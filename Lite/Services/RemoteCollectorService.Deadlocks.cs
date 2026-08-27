@@ -64,7 +64,17 @@ public partial class RemoteCollectorService
         }
         catch (SqlException ex)
         {
-            AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to ensure deadlock XE session: {ex.Message}");
+            /* Warn rather than Error when the server simply said no: a denied XE session is a least-privilege
+               posture (#1823), classified as PERMISSIONS upstream and retried no further this session.
+               Genuine failures still log at Error. */
+            if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+            {
+                AppLogger.Warn("XeSession", $"[{server.DisplayName}] Failed to ensure deadlock XE session: {ex.Message}");
+            }
+            else
+            {
+                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to ensure deadlock XE session: {ex.Message}");
+            }
 
             /* Propagate so RunCollectorAsync marks the collector unhealthy instead
                of letting a zero-row ring-buffer read record SUCCESS (#1086) */
@@ -146,7 +156,17 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;", connect
         }
         catch (SqlException ex)
         {
-            AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to create deadlock XE session: {ex.Message}");
+            /* Warn rather than Error when the server simply said no: a denied XE session is a least-privilege
+               posture (#1823), classified as PERMISSIONS upstream and retried no further this session.
+               Genuine failures still log at Error. */
+            if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+            {
+                AppLogger.Warn("XeSession", $"[{server.DisplayName}] Failed to create deadlock XE session: {ex.Message}");
+            }
+            else
+            {
+                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to create deadlock XE session: {ex.Message}");
+            }
             throw;
         }
     }

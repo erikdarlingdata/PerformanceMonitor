@@ -26,8 +26,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the system_health parse-on-read MCP slice — the eight get_health_parser_* tools over Darling's raw
-/// system_health_events, the same names the Dashboard exposes. Ungated: the exact eight-tool surface, each
+/// Pins the system_health parse-on-read MCP slice — the nine get_health_parser_* tools over Darling's raw
+/// system_health_events, the same names the Dashboard exposes. Ungated: the exact nine-tool surface, each
 /// tool's (server_name, hours_back, limit) contract, the event-xml + database-name read SQL pins (Postgres
 /// dialect, event_time window, event_type filter), column parity against the generated collector DDL, the
 /// Gemini-clean schema, and the two things that make this a faithful port — (1) the reuse of the shared
@@ -49,6 +49,7 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         "get_health_parser_memory_node_oom",
         "get_health_parser_scheduler_issues",
         "get_health_parser_severe_errors",
+        "get_health_parser_significant_waits",
         "get_health_parser_system_health",
     };
 
@@ -58,7 +59,7 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheEightHealthParserTools()
+    public void ToolSurface_ExactlyTheNineHealthParserTools()
     {
         var names = ToolMethods()
             .Select(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name)
@@ -81,7 +82,7 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
                 .Where(x => x.GetCustomAttribute<DescriptionAttribute>() is not null)
                 .Select(x => (x.Name!, x.HasDefaultValue))
                 .ToArray();
-            Assert.Equal(new[] { "server_name", "hours_back", "limit" }, p.Select(x => x.Item1).ToArray());
+            Assert.Equal(new[] { "server_name", "hours_back", "limit", "as_of" }, p.Select(x => x.Item1).ToArray());
             Assert.All(p, x => Assert.True(x.Item2, $"{tool}.{x.Item1} must be optional"));
         }
     }
@@ -111,9 +112,28 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         Assert.Contains("ORDER BY database_id, collection_time DESC", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #2484: the probe that lets an empty parse-on-read answer say WHICH nothing it found must read the
+    /// SAME source the read itself reads. A probe on the base table would report a server as captured for
+    /// rows the view-backed read can never return -- picking the wrong branch in precisely the case the
+    /// probe exists to get right. It is also scoped to the event_type, and windowless by design.
+    /// </summary>
+    [Fact]
+    public void HasAnyEventOfTypeSql_ProbesTheSameView_ScopedToType_AndIgnoresTheWindow()
+    {
+        var sql = DarlingSystemHealthReader.HasAnyEventOfTypeSql;
+        Assert.Contains("FROM v_system_health_events", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("event_type = $2", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        /* Windowless: a time bound here would make the probe answer the same question the read just did. */
+        Assert.DoesNotContain("event_time", sql, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(nameof(DarlingSystemHealthReader.SystemHealthEventsByTypeSql))]
     [InlineData(nameof(DarlingSystemHealthReader.DatabaseNameMapSql))]
+    [InlineData(nameof(DarlingSystemHealthReader.HasAnyEventOfTypeSql))]
     public void Reads_ArePostgresDialect_PositionalParams(string sqlName)
     {
         var sql = (string)typeof(DarlingSystemHealthReader).GetField(sqlName)!.GetValue(null)!;
@@ -152,7 +172,9 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
     public void AdvertisedSchema_IsGeminiClean_NoRequiredParams()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(8, tools.Count);
+        /* Derived from the pinned name list rather than restated, so a ninth tool cannot land with this
+           literal left describing eight. */
+        Assert.Equal(HealthParserToolSurface.Length, tools.Count);
         var violations = tools.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
         foreach (var t in tools)
@@ -228,6 +250,38 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
             var r = new IoIssuesRecord { State = state };
             Assert.Equal(SystemEventSignificance.IsSignificant(r), SystemHealthSignificance.IsSignificant(r));
         }
+    }
+
+    /// <summary>
+    /// #2484: the ninth category. Its gate is the most selective of the family - four conditions, any one
+    /// of which drops the row - which is exactly why an empty result has to distinguish "captured and none
+    /// qualified" from "nothing captured". Pinned against the viewer facade like its eight siblings.
+    /// </summary>
+    [Fact]
+    public void Significance_SignificantWait_MatchesViewer_OnAllFourConditions()
+    {
+        foreach (var (session, text, duration, waitType) in new (int?, string?, long?, string?)[]
+        {
+            (55, "SELECT 1", 500L, "LCK_M_X"),          /* the boundary: 500 is kept */
+            (55, "SELECT 1", 499L, "LCK_M_X"),          /* one ms under, dropped */
+            (0, "SELECT 1", 5000L, "LCK_M_X"),          /* system session, dropped */
+            (55, null, 5000L, "LCK_M_X"),               /* no statement, dropped */
+            (55, "BACKUP DATABASE test", 5000L, "LCK_M_X"), /* a backup waiting is its job, dropped */
+            (55, "SELECT 1", 5000L, "LAZYWRITER_SLEEP"),    /* idle wait type, dropped */
+        })
+        {
+            var r = new SignificantWaitRecord
+            {
+                SessionId = session,
+                QueryText = text,
+                DurationMs = duration,
+                WaitType = waitType,
+            };
+            Assert.Equal(SystemEventSignificance.IsSignificant(r), SystemHealthSignificance.IsSignificant(r));
+        }
+
+        Assert.Equal(500, SystemHealthSignificance.SignificantWaitMinDurationMs);
+        Assert.Contains("LAZYWRITER_SLEEP", SystemHealthSignificance.IgnoredWaitTypes);
     }
 
     /* ---------------- parsed-category round-trip: reuse SystemHealthParser + gate, over the shared fixtures ---------------- */

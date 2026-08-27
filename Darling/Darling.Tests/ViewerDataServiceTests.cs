@@ -659,11 +659,22 @@ public sealed class ViewerSchemaVersionGateTests
     /// <c>EXISTS</c>: the V22/V23 composite column contains two nested <c>EXISTS</c> of its own, so a naive
     /// substring count reads one HIGHER than the select list actually is. Paren depth is immune, because the
     /// nested pair sits inside parentheses — which is why this can be pinned at build time at all.</para>
+    ///
+    /// <para><b><c>/* */</c> comments are stripped before counting, and that is load-bearing.</b> A comma
+    /// inside a comment sits at paren depth zero and is indistinguishable from a select-item separator, so
+    /// one explanatory sentence in the probe SQL silently inflates the count and fails this test for a
+    /// reason that has nothing to do with the arity it exists to protect. V95 (#2599) hit exactly that.
+    /// The sentinels are the part worth commenting — the test must not tax anyone for doing it.</para>
     /// </summary>
     [Fact]
     public void StoreSchemaProbe_ColumnCount_MatchesTheMapArity()
     {
-        var sql = ViewerDataService.StoreSchemaProbeSql;
+        var sql = System.Text.RegularExpressions.Regex.Replace(
+            ViewerDataService.StoreSchemaProbeSql,
+            @"/\*.*?\*/",
+            " ",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
         var selectAt = sql.IndexOf("SELECT", StringComparison.Ordinal);
         Assert.True(selectAt >= 0, "the probe must be a SELECT");
 

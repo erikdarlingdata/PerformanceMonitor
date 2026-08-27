@@ -1052,6 +1052,12 @@ public sealed class AlertEngineTests
         h.Settings.TempDbSpaceEnabled = true;
         var engine = h.Build();
 
+        /* #2515: 1000 MB total and NO MaxSizeMb, which is deliberate and stays that way. The fixture predates
+           the ceiling, so it describes a tempdb whose cap was never measured — and that is exactly the case
+           where the denominator remains the allocation. It does NOT imply a 1000 MB cap; if it did, this pin
+           would have to move, and the fact that it does not is the guarantee that no existing on-prem or RDS
+           target with an unlimited (or uncollected) tempdb sees its number change. The capped case gets its
+           own test below rather than being folded in here. */
         h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200 }; /* 80% used */
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var fired = Assert.Single(h.Deliverer.Outcomes);
@@ -1064,6 +1070,36 @@ public sealed class AlertEngineTests
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("tempdb Space Resolved", resolution.Title);              /* :463 */
         Assert.Equal("SRV-A: tempdb usage back to 20%", resolution.Message);  /* :461,:464 */
+    }
+
+    /// <summary>
+    /// #2515, through the ENGINE rather than the arithmetic: the Azure shape from the issue must not fire, and
+    /// the same allocation without a ceiling must. Same 59.75 MB of reserved tempdb in both, same 80% default —
+    /// the only difference is whether the collector could see how far the files are allowed to grow.
+    ///
+    /// <para>This is the assertion the whole change exists for. <see cref="TempDbCeilingStoreTests"/> proves
+    /// the arithmetic and the store round-trip; this proves the alert engine's decision follows it, which is
+    /// what actually pages someone.</para>
+    /// </summary>
+    [Fact]
+    public async Task TempDb_TheAzureCeiling_SuppressesTheAlert_ThatTheAllocationWouldFire()
+    {
+        var h = new Harness();
+        h.Settings.TempDbSpaceEnabled = true;
+        Assert.Equal(80, h.Settings.TempDbSpaceThresholdPercent);
+        var engine = h.Build();
+
+        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. */
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69, MaxSizeMb = 65_536 };
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* The identical snapshot with the ceiling unmeasured is the pre-#2515 reading, and it pages. */
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69 };
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("tempdb Space", fired.MetricName);
+        Assert.Equal("96% used (60 MB)", fired.CurrentValue);
     }
 
     /* ---------------- low disk ---------------- */

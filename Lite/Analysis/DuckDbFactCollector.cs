@@ -26,39 +26,52 @@ public partial class DuckDbFactCollector : IFactCollector
     {
         var facts = new List<Fact>();
 
-        await CollectWaitStatsFactsAsync(context, facts);
+        /* #2412: one cancellation checkpoint per collector, not one for the phase. This is the
+           longest stage of an analysis pass — thirty-one collectors, each opening the store and
+           running its own reads — so a check only at the phase boundary would let a pass that has
+           already blown its budget run every remaining collector before noticing. Routing the
+           calls through a local step is what buys the per-collector check without writing it out
+           thirty-one times. The two grouping helpers below rewrite facts already in hand rather
+           than reading the store, so they stay inline where their ordering matters. */
+        async Task RunCollectorAsync(Func<AnalysisContext, List<Fact>, Task> collect)
+        {
+            context.CancellationToken.ThrowIfCancellationRequested();
+            await collect(context, facts);
+        }
+
+        await RunCollectorAsync(CollectWaitStatsFactsAsync);
         FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
         FactCollectorHelpers.GroupParallelismWaits(facts, context);
-        await CollectBlockingFactsAsync(context, facts);
-        await CollectBlockingChainFactsAsync(context, facts);
-        await CollectDeadlockFactsAsync(context, facts);
-        await CollectServerConfigFactsAsync(context, facts);
-        await CollectMemoryFactsAsync(context, facts);
-        await CollectDatabaseSizeFactAsync(context, facts);
-        await CollectServerMetadataFactsAsync(context, facts);
-        await CollectCpuUtilizationFactsAsync(context, facts);
-        await CollectRunnableTaskFactsAsync(context, facts);
-        await CollectIoLatencyFactsAsync(context, facts);
-        await CollectTempDbFactsAsync(context, facts);
-        await CollectMemoryGrantFactsAsync(context, facts);
-        await CollectQueryStatsFactsAsync(context, facts);
-        await CollectParameterSensitivityFactsAsync(context, facts);
-        await CollectPlanRegressionFactsAsync(context, facts);
-        await CollectBadActorFactsAsync(context, facts);
-        await CollectPerfmonFactsAsync(context, facts);
-        await CollectMemoryClerkFactsAsync(context, facts);
-        await CollectPlanCacheFactsAsync(context, facts);
-        await CollectMemoryPressureEventFactsAsync(context, facts);
-        await CollectDatabaseConfigFactsAsync(context, facts);
-        await CollectFileAutogrowthFactsAsync(context, facts);
-        await CollectProcedureStatsFactsAsync(context, facts);
-        await CollectActiveQueryFactsAsync(context, facts);
-        await CollectRunningJobFactsAsync(context, facts);
-        await CollectSessionFactsAsync(context, facts);
-        await CollectTraceFlagFactsAsync(context, facts);
-        await CollectServerPropertiesFactsAsync(context, facts);
-        await CollectDiskSpaceFactsAsync(context, facts);
-        await CollectPlanAdvisoryFactsAsync(context, facts);
+        await RunCollectorAsync(CollectBlockingFactsAsync);
+        await RunCollectorAsync(CollectBlockingChainFactsAsync);
+        await RunCollectorAsync(CollectDeadlockFactsAsync);
+        await RunCollectorAsync(CollectServerConfigFactsAsync);
+        await RunCollectorAsync(CollectMemoryFactsAsync);
+        await RunCollectorAsync(CollectDatabaseSizeFactAsync);
+        await RunCollectorAsync(CollectServerMetadataFactsAsync);
+        await RunCollectorAsync(CollectCpuUtilizationFactsAsync);
+        await RunCollectorAsync(CollectRunnableTaskFactsAsync);
+        await RunCollectorAsync(CollectIoLatencyFactsAsync);
+        await RunCollectorAsync(CollectTempDbFactsAsync);
+        await RunCollectorAsync(CollectMemoryGrantFactsAsync);
+        await RunCollectorAsync(CollectQueryStatsFactsAsync);
+        await RunCollectorAsync(CollectParameterSensitivityFactsAsync);
+        await RunCollectorAsync(CollectPlanRegressionFactsAsync);
+        await RunCollectorAsync(CollectBadActorFactsAsync);
+        await RunCollectorAsync(CollectPerfmonFactsAsync);
+        await RunCollectorAsync(CollectMemoryClerkFactsAsync);
+        await RunCollectorAsync(CollectPlanCacheFactsAsync);
+        await RunCollectorAsync(CollectMemoryPressureEventFactsAsync);
+        await RunCollectorAsync(CollectDatabaseConfigFactsAsync);
+        await RunCollectorAsync(CollectFileAutogrowthFactsAsync);
+        await RunCollectorAsync(CollectProcedureStatsFactsAsync);
+        await RunCollectorAsync(CollectActiveQueryFactsAsync);
+        await RunCollectorAsync(CollectRunningJobFactsAsync);
+        await RunCollectorAsync(CollectSessionFactsAsync);
+        await RunCollectorAsync(CollectTraceFlagFactsAsync);
+        await RunCollectorAsync(CollectServerPropertiesFactsAsync);
+        await RunCollectorAsync(CollectDiskSpaceFactsAsync);
+        await RunCollectorAsync(CollectPlanAdvisoryFactsAsync);
 
         return facts;
     }

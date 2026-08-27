@@ -61,9 +61,12 @@ public partial class RemoteCollectorService
         {
             throw;
         }
-        catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 229 or 297 or 300 or 916)
+        catch (Microsoft.Data.SqlClient.SqlException ex) when (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
         {
-            /* Login cannot read the msdb job tables — expected for read-only monitoring accounts;
+            /* #2512: the shared set, so this and Darling's twin cannot drift apart again — they were
+               already identical here, which is precisely why the next number added to one of them
+               would have been added to only one.
+               Login cannot read the msdb job tables — expected for read-only monitoring accounts;
                skip quietly so a permission gap doesn't fail the whole alert cycle. The remedy is
                direct table SELECTs, NOT SQLAgentReaderRole (#1823): that role gates the sp_help_job*
                procedures, which this product never calls, and grants no SELECT on the base tables. */

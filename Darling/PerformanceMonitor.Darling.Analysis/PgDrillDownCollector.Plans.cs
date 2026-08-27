@@ -49,22 +49,27 @@ LIMIT 1";
         string? planHandle = null;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PlanHandleLookupSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(queryHash);
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (await reader.ReadAsync() && !reader.IsDBNull(0))
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
                 planHandle = reader.GetString(0);
         }
-        catch { return; }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* No plan_handle for this hash — the fetch below has nothing to ask for. An abandonment
+               is NOT swallowed here (#2443). */
+            return;
+        }
 
         if (string.IsNullOrEmpty(planHandle)) return;
 
         // Fetch plan XML live from SQL Server
-        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle);
+        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
         if (string.IsNullOrEmpty(planXml)) return;
 
         try
@@ -142,15 +147,15 @@ LIMIT 10";
             /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
                before the CPU-only parse; the scoping is kept so the connection closes before
                the parse, even though PG holds no lock. */
-            await using (var connection = await _postgres.OpenConnectionAsync())
+            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
                 using var cmd = new NpgsqlCommand(PlanAdvisoryXmlSql, connection);
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-                using var reader = await cmd.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
                 {
                     if (!reader.IsDBNull(0))
                         planXmls.Add(reader.GetString(0));
@@ -190,9 +195,10 @@ LIMIT 10";
                     .ToList();
             }
         }
-        catch
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             // Plan read/parse can fail on malformed XML — skip, the detail is best-effort.
+            // An abandonment is NOT swallowed here (#2443).
         }
     }
 }

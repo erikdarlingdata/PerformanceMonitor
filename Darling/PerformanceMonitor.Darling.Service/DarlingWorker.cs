@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -276,7 +276,7 @@ public sealed class DarlingWorker : BackgroundService
     /// <list type="bullet">
     /// <item>BYO mode (<c>managed=false</c>) with any <c>postgres.network.*</c> or <c>mcp.network.*</c>
     /// set — the fields are IGNORED; the operator's own PostgreSQL governs exposure.</item>
-    /// <item>Managed mode with an EXPOSED store whose <c>network.role</c> is <c>admin</c> — names the
+    /// <item>Managed mode with an EXPOSED store whose <c>network.role</c> admits <c>admin</c> — names the
     /// <c>config_command</c> / <c>config_monitored_servers</c> / <c>config_notification</c>
     /// service-credential pivot a remote admin connection can reach (D7 — the operator's informed opt-in).</item>
     /// </list>
@@ -314,8 +314,12 @@ public sealed class DarlingWorker : BackgroundService
             && DarlingNetwork.IsExposedListenAddress(network.Listen)
             && string.Equals(DarlingNetwork.NormalizeNetworkRole(network.Role), "admin", StringComparison.Ordinal))
         {
+            /* "admits" rather than "is": since #2665 the field can name both roles, and NormalizeNetworkRole
+               answers 'admin' for that too — correctly, because admin IS reachable. Wording it as "is 'admin'"
+               would read as wrong to the operator who wrote "admin,viewer" and invite them to dismiss the one
+               warning that matters here. */
             warnings.Add(
-                "postgres.network.role is 'admin' — a REMOTE admin connection can write config_command (the test_connect service-credential pivot), config_monitored_servers, and config_notification (webhook exfil). This is an explicit opt-in; the secure default is 'viewer' (read-only). Only expose admin on a trusted network.");
+                "postgres.network.role admits 'admin' — a REMOTE admin connection can write config_command (the test_connect service-credential pivot), config_monitored_servers, and config_notification (webhook exfil). This is an explicit opt-in; the secure default is 'viewer' (read-only). Only expose admin on a trusted network.");
         }
 
         return warnings;
@@ -348,8 +352,42 @@ public sealed class DarlingWorker : BackgroundService
 
     /* Server IDs whose scheduled analysis is currently running — prevents relaunching
        analysis for a server whose previous (possibly hung) pass has not finished
-       (Lite's CollectionBackgroundService in-flight guard). */
-    private readonly ConcurrentDictionary<int, byte> _analysisInFlight = new();
+       (Lite's CollectionBackgroundService in-flight guard). The value carries when the pass started
+       and how loudly it has been reported, because #2430's defect was that a pass which never
+       finishes leaves this marker set FOREVER and the server is then skipped in silence on every
+       later cycle. */
+    private readonly ConcurrentDictionary<int, AnalysisPassState> _analysisInFlight = new();
+
+    /* How far past its budget an in-flight pass must be before the sweep starts reporting it. The
+       ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored the
+       cancellation raised at that budget — wedged inside one of the store reads that still take no
+       token (see the note on RunAnalysisPassAsync), which no token can reach. */
+    private const int StuckAnalysisMultiple = 3;
+
+    /* Reports back off by doubling. A fixed repeat interval would either be slower than the analysis
+       cadence (useless) or produce one line per cycle forever (the spam that makes a log unreadable).
+       Doubling gives a handful of lines in the first day and a handful per day after — loud enough to
+       be noticed, quiet enough to stay noticed. Capped so the shift cannot run away on a service that
+       stays up for months, which this one does. */
+    private const int StuckAnalysisMaxBackoffDoublings = 20;
+
+    /// <summary>
+    /// Bookkeeping for one in-flight analysis pass (#2430). A class, not a struct, so the sweep can
+    /// update the report counters in place without a read-modify-write race against the completion
+    /// continuation, which only ever removes the whole entry.
+    /// </summary>
+    private sealed class AnalysisPassState
+    {
+        public AnalysisPassState(DateTime startedUtc) => StartedUtc = startedUtc;
+
+        public DateTime StartedUtc { get; }
+
+        /// <summary>Cycles this server has lost to the pass still being in flight.</summary>
+        public int SkippedCycles { get; set; }
+
+        /// <summary>How many times it has been reported, which is what the backoff doubles on.</summary>
+        public int ReportCount { get; set; }
+    }
 
     /* MinValue = the first sweep after startup runs the retention purge, then daily. */
     private DateTime _nextPurgeUtc = DateTime.MinValue;
@@ -1203,7 +1241,7 @@ public sealed class DarlingWorker : BackgroundService
 
         /* #2022 phase 2: the Query Store backfill worker, on its own tick (see s_queryStoreBackfillInterval).
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
-           24h-clamped outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
+           clamp-bounded outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
            never past the raw tier's horizon. Plan capture reads the same live provider the runner does. */
         var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb));
@@ -2134,6 +2172,10 @@ public sealed class DarlingWorker : BackgroundService
     /// Reads <c>(queryid, query)</c> from the monitored PostgreSQL server with <c>showtext = true</c> (#2219).
     /// Capped, and ordered by total execution time so a catalog larger than the cap keeps the text for the
     /// queries anyone would actually look at rather than an arbitrary slice.
+    /// <para>#2651: the SOURCE is chosen by flavor. This read was Aurora-only, so off Aurora the text table
+    /// was never populated at all — which made get_pg_top_queries return a null query_text on every row
+    /// forever, and made test_hypothetical_index (#2612) unable to resolve a statement on the one platform
+    /// it can be tested against.</para>
     /// </summary>
     private static async Task<(List<long> QueryIds, List<string> Texts)> ReadPgStatementTextAsync(
         ServerRuntime runtime, CancellationToken cancellationToken)
@@ -2143,7 +2185,9 @@ public sealed class DarlingWorker : BackgroundService
 
         await using var connection = new Npgsql.NpgsqlConnection(runtime.ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new Npgsql.NpgsqlCommand(PgStatementText.FetchSql, connection) { CommandTimeout = 60 };
+        await using var command = new Npgsql.NpgsqlCommand(
+            PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion),
+            connection) { CommandTimeout = 60 };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -3053,23 +3097,61 @@ LIMIT 1", connection);
         bool notifyFindings,
         CancellationToken stoppingToken)
     {
-        if (!_analysisInFlight.TryAdd(serverId, 0))
+        if (!_analysisInFlight.TryAdd(serverId, new AnalysisPassState(DateTime.UtcNow)))
         {
+            ReportStuckAnalysis(serverId, displayName);
             return new AnalysisPassResult(AnalysisPassStatus.Skipped, 0, "analysis is already running for this server");
         }
+
+        CancellationTokenSource? passCts = null;
+        var passStarted = false;
 
         try
         {
             var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger);
-            var analyzeTask = analysisService.AnalyzeAsync(serverId, storageName, hoursBack: 4, stoppingToken);
+
+            /* #2430: the TOKEN is the budget now; the Task.Delay below is only this sweep's patience.
+               Before this, AnalyzeAsync received the STOPPING token and nothing else, so the timeout
+               abandoned the wait without cancelling any work — and since the marker below is released
+               only on true completion, a pass that never finished left this server skipped in silence
+               for the life of the process.
+
+               Arming the CTS before the task exists means Cancel can never race the continuation that
+               disposes it. There is deliberately no Task.Run here, unlike the Lite twin: DuckDB
+               implements no async execution, so Lite's pass ran its whole collection phase inline and
+               the race could not fire at all, while Npgsql is genuinely async and hands this thread
+               back at the first read. That difference is also why this defect stayed invisible on
+               Darling — a slow pass never took the sweep down with it, it just went quiet. */
+            passCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            passCts.CancelAfter(s_analysisTimeout);
+            var cts = passCts;
+
+            /* Both tokens, and they mean different things: the first is what the reads observe, the
+               second is the only one that still means "the host is stopping". Handing the armed token
+               to the classifier alone would log every ordinary overrun as "abandoned at shutdown". */
+            var analyzeTask = analysisService.AnalyzeAsync(
+                serverId, storageName, hoursBack: 4, cts.Token, stoppingToken);
 
             /* Clear the in-flight marker only when the task truly finishes — not
                when the timeout below moves us on — so a hung server is not relaunched. */
             _ = analyzeTask.ContinueWith(
-                completed => _analysisInFlight.TryRemove(serverId, out _),
+                completed =>
+                {
+                    _analysisInFlight.TryRemove(serverId, out _);
+                    cts.Dispose();
+                },
                 TaskScheduler.Default);
 
-            var finished = await Task.WhenAny(analyzeTask, Task.Delay(s_analysisTimeout, stoppingToken));
+            /* From here the continuation owns the marker and the token source, and neither
+               ContinueWith nor the call above throws, so there is no window in which the pass exists
+               with nothing committed to cleaning up after it. */
+            passStarted = true;
+
+            /* Wait the budget PLUS the unwind grace, so a pass that honours its cancellation is seen
+               finishing here rather than racing this sweep's own timer. Losing that race now carries
+               real information: the pass was asked to stop and did not. */
+            var finished = await Task.WhenAny(
+                analyzeTask, Task.Delay(s_analysisTimeout + s_analysisShutdownGrace, stoppingToken));
 
             if (stoppingToken.IsCancellationRequested)
             {
@@ -3102,7 +3184,7 @@ LIMIT 1", connection);
             if (finished != analyzeTask)
             {
                 _logger.LogWarning(
-                    "[{Server}] Analysis exceeded {Timeout}s — skipped this cycle",
+                    "[{Server}] Analysis exceeded {Timeout}s and has not unwound the cancellation raised at that budget — skipped this cycle. This server stays skipped while the pass is in flight, and is reported again if it stays that way; every other server is unaffected.",
                     displayName, (int)s_analysisTimeout.TotalSeconds);
                 return new AnalysisPassResult(AnalysisPassStatus.TimedOut, 0, $"analysis exceeded {(int)s_analysisTimeout.TotalSeconds}s");
             }
@@ -3111,6 +3193,31 @@ LIMIT 1", connection);
                to the notification channels when delivery is on (Lite's D0 split: production
                unconditional, delivery gated). */
             var findings = await analyzeTask;
+
+            /* A pass that ended early unwound as asked and returned nothing, so there is nothing to
+               route — say so, rather than letting it read as a clean all-clear, which is what the old
+               code did for every timed-out pass that came back before the sweep gave up on it.
+
+               READ the pass's own classification rather than re-deriving one here (review, #2430). "No
+               findings and the budget token has fired" is equally true of a genuine fault that landed
+               after the budget expired, and calling that a timeout would bury the pass's ERROR under a
+               Warning saying it merely ran out of time. The pass classified this once and logged the
+               single line for it, so this adds no second line of its own — it only turns the answer
+               into the terminal state analyze_now reports. */
+            if (analysisService.EndedEarlyAs is AnalysisAbandonKind ending)
+            {
+                return ending switch
+                {
+                    AnalysisAbandonKind.Shutdown =>
+                        new AnalysisPassResult(AnalysisPassStatus.Skipped, 0, "service is stopping"),
+                    AnalysisAbandonKind.Timeout =>
+                        new AnalysisPassResult(AnalysisPassStatus.TimedOut, 0,
+                            $"analysis exceeded {(int)s_analysisTimeout.TotalSeconds}s"),
+                    _ => new AnalysisPassResult(AnalysisPassStatus.Error, 0,
+                        "analysis failed — the pass logged the fault"),
+                };
+            }
+
             if (notifyFindings)
             {
                 await notificationService.NotifyAsync(findings);
@@ -3141,11 +3248,63 @@ LIMIT 1", connection);
         catch (Exception ex)
         {
             _logger.LogError("[{Server}] Analysis failed: {Message}", displayName, ex.Message);
-            /* If analyzeTask was never created (e.g. ctor threw), the continuation
-               never ran — clear the marker defensively. */
-            _analysisInFlight.TryRemove(serverId, out _);
+
+            /* If the pass was never launched (e.g. the service ctor threw), no continuation exists to
+               clear the marker or release the token source — do both here, or this server is skipped
+               forever, which is the very defect this method is being fixed for. Once the pass IS
+               running the continuation owns them, and clearing them here would pull the token out
+               from under a live pass and re-admit that server next cycle on top of it. The old code
+               cleared unconditionally; it got away with it only because every path that could reach
+               here after launch had already completed the task. */
+            if (!passStarted)
+            {
+                _analysisInFlight.TryRemove(serverId, out _);
+                passCts?.Dispose();
+            }
+
             return new AnalysisPassResult(AnalysisPassStatus.Error, 0, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// #2430: reports a server whose analysis pass is still in flight from an earlier cycle. The
+    /// in-flight guard is deliberately released only on true completion — that is what stops a hung
+    /// server piling up passes — but it also means a pass that never completes leaves the marker set
+    /// for the life of the service, and every later cycle skipped that server with nothing said at all.
+    /// The cancellation now raised at the budget clears the great majority of those; what remains is
+    /// the pass wedged in a store read that takes no token, and this is what makes THAT visible rather
+    /// than silent.
+    ///
+    /// <para>A permanently-skipped server that is loudly skipped is a far smaller bug than one silently
+    /// skipped: the first costs findings and says so, the second looks exactly like a server with
+    /// nothing wrong with it.</para>
+    /// </summary>
+    private void ReportStuckAnalysis(int serverId, string displayName)
+    {
+        if (!_analysisInFlight.TryGetValue(serverId, out var state))
+        {
+            /* Finished between the TryAdd above and this read — it was never stuck. */
+            return;
+        }
+
+        state.SkippedCycles++;
+
+        var inFlightFor = DateTime.UtcNow - state.StartedUtc;
+        var reportAfter =
+            (s_analysisTimeout * StuckAnalysisMultiple) *
+            Math.Pow(2, Math.Min(state.ReportCount, StuckAnalysisMaxBackoffDoublings));
+
+        if (inFlightFor < reportAfter)
+        {
+            return;
+        }
+
+        state.ReportCount++;
+
+        _logger.LogError(
+            "[{Server}] Analysis has been in flight for {Minutes:F0} minutes — over {Multiple}x its {Timeout}s budget — and did not stop when cancelled at that budget. {Skipped} analysis cycle(s) have been skipped for this server since, and every later cycle is skipped too until the pass unwinds or the service restarts. Analysis for every other server is unaffected.",
+            displayName, inFlightFor.TotalMinutes, StuckAnalysisMultiple,
+            (int)s_analysisTimeout.TotalSeconds, state.SkippedCycles);
     }
 
     /// <summary>
@@ -3306,6 +3465,9 @@ LIMIT 1", connection);
 
         public Task<CommandOutcome> FetchActiveQueriesLiveAsync(int serverId, CancellationToken cancellationToken)
             => _worker.RunFetchActiveQueriesLiveAsync(_servers, _runner, serverId, cancellationToken);
+
+        public Task<CommandOutcome> TestHypotheticalIndexAsync(int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken)
+            => _worker.RunTestHypotheticalIndexAsync(_servers, serverId, request, cancellationToken);
     }
 
     /// <summary>
@@ -3356,9 +3518,14 @@ LIMIT 1", connection);
         {
             throw;
         }
-        catch (SqlException ex) when (ex.Number is 229 or 297 or 300 or 916)
+        catch (SqlException ex) when (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
         {
-            /* Expected for read-only monitoring accounts; hit every alert cycle, so Info. The named
+            /* #2512: routed through the shared set rather than a fourth copy of it — this one had
+               916 but neither 262 nor 8189, which is the drift the set exists to end. Widening is safe
+               in the only direction that matters here: every number in it means the login cannot read
+               what it asked for, and the response is to return no jobs rather than fail the alert
+               cycle. A 262 naming msdb is exactly this case and used to fall through to the warning.
+               Expected for read-only monitoring accounts; hit every alert cycle, so Info. The named
                remedy is direct table SELECTs, NOT SQLAgentReaderRole: that role gates the sp_help_job*
                interface only and confers nothing on the base tables this query reads — a #1823 field
                box had the role and still landed here every cycle. */
@@ -3508,9 +3675,11 @@ LIMIT 1", connection);
                    nulled it on a connection-level failure. */
                 if (server.Runtime is null
                     || !CollectorCatalog.EngineMatches(name, server.Runtime.Target)
-                    /* And the within-engine gate, PostgreSQL only — same reasoning as the scheduled sweep. */
-                    || (server.Runtime.Target.Engine == CollectorTargetEngine.PostgreSql
-                        && !CollectorCatalog.AppliesTo(name, server.Runtime.Target)))
+                    /* And the within-engine gate, on EVERY engine — same reasoning as the scheduled sweep,
+                       and extended to SQL Server with it (#2579). This loop runs on every connect and
+                       reconnect, so leaving it PostgreSQL-scoped would keep landing fake SUCCESS rows for
+                       gated-off SQL Server collectors at exactly the moments an operator is watching. */
+                    || !CollectorCatalog.AppliesTo(name, server.Runtime.Target))
                 {
                     continue;
                 }
@@ -3627,23 +3796,29 @@ LIMIT 1", connection);
                     continue;
                 }
 
-                /* WITHIN-engine gates get the same treatment, on PostgreSQL targets only.
+                /* WITHIN-engine gates get the same treatment, on EVERY engine.
                    EngineMatches above drops the wrong DIALECT; it says nothing about a collector that is
-                   right-dialect but inapplicable to this particular target — pg_wait_stats and
-                   pg_statement_stats read Aurora-only functions, so on stock PostgreSQL they dispatched, came
-                   back with 0 rows, and RunOneAsync recorded SUCCESS. Two collectors at a 1-minute cadence is
-                   ~2,880 fake successes a day per server, and the PR promised "a graceful skip with an
-                   explanation" instead. Confirmed on the review's live stock-PostgreSQL run.
+                   right-dialect but inapplicable to this particular target — pg_wait_stats reads Aurora's own
+                   wait instrumentation, so on stock PostgreSQL it dispatched, came back with 0 rows, and
+                   RunOneAsync recorded SUCCESS. At a 1-minute cadence that is ~1,440 fake successes a day per
+                   server, and the PR promised "a graceful skip with an explanation" instead. (pg_statement_stats
+                   was the second such collector until #2625 gave it a vanilla pg_stat_statements path; it now
+                   applies to every PostgreSQL target and reaches this gate on none of them.)
 
-                   Scoped to PostgreSQL deliberately rather than applied to the composed gate for everyone: on
-                   SQL Server the same zero-row-SUCCESS path covers a long-established handful of Azure-gated
-                   collectors, and silencing those is a change to a shipping SKU's log semantics that deserves
-                   its own decision rather than riding along here.
+                   #2579 EXTENDS THIS TO SQL SERVER, which the PostgreSQL change deliberately left alone as
+                   "its own decision" because it changes a shipping SKU's log semantics for the Azure-gated
+                   collectors. Here is that decision, and what settled it is that the cost turned out to be
+                   the opposite of cosmetic. On an AWS RDS fleet the SQL Server gates are not a handful: 84
+                   instances x agent_status and running_jobs x a 5-minute cadence is ~24,000 rows a day that
+                   say SUCCESS about collectors deliberately not running. A gated-off run recorded as SUCCESS
+                   is byte-identical to a real one — same status, zero rows, no note — so nothing downstream
+                   can tell them apart. That is not merely noise: it is the shape the whole miss vocabulary
+                   exists to prevent, and it read as evidence of working collection convincingly enough to
+                   produce an issue and a PR built on it before the 0ms durations gave it away.
 
                    No log row is the honest outcome, and it is not silent: --test-connection names exactly
                    which collectors do not apply to a target, and why, before the service ever runs. */
-                if (runtime.Target.Engine == CollectorTargetEngine.PostgreSql
-                    && !CollectorCatalog.AppliesTo(name, runtime.Target))
+                if (!CollectorCatalog.AppliesTo(name, runtime.Target))
                 {
                     continue;
                 }
@@ -3726,11 +3901,12 @@ LIMIT 1", connection);
                 /* The THIRD dispatch loop, and it got neither engine gate in the first round: an operator
                    snapshot against a PostgreSQL target dispatched every SQL Server collector, whose
                    AppliesTo early-return yields zero rows and lands a burst of fake SUCCESS in
-                   collection_log — the phantom-success class the other two loops (on-load :3157, scheduled
-                   sweep) were gated against. Same predicate, same PostgreSQL-only scoping. */
+                   collection_log — the phantom-success class the other two loops (on-load, scheduled
+                   sweep) were gated against. Same predicate, and since #2579 the same every-engine scoping:
+                   an operator-triggered snapshot against an RDS target would otherwise land its own burst of
+                   fake successes for the msdb-gated collectors. */
                 if (!CollectorCatalog.EngineMatches(name, runtime.Target)
-                    || (runtime.Target.Engine == CollectorTargetEngine.PostgreSql
-                        && !CollectorCatalog.AppliesTo(name, runtime.Target)))
+                    || !CollectorCatalog.AppliesTo(name, runtime.Target))
                 {
                     continue;
                 }
@@ -3798,8 +3974,11 @@ LIMIT 1", connection);
                 JsonError($"server '{displayName}' is not currently connected — the live plan cache can only be read from a connected server"));
         }
 
+        /* #2443: both arms now take the SAME token. The by-sql_handle arm always had it; the
+           by-plan_handle arm did not, so a cancelled fetch_plan command kept a session open on the
+           monitored server for whichever key the caller happened to use. */
         var planXml = request.UsePlanHandle
-            ? await planFetcher.FetchPlanXmlAsync(serverId, request.PlanHandle!)
+            ? await planFetcher.FetchPlanXmlAsync(serverId, request.PlanHandle!, cancellationToken)
             : await planFetcher.FetchPlanBySqlHandleAsync(
                 serverId, request.DatabaseName, request.SqlHandle!,
                 request.StatementStartOffset, request.StatementEndOffset, cancellationToken);
@@ -3824,6 +4003,114 @@ LIMIT 1", connection);
     /// <c>ActiveQueriesLiveTimeout</c> poll budget so the viewer sees a real "timed out" outcome rather than a
     /// poll miss, and so a wedged read cannot pin the single-threaded command loop past the stale-command reaper.</summary>
     public const int ActiveQueriesFetchTimeoutSeconds = 30;
+
+    /// <summary>
+    /// <c>test_hypothetical_index</c> (#2612): plan one stored statement with and without a candidate index.
+    ///
+    /// <para>The statement text is resolved HERE, from this product's own <c>pg_statement_text</c> store,
+    /// keyed by the queryid the caller named. It is never taken from the caller — the request carries an
+    /// identifier and a candidate, and nothing else reaches SQL.</para>
+    ///
+    /// <para>PostgreSQL only, and it says so rather than failing obscurely on a SQL Server target: hypopg
+    /// and <c>EXPLAIN (GENERIC_PLAN)</c> have no SQL Server equivalent, and the candidate this answers about
+    /// comes from a PostgreSQL-only collector.</para>
+    /// </summary>
+    private async Task<CommandOutcome> RunTestHypotheticalIndexAsync(
+        List<ServerLoopState> servers, int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken)
+    {
+        ServerLoopState? server;
+        ServerRuntime? runtime;
+        string displayName;
+        lock (_serversLock)
+        {
+            server = servers.Find(s => s.Config.ServerId == serverId);
+            runtime = server?.Runtime;
+            displayName = server?.Config.DisplayName ?? serverId.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (server is null)
+        {
+            return new CommandOutcome(false, "server not monitored", JsonError($"no monitored server with server_id {serverId}"));
+        }
+
+        if (runtime is null)
+        {
+            return new CommandOutcome(false, "server not connected",
+                JsonError($"server '{displayName}' is not currently connected — a hypothetical index has to be tested against the server's own statistics, so there is nothing to answer from while it is unreachable"));
+        }
+
+        if (runtime.Target.Engine != CollectorTargetEngine.PostgreSql)
+        {
+            return new CommandOutcome(false, "not a PostgreSQL target",
+                JsonError($"server '{displayName}' is not PostgreSQL. Hypothetical indexes come from the hypopg extension and the plan comparison needs EXPLAIN (GENERIC_PLAN); neither has a SQL Server equivalent, and the index candidate this answers about comes from a PostgreSQL-only collector."));
+        }
+
+        if (!request.TryGetQueryId(out var queryId))
+        {
+            return new CommandOutcome(false, "invalid queryid", JsonError("queryid must be a signed 64-bit integer sent as a STRING"));
+        }
+
+        string? statementText;
+        await using (var lookup = _postgres!.CreateCommand(
+            "SELECT query_text FROM collect.pg_statement_text WHERE server_id = $1 AND queryid = $2"))
+        {
+            lookup.Parameters.AddWithValue(serverId);
+            lookup.Parameters.AddWithValue(queryId);
+            statementText = (await lookup.ExecuteScalarAsync(cancellationToken)) as string;
+        }
+
+        if (string.IsNullOrWhiteSpace(statementText))
+        {
+            return new CommandOutcome(false, "statement text not captured",
+                JsonError($"no statement text is stored for queryid {queryId} on '{displayName}'. Text is refreshed on its own cadence and a major-version upgrade re-keys every queryid, so a statement first seen minutes ago genuinely has none yet — there is nothing to re-plan until it does."));
+        }
+
+        try
+        {
+            await using var connection = new NpgsqlConnection(runtime.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+
+            var result = await Targets.HypotheticalIndexExperiment.RunAsync(
+                connection, statementText, request.BuildCreateIndexStatement(),
+                runtime.Target.PostgresMajorVersion, cancellationToken);
+
+            _logger.LogInformation(
+                "[{Server}] test_hypothetical_index on {Schema}.{Table}: planner would {Verdict} it ({Before:N2} -> {After:N2})",
+                displayName, request.SchemaName, request.TableName,
+                result.PlannerWouldUseIt ? "USE" : "NOT use", result.CostBefore, result.CostAfter);
+
+            return new CommandOutcome(true, "hypothetical index tested", JsonSerializer.Serialize(new
+            {
+                server = displayName,
+                queryid = request.QueryId,
+                candidate = request.BuildCreateIndexStatement(),
+                planner_would_use_it = result.PlannerWouldUseIt,
+                estimated_cost_before = result.CostBefore,
+                estimated_cost_after = result.CostAfter,
+                hypothetical_index_name = result.HypotheticalIndexName,
+                explanation = result.Explanation,
+                plan_before = result.PlanBeforeJson,
+                plan_after = result.PlanAfterJson,
+            }));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (PostgresException ex)
+        {
+            /* Reported rather than thrown, and the SQLSTATE travels: 42P01 here means the table named in the
+               candidate does not exist, which is a caller mistake, and 42501 means the login cannot plan
+               against it — two different conversations that a bare failure would merge. */
+            return new CommandOutcome(false, "experiment failed",
+                JsonError($"planning on '{displayName}' failed: {ex.MessageText} (SQLSTATE {ex.SqlState})"));
+        }
+        catch (Exception ex)
+        {
+            return new CommandOutcome(false, "experiment failed",
+                JsonError($"planning on '{displayName}' failed: {ex.Message}"));
+        }
+    }
 
     /// <summary>
     /// The <c>fetch_active_queries</c> command handler (headless-plan live-snapshot wave): reads the LIVE
@@ -4161,6 +4448,16 @@ LIMIT 1";
     };
 
     /// <summary>
+    /// Where the missing extension has to be created, named when we know it (#2638).
+    /// </summary>
+    private static string WhereToCreateIt(string? connectedDatabase)
+        => string.IsNullOrWhiteSpace(connectedDatabase)
+            ? "in the connected database (CREATE EXTENSION ...). "
+            : $"in database '{connectedDatabase}', which is the one this collector connects to — an "
+              + "extension installed in a DIFFERENT database on the same cluster is invisible from here, "
+              + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
+
+    /// <summary>
     /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
     /// <para>The store has five statuses and none of them is "this feature is not installed", so the
     /// non-fatal-degradation bucket (PERMISSIONS) carries those cases and the MESSAGE distinguishes them —
@@ -4168,7 +4465,7 @@ LIMIT 1";
     /// general handler have it", which keeps the genuinely unexpected loud.</para>
     /// </summary>
     internal static (string Status, string Explanation) PostgresFaultOutcome(
-        PostgresException ex, string collectorName)
+        PostgresException ex, string collectorName, string? connectedDatabase = null)
     {
         var fault = PostgresTargetProvider.Instance.Classify(
             ex, CollectorCatalog.YieldsOnLockTimeout(collectorName));
@@ -4181,12 +4478,18 @@ LIMIT 1";
 
             /* 42P01 / 42883: the relation or function is not there. Overwhelmingly an extension that was
                never created in the connected database rather than anything to do with privileges. */
+            /* #2638: the database is NAMED. Extensions are per-database, and on a real fleet one was
+               installed in a different database on the same cluster from the one this collector connects
+               to — so an operator who checked the obvious database found it already there and concluded
+               the collector was broken. "Create it somewhere" is not an instruction; naming the database
+               makes it one. Threaded from ServerRuntime.ConnectedDatabase; when that is unknown the
+               sentence degrades to what it always said rather than inventing a name. */
             CollectorTargetFault.ObjectMissing => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the source object does not exist on this "
-                + "target. This is NOT a missing grant: it is normally an extension that was never "
-                + "created in the connected database (CREATE EXTENSION pg_stat_statements), so the "
-                + "collector will keep degrading until it is. Recorded as a non-fatal skip rather than an "
-                + "error so it does not fill the log every cycle."),
+                + "target. This is NOT a missing grant: it is normally an extension that was never created "
+                + WhereToCreateIt(connectedDatabase)
+                + "The collector will keep degrading until it is. Recorded as a non-fatal skip rather than "
+                + "an error so it does not fill the log every cycle."),
 
             /* 0A000 / 55000 / 55006: the server will not do this, permanently or by configuration —
                pg_stat_wal on Aurora, or an optimized-reads cache that is switched off. */
@@ -4276,7 +4579,8 @@ LIMIT 1";
                databases, #1837). The status stays SUCCESS, and every health/band read keys on status rather
                than on error_message, so the note is inert outside the Collection Log detail grid. */
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, result.Note, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, result.Note,
+                result.Fanout, _logger, cancellationToken);
 
             /* #2219: statement TEXT rides alongside the statement stats, on its own hourly cadence. Hung off the
                stats collector's success rather than given its own loop because it is meaningless without those
@@ -4307,7 +4611,31 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName, ex.Message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, fanout: null, _logger, cancellationToken);
+            return 0;
+        }
+        catch (RdsLogUnavailableException ex) when (ex.IsAuthorizationFailure)
+        {
+            /* #2633: the AWS call was DENIED, so nothing was read. Degraded to PERMISSIONS rather than
+               ERROR for the same reason a 42501 from the pg_read_file route is — a least-privilege
+               deployment is an expected state an operator can act on, and screaming every cycle about it
+               would bury real faults — but it must NOT be recorded as a successful empty read, which is
+               what returning zero rows used to make it.
+
+               Only the authorization case lands here. A throttle, a failover or an endpoint that stopped
+               resolving falls through to the general handler and stays loud, because a permanent-sounding
+               status on a transient fault is how an outage gets read as a configuration choice. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the RDS log API refused the call",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0,
+                $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
+                + "not a database grant: plan capture on managed PostgreSQL reads the server log through "
+                + "the RDS API, so the role needs rds:DescribeDBLogFiles and rds:DownloadDBLogFilePortion "
+                + "on the target instance. Nothing was read this cycle — this is NOT 'no plans were "
+                + "captured'.",
+                fanout: null, _logger, cancellationToken);
             return 0;
         }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
@@ -4328,10 +4656,10 @@ LIMIT 1";
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, "YIELDED", 0, 0, 0,
                 $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
-                _logger, cancellationToken);
+                fanout: null, _logger, cancellationToken);
             return 0;
         }
-        catch (SqlException ex) when (ex.Number is 229 or 297 or 300 or 8189)
+        catch (SqlException ex) when (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
         {
             /* Same Azure explanation Lite appends (#1631): error 300 on Azure SQL Database is a service
                objective limit phrased as a permission denied on 'master', which reads as a missing GRANT
@@ -4339,18 +4667,23 @@ LIMIT 1";
                searchable. Parity is the point — a Darling operator gets the identical sentence Lite gives.
                8189 is sys.traces' own denial ("You do not have permission to run 'SYS.TRACES'", ALTER
                TRACE missing): a legitimate least-privilege choice (#1823) — ALTER TRACE is not read-only —
-               so default_trace_events must degrade as PERMISSIONS, not scream ERROR every cycle. */
-            var message = ex.Message + AzureDmvPermissionHint.For(ex.Number, server.Runtime?.Target.IsAzureSqlDb == true);
+               so default_trace_events must degrade as PERMISSIONS, not scream ERROR every cycle.
+               #2512: the number set moved to SqlServerPermissionErrors, shared with Lite's catch and
+               with SqlServerTargetProvider.Classify, and gained 262 — "permission denied in database
+               'tempdb'", the #2150 denial that used to record ERROR every cycle and is the reason
+               tempdb_stats was gated off Azure SQL Database at all. */
+            var message = ex.Message + AzureDmvPermissionHint.For(
+                ex.Number, server.Runtime?.Target.IsAzureSqlDb == true, ex.Message);
 
             _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",
                 server.Config.DisplayName, collectorName, ex.Number, message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, fanout: null, _logger, cancellationToken);
             return 0;
         }
         catch (PostgresException ex) when (
-            PostgresFaultOutcome(ex, collectorName) is { Status: not "ERROR" } outcome)
+            PostgresFaultOutcome(ex, collectorName, runtime.ConnectedDatabase) is { Status: not "ERROR" } outcome)
         {
             /* PostgreSQL faults classified by SQLSTATE through the same ITargetProvider.Classify the
                engine seam already exposes, so the runner and the provider cannot disagree about what an
@@ -4381,7 +4714,7 @@ LIMIT 1";
             }
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, fanout: null, _logger, cancellationToken);
             return 0;
         }
         catch (Exception ex)
@@ -4419,7 +4752,7 @@ LIMIT 1";
             try
             {
                 await DarlingObservability.LogCollectionAsync(
-                    _postgres!, runtime, collectorName, "ERROR", 0, 0, 0, ex.Message, _logger, cancellationToken);
+                    _postgres!, runtime, collectorName, "ERROR", 0, 0, 0, ex.Message, fanout: null, _logger, cancellationToken);
             }
             catch
             {
@@ -4490,11 +4823,37 @@ LIMIT 1";
         ["pg_wait_stats"] = (r, s, ct) => r.RunAsync(PgWaitStatsCollector.Instance, s, ct),
         ["pg_statement_stats"] = (r, s, ct) => r.RunAsync(PgStatementStatsCollector.Instance, s, ct),
         ["pg_wraparound_stats"] = (r, s, ct) => r.RunAsync(PgWraparoundStatsCollector.Instance, s, ct),
+        ["pg_server_config"] = (r, s, ct) => r.RunAsync(PgServerConfigCollector.Instance, s, ct),
+        ["pg_deadlocks"] = (r, s, ct) => r.RunAsync(PgDeadlocksCollector.Instance, s, ct),
         ["pg_xmin_horizon"] = (r, s, ct) => r.RunAsync(PgXminHorizonCollector.Instance, s, ct),
         ["pg_replication_slots"] = (r, s, ct) => r.RunAsync(PgReplicationSlotsCollector.Instance, s, ct),
         ["pg_autovacuum_stats"] = (r, s, ct) => r.RunAsync(PgAutovacuumStatsCollector.Instance, s, ct),
         ["pg_io_stats"] = (r, s, ct) => r.RunAsync(PgIoStatsCollector.Instance, s, ct),
         ["pg_blocking"] = (r, s, ct) => r.RunAsync(PgBlockingCollector.Instance, s, ct),
+        ["pg_database_stats"] = (r, s, ct) => r.RunAsync(PgDatabaseStatsCollector.Instance, s, ct),
+        ["pg_index_usage_stats"] = (r, s, ct) => r.RunAsync(PgIndexUsageStatsCollector.Instance, s, ct),
+        ["pg_table_bloat_stats"] = (r, s, ct) => r.RunAsync(PgTableBloatStatsCollector.Instance, s, ct),
+        ["pg_session_states"] = (r, s, ct) => r.RunAsync(PgSessionStatesCollector.Instance, s, ct),
+        ["pg_plan_capture_readiness"] = (r, s, ct) => r.RunAsync(PgPlanCaptureReadinessCollector.Instance, s, ct),
+        ["pg_write_stats"] = (r, s, ct) => r.RunAsync(PgWriteStatsCollector.Instance, s, ct),
+        ["pg_extension_availability"] = (r, s, ct) => r.RunAsync(PgExtensionAvailabilityCollector.Instance, s, ct),
+        ["pg_lock_stats"] = (r, s, ct) => r.RunAsync(PgLockStatsCollector.Instance, s, ct),
+        ["pg_wait_sampling"] = (r, s, ct) => r.RunAsync(PgWaitSamplingCollector.Instance, s, ct),
+        ["pg_kernel_stats"] = (r, s, ct) => r.RunAsync(PgKernelStatsCollector.Instance, s, ct),
+        ["pg_predicate_stats"] = (r, s, ct) => r.RunAsync(PgPredicateStatsCollector.Instance, s, ct),
+        /* TWO TRANSPORTS, one table. Self-hosted reads the server log with pg_read_file; Aurora and RDS
+           have no filesystem and pg_read_server_files is not grantable, so those go through the AWS log
+           API instead (#2538). The collector's own AppliesTo excludes managed targets, so without this
+           branch they would simply never capture a plan - and would look like they had nothing to say
+           rather than like they were on a different road. */
+        ["pg_plan_capture"] = (r, s, ct) =>
+            s.Target.IsAurora || s.Target.IsAwsRds
+                ? r.IngestRdsPlansAsync(s, ct)
+                : r.RunAsync(PgPlanCaptureCollector.Instance, s, ct),
+        ["pg_column_stats"] = (r, s, ct) => r.RunAsync(PgColumnStatsCollector.Instance, s, ct),
+        ["pg_replication_stats"] = (r, s, ct) => r.RunAsync(PgReplicationStatsCollector.Instance, s, ct),
+        ["pg_buffer_usage"] = (r, s, ct) => r.RunAsync(PgBufferUsageCollector.Instance, s, ct),
+        ["pg_index_bloat"] = (r, s, ct) => r.RunAsync(PgIndexBloatCollector.Instance, s, ct),
     };
 
     /// <summary>

@@ -23,7 +23,8 @@ public sealed class McpMemoryTools
             var stats = await dataService.GetLatestMemoryStatsAsync(resolved.ServerId);
             if (stats == null)
             {
-                return McpHelpers.Status("unavailable", "No memory stats available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory stats available.");
             }
 
             return JsonSerializer.Serialize(new
@@ -52,17 +53,44 @@ public sealed class McpMemoryTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetMemoryTrendAsync(resolved.ServerId, hours_back);
+            var points = await dataService.GetMemoryTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+
+            if (points.Count == 0)
+            {
+                /*
+                    A bare empty array here told an MCP client nothing at all -- and Darling's twin already
+                    returned a status envelope, so the same tool name gave two different answers depending
+                    on which SKU it was pointed at. Both now make the same distinction in the same words: a
+                    server that collected fine and was quiet in THIS window wants the window widened, while
+                    a server the collector has never touched wants somebody to go look at collection, and
+                    widening will never fill it. Probed only here, against the SAME source the trend read.
+                */
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
+                return await dataService.HasAnyMemoryStatAsync(resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No memory samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No memory stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.");
+            }
+
             var result = points.Select(p => new
             {
                 time = p.CollectionTime.ToString("o"),
@@ -98,6 +126,21 @@ public sealed class McpMemoryTools
         try
         {
             var rows = await dataService.GetLatestMemoryClerksAsync(resolved.ServerId);
+
+            if (rows.Count == 0)
+                /*
+                    ONE branch here, deliberately, and it is the reason this read gets no existence probe.
+                    The read is "every clerk at MAX(collection_time)", so zero rows back is logically the
+                    same statement as zero rows in the table — any probe against that source would agree
+                    with the read by construction. What the caller needs told is that an empty clerk list is
+                    NEVER a quiet period, because on a live SQL Server it cannot be. Same words as Darling's
+                    twin.
+                */
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_clerks")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
+
             var result = rows.Select(r => new
             {
                 clerk_type = r.ClerkType,
@@ -131,20 +174,22 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetMemoryPressureEventsAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetMemoryPressureEventsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_pressure_events")
+                    ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
             }
 
             return JsonSerializer.Serialize(new
@@ -171,20 +216,22 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24)
+        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetResourceSemaphoreSnapshotAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetResourceSemaphoreSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No memory grant data available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_grant_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
             }
 
             var result = rows.Select(r => new
@@ -223,20 +270,22 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 1.")] int hours_back = 1)
+        [Description("Hours of history. Default 1.")] int hours_back = 1,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetMemoryGrantChartDataAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetMemoryGrantChartDataAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No memory grant data available.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_grant_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
             }
 
             /* Return latest snapshot */

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -20,7 +21,8 @@ namespace Darling.Tests;
 /// THE COVERAGE PIN (parity board Tier 0), Darling side — the mirror of Lite's
 /// <c>CollectorViewerCoverageTests</c>. Every collector table in <see cref="CollectorCatalog"/> must have
 /// a consumer in the Darling viewer's reader layer
-/// (<c>PerformanceMonitor.Darling.Viewer/ViewerDataService*.cs</c>) — referenced directly by table name or
+/// (<c>PerformanceMonitor.Darling.Viewer/ViewerDataService*.cs</c>, plus the shared store readers those
+/// files CALL — see <see cref="ReaderLayerText"/>) — referenced directly by table name or
 /// via its <c>v_</c> view — OR be listed in <see cref="KnownStoreOnlyOrUnbuiltTables"/>.
 ///
 /// Darling currently reads EVERY catalog table, so the allow-list is empty and this pin is fully green.
@@ -48,26 +50,9 @@ public sealed class ViewerCollectorCoverageTests
         // database_states is read by ViewerDataService.DatabaseStates.cs (the override editor's backing
         // store), so it is covered by the reader-layer scan and needs no allow-list entry.
 
-        // UNBUILT UI (parity board Tier 1) -- remove each when the PostgreSQL tab ships.
-        // The eight PostgreSQL collector tables are read through MCP today, not the WPF viewer: each has a
-        // reader class + MCP tool (get_pg_wait_stats, get_pg_top_queries, get_pg_wraparound_risk,
-        // get_pg_xmin_horizon, get_pg_replication_slots, get_pg_autovacuum_health, get_pg_io_stats,
-        // get_pg_blocking) and is exposed over /api/read, so the data is not invisible — it is just not on a
-        // WPF tab, because the viewer's surfaces are SQL-Server-shaped and a PostgreSQL target's signals do
-        // not slot into them. Deliberately listed one per line so removing one at a time is a one-line diff.
-        "pg_wait_stats",
-        "pg_statement_stats",
-        "pg_wraparound_stats",
-        "pg_xmin_horizon",
-        "pg_replication_slot_stats",
-        "pg_autovacuum_stats",
-        "pg_io_stats",
-        // pg_blocking_edges is the one with a genuine SQL Server counterpart on the Blocking tab, and it
-        // still cannot share it: that tab is built on blocked_process_report XML (an engine-recorded event
-        // with a deadlock graph and a threshold), while this table holds periodic samples of an edge list.
-        // Rendering samples through a surface labelled as an event log would misrepresent coverage, which is
-        // a worse outcome than the tab not existing yet.
-        "pg_blocking_edges",
+        // EMPTY, and it stays empty. The nine PostgreSQL collector tables were the last entries here,
+        // carrying "remove each when the PostgreSQL tab ships" — and #2530 shipped exactly those tabs, so
+        // all nine came off in one commit. Every table in the catalog now has a Darling viewer reader.
     };
 
     [Fact]
@@ -138,10 +123,27 @@ public sealed class ViewerCollectorCoverageTests
     private static bool ReferencedIn(string readerText, string table) =>
         readerText.Contains(table, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Concatenated text of the Darling viewer's reader layer
+    /// <summary>
+    /// Concatenated text of the Darling viewer's reader layer
     /// (<c>PerformanceMonitor.Darling.Viewer/ViewerDataService*.cs</c>), located from this test file's
     /// compile-time path (Darling.Tests sits at <c>Darling/Darling.Tests/</c>; the viewer is the sibling
-    /// <c>Darling/PerformanceMonitor.Darling.Viewer/</c>).</summary>
+    /// <c>Darling/PerformanceMonitor.Darling.Viewer/</c>) — PLUS the shared store readers those files name.
+    ///
+    /// <para><b>Why the second half exists (#2530).</b> The PostgreSQL reads run the SAME query text on
+    /// the MCP surface and on the WPF tabs, from <c>DarlingPg</c>-prefixed readers in
+    /// <c>PerformanceMonitor.Darling.Storage</c>. A scan that looked only at <c>ViewerDataService*.cs</c>
+    /// would have demanded a SECOND copy of that SQL — including a 200-line recursive blocking walk whose
+    /// revisit guard, root attribution and truncation flag were each a separate review finding — purely to
+    /// satisfy a text match. Duplicating load-bearing SQL so a coverage pin passes is the opposite of what
+    /// the pin is for.</para>
+    ///
+    /// <para><b>It is still DERIVED, and still viewer-shaped.</b> A shared reader is followed only when the
+    /// viewer's own source NAMES its class — one hop, outwards from the viewer, never the reverse, so a
+    /// shared reader naming another cannot drag in coverage the viewer never asked for. Stop calling a
+    /// reader from the viewer and its table loses coverage immediately, which is exactly the failure this
+    /// pin exists to catch; proved by deleting one call and watching that table appear in the uncovered
+    /// list.</para>
+    /// </summary>
     private static string ReaderLayerText([CallerFilePath] string thisFile = "")
     {
         var testDir = Path.GetDirectoryName(thisFile)!;
@@ -162,7 +164,40 @@ public sealed class ViewerCollectorCoverageTests
             $"No ViewerDataService*.cs files found under {readerDir} — the coverage pin cannot read the " +
             "Darling viewer's reader layer (did the reader layer move?).");
 
-        return string.Join("\n", files.Select(f => StripSchemaProbeLines(File.ReadAllText(f))));
+        var viewerText = string.Join("\n", files.Select(f => StripSchemaProbeLines(File.ReadAllText(f))));
+
+        return viewerText + "\n" + SharedReadersNamedBy(viewerText, testDir);
+    }
+
+    /// <summary>
+    /// The source of every shared store reader the viewer's own reader layer names, concatenated.
+    /// <para>A name that resolves to no file under <c>PerformanceMonitor.Darling.Storage</c> is skipped
+    /// rather than asserted on: the viewer legitimately mentions reader classes it cannot reference (the
+    /// service's own, in prose), and a missing file grants no coverage — which is the safe direction to
+    /// fail in.</para>
+    /// </summary>
+    private static string SharedReadersNamedBy(string viewerText, string testDir)
+    {
+        var sharedDir = Path.GetFullPath(Path.Combine(testDir, "..", "PerformanceMonitor.Darling.Storage"));
+
+        var named = Regex
+            .Matches(viewerText, @"\bDarling[A-Za-z0-9]*Reader\b")
+            .Select(m => m.Value)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        var followed = new List<string>();
+        foreach (var name in named)
+        {
+            var path = Path.Combine(sharedDir, name + ".cs");
+            if (File.Exists(path) && !HasBuildOutputSegment(path))
+            {
+                followed.Add(StripSchemaProbeLines(File.ReadAllText(path)));
+            }
+        }
+
+        return string.Join("\n", followed);
     }
 
     /// <summary>

@@ -25,9 +25,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the core data-read MCP slice — the fifteen resource-metric / query-performance /
+/// Pins the core data-read MCP slice — the eighteen resource-metric / query-performance /
 /// discovery-health tools over the Postgres store, the same names the Dashboard and Lite expose.
-/// Ungated: the tool surface is EXACTLY the fifteen names (all static, on a [McpServerToolType]
+/// Ungated: the tool surface is EXACTLY the pinned names (all static, on a [McpServerToolType]
 /// class, returning the string envelope); each tool's MCP parameter contract matches Lite's (server_name
 /// optional / sole-server auto-select, hours_back / top / limit windows, wait_type required on
 /// get_wait_trend); every read SQL is Postgres-dialect, positional-param, reads the collector columns the
@@ -40,12 +40,15 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 {
     /* ---------------- ungated: tool-surface pin ---------------- */
 
-    /// <summary>The fourteen data-read tool names, ordinal-sorted — the same names Lite and the Dashboard
+    /// <summary>The eighteen data-read tool names, ordinal-sorted — the same names Lite and the Dashboard
     /// expose, so MCP clients see one consistent product.</summary>
     private static readonly string[] DataToolSurface =
     {
+        "get_blocking_stats",
         "get_collection_health",
+        "get_collection_log",
         "get_cpu_utilization",
+        "get_current_waits_trend",
         "get_file_io_stats",
         "get_memory_clerks",
         "get_memory_stats",
@@ -67,7 +70,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheFifteenDataTools()
+    public void ToolSurface_ExactlyTheEighteenDataTools()
     {
         var toolMethods = ToolMethods();
 
@@ -100,56 +103,79 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// Lite's parameter contract, pinned as a PREFIX rather than as the whole list (#2235).
+    /// Lite's parameter contract, pinned as an ORDERED SUBSEQUENCE of Darling's (#2235, widened by #2495).
     ///
     /// <para>This asserted the full list, which was the same thing until <c>get_top_queries_by_cpu</c> gained a
-    /// trailing optional <c>group_by</c> that Lite does not have. The guarantee that matters was never "the
-    /// lists are identical" — it is that a client written against LITE's contract still calls Darling
-    /// correctly, which a trailing optional parameter preserves both positionally and by name. Anything
-    /// appended must therefore stay optional AND stay last; a REORDERING that keeps the same names still
-    /// fails, because the prefix is compared element-wise rather than as a joined substring.</para>
+    /// trailing optional <c>group_by</c> that Lite does not have; it then asserted a PREFIX, which held only
+    /// while every parameter Lite gained after that landed before <c>group_by</c>. #2495 appended <c>as_of</c>
+    /// to BOTH SKUs — last on each, which is the convention <c>group_by</c> itself established — so Lite's
+    /// list is no longer a prefix of Darling's: Darling reads <c>…, min_dop, group_by, as_of</c> while Lite
+    /// reads <c>…, min_dop, as_of</c>.</para>
+    ///
+    /// <para>The guarantee that matters was never "the lists are identical", and it is not positional either:
+    /// MCP invokes by NAME, and the only C# call sites (the <c>/api/read</c> dispatch) do not pass Darling's
+    /// extra optionals at all. It is that <b>a client written against Lite's contract still calls Darling
+    /// correctly</b>, which needs exactly two things — every Lite name present in Lite's relative order, and
+    /// every Darling-only extra OPTIONAL so the client never has to supply one. Both are asserted here, so a
+    /// dropped parameter, a REORDERING, or a required Darling-only addition all still fail.</para>
     /// </summary>
     [Theory]
-    [InlineData("get_cpu_utilization", "server_name,hours_back")]
-    [InlineData("get_wait_stats", "server_name,hours_back,limit")]
-    [InlineData("get_wait_trend", "wait_type,server_name,hours_back")]
-    [InlineData("get_wait_types", "server_name,hours_back")]
+    [InlineData("get_cpu_utilization", "server_name,hours_back,as_of")]
+    [InlineData("get_wait_stats", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_wait_trend", "wait_type,server_name,hours_back,as_of")]
+    [InlineData("get_wait_types", "server_name,hours_back,as_of")]
     [InlineData("get_memory_stats", "server_name")]
     [InlineData("get_memory_clerks", "server_name")]
     [InlineData("get_file_io_stats", "server_name")]
-    [InlineData("get_tempdb_trend", "server_name,hours_back")]
+    [InlineData("get_tempdb_trend", "server_name,hours_back,as_of")]
     [InlineData("get_perfmon_stats", "server_name,counter_name,instance_name")]
-    [InlineData("get_top_queries_by_cpu", "server_name,hours_back,top,database_name,parallel_only,min_dop")]
-    [InlineData("get_top_procedures_by_cpu", "server_name,hours_back,top,database_name")]
-    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name")]
+    [InlineData("get_top_queries_by_cpu", "server_name,hours_back,top,database_name,parallel_only,min_dop,as_of")]
+    [InlineData("get_top_procedures_by_cpu", "server_name,hours_back,top,database_name,as_of")]
+    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of")]
     [InlineData("get_collection_health", "server_name")]
     [InlineData("get_server_properties", "server_name")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         var expected = expectedCsv.Split(',');
-        var actual = McpParams(toolName).Select(p => p.Name).ToArray();
+        var actual = McpParams(toolName);
+        var actualNames = actual.Select(p => p.Name).ToArray();
 
         Assert.True(actual.Length >= expected.Length,
-            $"{toolName} dropped a parameter Lite has: [{string.Join(",", actual)}]");
-        Assert.Equal(expected, actual.Take(expected.Length).ToArray());
+            $"{toolName} dropped a parameter Lite has: [{string.Join(",", actualNames)}]");
+
+        /* Every Lite name, in Lite's order, with Darling's own additions filtered out. */
+        Assert.Equal(expected, actualNames.Where(n => expected.Contains(n, StringComparer.Ordinal)).ToArray());
+
+        /* And nothing Darling adds on top may be required, or a Lite-shaped call could not be made at all. */
+        foreach (var extra in actual.Where(p => !expected.Contains(p.Name, StringComparer.Ordinal)))
+            Assert.True(extra.Optional, $"{toolName}.{extra.Name} is Darling-only and must be optional");
     }
 
     /// <summary>
-    /// #2235's <c>group_by</c>, pinned as a TRAILING OPTIONAL on <c>get_top_queries_by_cpu</c> and absent from
+    /// #2235's <c>group_by</c>, pinned as an APPENDED OPTIONAL on <c>get_top_queries_by_cpu</c> and absent from
     /// its siblings.
     ///
-    /// <para>Trailing and optional is what keeps <see cref="ParamContract_MatchesLite"/> true, so it is asserted
-    /// rather than left to review. Absent on <c>get_top_procedures_by_cpu</c> because procedure stats are
+    /// <para>It was pinned as the LAST parameter until #2495 appended <c>as_of</c> to both SKUs behind it.
+    /// Moving <c>group_by</c> to keep it last would have relocated an already-shipped parameter to preserve a
+    /// property (position) that no caller of an MCP tool can observe, so what is pinned now is what the
+    /// property was always standing in for: <c>group_by</c> is optional, and it sits AFTER every parameter Lite
+    /// has, so a Lite-shaped call never meets it. Absent on <c>get_top_procedures_by_cpu</c> because procedure stats are
     /// ALREADY keyed on the object — the rollup would be a no-op there — and absent on
     /// <c>get_query_store_top</c> because Query Store keys on <c>query_id</c>, which does not fragment the way a
     /// shape hash does, so the same option would imply a grouping that surface cannot perform.</para>
     /// </summary>
     [Fact]
-    public void ParamContract_GroupByIsATrailingOptionalOnTopQueriesOnly()
+    public void ParamContract_GroupByIsAnAppendedOptionalOnTopQueriesOnly()
     {
-        var ps = McpParams("get_top_queries_by_cpu");
-        Assert.Equal("group_by", ps[^1].Name);
-        Assert.True(ps[^1].Optional, "group_by must be optional so Lite-shaped calls still work");
+        var names = McpParams("get_top_queries_by_cpu").Select(p => p.Name).ToArray();
+
+        Assert.Contains("group_by", names);
+        Assert.True(
+            McpParams("get_top_queries_by_cpu").Single(p => p.Name == "group_by").Optional,
+            "group_by must be optional so Lite-shaped calls still work");
+        Assert.True(
+            Array.IndexOf(names, "group_by") > Array.IndexOf(names, "min_dop"),
+            "group_by must sit after every parameter Lite has, so a Lite-shaped call never meets it");
 
         foreach (var tool in new[] { "get_top_procedures_by_cpu", "get_query_store_top" })
             Assert.DoesNotContain("group_by", McpParams(tool).Select(p => p.Name));
@@ -526,10 +552,13 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllFifteenDataTools()
+    public void AdvertisedSchema_IsGeminiClean_ForAllEighteenDataTools()
     {
         var tools = BuildDataToolSchemas();
-        Assert.Equal(15, tools.Count);
+        /* Derived from the pinned name list rather than restated. This literal was 15 while the list
+           beside it held 16 and the method name said Sixteen -- a count kept by hand in four places
+           drifts in whichever one the next person forgets. */
+        Assert.Equal(DataToolSurface.Length, tools.Count);
 
         var violations = tools.SelectMany(t => SchemaViolations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0,

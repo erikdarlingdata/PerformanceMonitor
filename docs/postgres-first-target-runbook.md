@@ -139,7 +139,7 @@ PerformanceMonitor.Darling.Service.exe --test-connection
 **Proof:** a `[PASS]` line that reports PostgreSQL facts, ending in how many collectors will actually run.
 
 ```
-  [PASS] aurora-orders-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 8 PostgreSQL collectors apply
+  [PASS] aurora-orders-writer: PostgreSQL 17 (server_version_num 170007), writer, Aurora — all 9 PostgreSQL collectors apply
 ```
 
 **Read the count.** It is computed by asking the same gate the collector runner asks, so it is the real
@@ -147,10 +147,10 @@ answer, and it is the difference between "this is configured" and "this will col
 
 | Target | Applies | Skipped, and why |
 |---|---|---|
-| Aurora writer | 7 of 7 | — |
-| Aurora reader | 6 of 7 | `pg_autovacuum_stats` — `pg_stat_user_tables` reports all zeros on a standby |
-| Self-managed 16+ writer | 5 of 7 | `pg_wait_stats`, `pg_statement_stats` — both read Aurora-only functions |
-| Self-managed 15 reader | 3 of 7 | the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
+| Aurora writer | 9 of 9 | — |
+| Aurora reader | 8 of 9 | `pg_autovacuum_stats` — `pg_stat_user_tables` reports all zeros on a standby |
+| Self-managed 16+ writer | 7 of 9 | `pg_wait_stats`, `pg_statement_stats` — both read Aurora-only functions |
+| Self-managed 15 reader | 5 of 9 | the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
 
 If the count is lower than the table says it should be, the probe disagrees with you about the target —
 check `writer`/`reader` and `Aurora`/`not Aurora` in the same line before touching anything else.
@@ -259,11 +259,23 @@ difference a cumulative counter, so the first read after startup legitimately sh
 | `pg_replication_slots` | 1 min | 1 min | 2 min (growth needs two) |
 | `pg_io_stats` | 1 min | 1 min | 2 min |
 | `pg_wraparound_stats` | 5 min | 5 min | 5 min (levels) |
+| `pg_blocking` | 1 min | 1 min | 1 min (a sample, not a counter) |
+| `pg_session_states` | 1 min | 1 min | 1 min (a sample, not a counter) |
+| `pg_database_stats` | 1 min | 1 min | 2 min |
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
+| `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
+| `pg_index_usage_stats` | 24 h | **24 h** | 48 h (a scan count is a difference) |
 
-`pg_autovacuum_stats` is the one that surprises people: an hour before the first row, two before
-"dead tuples growing" can be answered. That cadence is deliberate — a PostgreSQL connection is bound to
-one database for life, so per-database collection costs one connection per database per cycle.
+The three per-database collectors are the ones that surprise people. `pg_autovacuum_stats` and
+`pg_table_bloat_stats` take an hour before the first row and two before "growing or flat" can be answered;
+`pg_index_usage_stats` takes a **day**, and two before a windowed scan count exists at all. Those cadences
+are deliberate — a PostgreSQL connection is bound to one database for life, so per-database collection
+costs one connection per database per cycle, and index usage is a structural question that an hourly
+sample would re-record 24 times a day for nothing.
+
+`pg_table_bloat_stats` shares `pg_autovacuum_stats`' hour on purpose rather than by copying: it measures
+the DAMAGE whose CAUSE that one measures, and "vacuum fell behind at 14:00 and bloat grew" is only a
+sentence the data can support if both are sampled on the same grain.
 
 ## 8. Read it
 
@@ -278,6 +290,11 @@ Through MCP, one tool per collector:
 | `get_pg_replication_slots` | slot health, and whether retained WAL is still growing |
 | `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold |
 | `get_pg_io_stats` | I/O by (backend type, object, context) — who, what, and why |
+| `get_pg_blocking` | blocking chains that were SAMPLED, with the root attributed |
+| `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split |
+| `get_pg_index_usage` | which indexes nothing scans — **and whether each one can actually be dropped** |
+| `get_pg_table_bloat` | how much space the vacuum lag above has cost, as an **estimate** with its own error stated |
+| `get_pg_session_states` | who is holding a transaction open — **and whether they actually pin the xmin horizon** |
 
 **Proof, and the trap:** on a healthy target most of these are *supposed* to be boring. Do not read
 "nothing alarming" as "not collecting" — check `collection_log` (step 6) for that. Distinguish:
@@ -287,17 +304,105 @@ Through MCP, one tool per collector:
   replication slots is the common one, and it is good news.
 - **No rows, collector never ran** — gated off (step 3) or failing (step 9).
 
-Two results that look like bugs and are not:
+Five results that look like bugs and are not:
 
 - `get_pg_io_stats` on Aurora reports **write counters not tracked**. Correct: Aurora backends do not
   write data files, the storage layer does, so those columns are NULL — which is why the tool reports
   trackedness instead of letting a NULL read as a zero.
 - `get_pg_replication_slots` empty **on a reader** is per-instance, not a cluster all-clear. Slots live on
-  the writer. Same for autovacuum state.
+  the writer. Same for autovacuum state, index usage and bloat — all three are writer-only collectors.
+- `get_pg_table_bloat` reporting most of its rows with a **suppressed** estimate is almost always a
+  permissions gap rather than a missing ANALYZE, and it is the one step in this runbook that `GRANT
+  pg_monitor` alone does not satisfy. See the note below.
+- `get_pg_session_states` reporting a session **idle in transaction for an hour with `peak_horizon_age`
+  of `-1`** is not a contradiction and not a rounding artefact. It means the session pins nothing: a
+  READ COMMITTED transaction releases its snapshot at the end of each statement, and one whose write
+  matched no rows never got a transaction id to hold. Both were measured on a live PostgreSQL 16.15
+  instance. Terminating such a session reclaims not one dead row, which is exactly why the tool says
+  so instead of letting the duration imply otherwise.
+- `get_pg_database_stats` reporting `stats_reset_count` above zero is the tool working, not a fault. The
+  counters it reads are cumulative since the last `pg_stat_reset()`, so a reset zeroes them; the window
+  totals become LOWER BOUNDS and the tool says so rather than letting the reset surface as a negative
+  rate or a spike. A crash restart shows the same way.
+
+### The one grant `pg_monitor` does not cover
+
+`pg_monitor` is enough for every collector here except the two that read `pg_stats` — the bloat estimate
+and per-column statistics — and the way it fails is worth knowing because it does not look like a
+failure. `pg_stats` is filtered by `has_column_privilege(..., 'select')`, and `pg_monitor` confers
+**no** SELECT on user tables — so the monitoring role sees **zero**
+rows in `pg_stats` and the estimator, fed nothing, returns confident large numbers. Measured against a
+`pg_monitor`-only role on a live PostgreSQL 16 target: 88.59% reported for a table whose true bloat is
+0.50%, 95.03% for one that is really 74.82%, 22.57% for one that is really 0.46%.
+
+Darling does not publish those numbers — `estimate_unavailable` is set on every such row and the read
+suppresses the figure rather than captioning it — but the result is a bloat surface that reports nothing
+useful.
+
+The `pg_column_stats` collector has the same dependency and fails more quietly still: it reads `pg_stats`
+directly, so without this grant it returns **zero rows** and logs `SUCCESS`. Measured on a live Aurora
+target carrying 361 tables over the collector's size floor, 107 of them analyzed: the collector ran, succeeded,
+and collected nothing. An empty per-column statistics panel on a busy database means this grant is missing,
+not that the planner has no statistics.
+
+The fix is one grant:
+
+```sql
+-- PostgreSQL 14 and newer
+GRANT pg_read_all_data TO darling_monitor;
+
+-- PostgreSQL 13: the role does not exist, so grant it per schema
+GRANT USAGE ON SCHEMA public TO darling_monitor;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO darling_monitor;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO darling_monitor;
+```
+
+Verified on the live rig: with `pg_read_all_data` added, a `pg_monitor` role's estimates became
+byte-identical to a superuser's. This is a genuine widening of what the monitoring role can read, so it is
+a decision to take deliberately rather than a step to run — every other collector works without it, and a
+fleet that does not want it simply gets measured sizes and dead-tuple counts from this surface instead of
+an estimate, and an empty per-column statistics panel.
+
+### The other way to do it: a helper function
+
+`pg_read_all_data` is not the only route, and it is worth knowing the alternative exists before deciding,
+because the two fail in different directions.
+
+**Datadog takes the other route.** Its PostgreSQL setup has you create a `datadog` schema in **each**
+monitored database holding a `SECURITY DEFINER` function, and grant the monitoring role EXECUTE on that
+rather than SELECT on the data. A `SECURITY DEFINER` function runs with its OWNER's privileges, so a
+low-privilege login can obtain one specific privileged answer without being able to read anything else.
+
+Applied here, that would be a function returning `pg_stats` rows for a table â the monitoring role gets
+column statistics and still cannot `SELECT` a single row of customer data.
+
+| | `GRANT pg_read_all_data` | helper function |
+|---|---|---|
+| what it widens | SELECT on **all data**, cluster-wide | EXECUTE on one function |
+| objects created in the customer's database | **none** | one schema + one function, **per database** |
+| install | one statement, once | DDL in every database, repeated for every database added later |
+| upgrade | nothing to upgrade | the function is versioned code that ships with the product |
+| removal | `REVOKE` | `DROP`, and something has to remember it is there |
+| PostgreSQL 13 | role does not exist â explicit `GRANT SELECT` per schema | works |
+| who must run it | someone who can grant a role | someone who can create objects and own the definer |
+
+**The honest summary of the trade.** The grant is one statement and no footprint, and it hands over more
+than the collector needs. The helper hands over exactly what the collector needs and puts product-owned
+code inside the customer's database forever â which is a support obligation, not just an install step:
+it has to be versioned, upgraded in place, and removable, and a database created after onboarding silently
+has no helper until something notices.
+
+Which is why a monitoring vendor might reasonably choose either. A product that cannot ask for
+`pg_read_all_data` â because its customers will not grant it, or because it must work on PostgreSQL 13
+where the role does not exist â has the helper as its only route to the same data.
+
+**Darling ships neither today.** The grant is documented above and the helper is not implemented. If a
+fleet will not widen the role, the current behaviour is the honest one: `pg_column_stats` collects nothing,
+the bloat estimate reports `estimate_unavailable`, and every other collector is unaffected.
 
 ## 9. Alerting
 
-The three outage predictors alert; the other four collectors are read-only signals.
+The three outage predictors alert; the other nine collectors are read-only signals.
 
 - Evaluated on the **30-second** alert sweep, after the shared SQL Server sweep, gated on the probed
   engine.

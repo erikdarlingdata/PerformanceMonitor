@@ -140,12 +140,21 @@ function cell(row, c) {
   return el("td", { class: cls.join(" ") || null, text });
 }
 
-/* stat: desc = { stats:[{key,label,format,small?,sev?}] } over the tool's top-level object. A stat descriptor may
-   carry a PRE-COMPUTED severity (`sev`/`severity`, e.g. "Critical") — colored here from that hint only (R1: the
-   browser never re-derives a band); absent the hint the value keeps the default color. */
+/* stat: desc = { stats:[{key,label,format,small?,sev?}], emptyText? } over the tool's top-level object. A stat
+   descriptor may carry a PRE-COMPUTED severity (`sev`/`severity`, e.g. "Critical") — colored here from that hint
+   only (R1: the browser never re-derives a band); absent the hint the value keeps the default color. */
 function vizStat(data, desc) {
   const stats = Array.isArray(desc.stats) ? desc.stats : [];
   if (!stats.length) return emptyStrip(NO_FIELDS_MSG);
+  /* The stat twin of vizLine's zero-points guard, and it exists for the same failure (#2530). Several reads
+     answer their HEALTHY case with a data body carrying a prose `finding` and none of the summary keys —
+     get_pg_xmin_horizon's {status:"no_holder", finding} is the clearest: it is not the {status,message}
+     envelope, so classifyResponse calls it data, it reaches a viz, and a tile set over keys the body does not
+     have renders as a row of em-dashes that says nothing. Every key resolving to null is the only state in
+     which the descriptor's sentence is more informative than the tiles, so that is exactly when it wins; one
+     key with a value still renders the tiles, and a descriptor with no emptyText (every stored view, and
+     every SQL Server tile on the server page) falls through unchanged. */
+  if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);
   return el(
     "div",
     { class: "stats" },
@@ -160,11 +169,20 @@ function vizStat(data, desc) {
   );
 }
 
-/* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format? } */
+/* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? } */
 function vizLine(data, desc) {
   const seriesCfg = Array.isArray(desc.series) ? desc.series : [];
   if (!seriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
   const points = getPath(data, desc.rowsKey) || [];
+  /* ZERO points is a different statement from ONE point, and only the descriptor knows which sentence is true.
+     renderLineChart says "Not enough data points to chart yet" below two rows, which is right while collection is
+     warming up and wrong for a read whose empty array means the thing simply did not happen: get_blocking_trend
+     and get_deadlock_trend used to return `trend: []` with no {status,message} envelope on an idle server, so a
+     healthy server got a warming-up message about a condition it never had. Those two now answer with an
+     envelope (#2485) and are classified as "empty" before they reach a viz at all; this guard still stands for
+     every OTHER line read, which has no envelope of its own. A descriptor's emptyText wins at exactly zero; the
+     one-point case still falls through, because there the chart's own sentence IS the true one. */
+  if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);
   const series = seriesCfg.map((s, i) => ({
     key: s.key,
     label: s.label,

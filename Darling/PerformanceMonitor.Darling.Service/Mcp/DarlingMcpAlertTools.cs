@@ -68,9 +68,10 @@ public sealed class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit to return alerts across all servers (the fleet default).")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 50.")] int limit = 50)
+        [Description("Maximum rows. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
-        var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+        var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (hoursError != null) return hoursError;
         var limitError = McpHelpers.ValidateTop(limit);
         if (limitError != null) return limitError;
@@ -89,8 +90,8 @@ public sealed class DarlingMcpAlertTools
 
         try
         {
-            var since = DateTime.UtcNow.AddHours(-hours_back);
-            var rows = await DarlingAlertReader.GetAlertHistoryAsync(postgres, since, serverId, limit);
+            var since = windowEnd.AddHours(-hours_back);
+            var rows = await DarlingAlertReader.GetAlertHistoryAsync(postgres, since, windowEnd, serverId, limit);
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No alerts found in the specified time range.");
 
@@ -123,7 +124,7 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state), the cooldown, excluded databases, the deadlock/blocking delivery mode, and the scheduled-analysis cadence. This is the single global settings row the service hot-swaps in. SMTP/webhook delivery credentials are managed separately and are not reported here.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode, and the scheduled-analysis cadence. This is the single global settings row the service hot-swaps in. SMTP/webhook delivery credentials are managed separately and are not reported here.")]
     public static async Task<string> GetAlertSettings(
         NpgsqlDataSource postgres)
     {
@@ -144,11 +145,26 @@ public sealed class DarlingMcpAlertTools
     }
 
     /// <summary>The nested JSON shape get_alert_settings returns AND update_alert_settings echoes back — the same
-    /// field names update_alert_settings accepts on the way in, so a read → modify → write round-trips.</summary>
+    /// field names update_alert_settings accepts on the way in, so a read → modify → write round-trips.
+    ///
+    /// <para>That last clause is an INVARIANT, not a habit: #2417 found it broken in both directions at once
+    /// (six columns read and emitted to nobody, one key emitted the writer refused). It is now asserted as a
+    /// set equality between this payload's keys and the columns <c>AlertSettingsSelectSql</c> reads —
+    /// <c>EveryColumnRead_IsEmittedByThePayload_AndAcceptedByTheWriter</c>. Adding a key here without the
+    /// matching arm in <see cref="BuildAlertSettingsUpdate"/> (or the reverse) fails that test rather than
+    /// shipping.</para></summary>
     private static object BuildAlertSettingsPayload(DarlingAlertReader.AlertSettingsReadRow s) => new
     {
         alerts_enabled = s.Enabled,
         notify_connection_changes = s.NotifyConnectionChanges,
+        /* #2417: the connection family's two sub-settings, kept TOP-LEVEL beside their master switch
+           rather than folded into a `connection` group. The master shipped as a top-level key and Lite
+           emits it there too, so a group could only ever hold two of the three -- splitting one family
+           across two levels of the document is worse for a reader than two extra top-level keys. The
+           spellings are the store's own column names, which are also the keys Lite already reads out of
+           settings.json (App.LoadAlertSettings), so Lite's payload can adopt them verbatim. */
+        notify_connection_down_at_startup = s.NotifyConnectionDownAtStartup,
+        connection_refire_minutes = s.ConnectionRefireMinutes,
         cpu = new { enabled = s.CpuEnabled, threshold_percent = s.CpuThresholdPercent, mode = s.CpuMode },
         blocking = new
         {
@@ -191,9 +207,34 @@ public sealed class DarlingMcpAlertTools
             store_job_cadence_warn_percent = s.StoreJobCadenceWarnPercent
         },
         pvs = new { enabled = s.PvsEnabled, threshold_percent = s.PvsThresholdPercent, floor_gb = s.PvsFloorGb },
+        /* #2391: #2349's knobs reached 3.5.0 with the store plane only, so an alert that ships OFF could
+           be enabled only by UPDATEing config_alert_settings by hand. Reported by @gotqn. */
+        file_growth = new
+        {
+            enabled = s.FileGrowthEnabled,
+            rise_mb = s.FileGrowthRiseMb,
+            volume_percent = s.FileGrowthVolumePercent,
+            lookback_minutes = s.FileGrowthLookbackMinutes
+        },
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
         database_state = new { enabled = s.DatabaseStateEnabled },
+        /* #2417: the AG family, read out of the store since V35/V37 and emitted to nobody until now -- so
+           an agent asked why nothing alerted when a replica fell behind could not see the lag threshold,
+           could not see whether AG notification was on at all, and had no way to tell "configured not to
+           alert" from "failed to alert". Grouped like every other alert family, and the master switch is
+           named `enabled` for the same reason cpu/blocking/pvs/database_state are: inside this payload
+           `enabled` always means "this alert family is on", and notify_ag_health IS that switch rather
+           than a second opt-in behind one. The thresholds take the house <what>_threshold_<unit> spelling
+           (blocking.wait_threshold_seconds, poison_wait.threshold_ms, low_disk.threshold_gb) instead of
+           transliterating the columns' older _alert_<unit> suffix, which appears nowhere else on the wire. */
+        ag = new
+        {
+            enabled = s.NotifyAgHealth,
+            lag_threshold_seconds = s.AgLagAlertSeconds,
+            redo_queue_threshold_kb = s.AgRedoQueueAlertKb,
+            disconnect_refire_minutes = s.AgDisconnectRefireMinutes
+        },
         cooldown_minutes = s.CooldownMinutes,
         excluded_databases = s.ExcludedDatabases,
         delivery = new { mode = s.DeliveryMode, per_event_max = s.PerEventMax },
@@ -215,11 +256,32 @@ public sealed class DarlingMcpAlertTools
     {
         try
         {
-            var rules = (await new PgMuteRuleStore(postgres).LoadAllAsync()).AsEnumerable();
+            var all = await new PgMuteRuleStore(postgres).LoadAllAsync();
+            var rules = all.AsEnumerable();
             if (enabled_only)
                 rules = rules.Where(r => r.Enabled && (r.ExpiresAtUtc == null || r.ExpiresAtUtc > DateTime.UtcNow));
 
             var list = rules.ToList();
+
+            if (list.Count == 0)
+            {
+                /*
+                    This tool exists so an agent can tell a genuinely healthy-quiet server from one whose
+                    alerts are being suppressed, and an empty array answered that question with silence.
+                    Both kinds of empty are true negatives -- nothing is being suppressed either way, which
+                    is why both are "empty" rather than one being "unavailable" -- but they are not the same
+                    fact. No rule has ever been written is a different state from five rules that all lapsed,
+                    and the second one is a mute somebody INTENDED that is no longer in force.
+                */
+                var configured = all.Count;
+                return McpHelpers.Status(
+                    "empty",
+                    configured == 0
+                        ? "No mute rules are configured for this store, so no alert is being suppressed anywhere — a quiet alert history is genuine rather than muted."
+                        : $"No mute rules are in force right now: {configured} rule(s) exist but every one of them is disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
+                    new { enabled_only, configured_count = configured, excluded_by_filter = configured - list.Count });
+            }
+
             return JsonSerializer.Serialize(new
             {
                 total_count = list.Count,
@@ -462,6 +524,26 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        /* ag_redo_queue_alert_kb is the one bigint on this row, and DarlingAlertSettings clamps it in
+           long arithmetic. Binding it through AddInt would work today only because the ceiling happens to
+           fit in an int; typing it here means a raised ceiling stays writable instead of silently
+           rejecting every value above int.MaxValue as "not an integer". */
+        void AddLong(string column, JsonNode? node, string field, long min, long max)
+        {
+            if (error != null) return;
+            if (node is JsonValue v && v.TryGetValue<long>(out var l))
+            {
+                if (l < min || l > max)
+                    error = $"'{field}' must be an integer between {min} and {max}.";
+                else
+                    updates.Add((column, new NpgsqlParameter<long> { TypedValue = l }));
+            }
+            else
+            {
+                error = $"'{field}' must be an integer between {min} and {max}.";
+            }
+        }
+
         void AddDouble(string column, JsonNode? node, string field, double min, double max)
         {
             if (error != null) return;
@@ -547,6 +629,11 @@ public sealed class DarlingMcpAlertTools
             {
                 case "alerts_enabled": AddBool("enabled", prop.Value, "alerts_enabled"); break;
                 case "notify_connection_changes": AddBool("notify_connection_changes", prop.Value, "notify_connection_changes"); break;
+                /* #2417: bounds mirror DarlingAlertSettings' clamps EXACTLY -- Clamp(0, 1440) on the
+                   refire, nothing to clamp on the at-startup opt-in. Zero is IN range because 0 is the
+                   shipped configuration (one alert per outage, no re-fire), not an invalid one. */
+                case "notify_connection_down_at_startup": AddBool("notify_connection_down_at_startup", prop.Value, "notify_connection_down_at_startup"); break;
+                case "connection_refire_minutes": AddInt("connection_refire_minutes", prop.Value, "connection_refire_minutes", 0, 1440); break;
                 case "cooldown_minutes": AddInt("cooldown_minutes", prop.Value, "cooldown_minutes", 1, 120); break;
                 case "excluded_databases": AddStringArray("excluded_databases", prop.Value, "excluded_databases"); break;
 
@@ -570,6 +657,13 @@ public sealed class DarlingMcpAlertTools
                         {
                             case "enabled": AddBool("blocking_enabled", n, "blocking.enabled"); break;
                             case "count_threshold": AddInt("blocking_count_threshold", n, "blocking.count_threshold", 1, int.MaxValue); break;
+                            /* #2417: get_alert_settings has emitted this key since #1839 and the writer
+                               never took it, so handing a whole read payload back -- the round trip this
+                               tool's own description tells the caller to perform -- was rejected with
+                               "Unknown field 'blocking.wait_threshold_seconds'", naming a field the caller
+                               did not choose to send. The bound is the engine's Math.Max(0, ...), so 0
+                               keeps disabling the second gate rather than becoming invalid. */
+                            case "wait_threshold_seconds": AddInt("blocking_wait_seconds_threshold", n, "blocking.wait_threshold_seconds", 0, int.MaxValue); break;
                             default: error = $"Unknown field 'blocking.{k}'."; break;
                         }
                     });
@@ -675,6 +769,25 @@ public sealed class DarlingMcpAlertTools
                     });
                     break;
 
+                /* #2391: bounds mirror DarlingAlertSettings' clamps EXACTLY — Max(0) on the rise,
+                   [0,100] on the volume percent, [5,1440] on the lookback. If these drift apart the tool
+                   accepts a value the engine then silently rewrites, which reads as the setting not
+                   sticking. Zero on either gate disables that gate rather than being invalid (#2349),
+                   which is why the rise floor is 0 and not 1. */
+                case "file_growth":
+                    Group(prop.Value, "file_growth", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("file_growth_enabled", n, "file_growth.enabled"); break;
+                            case "rise_mb": AddInt("file_growth_rise_mb", n, "file_growth.rise_mb", 0, int.MaxValue); break;
+                            case "volume_percent": AddInt("file_growth_volume_percent", n, "file_growth.volume_percent", 0, 100); break;
+                            case "lookback_minutes": AddInt("file_growth_lookback_minutes", n, "file_growth.lookback_minutes", 5, 1440); break;
+                            default: error = $"Unknown field 'file_growth.{k}'."; break;
+                        }
+                    });
+                    break;
+
                 case "long_running_job":
                     Group(prop.Value, "long_running_job", (k, n) =>
                     {
@@ -706,6 +819,24 @@ public sealed class DarlingMcpAlertTools
                         {
                             case "enabled": AddBool("database_state_enabled", n, "database_state.enabled"); break;
                             default: error = $"Unknown field 'database_state.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                /* #2417: bounds mirror DarlingAlertSettings' clamps EXACTLY -- Clamp(lag, 0, 86400),
+                   Clamp(redo, 0L, 1073741824L), Clamp(refire, 0, 1440). Zero is IN range on all three
+                   and means OFF for that gate (the redo queue SHIPS at 0, because a healthy queue size
+                   is workload-specific), so a floor of 1 would remove the shipped configuration. */
+                case "ag":
+                    Group(prop.Value, "ag", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("notify_ag_health", n, "ag.enabled"); break;
+                            case "lag_threshold_seconds": AddInt("ag_lag_alert_seconds", n, "ag.lag_threshold_seconds", 0, 86400); break;
+                            case "redo_queue_threshold_kb": AddLong("ag_redo_queue_alert_kb", n, "ag.redo_queue_threshold_kb", 0L, 1073741824L); break;
+                            case "disconnect_refire_minutes": AddInt("ag_disconnect_refire_minutes", n, "ag.disconnect_refire_minutes", 0, 1440); break;
+                            default: error = $"Unknown field 'ag.{k}'."; break;
                         }
                     });
                     break;

@@ -18,9 +18,9 @@ public partial class DrillDownCollector
 {
     private async Task CollectTopDeadlocks(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -37,8 +37,8 @@ LIMIT 3";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             /* #1140: parse the involved objects from the graph for the dedup fingerprint + a readable
                Objects field. The raw graph XML is NOT surfaced (it would bloat the alert detail). */
@@ -59,9 +59,9 @@ LIMIT 3";
 
     private async Task CollectTopBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         /* BPR + always-on DMV blocking snapshot, so the flat top-blocking list isn't empty when the
@@ -98,8 +98,8 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -126,9 +126,9 @@ LIMIT 5";
     /// </summary>
     private async Task CollectReconstructedBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         // SpidFilter keeps Lite's drill-down, fact collector, and viewer fetch in lockstep on the apex
@@ -153,16 +153,17 @@ LIMIT 5000";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var rows = new List<BlockingPairRow>();
-        using (var reader = await cmd.ExecuteReaderAsync())
+        using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
         {
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(context.CancellationToken))
                 rows.Add(BlockingPairRowQuery.Read(reader));
         }
 
         // Always-on DMV blocking snapshot fallback. Merge BEFORE the empty check so DMV-only blocking
         // (blocked-process-report unavailable, e.g. AWS RDS) still reconstructs.
         await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-            connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd);
+            connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+            context.CancellationToken);
 
         if (rows.Count == 0) return;
 
@@ -199,9 +200,9 @@ LIMIT 5000";
 
     private async Task CollectLockModeBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -221,8 +222,8 @@ LIMIT 10";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {

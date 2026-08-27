@@ -72,7 +72,7 @@ public sealed class DarlingMcpLatchSpinlockToolsSurfaceAndSqlTests
     public void ParamContract_MatchesDashboard_ServerHoursTop_AllOptional(string toolName)
     {
         var p = McpParams(toolName);
-        Assert.Equal(new[] { "server_name", "hours_back", "top" }, p.Select(x => x.Name).ToArray());
+        Assert.Equal(new[] { "server_name", "hours_back", "top", "as_of" }, p.Select(x => x.Name).ToArray());
         Assert.All(p, x => Assert.True(x.Optional, $"{toolName}.{x.Name} must be optional"));
     }
 

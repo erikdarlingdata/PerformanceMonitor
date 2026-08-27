@@ -110,9 +110,20 @@ public partial class MainWindow
     private void PersistCollapseState()
     {
         _preferences.CollapsedFleetGroups = _fleet.CollapsedKeys.Select(k => k.ToStorageString()).ToList();
+
+        /* #2434: Save answers with a bool now instead of throwing, and this is the write that most needed
+           the guard behind it — collapsing a sidebar group is a whole-file rewrite of viewer-preferences.json
+           and nobody thinks of it as a save. Deliberately log-only rather than a dialog: a modal every time
+           a group collapses would be worse than the thing it reports, and the collapse state is the one
+           setting the next launch visibly re-states for you. The catch stays for anything Save's own
+           best-effort failure path cannot reach — a sidebar click must not take the viewer down. */
         try
         {
-            _preferencesStore.Save(_preferences);
+            if (!_preferencesStore.Save(_preferences))
+            {
+                ViewerLogger.Warn("Tags",
+                    "The sidebar collapse state was not saved; the groups will be back as they were on the next launch.");
+            }
         }
         catch (Exception ex)
         {

@@ -286,8 +286,50 @@ public partial class ServerTab : UserControl
 
         if (!isCustom)
         {
+            /* #2640: remember the choice. Before this the picker was write-only — the settings key
+               default_time_range_hours existed and was read at startup, but the only thing that wrote it
+               was the Settings window, so choosing "Last 7 days" here and restarting came back at four
+               hours with nothing to explain why. A control that offers a choice and discards it reads as
+               broken, and the reporter read it that way.
+
+               Custom Range is deliberately NOT persisted: it has no hours value to store, and restoring a
+               window that ended two days ago would be worse than restoring nothing — the app would open
+               showing an empty chart of a range the operator has moved on from. */
+            PersistSelectedTimeRange();
+
             await RefreshAllDataAsync();
         }
+    }
+
+    /// <summary>
+    /// Writes the picked range to <c>default_time_range_hours</c>, the same key the Settings window writes
+    /// and startup reads, so the two cannot disagree about what the range means. Failure is logged by
+    /// <see cref="App.WriteSetting"/> and never interrupts the refresh — a settings file that cannot be
+    /// written must not stop the user looking at data.
+    /// </summary>
+    private void PersistSelectedTimeRange()
+    {
+        var hours = TimeRangeCombo.SelectedIndex switch
+        {
+            0 => 1,
+            1 => 4,
+            2 => 12,
+            3 => 24,
+            4 => 168,
+            _ => 0,
+        };
+
+        if (hours == 0)
+        {
+            return;
+        }
+
+        /* The in-memory value too, not only the file: a second server tab opened in this same session
+           reads App.DefaultTimeRangeHours in its constructor, and a tab that opens on a different range
+           from the one just chosen is the same complaint in a smaller window. */
+        App.DefaultTimeRangeHours = hours;
+
+        App.WriteSetting("time range", root => root["default_time_range_hours"] = hours);
     }
 
     private async void CustomDateRange_Changed(object sender, SelectionChangedEventArgs e)

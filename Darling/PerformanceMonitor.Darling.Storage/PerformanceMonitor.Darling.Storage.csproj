@@ -20,4 +20,11 @@
   <ItemGroup>
     <ProjectReference Include="..\..\PerformanceMonitor.Collectors\PerformanceMonitor.Collectors.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- #2530: the PostgreSQL reads moved here from the service's MCP folder so the WPF viewer can run the
+         SAME query text the MCP surface runs. Their ordinal-mapping tests pin the internal Map*Row helpers,
+         which followed them; the service kept its own InternalsVisibleTo for everything that stayed there. -->
+    <InternalsVisibleTo Include="Darling.Tests" />
+  </ItemGroup>
 </Project>

@@ -20,12 +20,15 @@ public partial class LocalDataService
     /// <summary>
     /// Gets alert history from the config_alert_log table (excludes dismissed alerts).
     /// </summary>
-    public async Task<List<AlertHistoryRow>> GetAlertHistoryAsync(int hoursBack = 24, int limit = 500, int? serverId = null)
+    public async Task<List<AlertHistoryRow>> GetAlertHistoryAsync(int hoursBack = 24, int limit = 500, int? serverId = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        /* Both edges, not just the lower one: the row cap is applied by the database, so trimming
+           after the read would spend the whole LIMIT on rows newer than an as_of anchor and hand back an
+           empty window that looks exactly like a quiet one. */
+        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         if (serverId.HasValue)
         {
@@ -46,11 +49,13 @@ SELECT
     context_json
 FROM v_config_alert_log
 WHERE alert_time >= $1
-AND   server_id = $2
+AND   alert_time <= $2
+AND   server_id = $3
 AND   dismissed = FALSE
 ORDER BY alert_time DESC
-LIMIT $3";
+LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+            command.Parameters.Add(new DuckDBParameter { Value = until });
             command.Parameters.Add(new DuckDBParameter { Value = serverId.Value });
             command.Parameters.Add(new DuckDBParameter { Value = limit });
         }
@@ -73,10 +78,12 @@ SELECT
     context_json
 FROM v_config_alert_log
 WHERE alert_time >= $1
+AND   alert_time <= $2
 AND   dismissed = FALSE
 ORDER BY alert_time DESC
-LIMIT $2";
+LIMIT $3";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+            command.Parameters.Add(new DuckDBParameter { Value = until });
             command.Parameters.Add(new DuckDBParameter { Value = limit });
         }
 

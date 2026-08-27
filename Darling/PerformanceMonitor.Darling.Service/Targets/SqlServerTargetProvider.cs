@@ -99,7 +99,10 @@ public sealed class SqlServerTargetProvider : ITargetProvider
             return yieldsOnLockTimeout ? CollectorTargetFault.LockTimeoutYield : CollectorTargetFault.Unclassified;
         }
 
-        if (sql.Number is 229 or 297 or 300 or 8189 or 916)
+        /* #2512: the numbers live in SqlServerPermissionErrors now, so this and the two runner catch
+           filters cannot disagree about what a denial is — they already had (916 was here and in
+           neither of them). */
+        if (SqlServerPermissionErrors.IsPermissionDenied(sql.Number))
         {
             return CollectorTargetFault.Permissions;
         }

@@ -256,6 +256,9 @@ public class AlertContextBuildersTests
             {
                 ("Total Reserved", $"{800d:F0} MB"),
                 ("Unallocated", $"{200d:F0} MB"),
+                /* #2515: no MaxSizeMb on this fixture, so the ceiling was never measured and the
+                   percentage above is still against the allocation. */
+                ("Max Size", "Unknown"),
                 ("User Objects", $"{500d:F0} MB"),
                 ("Internal Objects", $"{250d:F0} MB"),
                 ("Version Store", $"{50d:F0} MB"),
@@ -274,7 +277,7 @@ public class AlertContextBuildersTests
             TopConsumerSessionId = 0
         });
 
-        Assert.Equal(("Top Consumer", "None"), context!.Details[0].Fields[5]);
+        Assert.Equal(("Top Consumer", "None"), context!.Details[0].Fields[6]);
     }
 
     /* ---------------- anomalous jobs ---------------- */

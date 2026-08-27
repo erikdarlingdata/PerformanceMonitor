@@ -21,6 +21,19 @@ namespace PerformanceMonitorLite.Services;
 /// GetLastAlertTimeAsync) — verbatim SQL, same DuckDbInitializer + App.DatabasePath
 /// fallback. The shared <c>string serverId</c> is parsed back to the DuckDB
 /// <c>INT</c> column before binding the $1 parameter (§4.1).
+///
+/// <para><b>The write lock on the six mutating methods is mostly earned, and once is not (#2463).</b>
+/// Said here because <c>FindingStore</c> next door writes under the READ lock and the difference looks
+/// like one of them is a bug. It is not: the rule is that the read lock excludes MAINTENANCE while the
+/// write lock additionally excludes OTHER WRITERS OF THE SAME ROWS, which matters because DuckDB's
+/// concurrency control fails the loser of a write-write collision instead of queueing it. The two
+/// watermark upserts, the incident-occurrence delete-then-reinsert, and the two
+/// <c>config_database_state_expected</c> UPDATEs all collide under that rule — the UPDATEs against
+/// <c>LocalDataService.GetDatabaseStateDeviationsAsync</c>'s #2208 maintenance block, which writes the
+/// same table. <see cref="RecordAlertAsync"/> is the exception: it APPENDS to <c>config_alert_log</c>
+/// and cannot collide, so it is over-locked and kept that way deliberately, because one method of six
+/// spelled differently costs more than the microseconds it saves on an alert-frequency write. Full rule
+/// and measurements on <c>DuckDbInitializer.s_dbLock</c>.</para>
 /// </summary>
 public sealed class DuckDbAlertHistoryStore : IAlertHistoryStore
 {

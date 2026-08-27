@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -34,12 +34,24 @@ public sealed class PgSchemaGeneratorTests
            collector) = 42, plus pg_statement_stats = 43, plus pg_wraparound_stats = 44, plus pg_xmin_horizon = 45,
            plus pg_replication_slot_stats = 46, plus pg_autovacuum_stats (the first per-database PostgreSQL
            collector) = 47, plus pg_io_stats = 48, plus pg_blocking = 49, plus query_store_health
-           (#2319) = 50. The catalog is deliberately
+           (#2319) = 50, plus pg_database_stats (#2539, the pg_stat_database counters) = 51, plus
+           pg_index_usage_stats (#2541, per-index usage) = 52, plus pg_table_bloat_stats (#2542, the
+           bloat estimate) = 53, plus pg_session_states (#2540, the sessions behind a pinned xmin
+           horizon) = 54, plus pg_plan_capture_readiness (#2564, whether plans can be
+           captured at all) = 55, plus pg_write_stats (#2544, the write side - checkpointer, background
+           writer and WAL as one row) = 56, plus pg_extension_availability (#2545, the extension
+           capability axis) = 57, plus pg_lock_stats (#2544, lock state by mode and relation -
+           which pg_blocking_edges cannot give) = 58, plus pg_column_stats (#2543,
+           the planner statistics that explain WHY a plan was chosen) = 59, plus
+           pg_replication_stats (#2544, connected standbys as distinct from slots) = 60, plus
+           pg_buffer_usage (#2544, what is resident in shared buffers) = 61, plus
+           pg_index_bloat (#2561) and pg_wait_sampling, pg_kernel_stats, pg_predicate_stats (#2603) and pg_plan_capture (#2566) = 66. The catalog is
+           deliberately
            engine-mixed: the schema generator walks it to
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(50, CollectorCatalog.All.Count);
+        Assert.Equal(68, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
@@ -608,10 +620,29 @@ public sealed class PgSchemaGeneratorTests
             (68, PgAutovacuumStatsCollector.Instance),
             (69, PgIoStatsCollector.Instance),
             (71, PgBlockingCollector.Instance),
+            (83, PgDatabaseStatsCollector.Instance),
+            (84, PgIndexUsageStatsCollector.Instance),
+            (85, PgTableBloatStatsCollector.Instance),
+            (86, PgSessionStatesCollector.Instance),
+            (87, PgPlanCaptureReadinessCollector.Instance),
+            (88, PgWriteStatsCollector.Instance),
+            (89, PgExtensionAvailabilityCollector.Instance),
+            (90, PgLockStatsCollector.Instance),
+            (91, PgColumnStatsCollector.Instance),
+            (92, PgReplicationStatsCollector.Instance),
+            (93, PgBufferUsageCollector.Instance),
+            (94, PgIndexBloatCollector.Instance),
+            (96, PgWaitSamplingCollector.Instance),
+            (97, PgKernelStatsCollector.Instance),
+            (98, PgPredicateStatsCollector.Instance),
+            (99, PgPlanCaptureCollector.Instance),
+            (102, PgServerConfigCollector.Instance),
+            (103, PgDeadlocksCollector.Instance),
         };
 
-        /* Every PostgreSQL collector must appear above. A ninth added without a rung listed here would
-           otherwise pass this test by simply not being checked. */
+        /* Every PostgreSQL collector must appear above. One added without a rung listed here would
+           otherwise pass this test by simply not being checked, which is why the expectation is DERIVED
+           from the catalog rather than written as a second literal. */
         Assert.Equal(
             CollectorCatalog.All.Count(c => c.TargetEngine == CollectorTargetEngine.PostgreSql),
             rungs.Length);

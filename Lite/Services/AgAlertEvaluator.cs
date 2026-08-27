@@ -26,13 +26,19 @@ namespace PerformanceMonitorLite.Services;
 /// <param name="Context">Discrete facts for database-scoped alerts (#2109) — null for the replica-grain
 /// alerts and resolutions, which carry no database. Trailing optional so existing construction sites
 /// (and the tests that pin them) stay untouched.</param>
+/// <param name="RefireStampKey">Opaque token (#2426), non-null only on an alert whose DELIVERY opens a
+/// re-fire window. The caller hands it back through <see cref="AgAlertEvaluator.NoteDelivered"/> after
+/// sending, which is what keeps the window stamped on delivery rather than on the decision: Lite evaluates
+/// even while a server is acknowledged or silenced and simply does not send, and a suppressed alert must not
+/// consume a window it was never announced in.</param>
 public readonly record struct AgAlert(
     string MetricName,
     string CurrentValue,
     string ThresholdValue,
     string DetailText,
     bool IsResolution,
-    AlertContext? Context = null);
+    AlertContext? Context = null,
+    string? RefireStampKey = null);
 
 /// <summary>
 /// Lite's Availability Group alert state machine (#1696) — the twin of Darling's
@@ -58,6 +64,7 @@ public sealed class AgAlertEvaluator
     private readonly Dictionary<string, string> _replicaConnectedState = new(StringComparer.Ordinal);
     private readonly Dictionary<string, bool> _databaseSuspended = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> _lastSyncBehindAlert = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> _lastDisconnectAlert = new(StringComparer.Ordinal);
     private readonly HashSet<string> _activeSyncBehind = new(StringComparer.Ordinal);
 
     private readonly Func<DateTime> _utcNow;
@@ -68,7 +75,13 @@ public sealed class AgAlertEvaluator
     /// The replica-grain conditions for one server: "AG Failover" and the disconnect/reconnect pair. Both are
     /// pure transitions per ag+replica, and the FIRST sighting of a replica is a silent baseline.
     /// </summary>
-    public List<AgAlert> EvaluateReplicas(int serverId, IReadOnlyList<AgReplicaReading> replicas)
+    /// <param name="disconnectRefireInterval">#2426: how often to re-announce a replica that is STILL
+    /// disconnected. Null (the shipped default) is edge-only — one alert per outage, however long it lasts.
+    /// The re-fire decision is the shared policy's, and the one departure from the silent-baseline rule is
+    /// documented there: with re-fire on, a replica already down at first sighting announces, because Lite's
+    /// AG state is in-memory and would otherwise let a restart silence a standing outage permanently.</param>
+    public List<AgAlert> EvaluateReplicas(
+        int serverId, IReadOnlyList<AgReplicaReading> replicas, TimeSpan? disconnectRefireInterval = null)
     {
         var alerts = new List<AgAlert>();
         if (replicas is null)
@@ -105,25 +118,47 @@ public sealed class AgAlertEvaluator
             if (!string.IsNullOrEmpty(replica.ConnectedStateDesc))
             {
                 _replicaConnectedState.TryGetValue(key, out var previousState);
-                var decision = AgAlertPolicy.DecideConnection(previousState, replica.ConnectedStateDesc);
+                var decision = AgAlertPolicy.DecideConnection(
+                    previousState,
+                    replica.ConnectedStateDesc,
+                    disconnectRefireInterval,
+                    _lastDisconnectAlert.TryGetValue(key, out var lastDisconnect) ? lastDisconnect : null,
+                    _utcNow());
                 _replicaConnectedState[key] = replica.ConnectedStateDesc!;
 
-                if (decision == AgConnectionDecision.Disconnected)
+                if (decision is AgConnectionDecision.Disconnected or AgConnectionDecision.StillDisconnected)
                 {
+                    /* #2426: a re-fire is the SAME metric name and the same guidance — webhook automation
+                       keyed on it is what the re-fire exists to re-trigger — and differs only in saying so,
+                       because an operator reading the alert history has no other way to tell a fresh outage
+                       from the sixth hour of one. The wording matches the connection re-fire's. */
+                    var opening = decision == AgConnectionDecision.StillDisconnected
+                        ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                          $"DISCONNECTED from the primary (re-alerting every " +
+                          $"{((int)disconnectRefireInterval!.Value.TotalMinutes).ToString(CultureInfo.InvariantCulture)} min)."
+                        : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is DISCONNECTED " +
+                          "from the primary.";
+
                     alerts.Add(new AgAlert(
                         AgAlertPolicy.ReplicaDisconnectedMetric,
                         replica.ConnectedStateDesc!,
                         "CONNECTED",
-                        $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is DISCONNECTED " +
-                        "from the primary. A disconnected replica receives no log at all, so it falls further behind " +
+                        opening +
+                        " A disconnected replica receives no log at all, so it falls further behind " +
                         "every second and cannot be failed over to without losing whatever the primary has committed " +
                         "since. If it is a synchronous-commit replica, the primary also loses its automatic-failover " +
                         "partner. Check the replica's SQL Server service, the availability endpoint (TCP 5022 by " +
                         "default) and its firewall rule, the WSFC quorum, and the network between the nodes.",
-                        IsResolution: false));
+                        IsResolution: false,
+                        RefireStampKey: key));
                 }
                 else if (decision == AgConnectionDecision.Reconnected)
                 {
+                    /* The clock is cleared on the RECONNECT decision rather than on the resolution's
+                       delivery: once the replica is back there is nothing left to re-announce, so a stamp
+                       surviving a suppressed reconnect notice could only mis-date the NEXT outage — which
+                       announces on its own edge regardless. */
+                    _lastDisconnectAlert.Remove(key);
                     alerts.Add(new AgAlert(
                         AgAlertPolicy.ReplicaReconnectedMetric,
                         replica.ConnectedStateDesc!,
@@ -256,6 +291,26 @@ public sealed class AgAlertEvaluator
         return alerts;
     }
 
+    /// <summary>
+    /// Opens the re-fire window for an alert the caller actually SENT (#2426). Alerts with no
+    /// <see cref="AgAlert.RefireStampKey"/> are ignored, so the caller can hand every alert back without
+    /// caring which ones carry a window.
+    ///
+    /// <para>Deliberately the caller's call rather than something the evaluator does while deciding, and it
+    /// is the same split Lite's connection re-fire already uses (<c>_lastConnectionDownAlertUtc</c> is
+    /// stamped beside <c>SendConnectionAlert</c>, not inside the policy). Lite evaluates AG health on every
+    /// sweep but skips delivery while a server is acknowledged or silenced; stamping at decision time would
+    /// let those suppressed sweeps eat window after window, and the operator would come back from an
+    /// acknowledgement to silence rather than to a re-announcement.</para>
+    /// </summary>
+    public void NoteDelivered(AgAlert alert)
+    {
+        if (alert.RefireStampKey is string key)
+        {
+            _lastDisconnectAlert[key] = _utcNow();
+        }
+    }
+
     /// <summary>Drops all AG state for a server removed from the monitored list, so a later re-add starts at a
     /// fresh baseline rather than inheriting a stale role and paging a phantom failover.</summary>
     public void Forget(int serverId)
@@ -265,6 +320,7 @@ public sealed class AgAlertEvaluator
         ForgetByPrefix(_replicaConnectedState, prefix);
         ForgetByPrefix(_databaseSuspended, prefix);
         ForgetByPrefix(_lastSyncBehindAlert, prefix);
+        ForgetByPrefix(_lastDisconnectAlert, prefix);
         _activeSyncBehind.RemoveWhere(k => k.StartsWith(prefix, StringComparison.Ordinal));
     }
 

@@ -31,28 +31,30 @@ public sealed class McpPlanCorrectionTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum recommendation rows. Default 50.")] int limit = 50)
+        [Description("Maximum recommendation rows. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
             var tuning = await dataService.GetLatestAutomaticTuningAsync(resolved.ServerId);
-            var rows = await dataService.GetPlanCorrectionsAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetPlanCorrectionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             if (tuning.Count == 0 && rows.Count == 0)
             {
-                return McpHelpers.Status("empty",
-                    "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
-                    "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
-                    "that or has no databases with Query Store on.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "plan_correction")
+                    ?? McpHelpers.Status("empty",
+                        "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
+                        "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
+                        "that or has no databases with Query Store on.");
             }
 
             var recommendations = rows.Take(limit).Select(r => new

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -140,6 +140,21 @@ public static class CollectorScheduleDefaults
            catalog. */
         ["pg_wraparound_stats"] = new(5, 90),
 
+        /* Hourly, and the cadence IS the design (#2658). Configuration changes when a person changes it,
+           so polling it per minute buys nothing and writes 415 rows a minute forever; an hour is inside
+           anyone's window for "what changed this afternoon". 365 days because the question this answers is
+           almost always asked long after the fact — "this got slow sometime last quarter" — and a config
+           history shorter than the memory of the incident is no history at all. It is cheap to keep: the
+           rows are small, and the changes read only ever looks at consecutive snapshots. */
+        ["pg_server_config"] = new(60, 365),
+
+        /* Every 5 minutes against a 4 MB tail, matching pg_plan_capture: the two read the same file the
+           same way, and a deadlock is an EVENT rather than a level, so the cadence has to be short enough
+           that a report is still inside the window when the read comes round. 90 days because deadlocks
+           are asked about in retrospect - "we had a spike last month" - and a shorter horizon answers that
+           with silence. The overlapping window is deliberate and the hash is what makes it free. */
+        ["pg_deadlocks"] = new(5, 90),
+
         /* Per-minute, unlike its wraparound sibling: an xmin holder is the FAST-moving leading
            indicator, and the thing an operator wants is the session or slot that appeared minutes
            ago, before it has cost anything. At most five rows a cycle. 30 days matches the other
@@ -174,5 +189,126 @@ public static class CollectorScheduleDefaults
            other per-minute series, and is the horizon that answers "is this the same chain every
            Monday at open" — the question that turns a one-off into a pattern. */
         ["pg_blocking"] = new(1, 30),
+
+        /* Per-minute, and cheap enough to be uncontroversial: pg_stat_database is cluster-wide, so this is
+           one query on the connection the collector already has, returning one row per database — single
+           digits to low tens on every target in the fleet. No fan-out, unlike pg_autovacuum_stats.
+           The cadence IS the value, not a cost to justify: a temp-file spill is what you correlate against
+           a deployment or a nightly job, and at an hourly grain "the reporting database started spilling"
+           loses the minute that would have named the cause. 30 days matches the other per-minute rate
+           collectors — the question this answers is "did this start on Tuesday", not a quarterly trend. */
+        ["pg_database_stats"] = new(1, 30),
+
+        /* DAILY, and the cadence is inherited from index_object_stats — the SQL Server collector that
+           answers the same question — rather than from the PostgreSQL fan-out sibling. "Has anything
+           scanned this index" is a structural question about a schema, not a rate: an hourly sample would
+           record the same catalog facts 24 times a day and cost 24x the fan-out connections to do it. The
+           counters are cumulative, so a daily sample loses no total; it only coarsens WHEN a scan happened,
+           and nobody drops an index on the strength of which hour it was last used.
+
+           90 days of retention, and this is the number that actually matters. The retention window IS the
+           evidence: an index can only be called unused for as long as we have been watching it, so the
+           window has to outlast the slowest query that might legitimately need it. 30 days cannot clear a
+           monthly report; 90 covers monthly and quarterly jobs. It still cannot clear an ANNUAL one, which
+           is why the read reports the observed window rather than asserting an index is unused. */
+        ["pg_index_usage_stats"] = new(1440, 90),
+
+        /* Hourly, matching pg_autovacuum_stats deliberately rather than by copying: this collector measures
+           the DAMAGE whose CAUSE that one measures, and correlating the two requires a common grain — at
+           different cadences "vacuum fell behind at 14:00 and bloat grew" stops being a sentence the data
+           can support. It is also the second per-database fan-out, so sharing the cadence means one
+           connection-budget decision instead of two.
+
+           90 days matches pg_autovacuum_stats and database_size_stats for the same reason: the useful
+           reading of bloat is a trend — is this table's waste growing, holding, or being reclaimed — and a
+           spot percentage on its own is what gets someone to run VACUUM FULL on a Tuesday. */
+        ["pg_table_bloat_stats"] = new(60, 90),
+
+        /* One minute, matching pg_blocking, and for the same reason rather than by copying it: both read
+           pg_stat_activity, both are SAMPLES of a view that records nothing on its own, and the cadence IS
+           the resolution — a transaction shorter than the interval is invisible no matter what else is
+           tuned. This one is the cheaper of the two: it makes no pg_blocking_pids() call, takes no
+           lock-manager ShareLock, and fans out to no databases, so a minute costs a single indexed scan of
+           an in-memory view per cycle.
+
+           A minute cannot see a ten-second idle-in-transaction reliably even though ten seconds is the
+           storage floor, and that is accepted rather than papered over. What this collector is for is the
+           CHRONIC holder — the session that has been parked for minutes or hours — which is also the only
+           kind that can pin the xmin horizon long enough to starve vacuum. Sampling faster would buy
+           recall on episodes that by definition cannot cause the harm.
+
+           30 days matches pg_blocking. The question is "how often does this application park a transaction,
+           and is it getting worse" — a month covers a release cycle, which is the unit at which someone can
+           actually act on the answer. Longer would mean keeping per-session rows, which are the widest and
+           most numerous thing here, well past the point anyone would correlate them to a deploy. */
+        ["pg_session_states"] = new(1, 30),
+        /* #2564 plan-capture readiness. HOURLY, not per-minute: every facet is a parameter-group setting,
+           and on Aurora/RDS changing one needs a reboot - so the value cannot move between cycles the way a
+           counter does. The history exists so somebody can see WHEN it changed, which an hourly grain
+           answers, and a 1-minute grain would pay 60x for the same answer. Retained a year because "when
+           did plan capture get turned on" is a question asked months later. */
+        ["pg_plan_capture_readiness"] = new(60, 365),
+        /* #2544 write side - checkpoints, background writer, WAL. PER-MINUTE and 30 days, matching
+           pg_io_stats rather than the hourly readiness collector above, because these are cumulative
+           COUNTERS: the value a reader wants is a rate, and a rate is only as fine-grained as the sampling
+           interval that produced it. An hourly grain would smear a five-minute burst of requested
+           checkpoints into nothing, which is the exact event this collects to catch. Affordable at that
+           cadence for the same reason pg_io_stats is - all three source views are cluster-wide singletons,
+           so a snapshot is ONE row, not one per relation. */
+        ["pg_write_stats"] = new(1, 30),
+        /* #2545 extension availability. DAILY, and retained a year. An extension appearing or being upgraded
+           is a rare, deliberate act - nobody installs one twice an hour - so a per-minute cadence would pay
+           1440x for the same answer. The year of retention is the point of keeping history at all: "when did
+           pg_stat_statements get installed" and "when did this extension get upgraded" are asked months
+           later, usually right after a plan changed shape and nobody can explain why. */
+        /* HOURLY, not every five minutes, and the reason is the fleet rather than the collector. All
+           four of these need an extension or a readable server log, and Aurora offers neither - so on a
+           managed target they can only ever record a non-fatal skip, and at a five-minute cadence that
+           is roughly 900 skip rows per target per day saying the same thing.
+
+           Hourly costs nothing where they DO work: every one of these reads a CUMULATIVE counter
+           (pg_wait_sampling_profile, pg_stat_kcache, pg_qualstats) or an append-only log, so a longer
+           interval loses no events - it only widens the window each delta covers. That is the opposite
+           of a sampled collector like pg_blocking, where the cadence IS the resolution and stretching
+           it genuinely loses sightings. */
+        ["pg_wait_sampling"] = new(60, 30),
+        ["pg_kernel_stats"] = new(60, 30),
+        ["pg_predicate_stats"] = new(60, 30),
+        ["pg_plan_capture"] = new(60, 14),
+        ["pg_extension_availability"] = new(1440, 365),
+        /* #2544 lock state. PER-MINUTE and 30 days, matching pg_blocking - this is a SAMPLE of instantaneous
+           state, not a counter, so the cadence IS the resolution. A lock queue that forms and clears inside
+           five minutes is the interesting one, and an hourly grain would miss it entirely while reporting
+           the server as quiet. Row count is bounded by CONTENTION rather than by concurrency, because the
+           snapshot aggregates by (database, locktype, mode, granted, relation) - an idle server produces a
+           handful of rows. */
+        ["pg_lock_stats"] = new(1, 30),
+        /* #2543 column statistics. DAILY and a year, because these change only when ANALYZE runs - which is
+           autovacuum's cadence, not a minute's - and the question they answer is asked retrospectively:
+           "n_distinct on this column moved on the day the plan changed" needs a year of history and gains
+           nothing from a finer grain. This is also the widest per-row fan-out here (columns x tables x
+           databases), which the 128-page floor in the query bounds. */
+        ["pg_column_stats"] = new(1440, 365),
+        /* #2544 replication connections. PER-MINUTE and 30 days, matching the slot collector it sits beside.
+           This is instantaneous state, so the cadence IS the resolution - a standby that drifts away and
+           catches up inside five minutes is a different and more worrying animal than one steadily behind,
+           and only a fine grain tells them apart. Row count is the number of connected standbys, so single
+           digits on any real topology. */
+        ["pg_replication_stats"] = new(1, 30),
+        /* #2544 buffer pool contents. HOURLY, for two reasons that point the same way. The full
+           pg_buffercache view is a scan of every buffer - measured at 6.1 ms for a 512 MB pool, which scales
+           linearly to roughly 780 ms at 64 GB of shared_buffers - so it is affordable hourly and not per
+           minute. And a server WITHOUT the pg_buffercache extension records an ObjectMissing outcome every
+           cycle, which at a minute grain would be thousands of rows a day of noise on a fleet that mostly
+           lacks it. What is resident in the pool is slow-moving enough that an hour is the right resolution
+           anyway. */
+        ["pg_buffer_usage"] = new(60, 30),
+        /* #2561 index bloat. DAILY and 90 days, matching pg_index_usage_stats deliberately - the two answer
+           halves of one question (is this index earning its keep, and is it wasting space doing it) and a
+           read that joins them wants both grains to line up. Daily is also the affordable grain: pgstatindex
+           reads EVERY PAGE of an index, so the cost scales with the fleet's total btree size rather than
+           with anything that changes minute to minute. Bloat accumulates over days, so a finer grain would
+           pay repeatedly for an answer that had not moved. */
+        ["pg_index_bloat"] = new(1440, 90),
     };
 }

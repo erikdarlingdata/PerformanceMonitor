@@ -32,14 +32,14 @@ LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryStatsSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var totalPhysical = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var bufferPool = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -52,7 +52,10 @@ LIMIT 1";
             if (targetMemory > 0)
                 facts.Add(new Fact { Source = "memory", Key = "MEMORY_TARGET_MB", Value = targetMemory, ServerId = context.ServerId });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string RunnableTaskStatsSql = @"
@@ -82,15 +85,15 @@ LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(RunnableTaskStatsSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var totalRunnable = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var runnableWarning = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -108,7 +111,10 @@ LIMIT 1";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string MemoryGrantSql = @"
@@ -131,15 +137,15 @@ AND   collection_time <= $3";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryGrantSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var maxWaiters = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             var avgWaiters = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -166,7 +172,10 @@ AND   collection_time <= $3";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string MemoryClerkSql = @"
@@ -189,18 +198,18 @@ LIMIT 10";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryClerkSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             var metadata = new Dictionary<string, double>();
             var totalMb = 0.0;
             var clerkCount = 0;
 
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 var clerkType = reader.GetString(0);
                 var memoryMb = Convert.ToDouble(reader.GetValue(1));
@@ -223,7 +232,10 @@ LIMIT 10";
                 Metadata = metadata
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string CpuUtilizationSql = @"
@@ -246,15 +258,15 @@ AND   collection_time <= $3";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(CpuUtilizationSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var avgSqlCpu = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var maxSqlCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -298,7 +310,10 @@ AND   collection_time <= $3";
                 });
             }
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string PerfmonSql = @"
@@ -322,15 +337,15 @@ FROM latest WHERE rn = 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PerfmonSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 var counterName = reader.GetString(0);
                 var cntrValue = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
@@ -363,7 +378,10 @@ FROM latest WHERE rn = 1";
                 });
             }
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string PlanCacheStatsSql = @"
@@ -395,14 +413,14 @@ WHERE rnk = 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PlanCacheStatsSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             // SUM(integer) is bigint in Postgres — read every aggregate through ToInt64 (the Lite-parity
             // shape), then widen the MB sizes to double for the metadata.
@@ -432,7 +450,10 @@ WHERE rnk = 1";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string MemoryPressureEventsSql = @"
@@ -459,15 +480,15 @@ AND   collection_time <= $3";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryPressureEventsSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var pressureEventCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             var maxProcess = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -492,7 +513,10 @@ AND   collection_time <= $3";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
 }

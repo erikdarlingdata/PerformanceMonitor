@@ -73,7 +73,7 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
     public void ParamContract_ServerHours_AllOptional(string toolName)
     {
         var p = McpParams(toolName);
-        Assert.Equal(new[] { "server_name", "hours_back" }, p.Select(x => x.Name).ToArray());
+        Assert.Equal(new[] { "server_name", "hours_back", "as_of" }, p.Select(x => x.Name).ToArray());
         Assert.All(p, x => Assert.True(x.Optional, $"{toolName}.{x.Name} must be optional"));
     }
 

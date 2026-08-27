@@ -64,9 +64,17 @@ internal static class DarlingTrendReader
     public sealed record FileIoLatencyTrendPoint(
         DateTime CollectionTime, string DatabaseName, double AvgReadLatencyMs, double AvgWriteLatencyMs);
 
-    /// <summary>One query-duration / execution-count trend point: the per-second rate (elapsed ms/sec) plus
-    /// executions/sec (Lite's <c>QueryTrendPoint</c> shape).</summary>
-    public sealed record QueryDurationTrendPoint(DateTime CollectionTime, double Value, long ExecutionCount);
+    /// <summary>
+    /// One query-duration / execution-count trend point, shared by the three Performance-Trends siblings:
+    /// the per-second rate (elapsed ms/sec) plus executions/sec (Lite's <c>QueryTrendPoint</c> shape).
+    /// <para><c>ExecutionCount</c> and <c>ExecutionsPerSecond</c> are the SAME quantity - executions per
+    /// second - and both are here because the first one shipped truncated to a long. On a server doing
+    /// three executions a second that rounds harmlessly; on a quiet one doing 0.4 it reports ZERO, which
+    /// reads as an idle server rather than a slow one. The long is kept so a consumer reading it does not
+    /// break; new readers should take <c>ExecutionsPerSecond</c>.</para>
+    /// </summary>
+    public sealed record QueryDurationTrendPoint(
+        DateTime CollectionTime, double Value, long ExecutionCount, double ExecutionsPerSecond);
 
     /// <summary>One point of a single query's per-collection history (Lite's <c>QueryStatsHistoryRow</c>,
     /// the columns get_query_trend surfaces): the interval deltas + DOP spread + the plan hash. Time metrics
@@ -345,19 +353,156 @@ internal static class DarlingTrendReader
         ORDER BY collection_time
         """;
 
-    public static async Task<List<QueryDurationTrendPoint>> GetQueryDurationTrendAsync(
+    /// <summary>Runs <see cref="QueryDurationTrendSql"/>.</summary>
+    public static Task<List<QueryDurationTrendPoint>> GetQueryDurationTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        => ReadDurationTrendAsync(QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, cancellationToken);
+
+    /* --------------------- procedure + Query Store duration trends (#2484) --------------------- */
+
+    /// <summary>
+    /// The procedure-stats duration trend - the viewer's <c>ProcedureDurationTrendSql</c>, verbatim apart
+    /// from the database filter the MCP copy of its query-stats twin already drops.
+    /// <para>Not a duplicate of the query-stats trend, and the difference is the point: <c>query_stats</c>
+    /// attributes a procedure's work to the individual statements inside it, so a procedure that got slower
+    /// shows up smeared across however many statements it runs. This charges the whole call to the
+    /// procedure. When both are available, the pair answers "did ad-hoc SQL regress, or did a procedure?" -
+    /// which one series alone never can. $1 server_id, $2/$3 window (naive UTC).</para>
+    /// </summary>
+    public const string ProcedureDurationTrendSql = """
+        WITH raw AS
+        (
+            SELECT
+                collection_time,
+                SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
+                SUM(delta_execution_count) AS total_executions,
+                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+            FROM procedure_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY collection_time
+        )
+        SELECT
+            collection_time,
+            CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds ELSE 0 END AS elapsed_ms_per_second,
+            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+        FROM raw
+        ORDER BY collection_time
+        """;
+
+    /// <summary>
+    /// The Query Store duration trend - the viewer's <c>QueryStoreDurationTrendSql</c>, verbatim apart from
+    /// the database filter, INCLUDING the #1841 tier-2 interval placement and its legacy arm.
+    /// <para>Copied rather than simplified. The two arms are not decoration: arm 1 dedups each runtime
+    /// interval to its final cumulative snapshot and places it at <c>interval_start_time_utc</c> - the hour
+    /// the work actually RAN - because Query Store has no delta columns and re-fetches an open interval's
+    /// running totals every cycle, so charging every fetch to its collection time triple-counts the same
+    /// work. Arm 2 keeps rows collected before that fix on their old un-deduped treatment, because no
+    /// interval start exists for them and none can be reconstructed. The arms split on
+    /// <c>interval_start_time_utc IS NULL</c>, so they partition the rows with no overlap and no gap.
+    /// Rewriting either arm here would make the browser and the desktop viewer disagree about the same
+    /// hour. $1 server_id, $2/$3 window (naive UTC).</para>
+    /// </summary>
+    public const string QueryStoreDurationTrendSql = """
+        WITH placed AS
+        (
+            /* Arm 1 (#1841 tier 2) - rows carrying the interval identity. Dedup to the interval's FINAL
+               cumulative snapshot, then place it at interval_start_time_utc: the hour the work ran, not
+               the cycle that last fetched it. */
+            SELECT
+                interval_start_time_utc AS point_time,
+                execution_count,
+                avg_duration_us
+            FROM
+            (
+                SELECT
+                    interval_start_time_utc,
+                    execution_count,
+                    avg_duration_us,
+                    ROW_NUMBER() OVER
+                    (
+                        PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                        ORDER BY collection_time DESC, execution_count DESC
+                    ) AS rn
+                FROM query_store_stats
+                WHERE server_id = $1
+                /* Windowed on the column this arm PLACES its points at (#1892). Filtering on
+                   collection_time here put a point outside the range the caller asked for, and dropped
+                   the range's final interval because its closing fetch had not happened yet. */
+                AND   interval_start_time_utc >= $2
+                AND   interval_start_time_utc <= $3
+                /* Chunk-exclusion bounds only. */
+                AND   collection_time >= $2 - interval '1 day'
+                AND   collection_time <= $3 + interval '30 days'
+                AND   interval_start_time_utc IS NOT NULL
+            ) AS identified
+            WHERE rn = 1
+
+            UNION ALL
+
+            /* Arm 2 - rows collected before tier 2. No interval start exists and none can be
+               reconstructed, so these keep the pre-tier-2 treatment byte for byte. */
+            SELECT
+                collection_time AS point_time,
+                execution_count,
+                avg_duration_us
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   interval_start_time_utc IS NULL
+        ),
+        raw AS
+        (
+            SELECT
+                point_time,
+                SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
+                SUM(execution_count) AS total_executions,
+                extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+            FROM placed
+            GROUP BY point_time
+        )
+        SELECT
+            point_time AS collection_time,
+            CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds ELSE 0 END AS duration_ms_per_second,
+            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+        FROM raw
+        ORDER BY point_time
+        """;
+
+    /// <summary>Runs <see cref="ProcedureDurationTrendSql"/>.</summary>
+    public static Task<List<QueryDurationTrendPoint>> GetProcedureDurationTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        => ReadDurationTrendAsync(ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, cancellationToken);
+
+    /// <summary>Runs <see cref="QueryStoreDurationTrendSql"/>.</summary>
+    public static Task<List<QueryDurationTrendPoint>> GetQueryStoreDurationTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        => ReadDurationTrendAsync(QueryStoreDurationTrendSql, postgres, serverId, startUtc, endUtc, cancellationToken);
+
+    /// <summary>
+    /// Shared reader for the three duration trends. All three project the same three columns - point time,
+    /// a per-second value, a per-second execution rate - which is the viewer's own arrangement
+    /// (<c>ReadDurationTrendAsync</c>), kept so the three series cannot drift apart in how they are read.
+    /// Summed bigint deltas come back as Postgres numeric, so the values Convert tolerantly.
+    /// </summary>
+    private static async Task<List<QueryDurationTrendPoint>> ReadDurationTrendAsync(
+        string sql, NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken)
     {
         var items = new List<QueryDurationTrendPoint>();
-        await using var command = postgres.CreateCommand(QueryDurationTrendSql);
+        await using var command = postgres.CreateCommand(sql);
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var executionsPerSecond = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2));
             items.Add(new QueryDurationTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1)),
-                reader.IsDBNull(2) ? 0 : (long)Convert.ToDouble(reader.GetValue(2))));
+                (long)executionsPerSecond,
+                executionsPerSecond));
         }
 
         return items;
@@ -493,5 +638,104 @@ internal static class DarlingTrendReader
         }
 
         return items;
+    }
+
+    /* ─────────── "which nothing is this?" probes for the three windowed trends ─────────── */
+
+    /// <summary>
+    /// Whether this server has EVER recorded a memory sample, ignoring any window.
+    /// <para>Exists so an empty memory trend can say WHICH kind of nothing it found. "No memory trend data
+    /// available" is true both of a quiet window and of a server the collector has never touched, and those
+    /// want opposite responses from the caller — widen the window, versus go find out why collection is not
+    /// running. Reads <c>v_memory_stats</c>, the same source <see cref="MemoryTrendSql"/> reads, so it can
+    /// never report "collected" for rows the trend cannot see. LIMIT 1, so it stops at the first row.</para>
+    /// </summary>
+    public const string HasAnyMemoryStatSql = """
+        SELECT 1
+        FROM v_memory_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Whether this server has EVER recorded a file I/O sample. Reads <c>v_file_io_stats</c>, the
+    /// same source <see cref="FileIoLatencyTrendSql"/> reads. See <see cref="HasAnyMemoryStatSql"/>.</summary>
+    public const string HasAnyFileIoStatSql = """
+        SELECT 1
+        FROM v_file_io_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// Whether this server has EVER recorded a query-stats sample.
+    /// <para>Reads the BASE <c>query_stats</c> table, deliberately, because <see cref="QueryDurationTrendSql"/>
+    /// does: on a V38+ store <c>v_query_stats</c> is the payload-RESOLVING view, not a passthrough, and the
+    /// duration trend projects no text so it never needs it. Probing the view here would be probing a
+    /// different relation from the one the read walks — the exact way an existence probe reports the wrong
+    /// branch in the case it exists to get right.</para>
+    /// </summary>
+    public const string HasAnyQueryStatSql = """
+        SELECT 1
+        FROM query_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Whether this server has EVER recorded a stored-procedure sample. Reads the BASE
+    /// <c>procedure_stats</c> table for the same reason the query-stats probe above does — it is what
+    /// <see cref="ProcedureDurationTrendSql"/> reads. See <see cref="HasAnyMemoryStatSql"/>.</summary>
+    public const string HasAnyProcedureStatSql = """
+        SELECT 1
+        FROM procedure_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// Whether this server has EVER recorded a Query Store sample. Reads the BASE
+    /// <c>query_store_stats</c> table, the source <see cref="QueryStoreDurationTrendSql"/> walks.
+    /// <para>Worth the most of the five, because zero rows here has a cause the others do not: Query Store
+    /// can simply be OFF on every database. A server with no Query Store data is not a server with no slow
+    /// queries, and the read has to say so rather than return a clean-looking empty series.</para>
+    /// </summary>
+    public const string HasAnyQueryStoreStatSql = """
+        SELECT 1
+        FROM query_store_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyMemoryStatSql"/>.</summary>
+    public static Task<bool> HasAnyMemoryStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => HasAnySampleAsync(postgres, HasAnyMemoryStatSql, serverId, cancellationToken);
+
+    /// <summary>Runs <see cref="HasAnyFileIoStatSql"/>.</summary>
+    public static Task<bool> HasAnyFileIoStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => HasAnySampleAsync(postgres, HasAnyFileIoStatSql, serverId, cancellationToken);
+
+    /// <summary>Runs <see cref="HasAnyQueryStatSql"/>.</summary>
+    public static Task<bool> HasAnyQueryStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => HasAnySampleAsync(postgres, HasAnyQueryStatSql, serverId, cancellationToken);
+
+    /// <summary>Runs <see cref="HasAnyProcedureStatSql"/>.</summary>
+    public static Task<bool> HasAnyProcedureStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => HasAnySampleAsync(postgres, HasAnyProcedureStatSql, serverId, cancellationToken);
+
+    /// <summary>Runs <see cref="HasAnyQueryStoreStatSql"/>.</summary>
+    public static Task<bool> HasAnyQueryStoreStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => HasAnySampleAsync(postgres, HasAnyQueryStoreStatSql, serverId, cancellationToken);
+
+    /// <summary>All five probes share one shape: a scalar that is null when no row qualifies.</summary>
+    private static async Task<bool> HasAnySampleAsync(
+        NpgsqlDataSource postgres, string sql, int serverId, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(sql);
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 }

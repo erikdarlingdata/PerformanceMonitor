@@ -18,12 +18,12 @@ public partial class LocalDataService
     /// <summary>
     /// Gets TempDB stats trend for charting.
     /// </summary>
-    public async Task<List<TempDbRow>> GetTempDbTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<TempDbRow>> GetTempDbTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -83,7 +83,8 @@ SELECT
     internal_object_reserved_mb,
     version_store_reserved_mb,
     top_session_tempdb_mb,
-    top_session_id
+    top_session_id,
+    max_size_mb
 FROM v_tempdb_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -102,7 +103,11 @@ LIMIT 1";
                 InternalObjectReservedMb = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
                 VersionStoreReservedMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
                 TopConsumerMb = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                TopConsumerSessionId = reader.IsDBNull(6) ? 0 : reader.GetInt32(6)
+                TopConsumerSessionId = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                /* NULL on every row collected before the v56 migration, and 0 is what "no ceiling
+                   measured" is spelled as — so history keeps reporting the percentage it always did
+                   rather than dividing by a zero cap. Darling's twin reads the same column. */
+                MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7))
             };
         }
 

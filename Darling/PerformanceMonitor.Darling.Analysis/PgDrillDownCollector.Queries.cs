@@ -48,7 +48,7 @@ LIMIT 5";
     private async Task CollectQueriesAtSpike(AnalysisFinding finding, AnalysisContext context)
     {
         // Find the peak CPU time, then get queries active within 2 minutes of it
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         // Step 1: Find when the spike occurred
         using var peakCmd = new NpgsqlCommand(SpikePeakSql, connection);
@@ -59,9 +59,9 @@ LIMIT 5";
 
         DateTime? peakTime = null;
         int peakCpu = 0;
-        using (var peakReader = await peakCmd.ExecuteReaderAsync())
+        using (var peakReader = await peakCmd.ExecuteReaderAsync(context.CancellationToken))
         {
-            if (await peakReader.ReadAsync())
+            if (await peakReader.ReadAsync(context.CancellationToken))
             {
                 peakTime = peakReader.GetDateTime(0);
                 peakCpu = peakReader.GetInt32(1);
@@ -78,9 +78,9 @@ LIMIT 5";
         queryCmd.Parameters.AddWithValue(AsNaive(peakTime.Value.AddMinutes(2)));
 
         var items = new List<object>();
-        using (var reader = await queryCmd.ExecuteReaderAsync())
+        using (var reader = await queryCmd.ExecuteReaderAsync(context.CancellationToken))
         {
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 items.Add(new
                 {
@@ -126,7 +126,7 @@ LIMIT 5";
 
     private async Task CollectTopCpuQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(TopCpuQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -135,8 +135,8 @@ LIMIT 5";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -168,7 +168,7 @@ LIMIT 5";
 
     private async Task CollectTopSpillingQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(TopSpillingQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -177,8 +177,8 @@ LIMIT 5";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -248,7 +248,7 @@ LIMIT 5";
     /// </summary>
     private async Task CollectParameterSensitiveQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(ParameterSensitiveSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -257,8 +257,8 @@ LIMIT 5";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -492,7 +492,7 @@ LIMIT 5";
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(RegressedQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -505,8 +505,8 @@ LIMIT 5";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -567,7 +567,7 @@ GROUP BY database_name, query_hash";
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(BadActorDetailSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -576,8 +576,8 @@ GROUP BY database_name, query_hash";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
         cmd.Parameters.AddWithValue(queryHash);
 
-        using var reader = await cmd.ExecuteReaderAsync();
-        if (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        if (await reader.ReadAsync(context.CancellationToken))
         {
             finding.DrillDown!["bad_actor_query"] = new
             {
@@ -610,7 +610,7 @@ LIMIT 5";
 
     private async Task CollectPendingGrants(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(PendingGrantsSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -619,8 +619,8 @@ LIMIT 5";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {

@@ -245,7 +245,8 @@ public class FactScorer
     }
 
     /// <summary>
-    /// Scores TempDB usage. Value is usage fraction (reserved / total space).
+    /// Scores TempDB usage. Value is usage fraction — reserved ÷ tempdb's growth CEILING where it has one,
+    /// and ÷ the current allocation where it does not (#2515).
     /// </summary>
     private static double ScoreTempDbFact(Fact fact)
     {
@@ -273,6 +274,14 @@ public class FactScorer
     /// caps at 1.0 here; the CRITICAL band is earned only via corroboration. tempdb_contention_analysis
     /// corroborates the > 1 GB bar (version_store_high_warning fires at 1 GB — install/47:2504,
     /// install/34:146). Absent metadata (older facts) scores 0, preserving prior behavior.
+    ///
+    /// <para>#2515 moved the FRACTION arm's denominator to tempdb's growth ceiling and deliberately left these
+    /// bars alone. They are absolute MB and the ceiling is a denominator, so nothing about their reachability
+    /// moved: they are unreachable on an Azure SQL Database tempdb still at its initial ~62 MB for the reason
+    /// #2516 gave — a version store cannot exceed 1 GB inside a 62 MB tempdb — and they become reachable there
+    /// exactly when tempdb autogrows past a gigabyte, which is the same rule as everywhere else. The arm stays
+    /// self-consistent and needs no change; the fraction arm is what covers RCSI (on by default on Azure SQL
+    /// Database) until tempdb has grown that far.</para>
     /// </summary>
     private static double ScoreTempDbVersionStore(Fact fact)
     {

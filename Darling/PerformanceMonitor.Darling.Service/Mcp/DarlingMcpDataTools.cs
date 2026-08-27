@@ -52,19 +52,21 @@ public sealed class DarlingMcpDataTools
     public static async Task<string> GetCpuUtilization(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 4.")] int hours_back = 4)
+        [Description("Hours of history. Default 4.")] int hours_back = 4,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var rows = await DarlingDataReader.GetCpuUtilizationAsync(postgres, resolved.ServerId, DateTime.UtcNow.AddHours(-hours_back));
+            var rows = await DarlingDataReader.GetCpuUtilizationAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No CPU utilization data available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_utilization")
+                    ?? McpHelpers.Status("unavailable", "No CPU utilization data available.");
 
             /* Downsample to 1-minute buckets to avoid overwhelming LLM context (Lite's projection). */
             var bucketed = rows
@@ -100,22 +102,24 @@ public sealed class DarlingMcpDataTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return. Default 20.")] int limit = 20)
+        [Description("Maximum rows to return. Default 20.")] int limit = 20,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats")
+                    ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
 
             var result = rows.Take(limit).Select(r =>
             {
@@ -148,19 +152,43 @@ public sealed class DarlingMcpDataTools
     public static async Task<string> GetWaitTypes(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var types = await DarlingDataReader.GetDistinctWaitTypesAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+
+            if (types.Count == 0)
+            {
+                /*
+                    An empty list said nothing about which nothing this is. A server that collected and was
+                    quiet in THIS window wants the window widened; a server nothing has been stored for
+                    wants somebody to look at collection, and widening will never fill it. Probed only here,
+                    against the SAME source the read walks.
+                */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
+                return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No wait types recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No wait stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+            }
 
             return JsonSerializer.Serialize(new
             {
@@ -180,21 +208,32 @@ public sealed class DarlingMcpDataTools
         NpgsqlDataSource postgres,
         [Description("The exact wait type name, e.g. CXPACKET, PAGEIOLATCH_SH.")] string wait_type,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var start = now.AddHours(-hours_back);
             var points = await DarlingDataReader.GetWaitTrendAsync(postgres, resolved.ServerId, wait_type, start, now);
             if (points.Count == 0)
             {
+                /* The engine question comes BEFORE the distinct-values probe, not after it. Both are on
+                   the miss path, so either order keeps the property that matters — but a permanently gated
+                   engine takes this branch on every call, forever, and the probe below could never tell it
+                   anything. Asking first makes that case one query instead of two. */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 /* Distinguish "unknown wait type here" from "nothing collected at all", handing back the
                    ones that do have data — Lite's get_wait_trend miss vocabulary. */
                 var collected = await DarlingDataReader.GetDistinctWaitTypesAsync(postgres, resolved.ServerId, start, now);
@@ -243,7 +282,8 @@ public sealed class DarlingMcpDataTools
         {
             var stats = await DarlingDataReader.GetLatestMemoryStatsAsync(postgres, resolved.ServerId);
             if (stats == null)
-                return McpHelpers.Status("unavailable", "No memory stats available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats")
+                    ?? McpHelpers.Status("unavailable", "No memory stats available.");
 
             var utilization = stats.TotalPhysicalMemoryMb > 0
                 ? (stats.TotalPhysicalMemoryMb - stats.AvailablePhysicalMemoryMb) / stats.TotalPhysicalMemoryMb * 100
@@ -281,6 +321,21 @@ public sealed class DarlingMcpDataTools
         try
         {
             var rows = await DarlingDataReader.GetLatestMemoryClerksAsync(postgres, resolved.ServerId);
+
+            if (rows.Count == 0)
+                /*
+                    ONE branch here, deliberately, and it is the reason this read gets no existence probe.
+                    The read is "every clerk at MAX(collection_time)", so zero rows back is logically the
+                    same statement as zero rows in the table — any probe against that source would agree
+                    with the read by construction and tell the caller nothing it did not already have. What
+                    the caller does need is to be told that an empty clerk list is NEVER a quiet period,
+                    because on a live SQL Server it cannot be: the DMV always has clerks.
+                */
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_clerks")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
+
             var result = rows.Select(r => new
             {
                 clerk_type = r.ClerkType,
@@ -311,7 +366,8 @@ public sealed class DarlingMcpDataTools
         {
             var rows = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No file I/O stats available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats")
+                    ?? McpHelpers.Status("unavailable", "No file I/O stats available.");
 
             var result = rows.Select(r => new
             {
@@ -346,19 +402,21 @@ public sealed class DarlingMcpDataTools
     public static async Task<string> GetTempDbTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var rows = await DarlingDataReader.GetTempDbTrendAsync(postgres, resolved.ServerId, DateTime.UtcNow.AddHours(-hours_back));
+            var rows = await DarlingDataReader.GetTempDbTrendAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No TempDB data available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats")
+                    ?? McpHelpers.Status("unavailable", "No TempDB data available.");
 
             var result = rows.Select(r => new
             {
@@ -400,7 +458,8 @@ public sealed class DarlingMcpDataTools
         {
             var rows = await DarlingDataReader.GetLatestPerfmonStatsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No perfmon stats available.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "perfmon_stats")
+                    ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
 
             IEnumerable<DarlingDataReader.PerfmonRow> filtered = rows;
             if (!string.IsNullOrEmpty(counter_name))
@@ -439,7 +498,8 @@ public sealed class DarlingMcpDataTools
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1. Note: max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled. Confirm current parallelism with analyze_query_plan, which reads the actual plan.")] bool parallel_only = false,
         [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
-        [Description("Grouping. 'query_hash' (default) is one row per (database, query_hash, host_object). 'host_object' rolls every statement of a hosting procedure/function into ONE row — use it when dynamic SQL built with per-value literals fragments one logical statement across many query_hash values, which makes top-N-by-hash structurally unable to surface it (measured at 21 fragments for one statement, whose combined CPU was the largest on the instance while no single fragment ranked). Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up.")] string group_by = "query_hash")
+        [Description("Grouping. 'query_hash' (default) is one row per (database, query_hash, host_object). 'host_object' rolls every statement of a hosting procedure/function into ONE row — use it when dynamic SQL built with per-value literals fragments one logical statement across many query_hash values, which makes top-N-by-hash structurally unable to surface it (measured at 21 fragments for one statement, whose combined CPU was the largest on the instance while no single fragment ranked). Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up.")] string group_by = "query_hash",
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -454,18 +514,19 @@ public sealed class DarlingMcpDataTools
                 $"group_by must be 'query_hash' or 'host_object' (got '{group_by}').");
         }
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name, rollUpByHostObject: rollUp);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
 
             var filtered = rows
                 .Where(r => !(parallel_only || min_dop > 1) || (r.MaxDop > 1 && r.MaxDop >= (min_dop > 1 ? min_dop : 2)))
@@ -566,24 +627,26 @@ public sealed class DarlingMcpDataTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top procedures. Default 20.")] int top = 20,
-        [Description("Filter to a specific database.")] string? database_name = null)
+        [Description("Filter to a specific database.")] string? database_name = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
                same concurrent independent reads. */
@@ -650,19 +713,20 @@ public sealed class DarlingMcpDataTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top queries. Default 20.")] int top = 20,
-        [Description("Filter to a specific database.")] string? database_name = null)
+        [Description("Filter to a specific database.")] string? database_name = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
             var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name);
 
@@ -677,13 +741,23 @@ public sealed class DarlingMcpDataTools
             var truncated = floor is DateTime f && f > requestedStart.AddMinutes(90);
 
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
-                    "may not be enabled on the target databases -- or the window reaches past what the raw tier " +
-                    "retains (query_store_stats is dropped at 4 days when the rollups are armed), in which case " +
-                    "nothing was read for the older part of it. Try a shorter window before concluding the " +
-                    "queries did not run.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
+                    /* #2546: the sentence below GUESSES ("may not be enabled"), and it has to, because the
+                       read had no way to find out. The store has known all along -- query_store_health
+                       records actual_state per database every hour for exactly this purpose. Asking it turns
+                       a hedge into a fact plus the ALTER DATABASE that fixes it, and it answers for the
+                       database this read was scoped to rather than for the server's most flattering one. */
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, database_name)
+                    /* And the collector's own last run, for the case Query Store is on and the collector is
+                       the thing that cannot read it. */
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
+                        "may not be enabled on the target databases -- or the window reaches past what the raw tier " +
+                        "retains (query_store_stats is dropped at 4 days when the rollups are armed), in which case " +
+                        "nothing was read for the older part of it. Try a shorter window before concluding the " +
+                        "queries did not run.");
 
             var result = rows.Select(r => new
             {
@@ -808,7 +882,7 @@ public sealed class DarlingMcpDataTools
         }, McpHelpers.JsonOptions);
     }
 
-    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes.")]
+    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes. That verdict is the SUSTAINED answer only. peak_cycle_risk is the separate single-sweep answer: peak_cycle_ms is what the body costs on the cycle where every scheduled cadence comes due together, and BODY_OVERRUN means that one body cannot fit the budget even when the verdict reads OK — the signature of one infrequent heavy collector, which amortization hides and heaviest_collectors therefore ranks out of sight. peak_collector names it, and peak_cycle_note explains it. Read both fields: a server can be OK/BODY_OVERRUN (a schedule-shape problem, fix by moving or splitting that collector) or SATURATED/BODY_OVERRUN (a capacity problem). Every collector row carries avg_duration_ms, p95_duration_ms and max_duration_ms, because a collector's runs are not always one population: query_store on one dogfood server averaged 13,834 ms over 1,155 runs of which 958 yielded nothing and cost about 36 ms, which puts the other 197 at roughly 80,900 ms EACH - each one, on its own, larger than the whole sweep budget. Read the three together: avg close to p95 close to max is one population, avg far below p95 is two, and p95 far below max is one pathological run. peak_cycle_ms is built from p95 (floored at the mean, so it can never read lower than a mean-based figure) for exactly that reason, and peak_collector carries peak_run_ms beside avg_duration_ms so the gap is visible. Those three still describe RUNS, and a collector that runs once per DATABASE writes one blended row, so no run-level statistic can say which database cost what. Five fan out from an enumeration on any SQL Server target (query_store, plan_correction, query_store_health, index_object_stats, database_scoped_config); separately, eight more fan out over a per-database connection loop when the target is Azure SQL DB, and pg_autovacuum_stats always does on PostgreSQL. The per-collector `fanout` block is that answer, null for a collector that does not fan out: `items` is how wide the fan-out was, `slowest`/`slowest_ms` name the dearest database and its cost on the window's worst run, `run_ms` is that whole run, and `dominance` is slowest_ms * items / run_ms — 1.0 for a perfectly even fan-out, rising with concentration. It matters because the remedies diverge there: near 1.0 the cost is the fan-out's WIDTH and bounded parallelism is the lever, while around 2.0 or above one database dominates and a per-database schedule override or a stagger is what helps. Do not try to infer this from p95 versus avg — on a per-database collector that ratio is usually saturated by empty-versus-productive runs and says nothing about databases.")]
     public static async Task<string> GetCollectionHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -833,6 +907,16 @@ public sealed class DarlingMcpDataTools
                 yields = r.YieldCount,
                 failure_rate_pct = Math.Round(r.FailureRatePercent, 1),
                 avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
+                /* #2460: the mean above is a blend whenever a collector's runs come in two sizes, and
+                   on this fleet one of them plainly does — query_store averaged 13,834 ms over 1,155
+                   runs where 958 yielded nothing at ~36 ms, which puts the other 197 at ~80,900 ms
+                   each. p95 is what a HEAVY run of this collector costs and is what the peak-cycle
+                   arithmetic below is built from; max is carried beside it so a routine tail can be
+                   told from a single pathological cycle, which is the one thing a max alone cannot
+                   say about itself. Read the three together: avg ~= p95 ~= max is one population,
+                   avg << p95 is two, and p95 << max is one bad run. */
+                p95_duration_ms = Math.Round(r.P95DurationMs, 0),
+                max_duration_ms = Math.Round(r.MaxDurationMs, 0),
                 last_success = r.LastSuccessTime?.ToString("o"),
                 last_error = r.LastError,
                 /* #1837: what a NON-failing run reported — an enumeration that came back with 0 items,
@@ -849,7 +933,23 @@ public sealed class DarlingMcpDataTools
                 /* The same string both WPF grids render, composed on this side so the web dashboard and
                    any other consumer cannot re-derive it differently. */
                 note_summary = CollectorHealthClassifier.FormatCollectionNote(
-                    r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases)
+                    r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases),
+                /* #2472: the per-database breakdown of a collector that fans out, null for one that does
+                   not. Emitted as a nested object rather than four sibling fields so a consumer cannot
+                   read a slowest item without the width it has to be judged against — the parts only mean
+                   something together, and `dominance` is that meaning, computed here so every consumer
+                   gets the same arithmetic instead of three of them inventing it.
+
+                   This is the thing avg/p95/max structurally cannot say: they aggregate over runs, and one
+                   run is one blended row however many databases it covered. */
+                fanout = r.FanoutDominance is null ? null : new
+                {
+                    items = r.FanoutItems,
+                    slowest = r.SlowestItem,
+                    slowest_ms = r.SlowestItemMs,
+                    run_ms = r.SlowestRunDurationMs,
+                    dominance = Math.Round(r.FanoutDominance.Value, 2)
+                }
             });
 
             /* #2296: the roll-up that makes half-rate collection visible. Every collector on a saturated
@@ -859,7 +959,7 @@ public sealed class DarlingMcpDataTools
                by cadence) against the minute the fastest cadence holds; heaviest_collectors names where
                the budget goes, which is the actionable half of the answer. */
             var pressure = SweepPressureClassifier.Compute(
-                rows.Select(r => (r.CollectorName, r.AvgDurationMs, r.FrequencyMinutes)));
+                rows.Select(r => (r.CollectorName, r.AvgDurationMs, r.P95DurationMs, r.FrequencyMinutes)));
             var heaviest = rows
                 .Where(r => r.FrequencyMinutes > 0 && r.AvgDurationMs > 0)
                 .OrderByDescending(r => r.AvgDurationMs / r.FrequencyMinutes)
@@ -868,8 +968,44 @@ public sealed class DarlingMcpDataTools
                 {
                     collector = r.CollectorName,
                     avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
-                    frequency_minutes = r.FrequencyMinutes
+                    p95_duration_ms = Math.Round(r.P95DurationMs, 0),
+                    max_duration_ms = Math.Round(r.MaxDurationMs, 0),
+                    frequency_minutes = r.FrequencyMinutes,
+                    /* #2446: the ranking key said out loud, beside the single-run cost it is derived from.
+                       The list still ranks by amortized contribution, because that is what explains
+                       busy_percent — but an operator reading it to find the collector that overran a body
+                       was reading the wrong column with nothing on the row to say so. */
+                    amortized_ms_per_minute = Math.Round(r.AvgDurationMs / r.FrequencyMinutes, 0),
+                    /* #2460: "% of the budget PER RUN" now comes from the run that actually costs
+                       something — PeakRunMs, the p95 floored at the mean — rather than from a mean that
+                       on a bimodal collector describes no run at all. It is the same number the peak
+                       cycle charges this collector, so the column and the cycle reconcile by hand;
+                       taken from the mean, this row said query_store cost 23% of a body when its heavy
+                       run costs 135% of one. Through the shared helper rather than re-derived here, so
+                       the floor rule cannot drift between the two SKUs' tools. */
+                    pct_of_sweep_budget_per_run = Math.Round(
+                        SweepPressureClassifier.PeakRunMs(r.AvgDurationMs, r.P95DurationMs) / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
                 });
+
+            /* #2446: the collector that owns the most of ONE sweep, which is a different collector from
+               the ones above whenever it is infrequent enough for amortization to hide it. Named on every
+               server, not only on BODY_OVERRUN — knowing where a body's time concentrates is worth having
+               before it is a problem, and this is exactly the row heaviest_collectors ranks out of sight. */
+            var peakCollector = pressure.PeakCollectorName == null ? null : new
+            {
+                collector = pressure.PeakCollectorName,
+                /* #2460: what one aligned body is charged for this collector — its p95, floored at its
+                   mean — with the mean kept beside it, because on a bimodal collector the GAP between
+                   the two is the finding. amortized_ms_per_minute stays derived from the mean: that is
+                   what amortization means, and a rate built from a tail would claim work the server
+                   never sustains. */
+                peak_run_ms = Math.Round(pressure.PeakCollectorPeakRunMs, 0),
+                avg_duration_ms = Math.Round(pressure.PeakCollectorAvgDurationMs, 0),
+                frequency_minutes = pressure.PeakCollectorFrequencyMinutes,
+                amortized_ms_per_minute = Math.Round(pressure.PeakCollectorAvgDurationMs / pressure.PeakCollectorFrequencyMinutes, 0),
+                pct_of_sweep_budget_per_run = Math.Round(pressure.PeakCollectorPeakRunMs / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
+            };
+            var peakCycleNote = SweepPressureClassifier.FormatPeakCycleNote(pressure);
 
             return JsonSerializer.Serialize(new
             {
@@ -879,6 +1015,18 @@ public sealed class DarlingMcpDataTools
                     busy_ms_per_minute = Math.Round(pressure.BusyMsPerMinute, 0),
                     busy_percent = Math.Round(pressure.BusyPercent, 1),
                     verdict = pressure.Verdict,
+                    /* #2446: the second dimension, and deliberately NOT folded into verdict. verdict
+                       answers "does sustained demand fit the cadence on average"; this answers "does one
+                       scheduled body fit at all". They disagree exactly when an infrequent heavy collector
+                       owns most of a single sweep — which an amortized number cannot see by construction,
+                       since dividing by that collector's own long cadence is what makes it small. Its own
+                       vocabulary (FITS / BODY_OVERRUN) so it can never be read as a fourth verdict band,
+                       and its own field so a fleet scan can filter on it. */
+                    peak_cycle_ms = Math.Round(pressure.PeakCycleMs, 0),
+                    peak_cycle_percent = Math.Round(pressure.PeakCyclePercent, 1),
+                    peak_cycle_risk = pressure.PeakCycleRisk,
+                    peak_collector = peakCollector,
+                    peak_cycle_note = string.IsNullOrEmpty(peakCycleNote) ? null : peakCycleNote,
                     heaviest_collectors = heaviest,
                     note = pressure.Verdict switch
                     {
@@ -910,7 +1058,8 @@ public sealed class DarlingMcpDataTools
         {
             var row = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
             if (row == null)
-                return McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_properties")
+                    ?? McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
@@ -940,26 +1089,22 @@ public sealed class DarlingMcpDataTools
 
     /* ─────────────────────────── list_servers helpers ─────────────────────────── */
 
-    /// <summary>Older than twice the ~1-minute collector cadence = the collection has visibly lagged.</summary>
-    private static readonly TimeSpan StaleThreshold = TimeSpan.FromMinutes(2);
-
-    /// <summary>Older than this (or no collection at all) = the server is treated as Offline.</summary>
-    private static readonly TimeSpan OfflineThreshold = TimeSpan.FromMinutes(15);
-
     /// <summary>
-    /// The freshness-derived status the headless viewer's cards use (<c>ServerSummaryItem.ClassifyFreshness</c>):
-    /// Fresh → Online, Stale → Warning, long-dead → Offline, never-collected → AwaitingFirstCollection
-    /// (the service hasn't reached the server yet — a bootstrap state, not an outage; additive status
-    /// value, existing values unchanged). Both instants are UTC.
+    /// The freshness-derived status this tool reports: Fresh → Online, Stale → Warning, long-dead → Offline,
+    /// never-collected → AwaitingFirstCollection (the service hasn't reached the server yet — a bootstrap
+    /// state, not an outage). Both instants are UTC.
+    ///
+    /// <para>It used to classify freshness itself, against its OWN copies of the 2-minute and 15-minute
+    /// thresholds — so <c>ServerHealthThresholds</c> could move and <c>list_servers</c> would silently keep
+    /// answering with the old numbers. It now shares the ladder with every other status surface (#2473). What
+    /// it does NOT share is the vocabulary: <see cref="ServerCollectionStatusRules.McpToken"/> spells the
+    /// never-collected state as one word because that value was published to MCP clients, and a status value
+    /// a client keys on is a consumer API.</para>
     /// </summary>
-    private static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime nowUtc)
-    {
-        if (!lastCollectionUtc.HasValue) return "AwaitingFirstCollection";
-        var age = nowUtc - lastCollectionUtc.Value;
-        if (age > OfflineThreshold) return "Offline";
-        if (age > StaleThreshold) return "Warning";
-        return "Online";
-    }
+    private static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime nowUtc) =>
+        ServerCollectionStatusRules
+            .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc))
+            .McpToken();
 
     /// <summary>Product-name label for a sql_major_version (the viewer's <c>SqlVersionLabel</c>); 2016+ is
     /// what the product supports, older/unknown majors fall back to a bare version tag, null to empty.</summary>
@@ -975,4 +1120,271 @@ public sealed class DarlingMcpDataTools
         17 => "SQL Server 2025",
         _ => $"SQL Server v{sqlMajorVersion}",
     };
+
+    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window.")]
+    public static async Task<string> GetCollectionLog(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Maximum rows to return, newest first. Default 200.")] int limit = 200,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        /* The shared row-cap contract every sibling read uses: rejects out of range rather than
+           silently clamping, so a caller asking for 5000 is told no instead of quietly given 1000. */
+        var invalidLimit = McpHelpers.ValidateTop(limit);
+        if (invalidLimit != null) return invalidLimit;
+
+        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
+           shared validator would impose the 168-hour ceiling every other read carries, and take reach
+           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
+           is validated because it is new; the span keeps the behaviour callers already have. */
+        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        if (anchorError != null) return anchorError;
+
+        try
+        {
+            var end = windowEnd;
+            var start = end.AddHours(-Math.Abs(hours_back));
+
+            /* Over-fetch by one so truncation is OBSERVED rather than inferred. Comparing count to the
+               cap cannot tell a window holding exactly `limit` runs from one holding more, and this
+               read's whole premise is that the cap announces itself instead of being guessed at. */
+            var rows = await DarlingDataReader.GetCollectionLogAsync(
+                postgres, resolved.ServerId, start, end, limit + 1);
+            var truncated = rows.Count > limit;
+            if (truncated) rows = rows.Take(limit).ToList();
+
+            if (rows.Count == 0)
+            {
+                /*
+                    Zero rows is two completely different facts and they need different answers.
+                    A server that has collected before and simply did nothing in THIS window is a
+                    true negative -- the caller narrowed to a quiet period, and widening the window
+                    is the move. A server with no log rows at all has never collected, which is a
+                    fault, and telling that caller "nothing in the last 24 hours" would send them
+                    off widening a window that will never fill. So we ask which one it is rather
+                    than emitting one sentence that is true of both.
+                */
+                var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId);
+                return everCollected
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No collector runs recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that the service is running and that the server is enabled for collection; get_collection_health will be equally empty until it does.");
+            }
+
+            var result = rows.Select(r => new
+            {
+                collector = r.CollectorName,
+                collection_time = r.CollectionTime.ToString("o"),
+                duration_ms = r.DurationMs is null ? (double?)null : Math.Round(r.DurationMs.Value, 0),
+                /*
+                    The split matters more than the total. A collector slow because the monitored
+                    server is slow needs work on that server; one slow because the store is slow
+                    needs work here. The total alone cannot tell those apart, and it is the
+                    question people actually ask of this log.
+                */
+                sql_duration_ms = r.SqlDurationMs is null ? (double?)null : Math.Round(r.SqlDurationMs.Value, 0),
+                store_duration_ms = r.StoreDurationMs is null ? (double?)null : Math.Round(r.StoreDurationMs.Value, 0),
+                rows_collected = r.RowsCollected,
+                status = r.Status,
+                error_message = r.ErrorMessage,
+            });
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back = Math.Abs(hours_back),
+                run_count = rows.Count,
+                /* Observed by the over-fetch above, not inferred from the row count. */
+                truncated,
+                runs = result,
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_collection_log", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_current_waits_trend"), Description("Gets the two Current Waits series over time for a server: waiting-task total wait duration per wait type per collection, and blocked-session counts per database per collection. get_waiting_tasks answers 'what is waiting right now' and can never say whether it is worse than an hour ago — this is that question. Use it to tell a server that is always mildly blocked from one that just started, and to see which database owns the blocking over the window rather than in one snapshot.")]
+    public static async Task<string> GetCurrentWaitsTrend(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 4.")] int hours_back = 4,
+        [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
+           shared validator would impose the 168-hour ceiling every other read carries, and take reach
+           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
+           is validated because it is new; the span keeps the behaviour callers already have. */
+        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        if (anchorError != null) return anchorError;
+
+        try
+        {
+            var end = windowEnd;
+            var start = end.AddHours(-Math.Abs(hours_back));
+
+            var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end);
+            var blocked = await DarlingDataReader.GetBlockedSessionTrendAsync(
+                postgres, resolved.ServerId, start, end, database_name);
+
+            if (waits.Count == 0 && blocked.Count == 0)
+            {
+                /*
+                    Both series empty is two facts again, and here the wrong one is actively reassuring:
+                    "nothing was waiting" reads as an all-clear, while the truth may be that the
+                    waiting_tasks collector never ran. A caller told all-clear stops looking.
+                */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
+                var everCollected = await DarlingDataReader.HasAnyWaitingTaskSampleAsync(postgres, resolved.ServerId);
+                return everCollected
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"Nothing was waiting on {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No waiting-task samples have EVER been recorded for {resolved.ServerName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back = Math.Abs(hours_back),
+                database_name,
+                /*
+                    Two series in one payload because they are read together: a wait-type spike with no
+                    blocked sessions is a resource wait, and the same spike WITH them is contention. Split
+                    across two tools a caller can fetch one and draw the wrong conclusion.
+                */
+                waiting_tasks = waits.Select(w => new
+                {
+                    collection_time = w.CollectionTime.ToString("o"),
+                    wait_type = w.WaitType,
+                    total_wait_ms = w.TotalWaitMs,
+                }),
+                blocked_sessions = blocked.Select(b => new
+                {
+                    collection_time = b.CollectionTime.ToString("o"),
+                    database_name = b.DatabaseName,
+                    blocked_count = b.BlockedCount,
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_current_waits_trend", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). get_blocking_trend and get_deadlock_trend count incidents; this is how BAD they were. Ten one-second blocks and one ten-minute block are the same count and are not the same problem, which is the distinction this read exists to make.")]
+    public static async Task<string> GetBlockingStats(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
+           hours_back -- they Math.Abs() it and window on the result -- so routing them through the
+           shared validator would impose the 168-hour ceiling every other read carries, and take reach
+           away from exactly the read whose premise is looking FURTHER back than the default. The anchor
+           is validated because it is new; the span keeps the behaviour callers already have. */
+        var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
+        if (anchorError != null) return anchorError;
+
+        try
+        {
+            var end = windowEnd;
+            var start = end.AddHours(-Math.Abs(hours_back));
+
+            var blocking = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, resolved.ServerId, start, end);
+
+            /* Parsed and bucketed by the shared aggregator rather than re-derived here: a second copy of
+               "what counts as a victim" is how two surfaces end up disagreeing about one deadlock. */
+            var graphs = await DarlingDataReader.GetDeadlockGraphsAsync(postgres, resolved.ServerId, start, end);
+            var deadlocks = DeadlockSeverityAggregator.Aggregate(graphs);
+
+            if (blocking.Count == 0 && deadlocks.Count == 0)
+            {
+                /*
+                    The denominator is whether we LOOKED, not whether we ever FOUND anything. Blocking and
+                    deadlocks are edge tables: a server collected perfectly for months that simply never
+                    blocked has no rows at all, so asking "was an event ever captured" answers no and
+                    reports a healthy server as uncollected -- the reassuring-answer failure inverted, and
+                    a false alarm sends someone to fix collection that is working.
+
+                    So this asks collection_log for a SUCCESSFUL run of either capture path. Both are
+                    checked because either can be off alone, and the deadlock collector is separate from
+                    both -- the verdict covers its series too.
+                */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
+                var everRan =
+                    await DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId)
+                    || await DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId);
+                return everRan
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back = Math.Abs(hours_back),
+                /*
+                    Severity, not counts. get_blocking_trend already answers how OFTEN; ten one-second
+                    blocks and one ten-minute block share a count and are different problems.
+                */
+                blocking_duration = blocking.Select(b => new
+                {
+                    time = b.Time.ToString("o"),
+                    event_count = b.EventCount,
+                    total_duration_ms = b.TotalDurationMs,
+                    max_duration_ms = b.MaxDurationMs,
+                    avg_duration_ms = Math.Round(b.AvgDurationMs, 0),
+                }),
+                deadlock_severity = deadlocks.Select(d => new
+                {
+                    time = d.Time.ToString("o"),
+                    victim_count = d.VictimCount,
+                    /* Every process's wait, not just the victims' -- the Dashboard analyzer's semantics. */
+                    total_wait_ms = d.TotalWaitMs,
+                    max_wait_ms = d.MaxWaitMs,
+                    avg_wait_ms = Math.Round(d.AvgWaitMs, 0),
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_blocking_stats", ex);
+        }
+    }
 }

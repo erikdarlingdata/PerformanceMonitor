@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -600,7 +601,7 @@ public sealed class DarlingObservabilityTests
 
         DateTime firstModified;
         using (var read = new NpgsqlCommand(
-            "SELECT server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date FROM servers WHERE server_id = $1", connection))
+            "SELECT server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date, engine_kind FROM servers WHERE server_id = $1", connection))
         {
             read.Parameters.AddWithValue(TestServerId);
             using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
@@ -612,6 +613,49 @@ public sealed class DarlingObservabilityTests
             Assert.Equal(16, reader.GetInt32(4));
             Assert.False(reader.IsDBNull(5));
             firstModified = reader.GetDateTime(6);
+            /* V82 (#2530): the engine KIND the connector probed, derived from the target rather than from
+               the configured engine string. A SQL Server target stamps the SQL Server token. */
+            Assert.Equal(MonitoredEngineKind.SqlServer, reader.GetString(7));
+        }
+
+        /* The ON CONFLICT arm CORRECTS the engine kind, unlike is_enabled which it deliberately leaves
+           alone (#2530). Same identity, re-pointed at an Aurora target — which is what a registration
+           edited to a PostgreSQL host looks like on its next connect. A reconnect arm that skipped this
+           column would leave the row asserting SQL Server forever, and every engine-aware surface would
+           read it. */
+        var repointed = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "obs-e2e", Host = "obs-e2e-host" },
+            ConnectionString = "Host=obs-e2e-host",
+            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, IsAurora = true, PostgresMajorVersion = 17 },
+            StorageName = "obs-e2e-host",
+            ServerId = TestServerId,
+            EngineEdition = 0,
+        };
+
+        /* try/finally around the repoint, so a failed assertion inside it cannot leave this shared-store
+           row asserting Aurora for whatever runs next. The restore is the FINALLY, not a trailing
+           statement: a trailing one is skipped by exactly the failure that makes it matter. */
+        try
+        {
+            await DarlingObservability.UpsertServerAsync(postgres, repointed, null, TestContext.Current.CancellationToken);
+
+            using var read = new NpgsqlCommand("SELECT engine_kind, sql_engine_edition FROM servers WHERE server_id = $1", connection);
+            read.Parameters.AddWithValue(TestServerId);
+            using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken), "servers row missing after re-upsert");
+            Assert.Equal(MonitoredEngineKind.AuroraPostgres, reader.GetString(0));
+            /* And the edition it carries is 0 — the value that used to be indistinguishable from "never
+               connected", which is the whole reason the kind column exists. */
+            Assert.Equal(0, reader.GetInt32(1));
+        }
+        finally
+        {
+            /* Put it back, so the rest of this test — and the next run of it — reads the SQL Server row it
+               was written against. Its own connection is not needed here the way LiveStoreCleanup gives
+               one: this restore goes through the pooled NpgsqlDataSource the upserts above use, not
+               through the possibly-broken body connection. */
+            await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
         }
 
         /* The second upsert must not throw and must refresh modified_date. */
@@ -625,11 +669,13 @@ public sealed class DarlingObservabilityTests
             Assert.True(secondModified > firstModified, "second upsert did not refresh modified_date");
         }
 
+        /* A collector that does NOT fan out: the three V80 columns must come back NULL rather than zero,
+           which is what tells "this run had no fan-out" apart from "its fan-out was free" (#2472). */
         await DarlingObservability.LogCollectionAsync(
-            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null, null, TestContext.Current.CancellationToken);
+            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null, fanout: null, null, TestContext.Current.CancellationToken);
 
         using (var read = new NpgsqlCommand(
-            "SELECT collector_name, status, rows_collected, duration_ms, sql_duration_ms, duckdb_duration_ms, error_message FROM collection_log WHERE server_id = $1", connection))
+            "SELECT collector_name, status, rows_collected, duration_ms, sql_duration_ms, duckdb_duration_ms, error_message, fanout_item_count, slowest_item, slowest_item_ms FROM v_collection_log WHERE server_id = $1", connection))
         {
             read.Parameters.AddWithValue(TestServerId);
             using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
@@ -641,8 +687,126 @@ public sealed class DarlingObservabilityTests
             Assert.Equal(100, reader.GetInt32(4));
             Assert.Equal(25, reader.GetInt32(5)); /* the storage (Postgres) phase, under Lite's column name */
             Assert.True(reader.IsDBNull(6));
+            Assert.True(reader.IsDBNull(7));
+            Assert.True(reader.IsDBNull(8));
+            Assert.True(reader.IsDBNull(9));
             Assert.False(await reader.ReadAsync(TestContext.Current.CancellationToken), "expected exactly one collection_log row");
         }
+
+        await DeleteTestRowsAsync(connection);
+
+        /* And a collector that DID fan out, round-tripped through the same writer. Read back through
+           v_collection_log rather than the table: Postgres freezes a view's SELECT * at CREATE, so a rung
+           that adds columns without refreshing the view leaves the write perfectly correct and every READ
+           blind to it — a failure that only a read through the view can see (#2472, and V14 before it). */
+        await DarlingObservability.LogCollectionAsync(
+            postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
+            new FanoutCost(8, "the-busy-one", 61_900), null, TestContext.Current.CancellationToken);
+
+        using (var read = new NpgsqlCommand(
+            "SELECT duration_ms, fanout_item_count, slowest_item, slowest_item_ms FROM v_collection_log WHERE server_id = $1", connection))
+        {
+            read.Parameters.AddWithValue(TestServerId);
+            using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken), "collection_log row missing");
+
+            var durationMs = reader.GetInt32(0);
+            var items = reader.GetInt32(1);
+            var slowestMs = reader.GetInt32(3);
+
+            Assert.Equal(80_800, durationMs);
+            Assert.Equal(8, items);
+            Assert.Equal("the-busy-one", reader.GetString(2));
+            Assert.Equal(61_900, slowestMs);
+
+            /* The number the whole rung exists for, computed off the stored row rather than off the value
+               that was written: 6.13 against the 1.0 an even eight-database fan-out of the same 80,800 ms
+               would give. duration_ms alone cannot tell those apart, and neither can any aggregate of it. */
+            Assert.Equal(6.13, (double)slowestMs * items / durationMs, 2);
+        }
+
+        await DeleteTestRowsAsync(connection);
+    }
+
+    /// <summary>
+    /// The fan-out rollup, read back through the SHIPPED query against a live store (#2472).
+    ///
+    /// <para>This exists because the write-side test above cannot see the failure this one catches. The
+    /// health read's inner subquery ENUMERATES its columns rather than <c>SELECT *</c>-ing them, so an
+    /// outer aggregate naming a column the subquery does not project is perfectly valid C#, passes every
+    /// text assertion, compiles on every platform, and fails only when Postgres parses it. I wrote exactly
+    /// that bug building this rung, and nothing in the suite would have found it: no live test executed
+    /// <c>DarlingDataReader.CollectionHealthSql</c> at all.</para>
+    ///
+    /// <para>So the guard is to RUN the shipped text, not to assert about it — and to run it over a fan-out
+    /// whose answer is known, because a query that parses and returns nulls looks identical to one that
+    /// works on a store with no fan-out rows in it.</para>
+    /// </summary>
+    [Fact]
+    public async Task CollectionHealth_ReportsTheFanoutRollup_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live fan-out rollup test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteTestRowsAsync(connection);
+
+        var server = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "fanout-e2e", Host = "fanout-e2e-host" },
+            ConnectionString = "Server=fanout-e2e-host",
+            Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+            StorageName = "fanout-e2e-host",
+            ServerId = TestServerId,
+            EngineEdition = 3,
+        };
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
+
+        /* Two runs of one collector, both 80,800 ms, one even across eight databases and one dominated by
+           a single database. Every run-level aggregate the read already computes — AVG, MAX,
+           PERCENTILE_DISC — sees the same number for both, which is the whole reason the rollup exists. */
+        await DarlingObservability.LogCollectionAsync(
+            postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
+            new FanoutCost(8, "even-worst", 10_100), null, TestContext.Current.CancellationToken);
+
+        await DarlingObservability.LogCollectionAsync(
+            postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
+            new FanoutCost(8, "the-busy-one", 61_900), null, TestContext.Current.CancellationToken);
+
+        /* And a collector that does not fan out at all, so the null path is exercised by the same read. */
+        await DarlingObservability.LogCollectionAsync(
+            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null,
+            fanout: null, null, TestContext.Current.CancellationToken);
+
+        var rows = await DarlingDataReader.GetCollectionHealthAsync(
+            postgres, TestServerId, DateTime.UtcNow.AddDays(-1), TestContext.Current.CancellationToken);
+
+        var queryStore = Assert.Single(rows, r => r.CollectorName == "query_store");
+        var waitStats = Assert.Single(rows, r => r.CollectorName == "wait_stats");
+
+        /* The run-level statistics agree across the two shapes, exactly as predicted. */
+        Assert.Equal(80_800, queryStore.MaxDurationMs);
+        Assert.Equal(80_800, queryStore.AvgDurationMs);
+        Assert.Equal(80_800, queryStore.P95DurationMs);
+
+        /* The rollup names the dominated run's database, not the even one's — the rank is on the ITEM
+           cost, and both runs cost the same in total, so a rank on duration_ms would have picked
+           arbitrarily between them. */
+        Assert.Equal("the-busy-one", queryStore.SlowestItem);
+        Assert.Equal(8, queryStore.FanoutItems);
+        Assert.Equal(61_900, queryStore.SlowestItemMs);
+        Assert.Equal(80_800, queryStore.SlowestRunDurationMs);
+        Assert.Equal(6.13, queryStore.FanoutDominance!.Value, 2);
+
+        /* A collector with no fan-out reports nothing rather than zero. */
+        Assert.Null(waitStats.FanoutItems);
+        Assert.Null(waitStats.SlowestItem);
+        Assert.Null(waitStats.FanoutDominance);
 
         await DeleteTestRowsAsync(connection);
     }

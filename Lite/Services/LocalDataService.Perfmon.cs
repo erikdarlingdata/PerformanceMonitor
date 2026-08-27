@@ -54,12 +54,12 @@ ORDER BY counter_name";
     /// <summary>
     /// Gets the distinct perfmon counter names for a server.
     /// </summary>
-    public async Task<List<string>> GetDistinctPerfmonCountersAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<string>> GetDistinctPerfmonCountersAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT DISTINCT counter_name
@@ -85,12 +85,12 @@ ORDER BY counter_name";
     /// <summary>
     /// Gets perfmon counter trend data for charting.
     /// </summary>
-    public async Task<List<PerfmonTrendPoint>> GetPerfmonTrendAsync(int serverId, string counterName, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<PerfmonTrendPoint>> GetPerfmonTrendAsync(int serverId, string counterName, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT

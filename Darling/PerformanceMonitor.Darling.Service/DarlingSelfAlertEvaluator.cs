@@ -838,28 +838,48 @@ internal sealed class DarlingSelfAlertEvaluator
             if (!string.IsNullOrEmpty(replica.ConnectedStateDesc))
             {
                 _agReplicaConnectedState.TryGetValue(key, out var previousState);
-                var connection = AgAlertPolicy.DecideConnection(previousState, replica.ConnectedStateDesc);
-                _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
 
                 /* #1696 (V37): "AG Replica Disconnected" was a pure edge, so a replica that stayed
                    disconnected for a week announced it ONCE. The #1659 treatment: re-announce every N
                    minutes while it is still down (0 = off, the shipped default, so nothing starts
                    re-alerting on upgrade). Re-fires deliver under the SAME metric name, because webhook
-                   automation keyed on it is exactly what a re-fire exists to re-trigger. */
-                bool stillDisconnected =
-                    connection == AgConnectionDecision.None
-                    && AgAlertPolicy.IsDisconnected(replica.ConnectedStateDesc)
-                    && _agDisconnectRefireMinutes() is int refire
-                    && refire > 0
-                    && (!_lastAgDisconnectAlert.TryGetValue(key, out var lastDown)
-                        || _utcNow() - lastDown >= TimeSpan.FromMinutes(refire));
+                   automation keyed on it is exactly what a re-fire exists to re-trigger.
+
+                   #2426 moved the combined decision into the shared policy rather than leaving it as an
+                   expression here: Lite grew the same knob, and the parts with sharp corners — a re-fire
+                   must not double up with the edge that just fired, and an unrecognized state string must
+                   not count as down — are precisely the parts that drift when written twice. What stays
+                   here is what is genuinely this app's: the stamp, and the delivery it is stamped on. */
+                int refireMinutes = _agDisconnectRefireMinutes();
+                var connection = AgAlertPolicy.DecideConnection(
+                    previousState,
+                    replica.ConnectedStateDesc,
+                    refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
+                    _lastAgDisconnectAlert.TryGetValue(key, out var lastDown) ? lastDown : (DateTime?)null,
+                    _utcNow());
+                _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
+
+                bool stillDisconnected = connection == AgConnectionDecision.StillDisconnected;
 
                 if (connection == AgConnectionDecision.Disconnected || stillDisconnected)
                 {
+                    /* #2426: the re-fire says so in the DETAIL, not only in the short message. ShortMessage is
+                       the interactive toast body and reaches neither the history row nor the email —
+                       DarlingAlertDeliverer forwards DetailText — so an operator opening Alert Detail on the
+                       sixth re-announcement read text byte-identical to the first notice, which is precisely
+                       the "a week-long outage reads like a blip" problem this knob exists to end. The
+                       connection re-fire above already bakes it into detail; this is its AG twin, worded to
+                       match Lite's so the two SKUs' history rows say the same thing. */
+                    var opening = stillDisconnected
+                        ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                            $"DISCONNECTED from the primary (re-alerting every {refireMinutes.ToString(CultureInfo.InvariantCulture)} min)."
+                        : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is DISCONNECTED " +
+                            "from the primary.";
+
                     await FireAsync(
                         Key(serverId), serverName, AgReplicaDisconnectedMetric, replica.ConnectedStateDesc, "CONNECTED",
-                        detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is " +
-                            "DISCONNECTED from the primary. A disconnected replica receives no log at all, so it falls " +
+                        detail: opening +
+                            " A disconnected replica receives no log at all, so it falls " +
                             "further behind every second and cannot be failed over to without losing whatever the primary " +
                             "has committed since. If it is a synchronous-commit replica, the primary also loses its " +
                             "automatic-failover partner. Check the replica's SQL Server service, the availability endpoint " +

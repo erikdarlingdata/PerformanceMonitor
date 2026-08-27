@@ -76,6 +76,16 @@ public static class DarlingCliCommands
     public static bool IsPrintViewerConnectionVerb(string arg) =>
         string.Equals(arg, "--print-viewer-connection", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="PrintMcpToken"/> handles — reprint the MCP bearer token (#2479, item 2).</summary>
+    public static bool IsPrintMcpTokenVerb(string arg) =>
+        string.Equals(arg, "--print-mcp-token", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="PrintWebToken"/> handles — reprint the web dashboard access token.
+    /// The issue asked for the MCP half; both tokens have the identical unrecoverable-loss problem and the
+    /// identical DPAPI shape, so shipping one and not the other would leave half a fix behind.</summary>
+    public static bool IsPrintWebTokenVerb(string arg) =>
+        string.Equals(arg, "--print-web-token", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="ExportViewerConfigAsync"/> handles — write a COMPLETE viewer darling.json +
     /// server.crt + README.txt an operator copies to the viewer machine as-is (#1953).</summary>
     public static bool IsExportViewerConfigVerb(string arg) =>
@@ -158,6 +168,8 @@ public static class DarlingCliCommands
         IsEncryptPasswordVerb(arg)
         || IsValidateConfigVerb(arg)
         || IsPrintViewerConnectionVerb(arg)
+        || IsPrintMcpTokenVerb(arg)
+        || IsPrintWebTokenVerb(arg)
         || IsExportViewerConfigVerb(arg)
         || IsConfigureNetworkVerb(arg)
         || IsConfigureFirewallVerb(arg)
@@ -232,6 +244,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --print-mcp-token   Reprint the MCP bearer token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --print-web-token   Reprint the web dashboard access token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir] [--config <path>]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
@@ -309,10 +323,10 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// Prints a paste-ready remote-viewer connection string and the server TLS certificate for the opt-in store
-    /// network endpoint (darling-network-endpoints D8). It DPAPI-decrypts the credential of the role
-    /// <c>postgres.network.role</c> names (default <c>viewer</c>, read-only) and reads the generated
-    /// <c>server.crt</c>, so it must run ON the managed store's host under an account that can decrypt them —
+    /// Prints a paste-ready remote-viewer connection string PER ADMITTED ROLE (#2665) and the server TLS
+    /// certificate for the opt-in store network endpoint (darling-network-endpoints D8). It DPAPI-decrypts the
+    /// credential of every role <c>postgres.network.role</c> names (default <c>viewer</c>, read-only) and reads
+    /// the generated <c>server.crt</c>, so it must run ON the managed store's host under an account that can decrypt them —
     /// hence Windows-only (the caller is <c>OperatingSystem.IsWindows()</c>-guarded, mirroring
     /// <c>--encrypt-password</c>). The operator pastes the string into the VIEWER machine's darling.json
     /// (<c>postgres.managed = false</c>, into <c>postgres.connectionString</c>, consumed verbatim — no viewer
@@ -337,9 +351,9 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var handoff = await ResolveViewerHandoffAsync(
+        var handoffs = await ResolveViewerHandoffsAsync(
             config, "--print-viewer-connection", "print", error, cancellationToken);
-        if (handoff is null)
+        if (handoffs is null)
         {
             return 1;
         }
@@ -348,8 +362,6 @@ public static class DarlingCliCommands
            VIEWER machine (a bare filename resolves against the folder holding the viewer's darling.json —
            #1970; an absolute path also works). Kept as a literal so the printed string is paste-ready. */
         const string clientCertificatePath = ViewerClientCertificateFileName;
-        var connectionString = BuildViewerConnectionString(
-            handoff.Host, handoff.Port, handoff.Role, handoff.Password, clientCertificatePath);
 
         /* Read the cert BEFORE anything reaches STDOUT: every STDERR line — including the missing-cert NOTE —
            must be emitted ahead of the payload (#1953 item 3). The field report watched the live password scroll
@@ -358,27 +370,43 @@ public static class DarlingCliCommands
            carries the fixed chain shape — that is what verify-full's Root Certificate must anchor
            on. A legacy store has no root.crt, and its single self-signed server.crt remains the
            right (if Windows-hostile) thing to print. */
-        var distributableCertPath = DarlingManagedPostgres.RootCertificatePathFor(handoff.CertificatePath);
+        var certificateSource = handoffs[0].CertificatePath;
+        var distributableCertPath = DarlingManagedPostgres.RootCertificatePathFor(certificateSource);
         if (!File.Exists(distributableCertPath))
         {
-            distributableCertPath = handoff.CertificatePath;
+            distributableCertPath = certificateSource;
         }
 
         var certificate = File.Exists(distributableCertPath)
             ? (await File.ReadAllTextAsync(distributableCertPath, cancellationToken)).Trim()
             : null;
 
+        var admitsAdmin = handoffs.Any(h => string.Equals(h.Role, "admin", StringComparison.Ordinal));
+        var roleList = string.Join("', '", handoffs.Select(h => h.Role));
+        var many = handoffs.Count > 1;
+
         /* Guidance + the live-secret warning go to STDERR, so redirecting STDOUT to a file or the clipboard
-           captures the connection string + cert WITHOUT swallowing the warning (D8). */
+           captures the connection string + cert WITHOUT swallowing the warning (D8). ALL of it is emitted
+           before the first STDOUT byte, including for a multi-role exposure — interleaving a warning between
+           two printed strings would put half the advice after a password had already scrolled past (#1953
+           item 3). */
         error.WriteLine();
         error.WriteLine(
-            $"WARNING: the connection string below contains a LIVE database password (the '{handoff.Role}' role), written " +
+            $"WARNING: the connection {(many ? "strings" : "string")} below {(many ? "contain" : "contains")} a LIVE " +
+            $"database password (the '{roleList}' {(many ? "roles" : "role")}), written " +
             "to STDOUT. Redirect it to an ACL'd file or pipe it to the clipboard; do not leave it in shell " +
             "scrollback, CI logs, or a screenshare.");
         error.WriteLine("  Example (file):      PerformanceMonitor.Darling.Service.exe --print-viewer-connection > viewer-connection.txt");
         error.WriteLine("  Example (clipboard): PerformanceMonitor.Darling.Service.exe --print-viewer-connection | clip");
         error.WriteLine("  Example (no paste):  PerformanceMonitor.Darling.Service.exe --export-viewer-config   (writes the whole viewer folder for you)");
-        if (string.Equals(handoff.Role, "admin", StringComparison.Ordinal))
+        if (many)
+        {
+            error.WriteLine(
+                $"  NOTE: postgres.network.role admits {handoffs.Count} roles (#2665), so one string is printed per role, " +
+                "each a DIFFERENT credential. Give each seat only the one it needs — they are not interchangeable.");
+        }
+
+        if (admitsAdmin)
         {
             error.WriteLine(
                 "  NOTE: 'admin' is a WRITE credential holding the config-table pivot surface. Prefer the default " +
@@ -394,17 +422,24 @@ public static class DarlingCliCommands
         else
         {
             error.WriteLine(
-                $"NOTE: the server TLS certificate ({handoff.CertificatePath}) does not exist yet — the service generates it " +
+                $"NOTE: the server TLS certificate ({certificateSource}) does not exist yet — the service generates it " +
                 "on its first managed start with postgres.network exposed. Enable postgres.network, restart the " +
                 "service, then re-run this command to emit the cert for verify-full.");
         }
 
         error.WriteLine();
 
-        output.WriteLine(
-            "# Paste into the viewer machine's darling.json -> postgres.connectionString (with postgres.managed = false):");
-        output.WriteLine(connectionString);
-        output.WriteLine();
+        /* One paste-ready string per admitted role, each labelled with the role it authenticates as — the
+           strings differ only in Username= and Password=, so an unlabelled pair is impossible to tell apart
+           after the fact and the reader would have to guess which seat to hand where. */
+        foreach (var handoff in handoffs)
+        {
+            output.WriteLine(
+                $"# Paste into the viewer machine's darling.json -> postgres.connectionString (with postgres.managed = false) — the '{handoff.Role}' seat:");
+            output.WriteLine(BuildViewerConnectionString(
+                handoff.Host, handoff.Port, handoff.Role, handoff.Password, clientCertificatePath));
+            output.WriteLine();
+        }
 
         /* Emit the server cert PEM so the operator can copy it to the viewer machine. */
         if (certificate is not null)
@@ -415,6 +450,198 @@ public static class DarlingCliCommands
             output.WriteLine(certificate);
         }
 
+        return 0;
+    }
+
+    /* ---------------------------------------------------------------------------------------------------
+       REPRINTING AN ENDPOINT TOKEN (#2479, item 2).
+
+       --configure-network shows each generated token's plaintext exactly once. Lose it and the only path
+       was regeneration, which invalidates every client already configured against it - so one mislaid
+       token during UAT meant re-onboarding every consumer of that endpoint. That is an unrecoverable
+       mistake made out of a recoverable one, and the recovery costs nothing to provide.
+
+       WHAT THIS DISCLOSES, checked rather than assumed. Nothing new. darling.json stores the token as a
+       DarlingSecrets blob: DPAPI, DataProtectionScope.LocalMachine, with the entropy constant
+       "PerformanceMonitor.Darling.v1" compiled into an OPEN-SOURCE binary. LocalMachine scope means any
+       process on this box can Unprotect it, and the entropy is not a secret because it is published in
+       this repository. So the whole of this verb is four lines of PowerShell to anyone holding the file.
+
+       WHICH IS WHY THE ELEVATION GATE IS NOT A CONFIDENTIALITY BOUNDARY, and this comment says so rather
+       than letting the code imply otherwise. install-darling.ps1 and DarlingFileSecurity deliberately grant
+       INTERACTIVE *read* on darling.json - the Viewer and these very CLI verbs are run by the interactive
+       operator - so an ordinary logged-on user who is NOT an administrator can already read the blob and
+       decrypt it. The gate is worth having for what it actually does: it keeps the verb consistent with the
+       other endpoint verbs that carry "(run elevated)", it stops a script or a shared shell picking a live
+       credential up in passing, and it makes reprinting a deliberate act. The token's real protection is
+       the file's ACL, and it always was.
+
+       Emission follows --print-viewer-connection's posture exactly (D8): every warning on STDERR, ahead of
+       any STDOUT payload, so redirecting STDOUT to an ACL'd file or the clipboard captures the token
+       WITHOUT swallowing the warning. The field report on that verb watched a live password scroll past
+       and only then saw the redirect advice, which is precisely backwards.
+       --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>Reprints the MCP bearer token from <c>mcp.network</c>. See the block above for the
+    /// disclosure analysis. Returns 0 when a token was printed, 1 otherwise.
+    ///
+    /// <para>No <c>Async</c> suffix, deliberately: this reads one file and decrypts one blob, with nothing
+    /// to await. It follows <c>HardenFiles</c> rather than the <c>PrintViewerConnectionAsync</c> directly
+    /// above, which really is async - naming a synchronous method <c>…Async</c> invites a caller to await
+    /// something that never yields (review catch on #2479).</para></summary>
+    [SupportedOSPlatform("windows")]
+    public static int PrintMcpToken(string? configPath, TextWriter output, TextWriter error)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var network = config.Mcp.Network;
+        return PrintEndpointToken(
+            "mcp",
+            "MCP bearer",
+            "--print-mcp-token",
+            "Remote MCP clients send it as the header:  Authorization: Bearer <token>",
+            IsElevated(),
+            network is not null && network.IsConfigured,
+            () => network!.ResolveToken(out _),
+            output,
+            error);
+    }
+
+    /// <summary>Reprints the web dashboard access token from <c>web.network</c>. Returns 0 when a token was
+    /// printed, 1 otherwise.</summary>
+    [SupportedOSPlatform("windows")]
+    public static int PrintWebToken(string? configPath, TextWriter output, TextWriter error)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var network = config.Web.Network;
+        return PrintEndpointToken(
+            "web",
+            "web dashboard access",
+            "--print-web-token",
+            "A remote browser presents it once via ?token=... and gets a session cookie back.",
+            IsElevated(),
+            network is not null && network.IsConfigured,
+            () => network!.ResolveToken(out _),
+            output,
+            error);
+    }
+
+    /// <summary>
+    /// The shared body. Split out so the elevation refusal, the disclosure warning and the redirect advice
+    /// are written once and cannot drift between the two endpoints - the same reason
+    /// <c>DescribeToggleOverride</c> takes a section name rather than existing twice.
+    ///
+    /// <para><paramref name="elevated"/> is passed IN rather than measured here, the same way the pure alert
+    /// gates take <c>nowUtc</c>: it makes both branches - the refusal and the disclosure - drivable in a test
+    /// on any runner, elevated or not. A verb whose refusal path is only exercised when the CI agent happens
+    /// to be unprivileged is a refusal nobody has checked.</para>
+    /// </summary>
+    internal static int PrintEndpointToken(
+        string section,
+        string tokenName,
+        string verb,
+        string howClientsPresentIt,
+        bool elevated,
+        bool configured,
+        Func<string?> resolveToken,
+        TextWriter output,
+        TextWriter error)
+    {
+        if (!elevated)
+        {
+            error.WriteLine($"{verb} needs an ELEVATED PowerShell.");
+            error.WriteLine();
+            error.WriteLine("It reprints a live credential, so it is a deliberate act rather than something a script or a");
+            error.WriteLine("shared shell picks up in passing.");
+            error.WriteLine();
+            error.WriteLine("Be clear about what this gate is NOT, though: darling.json grants INTERACTIVE read on purpose");
+            error.WriteLine("(the Viewer and these CLI verbs are run by the interactive operator), and the token is DPAPI-");
+            error.WriteLine("protected at LocalMachine scope with an entropy constant published in this project's source.");
+            error.WriteLine("Anyone who can log on to this box interactively can already decrypt it without this verb. The");
+            error.WriteLine("token's protection is the FILE'S ACL - keep darling.json restricted, and run --harden-files if");
+            error.WriteLine("you are not sure it still is.");
+            return 1;
+        }
+
+        if (!configured)
+        {
+            error.WriteLine($"darling.json has no {section}.network block, so there is no {tokenName} token to print.");
+            error.WriteLine($"Run --configure-network to create one (it generates the token and shows it once).");
+            return 1;
+        }
+
+        string? token;
+        try
+        {
+            token = resolveToken();
+        }
+        catch (System.Security.Cryptography.CryptographicException ex)
+        {
+            /* The DPAPI cause, and ONLY the DPAPI cause. ResolveToken also resolves env: and file: secret
+               references, and those fail with an InvalidOperationException whose message already names the
+               missing variable or the unreadable path (review catch on #2479). Appending "a DPAPI blob only
+               decrypts on the machine that produced it - regenerate it" to THOSE would be a false diagnosis
+               pointing at a destructive fix: regenerating invalidates every configured client, when the
+               actual repair is to set the environment variable or correct the path. So the advice is gated
+               on the exception that earns it, and the arm below reports what it actually knows. */
+            error.WriteLine($"Could not read the {tokenName} token: {ex.Message}");
+            error.WriteLine(
+                $"A DPAPI blob only decrypts on the machine that produced it, so a {section}.network.encryptedToken "
+                + "copied from another host can never be read here - regenerate it with --configure-network.");
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not read the {tokenName} token: {ex.Message}");
+            error.WriteLine(
+                $"That is what {section}.network resolved to. Fix the source it names (an env: reference needs "
+                + "the variable set in THIS shell; a file: reference needs a path this account can read), then "
+                + "re-run - the token itself is fine and does not need regenerating.");
+            return 1;
+        }
+
+        if (string.IsNullOrEmpty(token))
+        {
+            error.WriteLine($"{section}.network is configured but carries no token, so this endpoint is not LAN-exposed.");
+            error.WriteLine("Run --configure-network to generate one.");
+            return 1;
+        }
+
+        /* Every stderr line before the payload (D8), so a STDOUT redirect keeps the token and still shows
+           the warning. */
+        error.WriteLine();
+        error.WriteLine(
+            $"WARNING: the {tokenName} token below is written to STDOUT as PLAINTEXT. It gates ALL network access to "
+            + $"this endpoint. Redirect it to an ACL'd file or pipe it to the clipboard; do not leave it in shell "
+            + "scrollback, CI logs, or a screenshare.");
+        error.WriteLine($"  Example (file):      PerformanceMonitor.Darling.Service.exe {verb} > token.txt");
+        error.WriteLine($"  Example (clipboard): PerformanceMonitor.Darling.Service.exe {verb} | clip");
+        error.WriteLine($"  {howClientsPresentIt}");
+        error.WriteLine(
+            "  If this token has actually LEAKED, reprinting it is not the fix: --configure-network generates a new "
+            + "one, which invalidates every client already configured against the old one.");
+        error.WriteLine();
+
+        output.WriteLine(token);
         return 0;
     }
 
@@ -435,16 +662,22 @@ public static class DarlingCliCommands
         string Host, int Port, string Role, string Password, string CertificatePath);
 
     /// <summary>
-    /// Resolves the remote-viewer handoff material (D8), writing every refusal + warning to
+    /// Resolves the remote-viewer handoff material (D8) for EVERY role the exposure admits (#2665), in
+    /// <see cref="DarlingNetwork.NormalizeNetworkRoles"/>' order, writing every refusal + warning to
     /// <paramref name="error"/> and returning null when the caller must exit 1. Managed-mode only: the DPAPI
     /// credential files and the generated TLS cert it reads exist only there — in BYO the operator's own
     /// PostgreSQL governs exposure + credentials (D-BYO). Windows-only (DPAPI-LocalMachine). The two string
     /// parameters shape message WORDING only — never the logic, so both verbs resolve identically.
+    /// <para>Fail-closed on the FIRST role whose credential is missing or will not decrypt, rather than
+    /// returning the roles that worked. Both credentials are provisioned in the same act by
+    /// <c>DarlingManagedRoles</c>, so one missing means the store's bootstrap did not complete — which is
+    /// what the shared missing-credential diagnostic below actually explains. A partial handoff would bury
+    /// that under an export that looks like it succeeded.</para>
     /// </summary>
     /// <param name="verb">The CLI verb to name in refusals, e.g. <c>--export-viewer-config</c>.</param>
     /// <param name="action">What the verb would have produced, e.g. "print" / "export", for the no-remote-connection refusal.</param>
     [SupportedOSPlatform("windows")]
-    private static async Task<ViewerHandoff?> ResolveViewerHandoffAsync(
+    private static async Task<IReadOnlyList<ViewerHandoff>?> ResolveViewerHandoffsAsync(
         DarlingConfig config, string verb, string action, TextWriter error, CancellationToken cancellationToken)
     {
         var postgres = config.Postgres;
@@ -463,16 +696,17 @@ public static class DarlingCliCommands
             return null;
         }
 
-        /* The pg_hba login role the network exposure names — default viewer (read-only, the secure default).
+        /* Every pg_hba login role the network exposure names — default viewer (read-only, the secure default).
            An explicitly-invalid value is a hard error: the store degrades to loopback for it, so no remote
            connection exists at all. */
         var network = postgres.Network;
-        var role = DarlingNetwork.NormalizeNetworkRole(network?.Role);
-        if (role is null)
+        var roles = DarlingNetwork.NormalizeNetworkRoles(network?.Role);
+        if (roles is null || roles.Count == 0)
         {
             error.WriteLine(
-                $"postgres.network.role '{network?.Role}' is invalid — it must be \"viewer\" (default, read-only) " +
-                $"or \"admin\". The store degrades to loopback for an unknown role, so there is no remote connection to {action}.");
+                $"postgres.network.role '{network?.Role}' is invalid — it must be \"viewer\" (default, read-only), " +
+                $"\"admin\", or both (e.g. \"admin,viewer\"). The store degrades to loopback for an unknown role, so " +
+                $"there is no remote connection to {action}.");
             return null;
         }
 
@@ -488,44 +722,70 @@ public static class DarlingCliCommands
 
         var host = ResolveViewerHost(network?.Listen);
 
-        /* Decrypt the role's DPAPI-LocalMachine credential (Windows-only; the caller is IsWindows-guarded).
-           The cert lives in the same directory as the credential (ParentOf(dataDirectory)). */
+        /* Decrypt each role's DPAPI-LocalMachine credential (Windows-only; the caller is IsWindows-guarded).
+           Every credential and the cert live in the same directory (ParentOf(dataDirectory)), so the cert
+           path is role-independent. */
         var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(postgres);
-        var credentialPath = string.Equals(role, "admin", StringComparison.Ordinal)
-            ? DarlingManagedPostgres.AdminCredentialPathFor(dataDirectory)
-            : DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+        var certificatePath = Path.Combine(
+            Path.GetDirectoryName(DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory))!,
+            DarlingManagedPostgres.ServerCertFileName);
 
-        if (!File.Exists(credentialPath))
+        var handoffs = new List<ViewerHandoff>(roles.Count);
+        foreach (var role in roles)
         {
-            /* #2197: which of the two things this means is decided from the store's own files, not assumed.
-               A bootstrap that has already failed produces this same absence, and telling THAT operator to
-               start the service again is the dead end the field report walked into. */
-            error.WriteLine(DarlingStoreBootstrapEvidence.MissingCredentialMessage(
-                $"The '{role}' role credential ({credentialPath})",
-                "provisions the least-privilege roles and their credentials",
-                dataDirectory));
-            return null;
+            var credentialPath = string.Equals(role, "admin", StringComparison.Ordinal)
+                ? DarlingManagedPostgres.AdminCredentialPathFor(dataDirectory)
+                : DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+
+            if (!File.Exists(credentialPath))
+            {
+                /* #2197: which of the two things this means is decided from the store's own files, not assumed.
+                   A bootstrap that has already failed produces this same absence, and telling THAT operator to
+                   start the service again is the dead end the field report walked into. */
+                error.WriteLine(DarlingStoreBootstrapEvidence.MissingCredentialMessage(
+                    $"The '{role}' role credential ({credentialPath})",
+                    "provisions the least-privilege roles and their credentials",
+                    dataDirectory));
+                return null;
+            }
+
+            string password;
+            try
+            {
+                password = DarlingSecrets.Unprotect((await File.ReadAllTextAsync(credentialPath, cancellationToken)).Trim());
+            }
+            catch (Exception ex)
+            {
+                error.WriteLine(
+                    $"Could not decrypt the '{role}' credential at {credentialPath}: {ex.Message} (DPAPI-LocalMachine — " +
+                    "run this on the same machine as the service, under an account that can read the credential).");
+                return null;
+            }
+
+            handoffs.Add(new ViewerHandoff(host, postgres.Port, role, password, certificatePath));
         }
 
-        string password;
-        try
+        return handoffs;
+    }
+
+    /// <summary>
+    /// The single seat <c>--export-viewer-config</c> writes when the exposure admits both roles (#2665): the
+    /// LEAST-PRIVILEGE one. The verb produces one folder holding one live credential, and the folder is what
+    /// gets handed to somebody else — so where there is a choice it must be the read-only seat, the same call
+    /// D7 makes for the default. The admin string stays one <c>--print-viewer-connection</c> away, and the
+    /// verb says so rather than leaving the choice invisible. Pure.
+    /// </summary>
+    private static ViewerHandoff SelectExportSeat(IReadOnlyList<ViewerHandoff> handoffs)
+    {
+        foreach (var handoff in handoffs)
         {
-            password = DarlingSecrets.Unprotect((await File.ReadAllTextAsync(credentialPath, cancellationToken)).Trim());
-        }
-        catch (Exception ex)
-        {
-            error.WriteLine(
-                $"Could not decrypt the '{role}' credential at {credentialPath}: {ex.Message} (DPAPI-LocalMachine — " +
-                "run this on the same machine as the service, under an account that can read the credential).");
-            return null;
+            if (string.Equals(handoff.Role, "viewer", StringComparison.Ordinal))
+            {
+                return handoff;
+            }
         }
 
-        return new ViewerHandoff(
-            host,
-            postgres.Port,
-            role,
-            password,
-            Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName));
+        return handoffs[0];
     }
 
     /// <summary>
@@ -657,11 +917,24 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var handoff = await ResolveViewerHandoffAsync(
+        var handoffs = await ResolveViewerHandoffsAsync(
             config, "--export-viewer-config", "export", error, cancellationToken);
-        if (handoff is null)
+        if (handoffs is null)
         {
             return 1;
+        }
+
+        /* One folder holds one live credential, so a multi-role exposure has to CHOOSE — and the folder is
+           what gets handed to somebody else, so the choice is the read-only seat (see SelectExportSeat).
+           Saying which, and where the other one is, because an operator who set "admin,viewer" and got a
+           folder back would otherwise have no way to know a seat was picked for them. */
+        var handoff = SelectExportSeat(handoffs);
+        if (handoffs.Count > 1)
+        {
+            error.WriteLine(
+                $"NOTE: postgres.network.role admits '{string.Join("', '", handoffs.Select(h => h.Role))}'. This folder is the " +
+                $"'{handoff.Role}' seat (the least-privileged of them). For another role's connection string, run " +
+                "--print-viewer-connection, which prints one per admitted role.");
         }
 
         string certificate;
@@ -1341,11 +1614,40 @@ public static class DarlingCliCommands
 
         output.WriteLine("Current exposure:");
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
-            "Store", storeNow.Exposed, storeNow.ListenIp, storeNow.Cidr, storeNow.Role, storeNow.DegradeReason));
+            "Store", storeNow.Exposed, storeNow.ListenIp, storeNow.Cidr,
+            storeNow.Roles is null ? null : string.Join(", ", storeNow.Roles), storeNow.DegradeReason));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "MCP  ", mcpNowExposed, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom, null, mcpNowDegrade));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "Web  ", webNowExposed, config.Web.Network?.Listen, config.Web.Network?.AllowFrom, null, webNowDegrade));
+
+        /* #2562: whether the exposed dashboard is ENCRYPTED belongs in the exposure summary — this verb is
+           what an operator runs to answer "what is open", and "open on the LAN" reads very differently with
+           and without TLS. Only when exposed: TLS is meaningless on a loopback-only dashboard, and a line
+           saying "OFF" there would be a warning about nothing. The wizard does not PROMPT for a certificate
+           (web.network.tls is file-defined and restart-only, like the rest of the block); it reports it. */
+        if (webNowExposed)
+        {
+            var tls = DarlingWebTls.Describe(config.Web.Network?.Tls);
+            output.WriteLine(tls.Shape switch
+            {
+                DarlingWebTls.TlsShape.NotConfigured =>
+                    "         TLS: off — the access token and its session cookie cross the segment in the clear. "
+                    + "Set web.network.tls to serve HTTPS.",
+                DarlingWebTls.TlsShape.Invalid =>
+                    $"         TLS: MISCONFIGURED — {tls.Problem} The dashboard will bind loopback-only.",
+                /* The warning rides along: this verb is the one an operator runs to see what is open, and a
+                   stale PKCS#12 password beside a working PEM pair is exactly the "I thought the bundle was
+                   being served" state they came here to resolve. The service logs it at every start; nobody
+                   reading this summary should have to go find that line. */
+                DarlingWebTls.TlsShape.Pem =>
+                    $"         TLS: on (PEM pair, {config.Web.Network!.Tls!.CertPath})."
+                    + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
+                _ => $"         TLS: on (PKCS#12, {config.Web.Network!.Tls!.PfxPath})."
+                     + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
+            });
+        }
+
         output.WriteLine($"  Service: {await DescribeServiceStateAsync(cancellationToken)}");
         output.WriteLine();
 
@@ -1422,12 +1724,15 @@ public static class DarlingCliCommands
         {
             output.WriteLine();
             output.WriteLine("== MCP exposure ==");
-            if (!config.Mcp.Enabled)
-            {
-                output.WriteLine("NOTE: mcp.enabled is currently false. The wizard writes the network block, but the endpoint");
-                output.WriteLine("      stays down until you enable MCP in the Viewer's Settings (enabled/port are control-plane");
-                output.WriteLine("      after first run; the wizard never edits them).");
-            }
+            /* #2389: unconditional, and about the PRECEDENCE rather than the file value. This used to print
+               only when mcp.enabled was FALSE in the file, which is exactly backwards — a file that says true
+               while config_service.mcp_enabled says false is the combination that misleads, and it printed
+               nothing there. The wizard holds no store connection, so it cannot report the effective value;
+               what it can do honestly is say which plane decides and where the file value stops mattering. */
+            output.WriteLine($"NOTE: darling.json has mcp.enabled = {(config.Mcp.Enabled ? "true" : "false")}, but after the first run that is only");
+            output.WriteLine("      the SEED — config.config_service.mcp_enabled decides whether the endpoint actually runs, and");
+            output.WriteLine("      this wizard neither reads nor writes it. It writes the network block only (which IS file-only");
+            output.WriteLine("      and restart-only); use --enable-mcp / --disable-mcp or the Viewer's Settings to turn MCP on.");
 
             mcp = GatherMcpInputs(input, output, error, config.Mcp);
             if (mcp is null)
@@ -1441,12 +1746,11 @@ public static class DarlingCliCommands
         {
             output.WriteLine();
             output.WriteLine("== Web dashboard exposure ==");
-            if (!config.Web.Enabled)
-            {
-                output.WriteLine("NOTE: web.enabled is currently false. The wizard writes the network block, but the dashboard");
-                output.WriteLine("      stays down until you enable it with --enable-web or the Viewer's Settings (enabled/port");
-                output.WriteLine("      are control-plane after first run; the wizard never edits them).");
-            }
+            /* #2389: the MCP note's twin — unconditional, and about which plane decides. */
+            output.WriteLine($"NOTE: darling.json has web.enabled = {(config.Web.Enabled ? "true" : "false")}, but after the first run that is only");
+            output.WriteLine("      the SEED — config.config_service.web_enabled decides whether the dashboard actually runs, and");
+            output.WriteLine("      this wizard neither reads nor writes it. It writes the network block only (which IS file-only");
+            output.WriteLine("      and restart-only); use --enable-web / --disable-web or the Viewer's Settings to turn it on.");
 
             web = GatherWebInputs(input, output, error, config.Web);
             if (web is null)
@@ -1717,9 +2021,12 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// Gathers listen / allowFrom / role for the store, RE-PROMPTING with the store resolver's own degrade
+    /// Gathers listen / allowFrom / role(s) for the store, RE-PROMPTING with the store resolver's own degrade
     /// reason until it accepts them (or the operator cancels). The whitespace-in-path degrade is a config
     /// problem the loop cannot fix, so it is reported and the surface is abandoned. Returns null on cancel.
+    /// <para>The returned Role is the resolver's CANONICAL joined list (#2665): <c>"viewer + admin"</c> comes
+    /// back as <c>"admin,viewer"</c>, so darling.json holds the text the service would itself compute and a
+    /// re-run of the wizard is a no-op rather than a reorder.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
     private static (string Listen, string AllowFrom, string Role)? GatherStoreInputs(
@@ -1741,15 +2048,21 @@ public static class DarlingCliCommands
                 return null;
             }
 
-            output.WriteLine("Remote pg_hba role: 'viewer' (read-only, the secure default) or 'admin' (remote WRITES).");
-            var role = Prompt(input, output, "Role", "viewer");
+            output.WriteLine("Remote pg_hba role(s): 'viewer' (read-only, the secure default), 'admin' (remote WRITES),");
+            output.WriteLine("or BOTH as 'admin,viewer' — that writes one hostssl rule per role inside the managed block, so");
+            output.WriteLine("an admin seat and read-only seats can reach the same store and a later CIDR narrowing tightens");
+            output.WriteLine("all of them together (#2665).");
+            var role = Prompt(input, output, "Role(s)", "viewer");
             if (role is null)
             {
                 output.WriteLine("Cancelled — no changes made.");
                 return null;
             }
 
-            if (string.Equals(role, "admin", StringComparison.OrdinalIgnoreCase))
+            /* Warn off the NORMALIZED value, not the typed text. A check for the string being exactly "admin"
+               goes silent for every list form ("admin,viewer", "viewer+admin") — which is the case where the
+               operator most needs to read it, because they may be thinking about the viewer half. */
+            if (string.Equals(DarlingNetwork.NormalizeNetworkRole(role), "admin", StringComparison.Ordinal))
             {
                 output.WriteLine("  WARNING: 'admin' is a remote WRITE credential holding the config-table service-credential pivot.");
                 output.WriteLine("           Prefer 'viewer' unless you specifically need remote writes.");
@@ -1761,7 +2074,7 @@ public static class DarlingCliCommands
             {
                 /* Write the resolver's canonical values (parsed IP, host-bits-zeroed CIDR, normalized role)
                    so the file matches what the service would compute. */
-                return (decision.ListenIp!, decision.Cidr!, decision.Role!);
+                return (decision.ListenIp!, decision.Cidr!, string.Join(",", decision.Roles!));
             }
 
             var reason = decision.DegradeReason ?? "the store resolver rejected these values";
@@ -2086,11 +2399,18 @@ public static class DarlingCliCommands
             output.WriteLine("  MCP firewall rule (run ELEVATED; scoped to the port + CIDR):");
             output.WriteLine("    " + DarlingManagedPostgres.BuildFirewallEnableCommand(
                 DarlingMcpHostService.McpFirewallRuleName(mcpPort), mcpPort, mcpCidr!));
-            if (!mcpEnabled)
-            {
-                output.WriteLine("  NOTE: mcp.enabled is false, so the MCP endpoint stays down until you enable MCP in the");
-                output.WriteLine("        Viewer's Settings. The network block you just wrote applies once MCP is enabled.");
-            }
+            /* #2414: this wizard holds no store connection, so the only port it can name is darling.json's, and
+               the port is part of the rule's NAME. Say that, and point at the verb that resolves the effective
+               one — pasting the line below on a box whose port has been moved opens the wrong port. */
+            output.WriteLine($"  (that rule is named for darling.json's mcp.port = {mcpPort}. If the port was ever changed in the");
+            output.WriteLine("   Viewer's Settings, config.config_service.mcp_port is what the endpoint binds — run");
+            output.WriteLine("   --configure-firewall ELEVATED instead and it resolves the effective port and moves the rule.)");
+            /* #2389: unconditional and about the PLANE, not the file value. This printed only when the FILE
+               said false, which left the actually-misleading combination — file true, store false — with no
+               note at all; and mcpEnabled here is the file's value, which on a seeded box decides nothing. */
+            output.WriteLine("  NOTE: the network block you just wrote is FILE-authoritative and applies on restart, but whether");
+            output.WriteLine("        MCP runs at all is config.config_service.mcp_enabled — darling.json's mcp.enabled is only the");
+            output.WriteLine($"        first-run seed, and it currently reads {(mcpEnabled ? "true" : "false")}. Enable with --enable-mcp or the Viewer's Settings.");
         }
 
         if (webConfigured)
@@ -2099,6 +2419,10 @@ public static class DarlingCliCommands
             output.WriteLine("  reconciles this rule for you):");
             output.WriteLine("    " + DarlingManagedPostgres.BuildFirewallEnableCommand(
                 DarlingWebHostService.WebFirewallRuleName(webPort), webPort, webCidr!));
+            /* #2414: the MCP caveat's twin. */
+            output.WriteLine($"  (that rule is named for darling.json's web.port = {webPort}. If the port was ever changed in the");
+            output.WriteLine("   Viewer's Settings, config.config_service.web_port is what the endpoint binds — run");
+            output.WriteLine("   --configure-firewall ELEVATED instead and it resolves the effective port and moves the rule.)");
 
             /* The one login step a human does differently for Web: a remote browser presents the access token
                once via ?token= and is 302'd back with a session cookie. A 0.0.0.0 bind has no single address
@@ -2107,12 +2431,10 @@ public static class DarlingCliCommands
             output.WriteLine("  Remote browser login (after the service restarts):");
             output.WriteLine($"    http://{webHost}:{webPort}/?token=<your-access-token>");
             output.WriteLine("  (the token is exchanged for a session cookie and stripped from the URL; loopback needs no token)");
-            if (!webEnabled)
-            {
-                output.WriteLine("  NOTE: web.enabled is false, so the dashboard stays down until you enable it with --enable-web");
-                output.WriteLine("        or the Viewer's Settings. The network block you just wrote applies once the web dashboard");
-                output.WriteLine("        is enabled.");
-            }
+            /* #2389: the MCP note's twin — unconditional, and about which plane decides. */
+            output.WriteLine("  NOTE: the network block you just wrote is FILE-authoritative and applies on restart, but whether");
+            output.WriteLine("        the dashboard runs at all is config.config_service.web_enabled — darling.json's web.enabled is");
+            output.WriteLine($"        only the first-run seed, and it currently reads {(webEnabled ? "true" : "false")}. Enable with --enable-web or Settings.");
         }
     }
 
@@ -2293,21 +2615,31 @@ public static class DarlingCliCommands
 
     /// <summary>The CLI's targeted store write that ENABLES the MCP endpoint on the single config_service row
     /// (id=1). Sets only <c>mcp_enabled</c> + the audit columns; the BEFORE-UPDATE self-bump trigger fires
-    /// <c>config_version</c> (deliberately NOT set here) so the worker hot-reloads. Pure — Darling.Tests pin the shape.</summary>
+    /// <c>config_version</c> (deliberately NOT set here) so the worker hot-reloads. Pure — Darling.Tests pin the shape.
+    /// <para>#2414: it also RETURNS <c>mcp_port</c>. The firewall half of this verb has to name its rule for the
+    /// port the endpoint BINDS, which is this column and not darling.json's seed, and returning it from the write
+    /// itself makes that read free, atomic with the toggle, and impossible to skip — a separate SELECT is a second
+    /// resolution path, which is exactly how the two ports drifted apart in the first place.</para></summary>
     public const string EnableMcpStoreSql =
-        "UPDATE config.config_service SET mcp_enabled = TRUE, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = 'cli' WHERE id = 1";
+        "UPDATE config.config_service SET mcp_enabled = TRUE, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = 'cli' WHERE id = 1 RETURNING mcp_port";
 
     /// <summary>The CLI's targeted store write that DISABLES the MCP endpoint (twin of <see cref="EnableMcpStoreSql"/>).</summary>
     public const string DisableMcpStoreSql =
-        "UPDATE config.config_service SET mcp_enabled = FALSE, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = 'cli' WHERE id = 1";
+        "UPDATE config.config_service SET mcp_enabled = FALSE, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = 'cli' WHERE id = 1 RETURNING mcp_port";
 
     /// <summary>The CLI's targeted store write that ENABLES the read-only web dashboard endpoint (twin of <see cref="EnableMcpStoreSql"/>).</summary>
     public const string EnableWebStoreSql =
-        "UPDATE config.config_service SET web_enabled = TRUE, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = 'cli' WHERE id = 1";
+        "UPDATE config.config_service SET web_enabled = TRUE, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = 'cli' WHERE id = 1 RETURNING web_port";
 
     /// <summary>The CLI's targeted store write that DISABLES the web dashboard endpoint (twin of <see cref="EnableMcpStoreSql"/>).</summary>
     public const string DisableWebStoreSql =
-        "UPDATE config.config_service SET web_enabled = FALSE, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = 'cli' WHERE id = 1";
+        "UPDATE config.config_service SET web_enabled = FALSE, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = 'cli' WHERE id = 1 RETURNING web_port";
+
+    /// <summary>The elevated firewall verb's best-effort read of the CONTROL PLANE's effective endpoint toggles
+    /// (#2414). Read-only, and the only store contact <c>--configure-firewall</c> makes — see
+    /// <see cref="TryReadEndpointTogglesAsync"/> for why it is best-effort rather than required.</summary>
+    public const string ReadEndpointTogglesSql =
+        "SELECT mcp_enabled, mcp_port, web_enabled, web_port FROM config.config_service WHERE id = 1";
 
     /// <summary>Which optional endpoint a toggle verb targets — selects the store column, firewall rule name,
     /// darling.json network block, and seed-key note.</summary>
@@ -2454,9 +2786,7 @@ public static class DarlingCliCommands
 
         if (!postgres.Managed)
         {
-            error.WriteLine(
-                $"{verb} applies to the managed store only. In bring-your-own mode (postgres.connectionString), the " +
-                $"endpoint enable flags live in YOUR PostgreSQL's config.config_service ({column}) — toggle them there.");
+            error.WriteLine(ByoEndpointToggleMessage(verb, column, enable));
             return 1;
         }
 
@@ -2470,15 +2800,22 @@ public static class DarlingCliCommands
         }
 
         /* The TARGETED store write. A DIRECT config_service UPDATE self-bumps config_version via the BEFORE-UPDATE
-           trigger, so the worker hot-reloads within one sweep — we never touch config_version ourselves. */
+           trigger, so the worker hot-reloads within one sweep — we never touch config_version ourselves.
+
+           #2414: the statement RETURNS the endpoint's port, so the firewall step below scopes its rule to the port
+           the endpoint actually BINDS instead of to darling.json's first-run seed. It is a scalar read of the row
+           this verb just wrote, in the same round trip, under the same lock — and it doubles as the seeded check,
+           since a RETURNING that yields no row is the 0-rows-updated case. Note what this makes structurally
+           impossible: the store is unreachable, and the verb has already returned 1 before any firewall command is
+           built, so these two verbs can never open a port on a guessed number. */
         var sql = EndpointToggleSql(endpoint, enable);
-        int rows;
+        object? returnedPort;
         try
         {
             await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand(sql, connection);
-            rows = await command.ExecuteNonQueryAsync(cancellationToken);
+            returnedPort = await command.ExecuteScalarAsync(cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -2490,13 +2827,15 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        if (rows == 0)
+        if (returnedPort is null or DBNull)
         {
             error.WriteLine(
                 "The control-plane store is not seeded yet (config.config_service has no id=1 row) — start the " +
                 "PerformanceMonitor Darling service once so it seeds the store, then re-run this command.");
             return 1;
         }
+
+        var storePort = Convert.ToInt32(returnedPort, CultureInfo.InvariantCulture);
 
         output.WriteLine(
             $"{endpointLabel} endpoint {(enable ? "ENABLED" : "DISABLED")} in the control-plane store " +
@@ -2505,7 +2844,15 @@ public static class DarlingCliCommands
             "The running service applies this LIVE within one collection sweep (the write self-bumps the reload " +
             "beacon) — no restart needed.");
 
-        await ReconcileEndpointFirewallAsync(endpoint, enable, config, output, error, cancellationToken);
+        /* #2414: the SAME resolver the two host supervisors bind on, fed the row this verb just wrote. It carries
+           the provenance as well as the value, so the firewall step can state on whose authority it picked a port
+           and flag a file/store disagreement instead of silently acting on one. */
+        var toggle = DarlingHostBinding.ResolveEndpointToggle(
+            (enable, storePort),
+            endpoint == EndpointKind.Mcp ? config.Mcp.Enabled : config.Web.Enabled,
+            endpoint == EndpointKind.Mcp ? config.Mcp.Port : config.Web.Port);
+
+        await ReconcileEndpointFirewallAsync(endpoint, enable, config, toggle, output, error, cancellationToken);
 
         output.WriteLine();
         output.WriteLine(
@@ -2524,6 +2871,60 @@ public static class DarlingCliCommands
         (EndpointKind.Web, false) => DisableWebStoreSql,
         _ => throw new ArgumentOutOfRangeException(nameof(endpoint)),
     };
+
+    /// <summary>
+    /// What a bring-your-own deployment is told instead of a toggle: the flags live in the operator's own
+    /// PostgreSQL, and the UPDATE is the whole procedure. Composed here rather than inline because #2626
+    /// needs the SAME sentence from a second caller — the platform guard, which is the one a non-Windows
+    /// operator actually reaches.
+    /// </summary>
+    private static string ByoEndpointToggleMessage(string verb, string column, bool enable) =>
+        $"{verb} applies to the managed store only. In bring-your-own mode (postgres.connectionString), the "
+        + $"endpoint enable flags live in YOUR PostgreSQL's config.config_service ({column}) — toggle them "
+        + $"there:\n    UPDATE config.config_service SET {column} = {(enable ? "true" : "false")};\n"
+        + "The service picks that up within one sweep; no restart is needed.";
+
+    /// <summary>
+    /// The message for an endpoint-toggle verb invoked on a non-Windows host (#2626).
+    ///
+    /// <para>
+    /// "requires Windows" alone is true of the verb and MISLEADING about the situation. The two Windows
+    /// dependencies — the DPAPI-protected owner credential and the firewall reconcile — are both MANAGED-mode
+    /// concerns, and a non-Windows deployment is necessarily bring-your-own, where the verb would refuse
+    /// anyway with the message that actually helps. Reading the platform message on macOS or Linux, an
+    /// operator concludes the DASHBOARD is Windows-only; it is not, and one UPDATE turns it on.
+    /// </para>
+    ///
+    /// <para>
+    /// So the config is loaded here, best effort, purely to decide which sentence to print. A config that
+    /// cannot be loaded, or a managed one (which on a non-Windows host should not exist), gets the platform
+    /// sentence — the honest answer when we cannot tell.
+    /// </para>
+    /// </summary>
+    public static int WriteEndpointVerbPlatformRefusal(
+        bool isMcp, bool enable, string? configPath, TextWriter error)
+    {
+        var endpoint = isMcp ? EndpointKind.Mcp : EndpointKind.Web;
+        var verb = VerbName(endpoint, enable);
+        var column = isMcp ? "mcp_enabled" : "web_enabled";
+
+        var managed = true;
+        try
+        {
+            managed = DarlingConfig.Load(configPath).Postgres?.Managed ?? true;
+        }
+        catch
+        {
+            /* Deliberately swallowed: this method exists to pick a sentence, and a config we cannot read is
+               not a reason to fail differently than we already are. */
+        }
+
+        error.WriteLine(managed
+            ? $"{verb} requires Windows (DPAPI + firewall)."
+            : ByoEndpointToggleMessage(verb, column, enable));
+
+        return 1;
+    }
 
     /// <summary>The verb spelling for a toggle (for error + handoff text).</summary>
     private static string VerbName(EndpointKind endpoint, bool enable) => (endpoint, enable) switch
@@ -2544,14 +2945,25 @@ public static class DarlingCliCommands
     /// and the SAME pure command builders. Elevated -> runs the rule; otherwise prints the exact elevated command
     /// — the store toggle already succeeded, so a non-elevated shell is a handoff, never a failure. A firewall
     /// failure is likewise non-fatal.
+    ///
+    /// <para>#2414: the port comes from <paramref name="toggle"/>, i.e. from the control plane, NOT from
+    /// <c>config.Mcp.Port</c>/<c>config.Web.Port</c>. Those are the first-run seed; the supervisor binds the store's
+    /// value, so naming the rule from the file opened one port while the endpoint served another. The caller
+    /// resolves the toggle from the row it just wrote, so this method cannot be reached with a guessed port.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
     private static async Task ReconcileEndpointFirewallAsync(
-        EndpointKind endpoint, bool enable, DarlingConfig config, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        EndpointKind endpoint, bool enable, DarlingConfig config, DarlingHostBinding.EndpointToggle toggle,
+        TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
-        var (port, listen, allowFrom, ruleName) = endpoint == EndpointKind.Mcp
-            ? (config.Mcp.Port, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom, DarlingMcpHostService.McpFirewallRuleName(config.Mcp.Port))
-            : (config.Web.Port, config.Web.Network?.Listen, config.Web.Network?.AllowFrom, DarlingWebHostService.WebFirewallRuleName(config.Web.Port));
+        var (section, surface, filePort, listen, allowFrom) = endpoint == EndpointKind.Mcp
+            ? ("mcp", "MCP", config.Mcp.Port, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom)
+            : ("web", "web dashboard", config.Web.Port, config.Web.Network?.Listen, config.Web.Network?.AllowFrom);
+
+        var port = toggle.Port;
+        var ruleName = endpoint == EndpointKind.Mcp
+            ? DarlingMcpHostService.McpFirewallRuleName(port)
+            : DarlingWebHostService.WebFirewallRuleName(port);
 
         var exposed = DarlingNetwork.IsExposedListenAddress(listen);
         var plan = ClassifyFirewallPlan(exposed, IsElevated());
@@ -2594,53 +3006,66 @@ public static class DarlingCliCommands
             }
         }
 
-        var command = enable
+        /* #2414: state which plane named the port BEFORE doing anything with it. Here the control plane always
+           answered — the caller could not have got this far otherwise — so this is either a confirmation or the
+           report of a file/store disagreement the operator has never been shown. Only on ENABLE: a disable sweeps
+           every port of the surface, so which one the store named decides nothing and claiming otherwise would be
+           a line that describes work this verb is not doing. */
+        if (enable)
+        {
+            output.WriteLine(DarlingHostBinding.DescribeFirewallPortAuthority(toggle, section, surface, filePort, null));
+        }
+
+        /* #2414, the security half: sweep EVERY port of this surface before ensuring the desired rule, rather than
+           reconciling the one exact DisplayName. The port lives in the rule's name, so moving a port does not
+           update a rule — it creates a second one and strands the first as an inbound allow rule on a port nothing
+           serves. Exact-name reconciliation can by construction never reach that rule; it is not even aware of it.
+           The wildcard comes from DarlingFirewallCheck.SurfaceRuleWildcard, which returns the name UNCHANGED when
+           it does not parse, so the widening is provably confined to other ports of THIS surface and can never
+           reach a rule this product did not create. --configure-firewall has swept this way since #1771; the
+           toggle verbs, which are the ones an operator reaches for after changing a port, did not. */
+        var wildcard = DarlingFirewallCheck.SurfaceRuleWildcard(ruleName);
+        var sweepCommand = DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard);
+        var openCommand = enable
             ? DarlingManagedPostgres.BuildFirewallEnableCommand(ruleName, port, canonicalCidr)
-            : DarlingManagedPostgres.BuildFirewallDisableCommand(ruleName);
+            : null;
 
         if (plan == EndpointFirewallPlan.RunElevated)
         {
-            await RunFirewallCommandAsync(command, ruleName, enable, output, error, cancellationToken);
+            /* Its own step, never concatenated ahead of the open: the sweep command ends in `exit 0` and would
+               otherwise terminate the shell before the rule was created. A failure in either step is reported with
+               the exact command and is non-fatal — the store toggle already succeeded. */
+            await TryRunFirewallStepAsync(
+                sweepCommand,
+                enable
+                    ? $"Firewall: cleared any previous {surface} rule matching '{wildcard}'."
+                    : $"Firewall: removed every {surface} rule matching '{wildcard}'.",
+                $"Firewall: could not remove the rule(s) matching '{wildcard}'",
+                output, error, cancellationToken);
+
+            if (openCommand is not null)
+            {
+                await TryRunFirewallStepAsync(
+                    openCommand,
+                    $"Firewall rule '{ruleName}' opened (TCP {port}, inbound, from {canonicalCidr}).",
+                    $"Firewall rule open did not confirm for '{ruleName}'",
+                    output, error, cancellationToken);
+            }
+
             return;
         }
 
-        /* Handoff (not elevated) — the store toggle already succeeded; print the exact command to run elevated. */
+        /* Handoff (not elevated) — the store toggle already succeeded; print the exact commands to run elevated. */
         output.WriteLine(enable
             ? "Firewall: this shell is not elevated, so the endpoint was enabled but its firewall rule was NOT opened. " +
-              "Run this in an ELEVATED PowerShell to open the port (scoped to the port + CIDR):"
-            : "Firewall: this shell is not elevated, so the firewall rule was NOT removed. Run this in an ELEVATED PowerShell to close the port:");
-        output.WriteLine("  " + command);
-    }
-
-    /// <summary>Runs a scoped firewall command via the shared PowerShell runner and reports the outcome. NEVER
-    /// throws (except on cancellation) — the store toggle already succeeded, so a firewall failure degrades to a
-    /// printed elevated hand-off, never a non-zero exit.</summary>
-    [SupportedOSPlatform("windows")]
-    private static async Task RunFirewallCommandAsync(
-        string command, string ruleName, bool enable, TextWriter output, TextWriter error, CancellationToken cancellationToken)
-    {
-        try
+              "Run these in an ELEVATED PowerShell — the first clears any rule left on a previously configured port, " +
+              "the second opens this one (scoped to the port + CIDR):"
+            : "Firewall: this shell is not elevated, so the firewall rule was NOT removed. Run this in an ELEVATED " +
+              "PowerShell to close the port (it covers every port this surface has ever been configured on):");
+        output.WriteLine("  " + sweepCommand);
+        if (openCommand is not null)
         {
-            var (exitCode, psOutput) = await DarlingManagedPostgres.RunPowerShellAsync(command, cancellationToken);
-            if (exitCode == 0)
-            {
-                output.WriteLine($"Firewall rule '{ruleName}' {(enable ? "opened" : "removed")}.");
-                return;
-            }
-
-            error.WriteLine(
-                $"Firewall rule {(enable ? "open" : "removal")} did not confirm (exit {exitCode}: {psOutput}). " +
-                "Run this in an elevated PowerShell:");
-            error.WriteLine("  " + command);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            error.WriteLine($"Firewall rule {(enable ? "open" : "removal")} failed ({ex.Message}). Run this in an elevated PowerShell:");
-            error.WriteLine("  " + command);
+            output.WriteLine("  " + openCommand);
         }
     }
 
@@ -2654,9 +3079,20 @@ public static class DarlingCliCommands
        calls this verb, uninstall-darling.ps1 removes the rules, and the running service only VERIFIES
        (DarlingFirewallCheck).
 
-       It reconciles all THREE surfaces (store, MCP, web) in one pass, from darling.json alone: no store
-       connection, no credentials, so it is safe to run at install time before the store has ever booted —
-       unlike --enable-mcp/--enable-web, which write the control-plane store and therefore need it running.
+       It reconciles all THREE surfaces (store, MCP, web) in one pass. #2414 gave it ONE optional store read:
+       the MCP and web PORTS are control-plane-authoritative (config_service.mcp_port/web_port), and naming a
+       rule from darling.json's seed opened one port while the endpoint served another. The read is best-effort
+       and never a precondition — this verb still has to work at install time, before the store exists, where
+       the file's port is the value the store will be seeded WITH. When the read fails, the verb says which port
+       it used and why, and it never falls back silently: see TryReadEndpointTogglesAsync.
+
+       #2436 followed the same read one step further, into what the verb is entitled to DO with it. The store
+       row carries an enable flag as well as a port, so a surface the control plane has switched off gets its
+       rule removed rather than opened — the posture --disable-mcp already had, which this verb used to undo on
+       every upgrade (see DescribeDisabledSurface). And when the read FAILS, the verb stops removing a
+       LAN-exposed surface's existing rules at all — neither the port nor the enable flag is knowable then, and
+       both are ways to end up deleting the rule the endpoint is actually being served on. It still creates the
+       file's rule, which is what a fresh install needs (see FirewallRulePlan.SweepOtherPorts).
        ================================================================================================ */
 
     /// <summary>What <c>--configure-firewall</c> will do to one surface's rule.</summary>
@@ -2671,9 +3107,31 @@ public static class DarlingCliCommands
     }
 
     /// <summary>One surface's desired firewall state. <paramref name="Note"/> is a human explanation printed
-    /// alongside, non-null only where the reason is not self-evident (a fail-closed exposure).</summary>
+    /// alongside, non-null only where the reason is not self-evident (a fail-closed exposure, or a surface the
+    /// control plane has switched off).
+    /// <paramref name="PortNote"/> (#2414) says which PLANE supplied <paramref name="Port"/> and, when the store
+    /// could not be read, what would make the chosen port wrong — non-null only on an Open plan, since a Remove
+    /// sweeps every port of the surface and does not depend on picking the right one.
+    /// <para><paramref name="SweepOtherPorts"/> (#2436) is permission to remove this surface's rules on ports
+    /// OTHER than <paramref name="Port"/>. That sweep is how a rule stranded by a port change gets collected,
+    /// and its whole justification is that the sweeper knows what this surface is actually doing — so it is
+    /// withheld on exactly one combination: a surface darling.json exposes on the LAN, on a run that could not
+    /// read the control plane. There, BOTH store-backed values are a guess. The port may have moved, so another
+    /// port's rule may be the live one; and <c>mcp_enabled</c> may have been turned on with <c>--enable-mcp</c>
+    /// or in the Viewer, which never writes back to darling.json — so the file's <c>enabled = false</c> may be
+    /// years stale and the surface may be serving right now. Either way the wildcard would delete the rule the
+    /// endpoint is being served on, which is the outage this whole change exists to prevent. Nothing is exposed
+    /// by deferring: the store is unreadable because the service is stopped, so no Darling endpoint is
+    /// listening on any port until a run that CAN read the control plane is possible again.</para>
+    /// <para>The other half is certain and always sweeps. Whether a surface is network-exposed at all is
+    /// decided by <c>mcp.network</c> / <c>web.network</c>, which are FILE-ONLY and have no config_service
+    /// equivalent by design (#2389) — the control plane can switch an exposed surface off, never switch an
+    /// unexposed one on. So a bind that resolves loopback-only is loopback-only whatever the store would have
+    /// said, no rule belongs on any port, and collecting them needs no knowledge this run is missing. Same for
+    /// the store surface, whose <c>postgres.port</c> has no config_service column to disagree with it.</para></summary>
     public readonly record struct FirewallRulePlan(
-        string Surface, string RuleName, int Port, FirewallRuleAction Action, string? Cidr, string? Note);
+        string Surface, string RuleName, int Port, FirewallRuleAction Action, string? Cidr, string? Note, string? PortNote,
+        bool SweepOtherPorts = true);
 
     /// <summary>
     /// PURE desired-state for all three rules, so the whole decision pins without a live firewall.
@@ -2686,9 +3144,19 @@ public static class DarlingCliCommands
     /// otherwise every start would report a rule this verb had just deliberately created.</para>
     /// <para>BYO mode resolves loopback for MCP/web (their resolvers take <c>managed</c> and refuse exposure
     /// without it) and skips the store entirely, whose exposure the operator's own PostgreSQL governs.</para>
+    /// <para>#2414: the MCP and web PORTS come from <paramref name="mcpStore"/>/<paramref name="webStore"/> when
+    /// the caller could read <c>config.config_service</c>, because that is the port the supervisor binds; they fall
+    /// back to darling.json's seed when it could not, which is the normal state at install time and carries a
+    /// <see cref="FirewallRulePlan.PortNote"/> saying so. The store surface has no such split — <c>postgres.port</c>
+    /// is file-only, with no config_service column to disagree with it — so it is resolved from the file, full
+    /// stop, and gets no note.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    public static IReadOnlyList<FirewallRulePlan> PlanFirewallRules(DarlingConfig config)
+    public static IReadOnlyList<FirewallRulePlan> PlanFirewallRules(
+        DarlingConfig config,
+        (bool Enabled, int Port)? mcpStore = null,
+        (bool Enabled, int Port)? webStore = null,
+        string? storeUnavailableReason = null)
     {
         var plans = new List<FirewallRulePlan>();
         var managed = config.Postgres?.Managed ?? false;
@@ -2703,28 +3171,59 @@ public static class DarlingCliCommands
                 config.Postgres.Port,
                 store.Exposed ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
                 store.Exposed ? store.Cidr : null,
-                store.DegradeReason));
+                store.DegradeReason,
+                null,
+                /* postgres.port is file-only — there is no config_service column able to disagree with it — so
+                   this surface's port is never a guess and the sweep is always authoritative. */
+                SweepOtherPorts: true));
         }
 
+        /* #2414: the SAME resolver the MCP/web supervisors bind on, so the rule this verb writes is named for the
+           port the endpoint serves. A null store answer resolves to the file value with Origin = File, which the
+           describer turns into the loud fallback disclosure rather than a silent guess. */
+        var mcpToggle = DarlingHostBinding.ResolveEndpointToggle(mcpStore, config.Mcp.Enabled, config.Mcp.Port);
         var mcpBind = DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed);
         var mcpExposed = mcpBind.Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
+        var mcpOpen = mcpExposed && mcpToggle.Enabled;
         plans.Add(new FirewallRulePlan(
             "MCP",
-            DarlingMcpHostService.McpFirewallRuleName(config.Mcp.Port),
-            config.Mcp.Port,
-            mcpExposed ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
-            mcpExposed ? CanonicalCidrOrNull(config.Mcp.Network?.AllowFrom) : null,
-            mcpExposed ? null : DescribeLoopbackReason(mcpBind.Reason, "mcp")));
+            DarlingMcpHostService.McpFirewallRuleName(mcpToggle.Port),
+            mcpToggle.Port,
+            mcpOpen ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
+            mcpOpen ? CanonicalCidrOrNull(config.Mcp.Network?.AllowFrom) : null,
+            mcpOpen
+                ? null
+                : mcpExposed
+                    ? DescribeDisabledSurface(mcpToggle, "mcp", storeUnavailableReason)
+                    : DescribeLoopbackReason(mcpBind.Reason, "mcp"),
+            mcpOpen
+                ? DarlingHostBinding.DescribeFirewallPortAuthority(mcpToggle, "mcp", "MCP", config.Mcp.Port, storeUnavailableReason)
+                : null,
+            /* NOT !mcpOpen: a Remove reached because the FILE said disabled is exactly as much a guess as a
+               stale port, because --enable-mcp and the Viewer write only the store. mcpExposed is the half
+               that is certain — network.* is file-only, so the control plane can never expose what the file
+               does not. */
+            SweepOtherPorts: !mcpExposed || mcpToggle.Origin == DarlingHostBinding.EndpointToggleOrigin.ControlPlane));
 
+        var webToggle = DarlingHostBinding.ResolveEndpointToggle(webStore, config.Web.Enabled, config.Web.Port);
         var webBind = DarlingWebHostService.ResolveWebBind(config.Web, managed);
         var webExposed = webBind.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        var webOpen = webExposed && webToggle.Enabled;
         plans.Add(new FirewallRulePlan(
             "web dashboard",
-            DarlingWebHostService.WebFirewallRuleName(config.Web.Port),
-            config.Web.Port,
-            webExposed ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
-            webExposed ? CanonicalCidrOrNull(config.Web.Network?.AllowFrom) : null,
-            webExposed ? null : DescribeLoopbackReason((DarlingMcpHostService.McpBindReason)webBind.Reason, "web")));
+            DarlingWebHostService.WebFirewallRuleName(webToggle.Port),
+            webToggle.Port,
+            webOpen ? FirewallRuleAction.Open : FirewallRuleAction.Remove,
+            webOpen ? CanonicalCidrOrNull(config.Web.Network?.AllowFrom) : null,
+            webOpen
+                ? null
+                : webExposed
+                    ? DescribeDisabledSurface(webToggle, "web", storeUnavailableReason)
+                    : DescribeLoopbackReason((DarlingMcpHostService.McpBindReason)webBind.Reason, "web"),
+            webOpen
+                ? DarlingHostBinding.DescribeFirewallPortAuthority(webToggle, "web", "web dashboard", config.Web.Port, storeUnavailableReason)
+                : null,
+            SweepOtherPorts: !webExposed || webToggle.Origin == DarlingHostBinding.EndpointToggleOrigin.ControlPlane));
 
         return plans;
     }
@@ -2734,6 +3233,47 @@ public static class DarlingCliCommands
     /// caller's raw string into a PowerShell command (#1646).</summary>
     private static string? CanonicalCidrOrNull(string? allowFrom) =>
         ClassifyAllowFrom(allowFrom, out var canonical) == EndpointAllowFromVerdict.Valid ? canonical : null;
+
+    /// <summary>
+    /// Why a surface that IS configured for LAN exposure still gets no rule: it is switched OFF (#2436), so
+    /// the supervisor never starts it and there is nothing behind the port.
+    ///
+    /// <para><b>The decision, because the alternative is arguable.</b> Leaving the rule open would mean an
+    /// operator who enables the endpoint from the Viewer's Settings — a store write the running service picks
+    /// up within one poll interval, with no elevated step anywhere in it — finds the LAN path already open.
+    /// That convenience is real, and it is what this verb used to do. It loses to three things. The product's
+    /// own posture everywhere else is that no listener means no rule: <c>--disable-mcp</c> sweeps the surface,
+    /// <see cref="DarlingMcpHostService"/>'s stop path documents an admin removing the rule with THIS verb,
+    /// and #2414 was fixed precisely because an inbound allow on a port nothing serves is the inverse of what
+    /// scoping a rule to a port is for. Worse, the two disagreed: <c>--disable-mcp</c> closed the port and the
+    /// next <c>--configure-firewall</c> — which every upgrade runs — silently re-opened it, so the disable verb
+    /// did not stay done. And the convenience is not lost, only deferred to one elevated action the service
+    /// already asks for by name: its start-up check reports the missing rule and prints the command.</para>
+    ///
+    /// <para>Two messages, on the same three-state honesty <see cref="DarlingHostBinding.DescribeFirewallPortAuthority"/>
+    /// applies to the port — and for a reason review had to point out. <c>Origin == File</c> is NOT "fresh
+    /// install": <see cref="TryReadEndpointTogglesAsync"/> collapses BYO, a missing credential, a timeout and
+    /// every other connection failure into the same answer, so this branch is also reached on a long-lived box
+    /// whose store is merely unreachable this minute and may well hold <c>mcp_enabled = true</c>. Asserting the
+    /// endpoint is off there would contradict the sweep-declined line printed a few lines later in the same
+    /// run, which says the opposite — that the off may be stale and the rule may be the live one — and it is
+    /// the sweep-declined line that is right.</para>
+    /// </summary>
+    private static string DescribeDisabledSurface(
+        DarlingHostBinding.EndpointToggle toggle, string section, string? storeUnavailableReason)
+        => toggle.Origin == DarlingHostBinding.EndpointToggleOrigin.ControlPlane
+            ? $"{section}.network exposes this endpoint, but the CONTROL PLANE has it off "
+                + $"(config.config_service.{section}_enabled = false), so the service does not start it and no rule "
+                + $"belongs on that port — turn it on with --enable-{section} or in the Viewer's Settings, then "
+                + "re-run --configure-firewall from an elevated prompt"
+            : $"{section}.network exposes this endpoint, but the control plane could NOT be read "
+                + $"({storeUnavailableReason ?? "reason unknown"}), so this run goes on darling.json's "
+                + $"{section}.enabled = false and opens nothing. On a box whose store has never been written — the "
+                + $"normal state at install time — that is right: config.config_service.{section}_enabled is SEEDED "
+                + "from this value, so the endpoint will not start. On a box that has run before it may be stale, "
+                + $"because --enable-{section} and the Viewer's Settings write only the control plane and never back "
+                + "to the file; if the endpoint IS enabled there, re-run --configure-firewall once the store is up "
+                + "and it will open the port";
 
     /// <summary>Why a surface is loopback-only, when the reason is a DEGRADE worth printing. A plain
     /// loopback-by-default config is the normal case and gets no note.</summary>
@@ -2749,13 +3289,6 @@ public static class DarlingCliCommands
             _ => null,
         };
 
-    /// <summary>
-    /// Creates or removes every scoped Darling firewall rule so the live firewall matches darling.json.
-    /// Requires elevation (that is the entire point of the verb) and is idempotent — safe to re-run on every
-    /// upgrade, which is exactly how install-darling.ps1 uses it. Returns 0 when the firewall ends up matching
-    /// the config, 1 when it could not be made to.
-    /// </summary>
-    [SupportedOSPlatform("windows")]
     /// <summary>
     /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it,
     /// and what it is called in the report. Kept as data so the list is readable as a policy rather than as
@@ -2949,6 +3482,119 @@ public static class DarlingCliCommands
         }
     }
 
+    /// <summary>What the NOT-elevated <c>--configure-firewall</c> branch owes the operator for one surface
+    /// (#2445), and therefore whether an elevated shell really has work to do.</summary>
+    public enum FirewallHandoff
+    {
+        /// <summary>Nothing to hand over — the desired state already holds, or this run is not entitled to ask
+        /// for the change. Prints no command and does not make the verb fail.</summary>
+        Nothing,
+
+        /// <summary>A rule has to be CREATED. Prints the enable command and fails the verb, exactly as this
+        /// branch always has for an Open plan.</summary>
+        OpenCommand,
+
+        /// <summary>A rule the desired state forbids was FOUND by the read-only probe. Prints the same sweep
+        /// command the elevated path would have run, and fails the verb — there is measured elevated work.</summary>
+        SweepCommand,
+
+        /// <summary>The probe could not answer, so whether such a rule exists is unknown. Prints the sweep
+        /// command, because it is a no-op when there is nothing to remove and the operator can only act on what
+        /// they are handed — but does NOT fail the verb. An exit code here is a claim about the FIREWALL, and
+        /// "the probe did not answer" is not one.</summary>
+        SweepCommandUnverified,
+    }
+
+    /// <summary>
+    /// PURE: what the not-elevated branch owes ONE plan. <paramref name="rulesFound"/> is the read-only probe's
+    /// answer for this surface's wildcard — null when it could not answer — and is only ever consulted for a
+    /// Remove, because only there does the answer change anything.
+    ///
+    /// <para><b>Why the Remove half is measured and the Open half is not.</b> An Open plan already knows the
+    /// verb's whole job: the rule has to exist with these exact parameters, the enable command is idempotent
+    /// (it removes its own DisplayName first), and a probe could at best say a rule with that name exists —
+    /// not that its port, direction and RemoteAddress are the ones this config asks for. So the probe would buy
+    /// nothing there and this keeps the pre-#2445 behaviour exactly. A Remove is the opposite: the desired
+    /// state is the ABSENCE of a rule, absence is the overwhelmingly common case (every default loopback
+    /// install), and the two things this branch has to decide — whether to print a command at all, and whether
+    /// to report failure — are BOTH answered by "is one actually there". The alternative considered and
+    /// rejected was gating on <c>Note is not null</c>, which is a proxy for "a rule might exist" and is wrong in
+    /// both directions: it prints a sweep for a fail-closed surface that never had a rule, and stays silent
+    /// about a plain-loopback surface holding a stale rule from an exposure someone turned off by hand — the
+    /// exact state <see cref="FirewallRuleVerdict.LoopbackStaleRule"/> exists to name.</para>
+    ///
+    /// <para><b>Why a withheld sweep hands over nothing at all.</b> #2436 withholds
+    /// <see cref="FirewallRulePlan.SweepOtherPorts"/> for a surface darling.json exposes on a run that could not
+    /// read the control plane, because there the file's "switched off" may be years stale and the rule matching
+    /// the wildcard may be the one the endpoint is being served on. Printing that sweep command would hand the
+    /// operator, by copy and paste, the very outage the elevated path just declined to cause — and the operator
+    /// pasting it has no way to see that it was declined. The plan's <see cref="FirewallRulePlan.Note"/> is
+    /// printed above and says why; the remedy is a re-run with the store up, not a command.</para>
+    /// </summary>
+    public static FirewallHandoff ClassifyNotElevatedHandoff(
+        FirewallRuleAction action, bool sweepOtherPorts, bool? rulesFound) =>
+        action == FirewallRuleAction.Open ? FirewallHandoff.OpenCommand
+        : !sweepOtherPorts ? FirewallHandoff.Nothing
+        : rulesFound switch
+        {
+            true => FirewallHandoff.SweepCommand,
+            false => FirewallHandoff.Nothing,
+            _ => FirewallHandoff.SweepCommandUnverified,
+        };
+
+    /// <summary>
+    /// PURE: whether a not-elevated run has to report failure — true only where an elevated shell really has
+    /// work to do, which is what the exit code is supposed to mean.
+    /// <para><see cref="FirewallHandoff.SweepCommandUnverified"/> deliberately does not count. A non-zero exit
+    /// from this verb is a signal other things act on — <c>install-darling.ps1</c> prints a re-run banner on
+    /// it — and turning "the probe did not answer" into that signal would report drift the run never saw.
+    /// Under-reporting there is the safe direction: the running service probes the same rule on every start
+    /// and WARNs a stale one by name (<see cref="DarlingFirewallCheck"/>), so an unmeasured rule is found
+    /// within one service start, whereas a bogus failure teaches operators to ignore the banner.</para>
+    /// </summary>
+    public static bool NotElevatedRunHasWork(IEnumerable<FirewallHandoff> handoffs) =>
+        handoffs.Any(h => h is FirewallHandoff.OpenCommand or FirewallHandoff.SweepCommand);
+
+    /// <summary>
+    /// Read-only "does ANY rule for this surface exist" for the not-elevated branch (#2445). True/false when the
+    /// probe answered, null when it could not. Never writes anything and never throws except on cancellation.
+    ///
+    /// <para>It runs <see cref="DarlingFirewallCheck.BuildProbeCommand"/> — the probe the RUNNING service
+    /// already uses, shaped to exit 0 whether or not a rule matches — against
+    /// <see cref="DarlingFirewallCheck.SurfaceRuleWildcard"/>, which is the same wildcard the elevated sweep
+    /// deletes by. That pairing is the point rather than convenience: a narrower question would report "nothing
+    /// to do" about rules the sweep would still collect, and a wider one would offer a command covering rules
+    /// this product does not own. Probe and remedy share the builders, so they cannot come to disagree.</para>
+    ///
+    /// <para>Affordable precisely HERE, in the one branch that by definition holds no privilege:
+    /// <c>Get-NetFirewallRule</c> needs no elevation — reads succeed under a restricted token where writes
+    /// return PermissionDenied — and this costs at most one bounded PowerShell round trip per surface, only on
+    /// a path <c>install-darling.ps1</c> cannot take, since it refuses to run unelevated at all.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static async Task<bool?> ProbeSurfaceRulesAsync(string wildcard, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var (exitCode, psOutput) = await DarlingManagedPostgres.RunPowerShellAsync(
+                DarlingFirewallCheck.BuildProbeCommand(wildcard), cancellationToken);
+
+            /* The probe exits 0 for BOTH answers, so a non-zero exit means the probe itself broke; do not read
+               a count out of a run that failed. Same reasoning as DarlingFirewallCheck.CheckAsync. */
+            return exitCode == 0 ? DarlingFirewallCheck.TryParseProbeOutput(psOutput) : null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            /* A missing or broken powershell.exe is "could not tell", never "no rule" — guessing absence would
+               manufacture a clean bill of health for a firewall this run never read. */
+            return null;
+        }
+    }
+
     /// <summary>
     /// Creates or removes every scoped Darling firewall rule so the live firewall matches darling.json.
     /// Requires elevation (that is the entire point of the verb) and is idempotent — safe to re-run on every
@@ -2970,7 +3616,15 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var plans = PlanFirewallRules(config);
+        /* #2414: ask the control plane which ports the MCP/web endpoints are actually bound to, because that —
+           not darling.json's seed — is what the rule has to be named for. BEST EFFORT on purpose. This verb is
+           called by install-darling.ps1 before the service has ever run, when there is no store to ask and
+           darling.json's port is the only truth there is (the store row is SEEDED from it), so requiring a
+           reachable store would fail every fresh install. What it must not do is fall back QUIETLY: the plan
+           carries a PortNote that names the port it used, why it could not do better, and what makes that port
+           wrong, printed below on the same footing as the rules themselves. */
+        var (mcpStore, webStore, storeUnavailable) = await TryReadEndpointTogglesAsync(config, cancellationToken);
+        var plans = PlanFirewallRules(config, mcpStore, webStore, storeUnavailable);
         var toOpen = plans.Count(p => p.Action == FirewallRuleAction.Open);
 
         output.WriteLine("Reconciling the scoped Windows Firewall rules to match darling.json.");
@@ -2979,26 +3633,116 @@ public static class DarlingCliCommands
             "running service only verifies them and reports what it finds.");
         output.WriteLine();
 
+        /* Print the port provenance BEFORE the not-elevated branch below, so the operator who is about to paste
+           these commands by hand can see which plane chose the ports baked into them. */
+        var portNotes = plans.Select(p => p.PortNote).Where(n => n is not null).ToList();
+        foreach (var note in portNotes)
+        {
+            output.WriteLine(note);
+        }
+
+        if (portNotes.Count > 0)
+        {
+            output.WriteLine();
+        }
+
         if (!IsElevated())
         {
             /* Not elevated. When nothing is exposed there is genuinely nothing to do and a hard failure would
                be a lie (and would fail an otherwise fine loopback install); when something IS exposed this is a
                real, actionable failure, so exit non-zero AND print every command to run by hand. */
-            if (toOpen == 0)
+            /* #2436: the per-surface notes, for EVERY plan and before either branch below. The elevated path
+               prints them as it works; this path used to print none at all, so the operator who most needs
+               them — the one who cannot act on them yet — was the one who never saw them. They are also the
+               only place a surface says it is fully LAN-configured and switched OFF, which is a state that did
+               not exist here before this change: "no rule is needed" would otherwise read as "your exposure
+               config did not take", and in the mixed case a disabled surface's stale rule would be dropped
+               silently while its exposed sibling got a command. */
+            foreach (var plan in plans.Where(p => p.Note is not null))
+            {
+                output.WriteLine($"{plan.Surface}: {plan.Note}.");
+            }
+
+            /* #2445: MEASURE the Remove half instead of guessing at it. This branch used to print a command
+               only for Open plans, so a run whose whole work was a removal said "nothing needs an open port",
+               exited 0, and left a stale inbound allow rule sitting there with nothing offered to close it.
+               #2436 made that shape ordinary rather than exotic — a surface is now a Remove when the control
+               plane has it switched OFF, so it covers an admin who just ran --disable-mcp and re-ran this verb
+               from a normal prompt.
+
+               The read-only probe is what makes all three behaviours honest at once, and it is affordable here
+               for a reason worth stating: Get-NetFirewallRule needs no elevation, so this branch could always
+               have looked and simply never did. Without it the only gate available is a proxy for "a rule might
+               exist", which would print sweep commands on every default loopback install and STILL miss a stale
+               rule on a surface that has no note. With it, a clean box prints nothing extra and exits 0 exactly
+               as before, and a box with a stale rule gets that rule's own sweep command and a non-zero exit.
+               Only the Remove plans that are permitted to sweep are probed, so the cost is at most one bounded
+               PowerShell round trip per such surface, on a path install-darling.ps1 cannot reach — it fails
+               outright when not elevated, so the re-run banner this could have fired is not on that path. */
+            var handoffs = new List<(FirewallRulePlan Plan, FirewallHandoff Handoff)>();
+            foreach (var plan in plans)
+            {
+                bool? rulesFound = null;
+                if (plan.Action == FirewallRuleAction.Remove && plan.SweepOtherPorts)
+                {
+                    rulesFound = await ProbeSurfaceRulesAsync(
+                        DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName), cancellationToken);
+                }
+
+                handoffs.Add((plan, ClassifyNotElevatedHandoff(plan.Action, plan.SweepOtherPorts, rulesFound)));
+            }
+
+            if (handoffs.All(h => h.Handoff == FirewallHandoff.Nothing))
             {
                 output.WriteLine(
-                    "Every endpoint is loopback-only, so no firewall rule is needed and none was changed. " +
-                    "(This shell is not elevated, but there was nothing to do.)");
+                    "No endpoint wants an open port, and no scoped Darling rule is open that should not be, so " +
+                    "there is nothing for an elevated shell to do. (This shell is not elevated, but reading the " +
+                    "firewall does not need elevation — so that is measured, not assumed.)");
                 return 0;
             }
 
+            var hasWork = NotElevatedRunHasWork(handoffs.Select(h => h.Handoff));
+
             error.WriteLine("This shell is not elevated, so NO firewall rule was changed. Run these in an ELEVATED PowerShell:");
-            foreach (var plan in plans.Where(p => p.Action == FirewallRuleAction.Open))
+            foreach (var (plan, handoff) in handoffs)
             {
-                error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
+                switch (handoff)
+                {
+                    case FirewallHandoff.OpenCommand:
+                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
+                        break;
+
+                    /* The same builder and the same wildcard the elevated path would have used, so the command
+                       an operator pastes and the command the verb runs cannot drift apart. */
+                    case FirewallHandoff.SweepCommand:
+                        error.WriteLine(
+                            $"  # {plan.Surface}: a scoped rule is open on this surface and none belongs on any port.");
+                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
+                            DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName)));
+                        break;
+
+                    case FirewallHandoff.SweepCommandUnverified:
+                        error.WriteLine(
+                            $"  # {plan.Surface}: the read-only rule probe gave no usable answer, so this may be a no-op.");
+                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
+                            DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName)));
+                        break;
+
+                    case FirewallHandoff.Nothing:
+                    default:
+                        break;
+                }
             }
 
-            return 1;
+            if (!hasWork)
+            {
+                error.WriteLine(
+                    "Returning 0: nothing above is CONFIRMED work. The read-only probe could not answer for at " +
+                    "least one surface, so those commands are offered as a precaution — and a non-zero exit is a " +
+                    "claim about the firewall, which this run has no measurement to support.");
+            }
+
+            return hasWork ? 1 : 0;
         }
 
         var failures = 0;
@@ -3013,17 +3757,43 @@ public static class DarlingCliCommands
                name, so changing a port does not update a rule — it makes a different one and strands the old as
                an inbound allow rule on a port nothing serves. Reconciling by exact name could never reach that.
                Its own step, not concatenated ahead of the open below, because the sweep command ends in exit 0
-               and would otherwise terminate the shell before the rule was created. */
+               and would otherwise terminate the shell before the rule was created.
+
+               #2436: and the sweep's authority to remove OTHER ports comes from knowing which port is live. On
+               an Open plan whose port fell back to darling.json's seed because the store could not answer, that
+               is precisely the knowledge missing — a rule on another port is as likely to be the one the
+               endpoint is being served on as it is to be stale, and removing it turns the elevated verb an
+               operator was told to run into an outage of the surface it was meant to repair. That is not
+               hypothetical: install-darling.ps1 runs this verb with the service STOPPED, so on an upgrade of a
+               box whose port was moved in the Viewer it is the working rule that matched the wildcard. The
+               enable command below removes its own exact DisplayName first, so declining the sweep costs
+               nothing in idempotence — it defers the cleanup to a run that can see the control plane, which is
+               what the installer's post-start reconcile is for. */
             var wildcard = DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName);
-            if (!await TryRunFirewallStepAsync(
-                DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard),
-                plan.Action == FirewallRuleAction.Remove
-                    ? $"{plan.Surface}: loopback-only — no rule needed (removed any '{wildcard}')."
-                    : $"{plan.Surface}: cleared any previous rule matching '{wildcard}'.",
-                $"{plan.Surface}: could not remove the rule(s) matching '{wildcard}'",
-                output, error, cancellationToken))
+            if (plan.SweepOtherPorts)
             {
-                failures++;
+                if (!await TryRunFirewallStepAsync(
+                    DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard),
+                    plan.Action == FirewallRuleAction.Remove
+                        ? $"{plan.Surface}: no rule belongs on any port (removed any '{wildcard}')."
+                        : $"{plan.Surface}: cleared any previous rule matching '{wildcard}'.",
+                    $"{plan.Surface}: could not remove the rule(s) matching '{wildcard}'",
+                    output, error, cancellationToken))
+                {
+                    failures++;
+                }
+            }
+            else
+            {
+                output.WriteLine(plan.Action == FirewallRuleAction.Open
+                    ? $"{plan.Surface}: leaving any rule on ANOTHER port alone. This run could not read the control " +
+                      "plane, so it cannot tell a rule stranded by a port change from the rule the endpoint is " +
+                      "actually being served on — re-run --configure-firewall with the service up to collect it."
+                    : $"{plan.Surface}: leaving this surface's existing rules alone rather than removing them. " +
+                      "darling.json exposes this endpoint and says it is switched off, but the --enable-* verbs and " +
+                      "the Viewer write only the control plane, which this run could not read — so that off may be " +
+                      "stale and the rule may be the one the endpoint is being served on. Nothing is listening while " +
+                      "the service is stopped; re-run --configure-firewall with it up to reconcile.");
             }
 
             if (plan.Action == FirewallRuleAction.Remove)
@@ -3049,10 +3819,90 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        /* Not "every endpoint is loopback-only" any more: since #2436 a surface is also a Remove when it is
+           fully LAN-configured and the control plane has it switched OFF. That is the same misleading summary
+           #2442 fixed one branch up, and the per-surface lines above already carry the real reason. */
         output.WriteLine(toOpen == 0
-            ? "Done. Every endpoint is loopback-only, so no port was opened."
+            ? "Done. No endpoint wants an open port, so no port was opened."
             : $"Done. {toOpen} endpoint(s) exposed on the LAN; their scoped rules are in place.");
         return 0;
+    }
+
+    /// <summary>
+    /// BEST-EFFORT read of the control plane's effective endpoint toggles for <c>--configure-firewall</c> (#2414).
+    /// Returns nulls plus a human reason on every failure and NEVER throws except on caller cancellation.
+    ///
+    /// <para><b>Why best-effort and not required.</b> Every other consumer of these values runs inside the
+    /// service, where the store is a precondition. This verb is the opposite: install-darling.ps1 calls it while
+    /// elevated, before the service has ever started, on a box where <c>config.config_service</c> does not exist
+    /// yet — and it is correct there, because the store row is SEEDED from darling.json's ports, so at that moment
+    /// the file IS the control plane's future answer. Refusing would fail every fresh networked install to close a
+    /// window in which the file cannot be wrong.</para>
+    ///
+    /// <para><b>Why it must still say so.</b> The same fallback on a box whose port HAS been moved in the Viewer is
+    /// the whole of #2414: a rule for a port nothing serves, recreated on every run of the verb that is supposed to
+    /// fix it. So the reason travels back with the nulls and is printed, rather than being swallowed into a silent
+    /// default. Bounded to ten seconds because "the store is down" and "the store is slow" must not differ in how
+    /// long an installer hangs.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static async Task<((bool Enabled, int Port)? Mcp, (bool Enabled, int Port)? Web, string? Unavailable)>
+        TryReadEndpointTogglesAsync(DarlingConfig config, CancellationToken cancellationToken)
+    {
+        var postgres = config.Postgres;
+        if (postgres is null || !postgres.Managed)
+        {
+            /* BYO: config_service lives in the operator's own PostgreSQL and this verb holds no credential for it.
+               Harmless in practice — LAN exposure for MCP/web is managed-mode only, so both surfaces plan Remove,
+               which sweeps every port and needs no port at all. */
+            return (null, null,
+                "postgres.managed is false, so config.config_service lives in YOUR PostgreSQL and this verb has no credential for it");
+        }
+
+        string? connectionString;
+        try
+        {
+            connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
+        }
+        catch (Exception ex)
+        {
+            return (null, null, $"the stored store credential could not be read ({ex.Message})");
+        }
+
+        if (connectionString is null)
+        {
+            return (null, null,
+                "the service has not initialized the managed store yet, so there is no owner credential to read it with");
+        }
+
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync(budget.Token);
+            await using var command = new NpgsqlCommand(ReadEndpointTogglesSql, connection);
+            await using var reader = await command.ExecuteReaderAsync(budget.Token);
+            if (!await reader.ReadAsync(budget.Token))
+            {
+                return (null, null, "config.config_service has no id = 1 row yet — the service has never seeded the store");
+            }
+
+            return ((reader.GetBoolean(0), reader.GetInt32(1)), (reader.GetBoolean(2), reader.GetInt32(3)), null);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return (null, null, "the store did not answer within 10 seconds");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (null, null, $"the store did not answer ({ex.Message})");
+        }
     }
 
     /// <summary>Runs one reconcile step and reports it. Returns false on failure, after printing the exact

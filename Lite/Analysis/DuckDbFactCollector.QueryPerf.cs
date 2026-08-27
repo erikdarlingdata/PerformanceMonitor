@@ -20,9 +20,9 @@ public partial class DuckDbFactCollector
     {
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -42,8 +42,8 @@ AND   delta_execution_count > 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var totalSpills = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             var highDopQueries = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
@@ -85,7 +85,10 @@ AND   delta_execution_count > 0";
                 });
             }
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     /// <summary>
@@ -99,9 +102,9 @@ AND   delta_execution_count > 0";
     {
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -157,8 +160,8 @@ LIMIT 20";
             var worstGrantRatio = 0.0;
             var worstSpillDivergence = 0;
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 // Rows arrive ordered by worker_ratio DESC — the first row is the worst offender.
                 if (offenderCount == 0)
@@ -192,7 +195,10 @@ LIMIT 20";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     /// <summary>
@@ -207,9 +213,9 @@ LIMIT 20";
     {
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -370,8 +376,8 @@ LIMIT 20";
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 // Rows arrive ordered by regression_factor DESC — the first row is the worst offender.
                 if (offenderCount == 0)
@@ -415,7 +421,10 @@ LIMIT 20";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     /// <summary>
@@ -425,9 +434,9 @@ LIMIT 20";
     {
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -447,8 +456,8 @@ AND   delta_execution_count > 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var distinctProcs = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             var totalExecs = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
@@ -475,7 +484,10 @@ AND   delta_execution_count > 0";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     /// <summary>
@@ -491,10 +503,10 @@ AND   delta_execution_count > 0";
         {
             var planXmls = new List<string>();
 
-            using (var readLock = _duckDb.AcquireReadLock())
+            using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
             using (var connection = _duckDb.CreateConnection())
             {
-                await connection.OpenAsync();
+                await connection.OpenAsync(context.CancellationToken);
 
                 using var command = connection.CreateCommand();
                 command.CommandText = @"
@@ -510,8 +522,8 @@ LIMIT 10";
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-                using var reader = await command.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
                 {
                     if (!reader.IsDBNull(0))
                         planXmls.Add(reader.GetString(0));
@@ -556,9 +568,10 @@ LIMIT 10";
                 });
             }
         }
-        catch
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             // query_stats / plan parse may be unavailable — skip, the advisory is best-effort.
+            // An abandonment is NOT swallowed here (#2443).
         }
     }
 

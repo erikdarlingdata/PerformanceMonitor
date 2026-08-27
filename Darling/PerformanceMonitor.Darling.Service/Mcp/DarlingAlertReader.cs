@@ -52,26 +52,32 @@ internal static class DarlingAlertReader
     muted,
     detail_text";
 
-    /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 server_id,
-    /// $3 limit (naive UTC / int / int).</summary>
+    /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
+    /// end, $3 server_id, $4 limit (naive UTC / naive UTC / int / int).
+    ///
+    /// <para>The upper edge is bounded rather than open (#2495): the row cap is applied by the database, so
+    /// trimming after the read would spend the whole LIMIT on rows newer than the anchor and hand back an
+    /// empty window that looks like a quiet one.</para></summary>
     public const string AlertHistorySql = @"
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log
 WHERE alert_time >= $1
-AND   server_id = $2
+AND   alert_time <= $2
+AND   server_id = $3
 AND   dismissed = FALSE
 ORDER BY alert_time DESC
-LIMIT $3";
+LIMIT $4";
 
     /// <summary>All-servers alert history (the fleet default) — the viewer's <c>AlertHistoryAllServersSql</c>.
-    /// $1 window start, $2 limit (naive UTC / int).</summary>
+    /// $1 window start, $2 window end, $3 limit (naive UTC / naive UTC / int).</summary>
     public const string AlertHistoryAllServersSql = @"
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log
 WHERE alert_time >= $1
+AND   alert_time <= $2
 AND   dismissed = FALSE
 ORDER BY alert_time DESC
-LIMIT $2";
+LIMIT $3";
 
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History read. With no
@@ -79,12 +85,13 @@ LIMIT $2";
     /// server. Mirrors the viewer's optional-serverId <c>GetAlertHistoryAsync</c>.
     /// </summary>
     public static async Task<List<AlertHistoryReadRow>> GetAlertHistoryAsync(
-        NpgsqlDataSource postgres, DateTime sinceUtc, int? serverId, int limit, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, CancellationToken cancellationToken = default)
     {
         var rows = new List<AlertHistoryReadRow>();
 
         await using var command = postgres.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
         DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
         if (serverId.HasValue)
         {
             DarlingMcpReadParameters.AddInt(command, serverId.Value);
@@ -144,10 +151,16 @@ LIMIT $2";
         int DiskCriticalFreePercent,
         int DiskCriticalFreeGb,
         int AnalysisNotifyCooldownMinutes,
-        int StoreJobCadenceWarnPercent);
+        int StoreJobCadenceWarnPercent,
+        /* #2391 (V79, #2349's knobs): APPENDED, never inserted — every field above is positional and read
+           by ordinal, so placing these anywhere but the end would silently re-map all of them. */
+        bool FileGrowthEnabled,
+        int FileGrowthRiseMb,
+        int FileGrowthVolumePercent,
+        int FileGrowthLookbackMinutes);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
-    /// 47 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>). This had
+    /// 58 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>). This had
     /// stopped at 36, so <c>get_alert_settings</c> reported a store whose newest five knobs did not exist:
     /// an MCP client could not see the V33 connection opt-ins or the V35 Availability Group family at all.</summary>
     public const string AlertSettingsSelectSql = @"
@@ -167,7 +180,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        pvs_floor_gb, database_state_enabled,
        self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
        disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
-       store_job_cadence_warn_percent
+       store_job_cadence_warn_percent,
+       file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -205,6 +219,8 @@ WHERE id = 1";
             /* #2107 threshold knobs (V55) at 47–52; #2136 cadence-warn knob (V57) at 53. */
             reader.GetInt32(47), reader.GetInt32(48), reader.GetInt32(49),
             reader.GetInt32(50), reader.GetInt32(51), reader.GetInt32(52),
-            reader.GetInt32(53));
+            reader.GetInt32(53),
+            /* #2391: V79 file-growth knobs at 54–57. */
+            reader.GetBoolean(54), reader.GetInt32(55), reader.GetInt32(56), reader.GetInt32(57));
     }
 }

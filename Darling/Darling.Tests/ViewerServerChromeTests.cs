@@ -68,17 +68,21 @@ public sealed class ViewerServerChromeTests
     }
 
     [Fact]
-    public void ApplyFreshness_NeverCollected_IsUnknownDot_NotOffline()
+    public void ApplyFreshness_NeverCollected_IsAwaitingFirstCollection_NotOffline()
     {
-        /* Never-collected = the service hasn't reached the server yet (bootstrap). The sidebar dot
-           goes grey Unknown, never the red Offline — a queued server is not a dead one (24-server
-           field incident, 2026-07-17). */
+        /* Never-collected = the service hasn't reached the server yet (bootstrap). Never the red Offline —
+           a queued server is not a dead one (24-server field incident, 2026-07-17).
+
+           This asserted the grey "Unknown" dot until #2473, and the assertion was the defect written down:
+           the Overview card said amber "Awaiting first collection" for the same server, off the same
+           freshness call, one panel over. The dot now says what the card says. */
         var server = Server();
 
         server.ApplyFreshness(null, DateTime.UtcNow);
 
         Assert.Null(server.IsOnline);
-        Assert.Equal("Unknown", server.DotStatus);
+        Assert.True(server.AwaitingFirstCollection);
+        Assert.Equal("Awaiting first collection", server.DotStatus);
     }
 
     [Fact]

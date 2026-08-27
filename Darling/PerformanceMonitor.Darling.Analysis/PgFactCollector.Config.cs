@@ -49,7 +49,7 @@ WHERE rn = 1";
     /// </summary>
     private async Task CollectServerConfigFactsAsync(AnalysisContext context, List<Fact> facts)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(ServerConfigSql, connection);
         cmd.Parameters.AddWithValue(context.ServerId);
@@ -59,9 +59,9 @@ WHERE rn = 1";
         double? maxMemoryMb = null;
         double? minMemoryMb = null;
 
-        using (var reader = await cmd.ExecuteReaderAsync())
+        using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
         {
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 var configName = reader.GetString(0);
                 var value = Convert.ToDouble(reader.GetValue(1));
@@ -120,13 +120,13 @@ LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ServerMetadataSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var edition = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
             var majorVersion = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
@@ -136,7 +136,10 @@ LIMIT 1";
             if (majorVersion > 0)
                 facts.Add(new Fact { Source = "config", Key = "SERVER_MAJOR_VERSION", Value = majorVersion, ServerId = context.ServerId });
         }
-        catch { /* Columns may not exist yet (pre-migration) */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Columns may not exist yet (pre-migration). An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string DatabaseConfigSql = @"
@@ -171,13 +174,13 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(DatabaseConfigSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var dbCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             if (dbCount == 0) return;
@@ -213,7 +216,10 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string TraceFlagsSql = @"
@@ -235,16 +241,16 @@ ORDER BY trace_flag";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(TraceFlagsSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
 
-            using var reader = await cmd.ExecuteReaderAsync();
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             var metadata = new Dictionary<string, double>();
             var flagCount = 0;
 
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 var flag = Convert.ToInt32(reader.GetValue(0));
                 metadata[$"TF_{flag}"] = 1;
@@ -264,7 +270,10 @@ ORDER BY trace_flag";
                 Metadata = metadata
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string ServerPropertiesSql = @"
@@ -284,13 +293,13 @@ LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ServerPropertiesSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var cpuCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
             var htRatio = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
@@ -327,7 +336,10 @@ LIMIT 1";
             // score 0 is simply never emitted (noise control).
             FactCollectorHelpers.EmitServerHealthFacts(context, facts, edition, physicalMemMb, lpim, ifi, dumpCount);
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
 }

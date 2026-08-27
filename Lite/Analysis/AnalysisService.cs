@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -76,9 +77,26 @@ public class AnalysisService
     /// Runs the full analysis pipeline for a server.
     /// Default time range is the last 4 hours.
     /// </summary>
-    public async Task<List<AnalysisFinding>> AnalyzeAsync(int serverId, string serverName, int hoursBack = 4)
+    /// <param name="cancellationToken">#2412: abandons the pass at the scheduler's per-server
+    /// budget (and at app shutdown). Optional so the on-demand callers — the Recommendations tab
+    /// and the MCP tool, neither of which has a budget to enforce — keep the prior behavior. The
+    /// argument order matches the Darling twin's AnalyzeAsync so the two stay transplantable.</param>
+    /// <param name="asOfUtc">#2506: moves the END of the window off "now" while
+    /// <paramref name="hoursBack"/> stays its LENGTH, so an incident can be analyzed where it happened.
+    /// Null — every caller but the anchored MCP tool — is the pre-#2506 behaviour exactly. Anchoring
+    /// reaches the whole pipeline through the context, including the anomaly detector's hour-of-day ×
+    /// day-of-week baseline, which is keyed off the window rather than off the clock. An anchored pass
+    /// does not persist — see <see cref="AnalysisContext.PersistFindings"/>.</param>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
+        Justification = "The token is at position 4 and the scheduler passes it POSITIONALLY. Moving asOfUtc ahead " +
+                        "of it to satisfy the rule would silently rebind that call site's arguments — a compiling " +
+                        "change of meaning on the one caller that matters. Appending is the only edit that cannot " +
+                        "do that, and the Darling twin keeps the same order so the two stay transplantable.")]
+    public async Task<List<AnalysisFinding>> AnalyzeAsync(
+        int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default,
+        DateTime? asOfUtc = null)
     {
-        var timeRangeEnd = DateTime.UtcNow;
+        var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
         var context = new AnalysisContext
@@ -86,7 +104,9 @@ public class AnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
-            TimeRangeEnd = timeRangeEnd
+            TimeRangeEnd = timeRangeEnd,
+            AsOfUtc = asOfUtc,
+            CancellationToken = cancellationToken
         };
 
         return await AnalyzeAsync(context);
@@ -105,9 +125,20 @@ public class AnalysisService
 
         try
         {
+            /* #2412: a checkpoint ahead of every store-touching stage, so the rule is simply that
+               no store read STARTS after the budget has gone. One check at the top of the method
+               would not deliver that — each stage below is a many-query phase, and a cancelled
+               pass would run out whichever one it was already inside. This first checkpoint earns
+               its place even though the read below is a single scalar: an already-cancelled
+               context arrives here whenever the budget is very short or the pass queued behind a
+               wedged server, and it should not buy a round-trip. The post-enrichment tail (action
+               build + insert) carries no check on purpose — by then the expensive work is paid
+               for and finishing is what preserves it. */
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
-            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId);
+            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.CancellationToken);
             if (dataSpanHours < MinimumDataHours)
             {
                 var needed = MinimumDataHours >= 24
@@ -128,6 +159,8 @@ public class AnalysisService
                 return [];
             }
 
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             // 1. Collect facts from DuckDB
             var facts = await _collector.CollectFactsAsync(context);
 
@@ -136,6 +169,8 @@ public class AnalysisService
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
             }
+
+            context.CancellationToken.ThrowIfCancellationRequested();
 
             // 1.5. Detect anomalies (compare analysis window against baseline)
             var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
@@ -167,10 +202,14 @@ public class AnalysisService
             // dropped, only the incident tag is reconciled.
             AnomalyIncidentReconciler.Reconcile(stories);
 
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             // 4. Mute-filter the stories into the surviving findings WITHOUT inserting yet (the
             //    Darling twin's D2/P2 reorder) — enrichment + action-build happen on the survivors
             //    first so the BUILT RemediationAction is persisted on each row.
             var findings = await _findingStore.FilterMutedFindingsAsync(stories, context);
+
+            context.CancellationToken.ThrowIfCancellationRequested();
 
             // 5. Enrich the survivors with drill-down data (ephemeral except through the built action).
             await _drillDown.EnrichFindingsAsync(findings, context);
@@ -193,25 +232,60 @@ public class AnalysisService
                     ?? FactRemediation.BuildMissingIndexAction(finding);  // missing-index CREATE — copy-paste only
             }
 
-            // 7. Insert the survivors in one batched pass, persisting remediation_action_json.
-            await _findingStore.InsertFindingsAsync(findings, context);
+            // 7. Insert the survivors in one batched pass, persisting remediation_action_json —
+            //    UNLESS the window was anchored at a past instant (#2506), in which case the pass is
+            //    exploratory and writes nothing. The findings are still built, enriched and returned in
+            //    full; only the row is withheld, because the row would claim to be a current
+            //    observation. AnalysisContext.PersistFindings carries the whole argument.
+            if (context.PersistFindings)
+            {
+                await _findingStore.InsertFindingsAsync(findings, context);
+            }
 
             LastAnalysisTime = DateTime.UtcNow;
 
-            // 8. Notify listeners
-            AnalysisCompleted?.Invoke(this, new AnalysisCompletedEventArgs
+            // 8. Notify listeners. Gated with the insert for the same reason and not a weaker one:
+            //    this event is how findings reach notification, and an alert about last Tuesday
+            //    delivered today is the persistence problem with a shorter fuse.
+            if (context.PersistFindings)
             {
-                ServerId = context.ServerId,
-                ServerName = context.ServerName,
-                Findings = findings,
-                AnalysisTime = LastAnalysisTime.Value
-            });
+                AnalysisCompleted?.Invoke(this, new AnalysisCompletedEventArgs
+                {
+                    ServerId = context.ServerId,
+                    ServerName = context.ServerName,
+                    Findings = findings,
+                    AnalysisTime = LastAnalysisTime.Value
+                });
+            }
 
             AppLogger.Info("AnalysisService",
                 $"Analysis complete for {context.ServerName}: {findings.Count} finding(s), " +
-                $"highest severity {(findings.Count > 0 ? findings.Max(f => f.Severity) : 0):F2}");
+                $"highest severity {(findings.Count > 0 ? findings.Max(f => f.Severity) : 0):F2}" +
+                (context.PersistFindings ? string.Empty : " (anchored window — exploratory, not persisted)"));
 
             return findings;
+        }
+        catch (Exception ex) when (AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            /* #2443: the predicate moved to AnalysisAbandon.IsExpected, unchanged — signalled token
+               AND OperationCanceledException — because the store layer now needs the same judgement
+               at forty-odd catch sites, and two copies of it would drift. */
+            /* #2412: the pass was abandoned because it outlived its budget (or the app is
+               stopping), which is not a fault and must not read as one. Whatever this pass would
+               have written is gone; the next scheduled pass recomputes it from the store.
+
+               Both halves of the filter are load-bearing, and the TYPE half especially so here.
+               This token fires on TIMEOUT as well as at shutdown, so it is signalled during
+               ordinary running — a blanket `Exception` filter would relabel any genuine fault
+               that happened to land after the budget elapsed as abandonment and drop it to Info,
+               burying the one line of evidence it left. OperationCanceledException is what the
+               checkpoints throw, and what DuckDB's own duckdb_interrupt surfaces, so nothing the
+               cancellation actually produces is lost by naming it. This is the Darling twin's
+               AnalysisShutdown.IsExpectedAbandon discipline — signalled token AND a shape the
+               cancellation really produces — narrowed to the one shape that arises here. */
+            AppLogger.Info("AnalysisService",
+                $"Analysis abandoned for {context.ServerName} — this pass's findings are lost by design; the next pass recomputes them ({ex.Message})");
+            return [];
         }
         catch (Exception ex)
         {
@@ -227,10 +301,15 @@ public class AnalysisService
     /// <summary>
     /// Runs the collect + score pipeline without graph traversal.
     /// Returns raw scored facts with amplifier details for direct inspection.
+    ///
+    /// <para>#2506: <paramref name="asOfUtc"/> anchors the END of the window; null is "now", which is
+    /// every caller but the anchored MCP tool. Nothing here persists, so the anchor carries no
+    /// write-side question — this is a read that happens to score what it read.</para>
     /// </summary>
-    public async Task<List<Fact>> CollectAndScoreFactsAsync(int serverId, string serverName, int hoursBack = 4)
+    public async Task<List<Fact>> CollectAndScoreFactsAsync(
+        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null)
     {
-        var timeRangeEnd = DateTime.UtcNow;
+        var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
         var context = new AnalysisContext
@@ -238,7 +317,8 @@ public class AnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
-            TimeRangeEnd = timeRangeEnd
+            TimeRangeEnd = timeRangeEnd,
+            AsOfUtc = asOfUtc
         };
 
         try
@@ -308,10 +388,16 @@ public class AnalysisService
     /// Gets recent findings for a server within the given time range. The MCP findings read
     /// passes <see cref="FindingOccurrences.WindowCoveringLimit"/> so its occurrence stats cover
     /// the whole window; the store's default 100 stays for everyone else.
+    ///
+    /// <para>#2506: <paramref name="asOfUtc"/> anchors the window's END. This one is a pure read of
+    /// rows the SCHEDULED passes already wrote, so anchoring it asks "what did analysis say about this
+    /// server at the time" — the only way to see findings the retention sweep has not yet reached but
+    /// the default 24-hour window has scrolled past.</para>
     /// </summary>
-    public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(int serverId, int hoursBack = 24, int limit = 100)
+    public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
     {
-        return await _findingStore.GetRecentFindingsAsync(serverId, hoursBack, limit);
+        return await _findingStore.GetRecentFindingsAsync(serverId, hoursBack, limit, asOfUtc);
     }
 
     /// <summary>
@@ -339,13 +425,13 @@ public class AnalysisService
     /// </summary>
     /* Internal for AnalysisDataSpanTests (#1809): the span must survive an archive/reset, which is
        only observable with a real DuckDB + parquet fixture. */
-    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId)
+    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
     {
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(cancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -355,14 +441,18 @@ WHERE server_id = $1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
 
-            var result = await cmd.ExecuteScalarAsync();
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result == null || result is DBNull)
                 return 0;
 
             return Convert.ToDouble(result);
         }
-        catch
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {
+            /* A probe failure reads as "no data yet" — EXCEPT an abandonment, which must not be
+               allowed to masquerade as a 0-hour history (#2443). That would turn a cancelled pass
+               into an insufficient-data SKIP, which is a different and far calmer-looking answer
+               than the one the caller is about to log. */
             return 0;
         }
     }

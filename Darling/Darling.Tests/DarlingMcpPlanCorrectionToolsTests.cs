@@ -58,7 +58,7 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
             .Select(p => (p.Name, p.HasDefaultValue))
             .ToArray();
 
-        Assert.Equal(new[] { "server_name", "hours_back", "limit" }, mcpParams.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "server_name", "hours_back", "limit", "as_of" }, mcpParams.Select(p => p.Name).ToArray());
         Assert.True(mcpParams.Single(p => p.Name == "server_name").HasDefaultValue, "server_name must be optional");
     }
 

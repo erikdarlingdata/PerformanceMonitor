@@ -70,13 +70,13 @@ ORDER BY collection_time";
     /// The Plan Cache latest-snapshot composition grid: every (cacheobjtype, objtype) group captured at
     /// the most recent collection in the window, ordered by total cache size then plan count, capped at 30.
     /// </summary>
-    public async Task<List<PlanCacheSnapshotRow>> GetPlanCacheSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<PlanCacheSnapshotRow>> GetPlanCacheSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetPlanCacheSnapshotAsync", "v_plan_cache_stats latest composition");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH latest AS
@@ -138,13 +138,13 @@ LIMIT 30";
     /// the window. Computed independently of the top-30 grid so "Total Plans" is exact even when the grid
     /// is capped. An aggregate with no GROUP BY always returns one row, so an empty window yields (0,0,null).
     /// </summary>
-    public async Task<PlanCacheSummary> GetPlanCacheSummaryAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<PlanCacheSummary> GetPlanCacheSummaryAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetPlanCacheSummaryAsync", "v_plan_cache_stats summary totals");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH latest AS

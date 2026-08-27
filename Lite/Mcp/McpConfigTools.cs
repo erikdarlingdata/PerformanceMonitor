@@ -22,9 +22,10 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestServerConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No server configuration data available. The config collector may not have run yet.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_config")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No server configuration data available. The config collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
@@ -61,9 +62,10 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestDatabaseConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No database configuration data available. The config collector may not have run yet.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_config")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No database configuration data available. The config collector may not have run yet.");
 
             IEnumerable<DatabaseConfigRow> filtered = rows;
             if (!string.IsNullOrEmpty(database_name))
@@ -120,9 +122,10 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestDatabaseScopedConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No database-scoped configuration data available. The config collector may not have run yet.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_scoped_config")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No database-scoped configuration data available. The config collector may not have run yet.");
 
             IEnumerable<DatabaseScopedConfigRow> filtered = rows;
             if (!string.IsNullOrEmpty(database_name))
@@ -168,9 +171,10 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestQueryStoreHealthAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store_health")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
 
             IEnumerable<QueryStoreHealthRow> filtered = rows;
             if (!string.IsNullOrEmpty(database_name))
@@ -220,7 +224,8 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestTraceFlagsAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No trace flags found (none enabled, or the config collector has not run yet).");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "trace_flags")
+                    ?? McpHelpers.Status("empty", "No trace flags found (none enabled, or the config collector has not run yet).");
 
             return JsonSerializer.Serialize(new
             {

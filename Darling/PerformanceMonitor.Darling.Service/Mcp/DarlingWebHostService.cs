@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Net;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -48,7 +49,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// cookie or a valid <c>?token=</c> (constant-time), which is exchanged for an HMAC-signed HttpOnly
 /// SameSite=Strict cookie and 302-redirected to strip the token from the URL; out-of-CIDR is 403; no
 /// cookie/token gets a minimal inline login form. The cookie signing key is a per-process 32-byte RNG value,
-/// so a restart invalidates sessions (acceptable). No TLS (the same reverse-proxy story as MCP).</para>
+/// so a restart invalidates sessions (acceptable).</para>
+///
+/// <para><b>TLS (#2562):</b> opt-in via <c>web.network.tls</c> and applied to the NETWORK listener only — see
+/// <see cref="Hosting.DarlingWebTls"/> for the certificate rules and the Kestrel bind below for why the
+/// loopback listeners stay plain HTTP. Without it the exposed listener is plain HTTP and every start warns
+/// that the token and its cookie cross the segment in the clear. A certificate that is missing, unreadable,
+/// ambiguous or expired fail-closes to loopback-only exactly as an undecryptable token does; it never
+/// downgrades to serving the LAN over HTTP.</para>
 ///
 /// <para>The dashboard connects to the store as the least-privilege VIEWER role (not owner, not mcp) — a
 /// read-only pool. Static assets ship from <c>wwwroot</c> (a csproj Content copy) with the content root AND
@@ -61,6 +69,14 @@ public sealed class DarlingWebHostService : BackgroundService
     private readonly WebRuntimeState _state;
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
+
+    /// <summary>The TLS certificate the current network listener presents — the leaf AND the intermediates
+    /// that travel with it (#2562) — held for its lifetime. Disposal is not bookkeeping: on Windows the
+    /// private key is loaded with <c>MachineKeySet</c> and no <c>PersistKeySet</c>, so disposing is what
+    /// REMOVES the key material from the machine key store. A rebind that leaked it would accumulate a key
+    /// per restart.</summary>
+    private DarlingWebTls.LoadedCertificate? _serverCertificate;
+
     private int _runningPort;
 
     /// <summary>How often the supervisor re-reads the live control-plane state (#1562, mirrors the MCP host).</summary>
@@ -117,6 +133,9 @@ public sealed class DarlingWebHostService : BackgroundService
            lifetime exactly as before (the network exposure block is restart-only by design). */
         DarlingConfig? config = null;
         var lastFailedStartUtc = DateTime.MinValue;
+        /* #2389: the last control-plane-override report emitted, so a steady disagreement is stated once per
+           distinct state instead of on every 5s poll tick. */
+        string? lastOverrideReport = null;
         while (!stoppingToken.IsCancellationRequested)
         {
             if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
@@ -149,13 +168,28 @@ public sealed class DarlingWebHostService : BackgroundService
             }
 
             var published = _state.Read();
-            var enabled = published?.Enabled ?? config.Web.Enabled;
-            var desiredPort = published?.Port ?? config.Web.Port;
 
-            switch (DecideWebAction(_app is not null, _runningPort, enabled, desiredPort))
+            /* #2389: the store still wins whenever the worker has published (unchanged), but the resolution
+               now carries WHICH plane supplied each value — the MCP host's twin, sharing one resolver so the
+               two surfaces cannot drift. */
+            var toggle = DarlingHostBinding.ResolveEndpointToggle(
+                published is null ? null : (published.Enabled, published.Port), config.Web.Enabled, config.Web.Port);
+
+            /* Report the DISAGREEMENT at the point of override, once per distinct state, so a file edit that
+               the control plane is quietly ignoring says so instead of presenting as a successful start. */
+            var overrideReport = DarlingHostBinding.DescribeToggleOverride(
+                toggle, "web", "Web dashboard", config.Web.Enabled, config.Web.Port);
+            if (overrideReport is not null && !string.Equals(overrideReport, lastOverrideReport, StringComparison.Ordinal))
+            {
+                _logger.LogWarning("{Report}", overrideReport);
+            }
+
+            lastOverrideReport = overrideReport;
+
+            switch (DecideWebAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
             {
                 case WebSupervisorAction.Start when DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff:
-                    if (!await TryStartServerAsync(config, desiredPort, stoppingToken))
+                    if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
                     }
@@ -168,9 +202,9 @@ public sealed class DarlingWebHostService : BackgroundService
 
                 case WebSupervisorAction.Restart:
                     _logger.LogInformation(
-                        "Web dashboard port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, desiredPort);
+                        "Web dashboard port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, toggle.Port);
                     await StopServerAsync(stoppingToken);
-                    if (!await TryStartServerAsync(config, desiredPort, stoppingToken))
+                    if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
                     }
@@ -218,6 +252,9 @@ public sealed class DarlingWebHostService : BackgroundService
             _appDataSource = null;
         }
 
+        _serverCertificate?.Dispose();
+        _serverCertificate = null;
+
         _runningPort = 0;
     }
 
@@ -235,6 +272,9 @@ public sealed class DarlingWebHostService : BackgroundService
             try { await _appDataSource.DisposeAsync(); } catch { /* best-effort */ }
             _appDataSource = null;
         }
+
+        try { _serverCertificate?.Dispose(); } catch { /* best-effort */ }
+        _serverCertificate = null;
     }
 
     /// <summary>
@@ -260,13 +300,18 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>
-    /// One start ATTEMPT of the inner web app at <paramref name="effectivePort"/>: the port comes from the live
+    /// One start ATTEMPT of the inner web app at <paramref name="toggle"/>'s port: the port comes from the live
     /// control-plane value, and every bail path returns false so the supervisor retries with backoff instead of
     /// standing down for the process lifetime. The bind/network/token decisions come from the FILE-loaded config
     /// (network exposure is deliberately restart-only); returns true when the app is started and listening.
+    /// <para>#2389: the toggle carries the enable/port PROVENANCE, not just the port, so the start line names
+    /// the plane each half of the bind came from.</para>
     /// </summary>
-    private async Task<bool> TryStartServerAsync(DarlingConfig config, int effectivePort, CancellationToken stoppingToken)
+    private async Task<bool> TryStartServerAsync(
+        DarlingConfig config, DarlingHostBinding.EndpointToggle toggle, CancellationToken stoppingToken)
     {
+        var effectivePort = toggle.Port;
+
         var web = config.Web;
         var network = web.Network;
 
@@ -318,6 +363,141 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             }
 
+            /* TLS for the network listener (#2562). Resolved HERE rather than in the pure ResolveBind ladder for
+               the same reason the token is: loading a certificate reads files and a clock, and the ladder is
+               kept free of both. It also means a certificate failure degrades exactly the way a token failure
+               does — Critical, then loopback-only — instead of needing its own BindReason, which the MCP host's
+               parallel enum would have had to grow a member it can never use. */
+            DarlingWebTls.LoadedCertificate? serverCertificate = null;
+            if (networkMode)
+            {
+                var plan = DarlingWebTls.Describe(network!.Tls);
+                switch (plan.Shape)
+                {
+                    case DarlingWebTls.TlsShape.NotConfigured:
+                        /* The pre-#2562 behaviour, still the default, and still the only thing a plain-HTTP
+                           reverse proxy in front of the port needs. Warn every start: the token and the cookie
+                           it mints are readable by anything on the segment, and that is easy not to notice
+                           precisely because the dashboard works perfectly. */
+                        _logger.LogWarning(
+                            "Web dashboard is LAN-exposed WITHOUT TLS — the access token and its session cookie cross the "
+                            + "segment in the clear, and web.network.allowFrom bounds only who can route to the port. "
+                            + "Configure web.network.tls (a PKCS#12 bundle or a PEM pair), or front the port with a "
+                            + "TLS-terminating reverse proxy.");
+                        break;
+
+                    case DarlingWebTls.TlsShape.Invalid:
+                        _logger.LogCritical(
+                            "Web dashboard TLS is misconfigured ({Problem}) — refusing to expose; binding loopback-only.",
+                            plan.Problem);
+                        networkMode = false;
+                        break;
+
+                    default:
+                        try
+                        {
+                            var loaded = DarlingWebTls.Load(network.Tls!, plan.Shape);
+                            var certificate = loaded.Leaf;
+
+                            if (plan.Warning is not null)
+                            {
+                                _logger.LogWarning("Web dashboard TLS: {Warning}", plan.Warning);
+                            }
+
+                            /* Lifetime is checked BEFORE the listener is built, not left to the handshake: an
+                               expired certificate takes the dashboard down either way, and this is the only
+                               place the reason reaches an operator's log.
+
+                               ToUniversalTime() is not decoration: X509Certificate2.NotBefore/NotAfter return
+                               LOCAL DateTimes, and while the implicit DateTime->DateTimeOffset conversion does
+                               carry the local offset and would compare correctly, it reads as a UTC value to
+                               everyone who follows. Convert where the trap is, not where it detonates. */
+                            var refusal = DarlingWebTls.LifetimeRefusal(
+                                certificate.NotBefore.ToUniversalTime(),
+                                certificate.NotAfter.ToUniversalTime(),
+                                DateTimeOffset.UtcNow);
+                            if (refusal is not null)
+                            {
+                                loaded.Dispose();
+                                _logger.LogCritical(
+                                    "Web dashboard TLS certificate cannot be used ({Refusal}) — refusing to expose; binding loopback-only.",
+                                    refusal);
+                                networkMode = false;
+                                break;
+                            }
+
+                            /* Adopted by the field IMMEDIATELY, before any of the bail paths below it (port in
+                               use, store credential not ready), so every one of them releases the key. */
+                            serverCertificate = loaded;
+                            _serverCertificate = loaded;
+
+                            /* The SAN has to name the IP, not a hostname, and that is a consequence of a
+                               control that lives two files away: the anti-DNS-rebind Host allowlist accepts
+                               only `localhost`, a loopback literal, or the configured listen IP, so a LAN
+                               client CANNOT reach this dashboard by DNS name — it is refused 400 before any
+                               route runs. An internal CA asked for "a certificate for darling.corp.local"
+                               issues exactly the certificate that can never match here, and the operator
+                               would learn that from a browser warning rather than from us.
+
+                               A warning, not a refusal: the dashboard genuinely works after a click-through,
+                               and taking it down over a name mismatch would be a worse outcome than saying so.
+                               Skipped on a wildcard bind, where there is no single address to match against.
+                               Reuses the store's own SAN reader rather than growing a second one. */
+                            if (!networkListenIp!.Equals(IPAddress.Any)
+                                && !networkListenIp.Equals(IPAddress.IPv6Any)
+                                && !DarlingManagedPostgres.CertificateSanCoversIp(certificate, networkListenIp))
+                            {
+                                /* One placeholder per argument, in order. A repeated {Listen} would read
+                                   naturally and throw at format time, which the surrounding catch would
+                                   report as "web dashboard failed to start". */
+                                _logger.LogWarning(
+                                    "Web dashboard TLS certificate carries no iPAddress SAN for {Listen} — every browser "
+                                    + "will report a name mismatch. The anti-DNS-rebind Host allowlist accepts only that "
+                                    + "literal IP or loopback in the Host header, so a LAN client has to browse to it by IP "
+                                    + "on port {Port} and a DNS-name-only certificate can never match. Reissue the "
+                                    + "certificate with an iPAddress SAN.",
+                                    networkListenIp, effectivePort);
+                            }
+
+                            var expiry = DarlingWebTls.ExpiryWarning(
+                                certificate.NotAfter.ToUniversalTime(), DateTimeOffset.UtcNow);
+                            if (expiry is not null)
+                            {
+                                _logger.LogWarning(
+                                    "Web dashboard TLS certificate {Expiry} — subject {Subject}, thumbprint {Thumbprint}. "
+                                    + "The dashboard stops serving when it lapses; renew it before then.",
+                                    expiry, certificate.Subject, certificate.Thumbprint);
+                            }
+                            else
+                            {
+                                _logger.LogInformation(
+                                    "Web dashboard TLS certificate loaded — subject {Subject}, thumbprint {Thumbprint}, expires {NotAfter:u}.",
+                                    certificate.Subject, certificate.Thumbprint, certificate.NotAfter.ToUniversalTime());
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            /* Release whatever was already adopted. Adoption happens BEFORE the SAN check and
+                               the expiry logging, and both of those still run inside this try — the SAN reader
+                               re-materializes an extension from raw DER and can throw on a malformed one. A
+                               throw there lands here holding a certificate the listener will never use, and
+                               this degrade RETURNS TRUE (loopback-only started fine), so the method's outer
+                               catch and DisposeFailedStartAsync never see it. Without these two lines the
+                               "every bail path releases the key" claim on _serverCertificate is false. */
+                            _serverCertificate?.Dispose();
+                            _serverCertificate = null;
+                            serverCertificate = null;
+
+                            _logger.LogCritical(
+                                "Web dashboard TLS certificate could not be loaded ({Message}) — refusing to expose; binding loopback-only.",
+                                ex.Message);
+                            networkMode = false;
+                        }
+
+                        break;
+                }
+            }
+
             /* The REAL primary bind address (network IP when exposed, else loopback): both the port precheck and
                the Kestrel bind use it, so the precheck probes the actual address, not always loopback. */
             var primaryBind = networkMode ? networkListenIp! : IPAddress.Loopback;
@@ -327,6 +507,7 @@ public sealed class DarlingWebHostService : BackgroundService
             if (await PortUtilityService.IsTcpPortListeningAsync(effectivePort, primaryBind, stoppingToken))
             {
                 _logger.LogError("Port {Port} is already in use — web dashboard not started this attempt; will retry", effectivePort);
+                await DisposeFailedStartAsync();
                 return false;
             }
 
@@ -348,12 +529,14 @@ public sealed class DarlingWebHostService : BackgroundService
                 if (!OperatingSystem.IsWindows())
                 {
                     _logger.LogError("Web dashboard not started: postgres.managed = true requires Windows");
+                    await DisposeFailedStartAsync();
                     return false;
                 }
 
                 storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);
                 if (storeConnectionString is null)
                 {
+                    await DisposeFailedStartAsync();
                     return false;
                 }
             }
@@ -375,23 +558,56 @@ public sealed class DarlingWebHostService : BackgroundService
                 WebRootPath = "wwwroot",
             });
 
+            var listenerCertificate = serverCertificate;
             builder.WebHost.ConfigureKestrel(options =>
             {
                 if (networkMode)
                 {
                     /* Bind the specific family, then ALSO both loopback families (unless the listen is itself
                        loopback/wildcard, which would collide) so a local client resolving "localhost" still
-                       reaches the dashboard (loopback stays tokenless). */
-                    options.Listen(primaryBind, effectivePort);
+                       reaches the dashboard. Loopback is exempt from the CIDR test only — since #1649 it
+                       authenticates like any other remote. */
+                    options.Listen(primaryBind, effectivePort, listen =>
+                    {
+                        if (listenerCertificate is not null)
+                        {
+                            /* ServerCertificateChain, not just ServerCertificate: Kestrel presents ONLY what
+                               it is handed, so an intermediate left out here is an incomplete chain and a
+                               failed handshake on every client that has not independently cached it. Measured
+                               against a real leaf+intermediate PEM before this was wired: the server sent one
+                               certificate. */
+                            listen.UseHttps(https =>
+                            {
+                                https.ServerCertificate = listenerCertificate.Value.Leaf;
+                                if (listenerCertificate.Value.Chain.Count > 0)
+                                {
+                                    https.ServerCertificateChain = listenerCertificate.Value.Chain;
+                                }
+                            });
+                        }
+                    });
+
                     if (DarlingHostBinding.ShouldAddLoopbackListeners(primaryBind))
                     {
+                        /* The loopback listeners stay PLAIN HTTP even when the network listener is TLS, and
+                           that is a decision rather than an oversight. The certificate names the LAN address
+                           the operator exposes; it almost never also names "localhost", so serving TLS here
+                           would hand the local browser a name-mismatch warning on the one surface that never
+                           leaves the machine. Nothing is lost: loopback traffic is not on the segment this
+                           feature protects. When the listen IS a wildcard, ShouldAddLoopbackListeners is false
+                           and the single listener is TLS for everyone — the operator asked for all interfaces.
+
+                           This is also the answer to "redirect or refuse" for the exposed address: one port
+                           cannot speak both schemes, so a plain-HTTP client hitting the TLS listener fails at
+                           the handshake. Adding a second HTTP port to redirect would re-open, on a new port,
+                           the cleartext surface this exists to close. */
                         options.Listen(IPAddress.Loopback, effectivePort);
                         options.Listen(IPAddress.IPv6Loopback, effectivePort);
                     }
                 }
                 else
                 {
-                    /* The default/degraded loopback-only server — both families. */
+                    /* The default/degraded loopback-only server — both families, always plain HTTP. */
                     options.ListenLocalhost(effectivePort);
                 }
             });
@@ -404,6 +620,11 @@ public sealed class DarlingWebHostService : BackgroundService
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
 
             _app = builder.Build();
+
+            /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
+               because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
+               started server so a rebind starts with a clean budget. */
+            var refusals = new DarlingHttpRefusalLog();
 
             /* Pipeline order: the Host-allowlist middleware runs FIRST on EVERY request (both modes) as the
                DNS-rebinding guard, then (network mode only) the auth middleware, then DarlingWebEndpoints.MapAll
@@ -423,6 +644,12 @@ public sealed class DarlingWebHostService : BackgroundService
             {
                 if (!IsAllowedHost(context.Request.Host.Host, networkListenIp))
                 {
+                    refusals.Report(
+                        _logger, "Web dashboard", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
+                        context.Connection.RemoteIpAddress,
+                        $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
+                        + " (a loopback name/IP, or web.network.listen when LAN-exposed)",
+                        DateTime.UtcNow);
                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                     return;
                 }
@@ -445,8 +672,8 @@ public sealed class DarlingWebHostService : BackgroundService
                     var remote = context.Connection.RemoteIpAddress;
                     var hasValidCookie = TryValidateSessionCookie(
                         context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow);
-                    var hasValidToken = DarlingHostBinding.FixedTimeTokenEquals(
-                        context.Request.Query["token"].ToString(), token);
+                    var presentedToken = context.Request.Query["token"].ToString();
+                    var hasValidToken = DarlingHostBinding.FixedTimeTokenEquals(presentedToken, token);
 
                     switch (DecideWebAuth(remote, cidr, hasValidCookie, hasValidToken))
                     {
@@ -462,10 +689,34 @@ public sealed class DarlingWebHostService : BackgroundService
                             return;
 
                         case WebAuthAction.Forbid:
+                            /* The ONLY 403 this host produces: an out-of-CIDR remote, or one whose address
+                               ASP.NET Core could not report (which fails closed). A wrong credential from
+                               inside the CIDR is ShowLogin, not this - see below. */
+                            refusals.Report(
+                                _logger, "Web dashboard", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
+                                remote,
+                                remote is null
+                                    ? "its source address could not be determined, which fails closed"
+                                    : $"its address is outside web.network.allowFrom ({cidr})",
+                                DateTime.UtcNow);
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             return;
 
                         default: /* ShowLogin */
+                            /* A 200 rather than a 401, so this is not a "rejected request" by status - and
+                               it is exactly the state an operator asks about when a ?token= they pasted did
+                               not work. Logged ONLY when a token was actually presented and did not match:
+                               a first visit with no token is the normal path to the login page and logging
+                               it would make every bookmark a warning. */
+                            if (!string.IsNullOrEmpty(presentedToken))
+                            {
+                                refusals.Report(
+                                    _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK,
+                                    remote,
+                                    "the presented ?token= does not match web.network.encryptedToken, so the login page was served instead",
+                                    DateTime.UtcNow);
+                            }
+
                             await WriteLoginPageAsync(context);
                             return;
                     }
@@ -476,16 +727,36 @@ public sealed class DarlingWebHostService : BackgroundService
             _app.UseDefaultFiles();
             _app.UseStaticFiles();
 
+            /* #2389: name the authority for each half of what is being started — enabled/port from whichever
+               plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
+            var origin = DarlingHostBinding.DescribeToggleOrigin(toggle);
             if (networkMode)
             {
+                /* #2562: name the SCHEME the exposed listener actually speaks. An operator reading this line is
+                   deciding whether the token they are about to paste crosses the wire in the clear, and the
+                   line used to say "http://" unconditionally because that was the only thing it could be. */
                 _logger.LogInformation(
-                    "Starting web dashboard on http://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; loopback also bound, tokenless)",
-                    primaryBind, effectivePort, allowedCidr);
+                    "Starting web dashboard on {Scheme}://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; "
+                    + "loopback also bound over plain HTTP, and since #1649 it authenticates too) — "
+                    + "enabled/port from {Origin}; listen/allowFrom/token/tls from darling.json web.network (file-only, restart-only)",
+                    serverCertificate is null ? "http" : "https", primaryBind, effectivePort, allowedCidr, origin);
             }
             else
             {
-                _logger.LogInformation("Starting web dashboard on http://localhost:{Port} (loopback only)", effectivePort);
+                _logger.LogInformation(
+                    "Starting web dashboard on http://localhost:{Port} (loopback only) — enabled/port from {Origin}",
+                    effectivePort, origin);
             }
+
+            /* #2479 item 6: the network block is read ONCE and held for the process lifetime by design.
+               Say so at every start, in BOTH modes - the loopback line above never mentioned the block at
+               all, and loopback-when-you-expected-LAN is exactly the state being diagnosed. */
+            _logger.LogInformation(
+                "{Report}",
+                DarlingHostBinding.DescribeNetworkBlockLifetime(
+                    "web", "Web dashboard", config.Web.Network?.IsConfigured ?? false, networkMode,
+                    networkMode ? primaryBind.ToString() : null,
+                    networkMode ? allowedCidr.ToString() : null));
 
             /* StartAsync, not RunAsync: the supervisor loop owns the wait — the app keeps serving until
                StopServerAsync (toggle-off, port change, or shutdown). */
@@ -495,7 +766,9 @@ public sealed class DarlingWebHostService : BackgroundService
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            /* Normal shutdown mid-start. */
+            /* Normal shutdown mid-start — still release anything already acquired (#2562: the certificate's
+               private key is held in the machine key store until it is disposed). */
+            await DisposeFailedStartAsync();
             return false;
         }
         catch (Exception ex)
@@ -576,15 +849,65 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>
-    /// Builds a session cookie value <c>{expiryUnix}.{base64url(HMAC-SHA256(key, expiryUnix))}</c>. PURE — the
-    /// HMAC is over the exact expiry string that is stored, so <see cref="TryValidateSessionCookie"/> verifies
-    /// the same bytes it signs (a tampered expiry fails the HMAC).
+    /// The longest <paramref name="subject"/> <see cref="BuildSessionCookieValue"/> will mint into a cookie.
+    ///
+    /// <para>Generous for an OIDC <c>sub</c> — the identifiers real providers issue are GUIDs, opaque
+    /// 40-character strings, or an email — and a hard REFUSAL rather than a truncation, deliberately.
+    /// Truncating an identity is the one failure mode that would be worse than not having one: two subjects
+    /// sharing a prefix would collapse to the same seat, so the surface would report the wrong person as the
+    /// author of a change and every downstream authorization decision would be made about somebody else.
+    /// Failing the sign-in loudly is recoverable; silently merging two identities is not.</para>
     /// </summary>
-    internal static string BuildSessionCookieValue(byte[] signingKey, DateTimeOffset expiry)
+    internal const int MaxSessionSubjectLength = 256;
+
+    /// <summary>
+    /// Builds a session cookie value. PURE.
+    ///
+    /// <para>Two shapes, and the difference is whether the seat has a NAME:
+    /// <c>{expiryUnix}.{base64url(HMAC)}</c> for the shared-token seat, which has no identity to carry, and
+    /// <c>{expiryUnix}.{base64url(subject)}.{base64url(HMAC)}</c> once a per-user sign-in has established
+    /// who is holding it (#2550).</para>
+    ///
+    /// <para><b>The signature covers the whole prefix before the FINAL dot</b>, which is what makes the two
+    /// shapes one construction rather than two. Signing only the expiry and appending the subject beside it
+    /// would leave the subject unauthenticated — anyone holding a valid cookie could rewrite it to any other
+    /// subject and be served as that person, which is a worse position than the shared token this exists to
+    /// improve on, because it would look like identity while providing none. Extending the signed region
+    /// instead means expiry and subject are tamper-evident together.</para>
+    ///
+    /// <para>The two shapes cannot be confused for each other even though they share a separator: the
+    /// signature is always the last segment and the signed payload is always everything before it, so
+    /// re-presenting a 3-segment cookie as a 2-segment one requires the subject to be a valid HMAC over the
+    /// expiry, and the reverse requires forging an HMAC. Neither is available without the key.</para>
+    ///
+    /// <para>The subjectless form is byte-for-byte what this method produced before per-user identity existed,
+    /// so cookies already in browsers keep validating across the upgrade instead of signing everyone out.</para>
+    /// </summary>
+    /// <param name="subject">The authenticated principal, or null/empty for the shared-token seat.</param>
+    /// <exception cref="ArgumentException"><paramref name="subject"/> exceeds
+    /// <see cref="MaxSessionSubjectLength"/> — see the note there on why this refuses rather than truncates.
+    /// </exception>
+    internal static string BuildSessionCookieValue(byte[] signingKey, DateTimeOffset expiry, string? subject = null)
     {
+        if (subject is { Length: > MaxSessionSubjectLength })
+        {
+            throw new ArgumentException(
+                $"Session subject is {subject.Length} characters, which exceeds the {MaxSessionSubjectLength}-character "
+                + "limit. It is refused rather than truncated because two subjects sharing a prefix would become the "
+                + "same seat.",
+                nameof(subject));
+        }
+
         var expiryUnix = expiry.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
-        var signature = HMACSHA256.HashData(signingKey, Encoding.ASCII.GetBytes(expiryUnix));
-        return $"{expiryUnix}.{Base64UrlEncode(signature)}";
+        var payload = string.IsNullOrEmpty(subject)
+            ? expiryUnix
+            : $"{expiryUnix}.{Base64UrlEncode(Encoding.UTF8.GetBytes(subject))}";
+
+        /* ASCII, as before: the payload is an integer and base64url by construction, so every byte is in
+           range, and keeping the encoding means the subjectless cookie is identical to the one this minted
+           before the subject existed. */
+        var signature = HMACSHA256.HashData(signingKey, Encoding.ASCII.GetBytes(payload));
+        return $"{payload}.{Base64UrlEncode(signature)}";
     }
 
     /// <summary>
@@ -593,20 +916,50 @@ public sealed class DarlingWebHostService : BackgroundService
     /// The signature compare is constant-time.
     /// </summary>
     internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now)
+        => TryValidateSessionCookie(cookieValue, signingKey, now, out _);
+
+    /// <summary>
+    /// PURE verify, additionally reporting WHO the cookie says is holding it (#2550).
+    ///
+    /// <para><paramref name="subject"/> is null for the shared-token seat, which genuinely has no identity —
+    /// distinct from an empty string, which would read as an authenticated principal with a blank name. Every
+    /// caller that stamps provenance has to keep those apart, because "the shared token did this" and "a
+    /// signed-in person we failed to name did this" are different facts.</para>
+    ///
+    /// <para>The subject is decoded only AFTER the HMAC verifies, so nothing derived from an unauthenticated
+    /// cookie ever reaches a caller.</para>
+    /// </summary>
+    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject)
     {
+        subject = null;
+
         if (string.IsNullOrEmpty(cookieValue))
         {
             return false;
         }
 
-        var dot = cookieValue.IndexOf('.');
-        if (dot <= 0 || dot >= cookieValue.Length - 1)
+        /* LAST dot, not the first: the signature is the final segment and the signed payload is everything
+           before it, which is the rule that lets the subjectless and subject-bearing shapes share one parse.
+           For a subjectless cookie the last dot IS the first, so this is the original behavior unchanged. */
+        var lastDot = cookieValue.LastIndexOf('.');
+        if (lastDot <= 0 || lastDot >= cookieValue.Length - 1)
         {
             return false;
         }
 
-        var expiryPart = cookieValue.Substring(0, dot);
-        var signaturePart = cookieValue.Substring(dot + 1);
+        var payload = cookieValue.Substring(0, lastDot);
+        var signaturePart = cookieValue.Substring(lastDot + 1);
+
+        var firstDot = payload.IndexOf('.');
+        var expiryPart = firstDot < 0 ? payload : payload.Substring(0, firstDot);
+        var subjectPart = firstDot < 0 ? null : payload.Substring(firstDot + 1);
+
+        /* Exactly two or three segments. A fourth would leave a dot inside the subject segment, and accepting
+           it would mean two different cookies could parse to the same subject. */
+        if (subjectPart is not null && (subjectPart.Length == 0 || subjectPart.Contains('.')))
+        {
+            return false;
+        }
 
         if (!long.TryParse(expiryPart, NumberStyles.None, CultureInfo.InvariantCulture, out var expiryUnix))
         {
@@ -628,8 +981,28 @@ public sealed class DarlingWebHostService : BackgroundService
             return false;
         }
 
-        var expected = HMACSHA256.HashData(signingKey, Encoding.ASCII.GetBytes(expiryPart));
-        return CryptographicOperations.FixedTimeEquals(presented, expected);
+        var expected = HMACSHA256.HashData(signingKey, Encoding.ASCII.GetBytes(payload));
+        if (!CryptographicOperations.FixedTimeEquals(presented, expected))
+        {
+            return false;
+        }
+
+        if (subjectPart is not null)
+        {
+            try
+            {
+                subject = Encoding.UTF8.GetString(Base64UrlDecode(subjectPart));
+            }
+            catch (FormatException)
+            {
+                /* Signed by us and still undecodable means we minted it wrong, not that a caller tampered.
+                   Refusing is still right: serving a session whose identity we cannot read would put an
+                   unnamed principal behind the write paths this exists to attribute. */
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static void AppendSessionCookie(HttpContext context, byte[] signingKey)
@@ -639,9 +1012,13 @@ public sealed class DarlingWebHostService : BackgroundService
         {
             HttpOnly = true,
             SameSite = SameSiteMode.Strict,
-            /* The dashboard endpoint is plain HTTP (no TLS on this surface); a Secure cookie would never be
-               sent, so it must be false here. The reverse-proxy story is the same as MCP for on-wire secrecy. */
-            Secure = false,
+            /* PER-REQUEST, not a fixed value, because since #2562 this ONE host can serve both schemes at once:
+               the network listener is TLS when web.network.tls is configured while the loopback listeners
+               deliberately stay plain HTTP. A hardcoded true would mint a cookie the loopback browser then
+               refuses to send back (the login would loop forever); a hardcoded false would let a cookie issued
+               over TLS be replayed on any http:// downgrade. IsHttps is the connection's own answer, so each
+               cookie is marked for the transport it was actually issued on. */
+            Secure = context.Request.IsHttps,
             Path = "/",
             MaxAge = SessionLifetime,
         });

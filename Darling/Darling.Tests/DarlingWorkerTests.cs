@@ -201,9 +201,36 @@ public sealed class DarlingWorkerTests
         };
 
         var warnings = DarlingWorker.GetNetworkStartupWarnings(config);
-        Assert.Contains(warnings, w => w.Contains("network.role is 'admin'", StringComparison.Ordinal) && w.Contains("config_command", StringComparison.Ordinal));
+        Assert.Contains(warnings, w => w.Contains("network.role admits 'admin'", StringComparison.Ordinal) && w.Contains("config_command", StringComparison.Ordinal));
         /* Managed mode does not emit the BYO "ignored" notices. */
         Assert.DoesNotContain(warnings, w => w.Contains("IGNORED", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #2665: the pivot warning follows the ROLE, not the spelling of the field. A value admitting both roles
+    /// makes a remote admin connection just as reachable as <c>"admin"</c> alone does, so the D7 warning has to
+    /// fire for every list form — the one that would silently stop warning is the one an operator reaches for
+    /// precisely because they were thinking about the read-only half.
+    /// </summary>
+    [Theory]
+    [InlineData("admin,viewer")]
+    [InlineData("viewer,admin")]
+    [InlineData("admin+viewer")]
+    [InlineData("VIEWER, Admin")]
+    public void GetNetworkStartupWarnings_ManagedExposedRoleListIncludingAdmin_StillWarnsPivot(string role)
+    {
+        var config = new DarlingConfig
+        {
+            Postgres = new PostgresConfig
+            {
+                Managed = true,
+                Network = new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Role = role },
+            },
+        };
+
+        Assert.Contains(
+            DarlingWorker.GetNetworkStartupWarnings(config),
+            w => w.Contains("network.role admits 'admin'", StringComparison.Ordinal) && w.Contains("config_command", StringComparison.Ordinal));
     }
 
     /// <summary>The secure defaults are silent: managed + viewer role, managed + no network, and managed +

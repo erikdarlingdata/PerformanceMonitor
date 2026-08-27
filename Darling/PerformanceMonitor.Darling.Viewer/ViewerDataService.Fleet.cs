@@ -187,7 +187,17 @@ public sealed class FleetRankedServer
 /// </summary>
 public sealed class FleetRollup
 {
-    /// <summary>The default depth of the worst-first ranking (the "Needs attention" list caps at this).</summary>
+    /// <summary>
+    /// The default depth of the worst-first ranking (the "Needs attention" list caps at this).
+    ///
+    /// <para>Deliberately small, and deliberately unchanged by #2424 even though a 57-server fleet can leave
+    /// 52 servers behind it. The ranking renders inside the fleet roll-up panel, which is docked to the top
+    /// of the Overview and does NOT scroll — only the card grid beneath it does. A list that grew with the
+    /// fleet would therefore push the cards it is pointing at off the screen, and it would stop being a
+    /// triage shortlist ("look at these first") and become a second, worse copy of the grid without the
+    /// metrics. The overflow is answered by giving it somewhere to go instead — the needs-attention card
+    /// filter, over the grid that scrolls and carries the six metric rows.</para>
+    /// </summary>
     public const int DefaultWorstCount = 5;
 
     /// <summary>An empty fleet (no servers registered) — every count zero, no ranking.</summary>
@@ -211,7 +221,12 @@ public sealed class FleetRollup
     /// <summary>The worst-first problem servers (band != Healthy), capped at the requested depth.</summary>
     public IReadOnlyList<FleetRankedServer> WorstServers { get; init; } = Array.Empty<FleetRankedServer>();
 
-    /// <summary>Problem servers beyond the capped ranking — surfaced as a "+N more" affordance.</summary>
+    /// <summary>
+    /// Problem servers beyond the capped ranking. Surfaced as the "+N more need attention" affordance,
+    /// which is a LINK into the needs-attention card filter rather than a dead count (#2424): the ranking
+    /// deliberately stays short (see <see cref="DefaultWorstCount"/>), so this number is the whole reason
+    /// the filter exists.
+    /// </summary>
     public int AdditionalProblemCount { get; init; }
 
     /// <summary>Any server needs attention (band != Healthy) — drives the ranking list vs the all-clear line.</summary>
@@ -321,7 +336,14 @@ public sealed class FleetRollup
     /// Warning too; otherwise Healthy. No new thresholds are introduced here.
     /// </summary>
     public static FleetHealthBand ClassifyBand(ServerSummaryItem s) =>
-        ServerHealthClassifier.ClassifyBand(s.IsOnline, s.AwaitingFirstCollection, s.HasCollectorErrors, s.OverallMetricSeverity);
+        ServerHealthClassifier.ClassifyBand(
+            s.IsOnline,
+            /* Via the card's discriminant, not the raw flag. The shared classifier honours an awaiting marker
+               whatever IsOnline says, so an online card carrying a stray marker banded Warning while the card
+               said "Online" and had nothing to report — a third reading of the same pair. See ServerCollectionStatus. */
+            s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection,
+            s.HasCollectorErrors,
+            s.OverallMetricSeverity);
 
     /// <summary>
     /// The worst-first ordering score — the SHARED <see cref="ServerHealthClassifier.FleetHealthScore"/> over
@@ -339,14 +361,19 @@ public sealed class FleetRollup
     /// </summary>
     public static string BuildReason(ServerSummaryItem s)
     {
-        if (s.IsOnline == false)
+        /* Keyed on the card's own status discriminant rather than on the flags behind it. Reading
+           AwaitingFirstCollection independently of IsOnline is what let an online card claim it was awaiting
+           its first collection — see ServerCollectionStatus. */
+        if (s.CardStatus == ServerCollectionStatus.Offline)
         {
             return "Offline — no recent collection";
         }
 
-        if (s.AwaitingFirstCollection)
+        if (s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection)
         {
-            return "Awaiting first collection";
+            /* The word itself, not a copy of it — this line held the fourth spelling of the phrase, in the
+               fourth file, which is exactly the shape the #2473 pin now forbids. */
+            return s.CardStatus.Word();
         }
 
         var parts = new List<string>();
@@ -380,6 +407,126 @@ public sealed class FleetRollup
             parts.Add("collection stale");
         }
 
-        return parts.Count > 0 ? string.Join(", ", parts) : "Needs attention";
+        return parts.Count > 0 ? string.Join(", ", parts) : UnspecifiedReason;
+    }
+
+    /// <summary>
+    /// What <see cref="BuildReason"/> answers when it can name nothing — a card banded away from Healthy by a
+    /// severity whose display the reason does not cover. It reads fine in the ranking, where every row is a
+    /// problem server, and reads as an unexplained demand on a card, so the tooltip degrades to the band label
+    /// rather than repeating it. Named so the two sides cannot drift apart on the spelling.
+    /// </summary>
+    public const string UnspecifiedReason = "Needs attention";
+
+    /// <summary>The line every card tooltip ends on. The sidebar alert badge's tooltip has the same shape —
+    /// the breakdown, then how to act on it — so the Overview card is not the surface that explains itself
+    /// least; this one names the gesture the card actually supports.</summary>
+    private const string CardTooltipAction = "Double-click the card to open this server's tab";
+
+    /// <summary>
+    /// The Overview card's status tooltip (#2422): the band the card's border is painted from, WHY it is in
+    /// that band, and what to do next. Reported as "the card says Warning and will not say why" — the reader
+    /// had to scan six metric rows hunting for the amber one, once per card, on a 57-server fleet.
+    ///
+    /// <para>It is <see cref="BuildReason"/>'s output verbatim, the same sentence the Needs Attention ranking
+    /// already shows for that exact server. Re-deriving it here instead would forfeit the one property
+    /// BuildReason exists for: it is built from the card's OWN metric displays, so it cannot disagree with the
+    /// six rows the reader is looking at while they are looking at them.</para>
+    /// </summary>
+    public static string BuildStatusTooltip(ServerSummaryItem s)
+    {
+        ArgumentNullException.ThrowIfNull(s);
+
+        return Headline(s) + "\n" + CardTooltipAction;
+    }
+
+    /// <summary>
+    /// The tooltip's first line: what this card's state IS, in the words the card's own status line uses,
+    /// followed by the reason when there is one to give.
+    ///
+    /// <para>It switches on <see cref="ServerSummaryItem.CardStatus"/> — the SAME discriminant
+    /// <see cref="ServerSummaryItem.StatusDisplay"/> renders — rather than re-reading the flags underneath it.
+    /// A tooltip that hangs off a word and then contradicts it is the defect this change exists to remove, and
+    /// two independent readings of the same two flags is precisely how it comes back.</para>
+    /// </summary>
+    private static string Headline(ServerSummaryItem s)
+    {
+        var band = ClassifyBand(s);
+
+        return s.CardStatus switch
+        {
+            /* Offline and never-reached come back from BuildReason as whole sentences that already name the
+               state — the same sentence the status word shows — so a band label in front would only say
+               "Offline" twice. */
+            ServerCollectionStatus.Offline or ServerCollectionStatus.AwaitingFirstCollection => BuildReason(s),
+
+            /* "Unknown" is the one status word with no band behind it: ClassifyBand goes straight to the
+               metrics and, on a clean card, answers Healthy. The word wins, and the metrics are appended when
+               they have something to add — not knowing whether a server is reporting is no reason to withhold
+               the CPU number that WAS collected. */
+            ServerCollectionStatus.Unknown => WithReason(UnknownStatus, "; ", s),
+
+            /* Online and stale: the band is the headline. A healthy card gets an all-clear rather than
+               BuildReason's "Needs attention" fallback, which is written for a ranking that only ever holds
+               problem servers and on a grid showing EVERY server would say the opposite of the truth. */
+            _ => band == FleetHealthBand.Healthy
+                ? "Healthy — every metric on this card is inside its threshold"
+                : WithReason(ServerHealthClassifier.BandLabel(band), " — ", s),
+        };
+    }
+
+    /// <summary>
+    /// A headline plus what the card can actually name — or the headline alone when it can name nothing.
+    ///
+    /// <para>Every arm that appends a reason goes through here, because a card CAN sit outside Healthy with
+    /// nothing to say: a Blocking band raised by a long max-wait while the reason's own gate wants a non-zero
+    /// event count, for one. Appending unguarded produces "Warning — Needs attention", which tells the reader
+    /// exactly what they already knew and is how the ranking-only fallback reaches a card at all. Two arms had
+    /// their own copy of the append and only one of them was guarded, which is the same lesson as
+    /// <see cref="ServerCollectionStatus"/> one level down.</para>
+    /// </summary>
+    private static string WithReason(string headline, string separator, ServerSummaryItem s)
+    {
+        var reason = BuildReason(s);
+
+        return reason == UnspecifiedReason ? headline : headline + separator + reason;
+    }
+
+    /// <summary>The words behind StatusDisplay's "Unknown" — a card whose freshness was never classified.</summary>
+    private const string UnknownStatus = "Unknown — no collection status for this server";
+
+    /// <summary>
+    /// The problem servers among the Overview's cards — band != Healthy — kept in the order the caller handed
+    /// them in, so the grid's chosen sort survives the filter. This is the SAME predicate <see cref="Build"/>
+    /// uses to decide who is in the ranking and who counts toward <see cref="AdditionalProblemCount"/>, which
+    /// is what makes "+52 more need attention" land on exactly 52 cards rather than on a second opinion.
+    /// </summary>
+    public static List<ServerSummaryItem> NeedsAttention(IEnumerable<ServerSummaryItem> summaries)
+    {
+        ArgumentNullException.ThrowIfNull(summaries);
+
+        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy).ToList();
+    }
+
+    /// <summary>
+    /// The count shown beside the filter toggle while it is on. A filtered grid that looks like an unfiltered
+    /// one is a worse defect than the one the filter fixes, so the active state carries its own arithmetic —
+    /// including the all-clear case, which is otherwise an empty grid with nothing saying why.
+    /// </summary>
+    public static string AttentionFilterCountText(int shown, int total)
+    {
+        if (shown > 0)
+        {
+            return $"showing {shown} of {total}";
+        }
+
+        /* Nothing left to show. On a populated fleet that is the honest all-clear; with no cards at all it
+           must not report that zero servers are healthy, which is the sort of line that gets screenshotted. */
+        return total switch
+        {
+            <= 0 => "no servers to filter",
+            1 => "the 1 server monitored is healthy",
+            _ => $"all {total} servers are healthy",
+        };
     }
 }

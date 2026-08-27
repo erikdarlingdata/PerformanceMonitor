@@ -60,7 +60,10 @@ public sealed partial class ViewerDataService
         "pvs_enabled, pvs_threshold_percent, pvs_floor_gb, database_state_enabled, " +
         "self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold, " +
         "disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes, " +
-        "store_job_cadence_warn_percent";
+        "store_job_cadence_warn_percent, " +
+        /* #2391: V79 (#2349). APPENDED — this list drives the SELECT ordinals AND the upsert
+           parameter positions, so inserting anywhere but the end re-maps both at once. */
+        "file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -74,7 +77,7 @@ public sealed partial class ViewerDataService
 INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
-        $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54,
+        $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -131,6 +134,10 @@ ON CONFLICT (id) DO UPDATE SET
     disk_critical_free_gb = EXCLUDED.disk_critical_free_gb,
     analysis_notify_cooldown_minutes = EXCLUDED.analysis_notify_cooldown_minutes,
     store_job_cadence_warn_percent = EXCLUDED.store_job_cadence_warn_percent,
+    file_growth_enabled = EXCLUDED.file_growth_enabled,
+    file_growth_rise_mb = EXCLUDED.file_growth_rise_mb,
+    file_growth_volume_percent = EXCLUDED.file_growth_volume_percent,
+    file_growth_lookback_minutes = EXCLUDED.file_growth_lookback_minutes,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -214,6 +221,10 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.DiskCriticalFreeGb });               // $52 (#2107, V55)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.AnalysisNotifyCooldownMinutes });    // $53 (#2107, V55)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.StoreJobCadenceWarnPercent });      // $54 (#2136, V57)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.FileGrowthEnabled });             // $55 (#2349/#2391, V79)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FileGrowthRiseMb });               // $56 (#2349/#2391, V79)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FileGrowthVolumePercent });        // $57 (#2349/#2391, V79)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FileGrowthLookbackMinutes });      // $58 (#2349/#2391, V79)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -279,6 +290,10 @@ ON CONFLICT (id) DO UPDATE SET
         DiskCriticalFreeGb = reader.GetInt32(51),
         AnalysisNotifyCooldownMinutes = reader.GetInt32(52),
         StoreJobCadenceWarnPercent = reader.GetInt32(53),
+        FileGrowthEnabled = reader.GetBoolean(54),
+        FileGrowthRiseMb = reader.GetInt32(55),
+        FileGrowthVolumePercent = reader.GetInt32(56),
+        FileGrowthLookbackMinutes = reader.GetInt32(57),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -338,6 +353,13 @@ public sealed class AlertSettingsRow
     public int DiskCriticalFreeGb { get; set; } = 2;
     public int AnalysisNotifyCooldownMinutes { get; set; } = 360;
     public int StoreJobCadenceWarnPercent { get; set; } = 25;
+
+    /* #2391: defaults mirror the V79 column defaults, so a viewer prefilling against a store that has
+       not seeded the row shows what the store would have given it. Ships OFF, per #2349. */
+    public bool FileGrowthEnabled { get; set; }
+    public int FileGrowthRiseMb { get; set; } = 10240;
+    public int FileGrowthVolumePercent { get; set; } = 60;
+    public int FileGrowthLookbackMinutes { get; set; } = 60;
 
     public bool CpuEnabled { get; set; } = true;
     public int CpuThresholdPercent { get; set; } = 80;

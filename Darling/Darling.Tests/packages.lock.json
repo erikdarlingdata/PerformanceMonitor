@@ -11,6 +11,11 @@
           "xunit.v3.mtp-v1": "[3.2.2]"
         }
       },
+      "AWSSDK.Core": {
+        "type": "Transitive",
+        "resolved": "4.0.102.1",
+        "contentHash": "vsf+/o+S/euH/wG7bO1cha+OWaHvjgvpDeGFO6l3Vcdio9GlSfXkZDD2BogMuAJ+/jDyqqSgqmYVolPKV9ie/A=="
+      },
       "HarfBuzzSharp": {
         "type": "Transitive",
         "resolved": "8.3.1.1",
@@ -685,6 +690,8 @@
       "performancemonitor.darling.service": {
         "type": "Project",
         "dependencies": {
+          "AWSSDK.RDS": "[4.0.104.4, )",
+          "BlackwellSystems.Gcf": "[0.2.0, )",
           "Microsoft.Data.SqlClient": "[7.0.2, )",
           "Microsoft.Extensions.Hosting": "[10.0.11, )",
           "Microsoft.Extensions.Hosting.WindowsServices": "[10.0.11, )",
@@ -713,6 +720,7 @@
           "Hardcodet.NotifyIcon.Wpf": "[2.0.1, )",
           "PerformanceMonitor.Alerting": "[1.0.0, )",
           "PerformanceMonitor.Analysis": "[1.0.0, )",
+          "PerformanceMonitor.Collectors": "[1.0.0, )",
           "PerformanceMonitor.Common": "[1.0.0, )",
           "PerformanceMonitor.Darling.Analysis": "[1.0.0, )",
           "PerformanceMonitor.Darling.Storage": "[1.0.0, )",
@@ -745,6 +753,21 @@
           "PerformanceMonitor.PlanAnalysis": "[1.0.0, )",
           "ScottPlot.WPF": "[5.1.59, )"
         }
+      },
+      "AWSSDK.RDS": {
+        "type": "CentralTransitive",
+        "requested": "[4.0.104.4, )",
+        "resolved": "4.0.104.4",
+        "contentHash": "tAhUJwG6SnAFT0ZHL2n+z6c7EDmnpo5fPrZO4HZsBmVj4vV7k1/+j0zoe+wMLWKl8qRTk+gipUuz8LITk9rSyA==",
+        "dependencies": {
+          "AWSSDK.Core": "[4.0.102.1, 5.0.0)"
+        }
+      },
+      "BlackwellSystems.Gcf": {
+        "type": "CentralTransitive",
+        "requested": "[0.2.0, )",
+        "resolved": "0.2.0",
+        "contentHash": "HnL0i5xnmNDxv0j4kqGTgUxZ+uTEuRtM4S31NYS/XdL1kaQ77TfknqpW0yUALyt4KJRmzVKXgI2CmqdhvMQ9cA=="
       },
       "CredentialManagement": {
         "type": "CentralTransitive",

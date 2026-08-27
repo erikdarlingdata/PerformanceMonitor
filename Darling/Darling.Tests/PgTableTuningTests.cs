@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -51,7 +52,58 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_store_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE collect.pg_statement_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
 
-        Assert.Equal(11, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats */
+        /* #2402: the plan dimension takes the DEAD-TUPLE knob, not the insert one. It is a plain table
+           whose churn comes from retention DELETEs, so autovacuum_vacuum_insert_* — which governs every
+           entry above — does not apply to it at all. Asserted by exact text because the two knob families
+           differ by one word and the wrong one would be silently inert. */
+        Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
+
+        Assert.Equal(12, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats, +1 #2402 query_plan_dim */
+    }
+
+    /// <summary>
+    /// #2405: the four literal ALTERs are a floor for a plain-PostgreSQL store, not the coverage. On a
+    /// TimescaleDB store the tuning is DERIVED from the catalog, because "pure-insert append-only fact table"
+    /// describes every collector target by construction while the literal list described whichever four had
+    /// been the subject of an EXPLAIN investigation — 4 of 51 hypertables on the dogfood store.
+    ///
+    /// <para>Pinned at the SQL level: the predicate must select hypertables that lack the option (so a re-run
+    /// no-ops rather than re-ALTERing all 51), must read the TimescaleDB catalog, and must quote the
+    /// identifier it hands back, since that string is interpolated into the ALTER.</para>
+    /// </summary>
+    [Fact]
+    public void TheHypertableSweep_SelectsOnlyUntunedHypertables_AndQuotesTheIdentifier()
+    {
+        var sql = PgTableTuning.UntunedHypertablesSql;
+
+        Assert.Contains("timescaledb_information.hypertables", sql, StringComparison.Ordinal);
+        Assert.Contains("format('%I.%I'", sql, StringComparison.Ordinal);
+
+        /* Idempotence lives in the predicate, not in a guard at the call site. */
+        Assert.Contains("NOT LIKE '%insert_scale_factor%'", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The literal statements and the derived sweep must set the SAME options, or a store would be tuned two
+    /// different ways depending on which path reached the table first — and the derived sweep's predicate
+    /// (which matches on <c>insert_scale_factor</c>) would still consider the other spelling "tuned", making
+    /// the divergence permanent and invisible.
+    /// </summary>
+    [Fact]
+    public void TheLiteralStatementsAndTheDerivedSweep_ShareOneSpellingOfTheOptions()
+    {
+        Assert.Equal(
+            "autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000",
+            PgTableTuning.InsertTuningOptions);
+
+        var literals = PgTableTuning.Statements
+            .Where(s => s.Contains("autovacuum_vacuum_insert_scale_factor", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(4, literals.Count);
+        Assert.All(literals, s =>
+            Assert.Contains("(" + PgTableTuning.InsertTuningOptions + ")", s, StringComparison.Ordinal));
     }
 
     private static int CountOccurrences(string haystack, string needle)

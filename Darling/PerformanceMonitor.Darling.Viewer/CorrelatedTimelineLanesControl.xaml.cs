@@ -535,7 +535,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
-    /// Sets identical X-axis limits across all lanes.
+    /// Makes the lanes share a time axis in BOTH senses: identical X-axis limits, and - since #2533 -
+    /// identical left-hand pixel geometry, so the same instant sits at the same X pixel in all five.
+    /// Limits alone were never enough; each plot still sized its own gutter from its own Y tick labels.
     /// </summary>
     private void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
@@ -556,10 +558,16 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         var charts = new[] { CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart };
         foreach (var chart in charts)
-        {
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
+
+        /* #2533: every lane's Y limits and X limits are final by now, so this is the one place that can
+           see all five gutters at once and hand them the widest. It has to run on EVERY refresh, not
+           once at Initialize: ClearChart() calls WpfPlot.Reset(), which swaps in a fresh Plot and takes
+           any axis floor with it. */
+        LaneAxisAligner.AlignLeftGutters(charts);
+
+        foreach (var chart in charts)
             chart.Refresh();
-        }
     }
 
     private static void ClearChart(ScottPlot.WPF.WpfPlot chart)

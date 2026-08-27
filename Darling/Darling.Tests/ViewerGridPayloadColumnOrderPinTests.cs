@@ -25,8 +25,9 @@ namespace Darling.Tests;
 /// and assert the collector WRITE payload into the store, never a <c>DataGrid</c>. Worst case before the
 /// fix was <c>QueryStoreGrid</c>, where the query text was column 55 of 55.
 ///
-/// The pin is the table below, transcribed from the #1949 census, plus the web server page's
-/// <c>ACTIVE_COLUMNS</c> array — the one web column list in the service that renders query text. For each
+/// The pin is the table below, transcribed from the #1949 census, plus EVERY web column list in the service
+/// that renders query text — one when this pin was written, six since the web server page grew sub-tabs
+/// (#2475), which is why the web half is now a table of its own rather than a single hardcoded array. For each
 /// grid it records the time (or identity) ANCHOR and the payload columns that must follow it immediately.
 /// Adding a grid to this table whose payload columns still sit at the back FAILS — that is the point.
 ///
@@ -63,8 +64,12 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     private static readonly string ViewerQueryStatsHistory = Path.Combine(ViewerDir, "QueryStatsHistoryWindow.xaml");
     private static readonly string ViewerQueryStoreHistory = Path.Combine(ViewerDir, "QueryStoreHistoryWindow.xaml");
 
+    /* The web server page's descriptor arrays moved out of pages/server.js and into pages/server-tabs.js when
+       the page grew sub-tabs (#2475): server.js is now the shell (header, tab bar, range picker, panel grid)
+       and the tab registry owns every column array. The pin follows the array, not the filename it used to
+       sit in. */
     private static readonly string ServerPageJs = Path.Combine(
-        "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js");
+        "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
 
     /* The #1949 move list for the Darling viewer. Comparison and FinOps grids carry no time column, so their
        anchor is the identity block the grid is ranked by (Database, or Score+Database on High Impact).
@@ -162,20 +167,34 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
             $"not behind the metrics. Full order: [{string.Join(", ", headers)}]");
     }
 
-    [Fact]
-    public void WebServerPageShowsQueryTextRightOfCollectionTime()
+    /// <summary>
+    /// Every web column list that renders query text puts it immediately right of the anchor.
+    ///
+    /// <para>This used to pin <c>ACTIVE_COLUMNS</c> alone, because it was the only such list in the service. The
+    /// web server page's sub-tabs (#2475) added five more, and a rule enforced on one of six lists is a rule that
+    /// will be broken on the other five — the same reason the XAML half is a table rather than a spot-check. A new
+    /// grid whose text sits behind its metrics FAILS here, which is the point.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("ACTIVE_COLUMNS", "collection_time", "query_text", 9)]
+    [InlineData("TOP_QUERY_COLUMNS", "database_name", "query_text", 10)]
+    [InlineData("QUERY_STORE_COLUMNS", "database_name", "query_text", 8)]
+    [InlineData("LONG_QUERY_COLUMNS", "event_time", "statement", 8)]
+    [InlineData("PLAN_CORRECTION_COLUMNS", "collection_time", "query_text", 8)]
+    [InlineData("BLOCKING_COLUMNS", "event_time", "blocked_sql_text", 9)]
+    [InlineData("DEADLOCK_COLUMNS", "deadlock_time", "victim_sql_text", 5)]
+    public void EveryWebGridWithQueryText_PutsItRightOfTheAnchor(string array, string anchor, string text, int minKeys)
     {
-        // The web twin of the Active Queries grid. ACTIVE_COLUMNS array order IS the rendered column order
-        // (the server page hands the array straight to the table renderer); query_text was index 8 of 9.
-        var keys = JsColumnKeys(ReadRepoFile(ServerPageJs), "ACTIVE_COLUMNS");
-        Assert.True(keys.Count >= 9, $"only {keys.Count} ACTIVE_COLUMNS keys parsed — the scan is broken.");
-        Assert.Equal("collection_time", keys[0]);
-        Assert.Equal("query_text", keys[1]);
+        // Array order IS the rendered column order — the page hands the array straight to the table renderer.
+        var keys = JsColumnKeys(ReadRepoFile(ServerPageJs), array);
+        Assert.True(keys.Count >= minKeys, $"only {keys.Count} {array} keys parsed — the scan is broken.");
+        Assert.Equal(anchor, keys[0]);
+        Assert.Equal(text, keys[1]);
 
-        // Without this, re-adding a second query_text at the BACK would leave the pin green — the same hole
+        // Without this, re-adding a second text column at the BACK would leave the pin green — the same hole
         // EveryPinnedPayloadColumnIsUniqueInItsGrid closes on the XAML side.
-        Assert.True(keys.Count(k => k == "query_text") == 1,
-            $"query_text appears {keys.Count(k => k == "query_text")} times in ACTIVE_COLUMNS; expected once.");
+        Assert.True(keys.Count(k => k == text) == 1,
+            $"{text} appears {keys.Count(k => k == text)} times in {array}; expected once.");
     }
 
     [Fact]
@@ -261,7 +280,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     {
         var marker = $"const {arrayName} = [";
         var at = js.IndexOf(marker, StringComparison.Ordinal);
-        Assert.True(at >= 0, $"{arrayName} not found in server.js");
+        Assert.True(at >= 0, $"{arrayName} not found in the scanned module");
         var end = js.IndexOf("\n];", at, StringComparison.Ordinal);
         Assert.True(end >= 0, $"{arrayName} is unterminated");
         return JsKey.Matches(js[(at + marker.Length)..end]).Select(m => m.Groups[1].Value).ToList();

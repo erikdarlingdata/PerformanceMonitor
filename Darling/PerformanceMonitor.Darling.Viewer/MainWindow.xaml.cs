@@ -91,6 +91,24 @@ public partial class MainWindow : Window
     private readonly ViewerAppSettingsStore _appSettingsStore = new();
 
     /// <summary>
+    /// The per-user settings files that were on disk at startup and could not be read AT ALL, each with why
+    /// (#2434). Collected in the constructor, where all three stores are loaded, and reported once from
+    /// <see cref="OnLoaded"/> — a dialog raised from the constructor has no window behind it. Empty on
+    /// every ordinary run INCLUDING a first run: an absent file is not a problem, and saying so would make
+    /// a warning out of the most normal thing the viewer ever does.
+    /// </summary>
+    private readonly List<string> _unreadableSettingsFiles = new();
+
+    /// <summary>
+    /// The individual SETTINGS that could not be read, per file, when the rest of that file loaded normally
+    /// (#2456). Kept apart from <see cref="_unreadableSettingsFiles"/> because the two need different
+    /// sentences: one says every setting in the file reverted, the other says these did and nothing else
+    /// did. Collapsing them would put an overstatement in front of whichever case was not being described,
+    /// and the whole complaint here was a dialog that could not say which settings were lost.
+    /// </summary>
+    private readonly List<string> _unreadableSettingsValues = new();
+
+    /// <summary>
     /// The system-tray icon + minimize-to-tray behavior (ported from Lite's SystemTrayService, adapted for
     /// the headless viewer). Null until <see cref="OnLoaded"/> initializes it once the store connects.
     /// </summary>
@@ -127,6 +145,24 @@ public partial class MainWindow : Window
     private ServerOverviewSortMode _overviewSortMode;
 
     /// <summary>
+    /// The FULL, sorted Overview card set — the authority behind <c>OverviewItemsControl.ItemsSource</c> since
+    /// #2424, which now shows a possibly-filtered projection of it. Everything that used to read the bound list
+    /// back to answer "what cards are there" reads this instead, for the same reason <see cref="FleetView"/>
+    /// separates <c>All</c> from <c>Visible</c>: the moment the bound list is a SUBSET, a consumer that reads it
+    /// back is silently answering a different question.
+    /// </summary>
+    private List<ServerSummaryItem> _overviewCards = new();
+
+    /// <summary>
+    /// True while the Overview grid is filtered to servers that need attention (#2424) — the destination the
+    /// "+N more need attention" line finally has. Deliberately NOT persisted to ViewerAppSettings the way
+    /// <see cref="_overviewSortMode"/> is: a sort is a preference, this is a triage action tied to a moment, and
+    /// an Overview that opens with 52 of 57 servers already hidden is a support ticket even with the toggle in
+    /// plain sight.
+    /// </summary>
+    private bool _overviewAttentionOnly;
+
+    /// <summary>
     /// The non-secret configuration block shown on every connection/config failure (#1954): which
     /// darling.json won and what was parsed from it. Built at startup before the load is attempted (so a
     /// missing file still reports where the viewer looked) and extended with the parse summary once the file
@@ -145,12 +181,22 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _preferences = _preferencesStore.Load();
+        NoteUnreadableSettingsFile(_preferencesStore.FilePath, _preferencesStore.LastLoadState, _preferencesStore.LastLoadProblem,
+            _preferencesStore.LastLoadUnreadableMembers);
+        /* The registry loads in its own field initializer, which has already run by the time the
+           constructor body does, so its state is available here — and it is the one of the three worth
+           surfacing most: a viewer that opens with no servers because it could not read viewer-servers.json
+           looks exactly like a viewer nobody has configured yet. */
+        NoteUnreadableSettingsFile(_serverStore.FilePath, _serverStore.LastLoadState, _serverStore.LastLoadProblem,
+            _serverStore.LastLoadUnreadableMembers);
         /* Seed the persisted app settings the viewer honors at runtime BEFORE any tab/chart renders: the CSV
            export separator (grid exports) and the Server/Local/UTC time-display mode (every timestamp render
            routes through ViewerTimeHelper, which reads CurrentDisplayMode). UiTimeContext is deliberately left
            at its identity default — Darling charts pre-convert their X through ForDisplay, so wiring it would
            double-convert on hover/crosshair. */
         var appSettings = _appSettingsStore.Load();
+        NoteUnreadableSettingsFile(_appSettingsStore.FilePath, _appSettingsStore.LastLoadState, _appSettingsStore.LastLoadProblem,
+            _appSettingsStore.LastLoadUnreadableMembers);
         ViewerExportSettings.Apply(appSettings);
         /* Seed the new-mute-rule default expiration preference so every MuteRuleEditDialog opens on it, and the
            dismiss/mute action-logging opt-in the Alerts tab honors. */
@@ -178,9 +224,98 @@ public partial class MainWindow : Window
         Closed += OnClosed;
     }
 
+    /// <summary>
+    /// Records a settings file that is present and could not be read, for the one startup report. Absent
+    /// and readable both record nothing, which is the whole point of the three-way split.
+    ///
+    /// <para>Since #2456 the state carries a fourth possibility inside <c>Unreadable</c>: the file was read
+    /// after dropping members the deserializer could not understand, and <paramref name="members"/> names
+    /// them. That goes on the other list, because it is a different claim — those settings reverted and the
+    /// rest of the file did not.</para>
+    /// </summary>
+    private void NoteUnreadableSettingsFile(
+        string filePath,
+        SettingsFileState state,
+        string? problem,
+        IReadOnlyList<SettingsMemberProblem> members)
+    {
+        if (state != SettingsFileState.Unreadable)
+        {
+            return;
+        }
+
+        var fileName = System.IO.Path.GetFileName(filePath);
+
+        if (members.Count > 0)
+        {
+            _unreadableSettingsValues.Add($"{fileName} — {string.Join(", ", members)}");
+            return;
+        }
+
+        _unreadableSettingsFiles.Add($"{fileName} — {problem}");
+    }
+
+    /// <summary>
+    /// One dialog, once, when a settings file the viewer has just fallen back to defaults for is still
+    /// sitting on disk unreadable (#2434).
+    ///
+    /// <para>The fallback used to report itself through <c>Debug.WriteLine</c>, which the compiler removes
+    /// from a Release build — so in the viewer anyone actually runs, the operator's settings quietly became
+    /// defaults and there was nowhere whatsoever to find out why. The log carries it now, but a person
+    /// looking at an app that has forgotten its configuration should not have to go and find a log to learn
+    /// that it did.</para>
+    ///
+    /// <para>Raised from Loaded so it has a window behind it, and before the store connect below on
+    /// purpose: it costs nothing when there is nothing to say, and the connection-failure overlay would
+    /// otherwise bury the one message that explains why the settings changed.</para>
+    ///
+    /// <para>Two paragraphs rather than one list, because there are two different facts and #2456 is the
+    /// issue about telling them apart. A file that could not be read at all costs every setting in it; a
+    /// file that was read after dropping named members costs only those. One sentence covering both would
+    /// have to overstate one of them, and an overstated capability is worse than an admitted gap — which
+    /// is also why the second paragraph says the settings are NAMED rather than implying the list is
+    /// exhaustive of everything wrong with the file.</para>
+    /// </summary>
+    private void ReportUnreadableSettingsFiles()
+    {
+        if (_unreadableSettingsFiles.Count == 0 && _unreadableSettingsValues.Count == 0)
+        {
+            return;
+        }
+
+        var message = new System.Text.StringBuilder();
+
+        if (_unreadableSettingsFiles.Count > 0)
+        {
+            message
+                .Append("The viewer could not read these settings files, so the settings they hold are at ")
+                .Append("their defaults for this session:\n\n")
+                .AppendJoin('\n', _unreadableSettingsFiles)
+                .Append("\n\n");
+        }
+
+        if (_unreadableSettingsValues.Count > 0)
+        {
+            message
+                .Append("These individual settings could not be read and are at their defaults for this ")
+                .Append("session. Everything else in their file loaded normally:\n\n")
+                .AppendJoin('\n', _unreadableSettingsValues)
+                .Append("\n\n");
+        }
+
+        message
+            .Append("The files have been left exactly as they are. Fix the JSON and restart to get those ")
+            .Append("settings back — or save from the Settings window, which copies an unreadable file ")
+            .Append("aside as '.unreadable-<timestamp>' before replacing it.");
+
+        MessageBox.Show(message.ToString(), "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         Loaded -= OnLoaded;
+
+        ReportUnreadableSettingsFiles();
 
         /* #1954: say WHERE the config came from before trying to read it, so a missing or unparseable
            darling.json still names the file the viewer looked at and the rule that picked it. Resolving
@@ -241,6 +376,9 @@ public partial class MainWindow : Window
             var storeVersion = await _dataService.GetStoreSchemaVersionAsync();
             if (storeVersion is int version && version < ViewerDataService.RequiredStoreSchemaVersion)
             {
+                /* The store answered, so this is not Unreachable — but the seat probe never ran, so the
+                   field stays at "Seat: --" rather than claiming a verdict nothing measured (#2479). */
+                ApplySeatState(ViewerSeatState.Unknown);
                 ShowConnectionFailure(
                     $"The Darling store is at schema v{version}, but this viewer needs v{ViewerDataService.RequiredStoreSchemaVersion}. " +
                     "Update or restart the Darling service so it migrates the store, then reopen the viewer.");
@@ -252,9 +390,18 @@ public partial class MainWindow : Window
                probe fails safe to read-only; the write surfaces gate on ViewerDataService.IsReadOnly and
                the write paths translate a live 42501 into a friendly message as a backstop. */
             await _dataService.DetectReadOnlyAsync();
+
+            /* #2479 items 3+4: publish the verdict ONCE, globally, instead of letting it be discovered a
+               dialog at a time. Same probe, same fail-safe — this only makes the answer visible before a
+               write is attempted, which is the whole of #2400. */
+            ApplySeatState(_dataService.IsReadOnly ? ViewerSeatState.ReadOnly : ViewerSeatState.ReadWrite);
         }
         catch (ViewerStoreUnreachableException ex)
         {
+            /* NOT ReadOnly. #2117 built this arm precisely so an unreachable store stops being misread as
+               a read-only seat, and a status field that collapsed them would undo it in the one place an
+               operator now looks first — sending them to fix a role they never needed to touch. */
+            ApplySeatState(ViewerSeatState.Unreachable);
             ViewerLogger.Error("App", "Darling store unreachable", ex);
             ShowConnectionFailure(ex.Message);
             return;
@@ -263,6 +410,7 @@ public partial class MainWindow : Window
         {
             /* Reachable but the first connection failed for another reason (e.g. authentication, or the
                configured database does not exist) — show it rather than dead-ending on a blank window. */
+            ApplySeatState(ViewerSeatState.Unreachable);
             ViewerLogger.Error("App", "Darling store connection failed", ex);
             ShowConnectionFailure($"Couldn't connect to the Darling store: {ex.Message}");
             return;
@@ -749,6 +897,44 @@ public partial class MainWindow : Window
             ? $"Servers: {_fleet.VisibleServerCount} of {_fleet.TotalCount}"
             : $"Servers: {_fleet.TotalCount}";
 
+    /// <summary>
+    /// The status bar's "Seat:" field (#2479, items 3 and 4) — text, colour and the tooltip that explains
+    /// WHY, in one place so no caller can set half of it.
+    ///
+    /// <para>The colours are the existing status-bar vocabulary, not a new one:
+    /// <c>ErrorBrush</c> for a store that cannot be reached (the same severity <c>CollectorHealthText</c>
+    /// gives an erroring collector), <c>WarningBrush</c> for a read-only seat — visible, because a tester
+    /// who does not notice it is back to discovering the seat one refusal at a time, but not alarming,
+    /// because on a remote seat it is the correct and expected default — and the muted foreground for
+    /// read-write and for not-yet-probed, which are the unremarkable states.</para>
+    ///
+    /// <para><see cref="ViewerDataService.StoreIsOnThisMachine"/> only ORDERS the two sentences in the
+    /// tooltip by which default is likelier to have decided this seat. It cannot claim which one did: a
+    /// non-loopback store host does not prove a remote seat (#2279), so the tooltip names both.</para>
+    /// </summary>
+    private void ApplySeatState(ViewerSeatState state)
+    {
+        SeatText.Text = ViewerSeatIndicator.Text(state);
+        SeatText.ToolTip = ViewerSeatIndicator.ToolTip(state, _dataService?.StoreIsOnThisMachine ?? true);
+
+        /* TryFindResource rather than the hard FindResource the sibling status fields use, and the reason is
+           the call site rather than doubt about the keys: all three brushes exist in all three shipped
+           themes, but ApplySeatState is called from INSIDE the catch that handles an unreachable store. A
+           ResourceReferenceKeyNotFoundException thrown from a catch block is unhandled, so a missing key in
+           some future theme would turn "the service is down" into "the viewer crashed" - the one moment the
+           viewer most needs to stay up and explain itself. Falling back to the muted foreground costs a
+           colour and nothing else. */
+        SeatText.Foreground =
+            (state switch
+            {
+                ViewerSeatState.Unreachable => TryFindResource("ErrorBrush"),
+                ViewerSeatState.ReadOnly => TryFindResource("WarningBrush"),
+                _ => TryFindResource("ForegroundMutedBrush"),
+            } as System.Windows.Media.Brush)
+            ?? TryFindResource("ForegroundMutedBrush") as System.Windows.Media.Brush
+            ?? SeatText.Foreground;
+    }
+
     private async Task LoadServersAsync(bool preserveSelection = false)
     {
         if (_dataService is null)
@@ -1032,6 +1218,25 @@ public partial class MainWindow : Window
     // ── Time-display mode (Server / Local / UTC) ─────────────────────────────────────
 
     /// <summary>
+    /// Says that a setting the user just changed did not reach disk (#2434).
+    ///
+    /// <para>The two handlers below persist on an ordinary click — picking a time-display mode, re-sorting
+    /// the Overview — so a failure there has no Save button to report through, and until now had nowhere to
+    /// go at all: the store's Save could throw, neither handler caught it, and the whole-object write had
+    /// already replaced whatever it could not read. Save answers with a bool instead of throwing now, and
+    /// this is what does something with the answer. Which file and what was wrong with it is in the log;
+    /// what the user needs from a dialog is that the click did not stick.</para>
+    /// </summary>
+    private void WarnSettingNotSaved(string what, string filePath)
+    {
+        MessageBox.Show(
+            $"Your {what} could not be saved to '{System.IO.Path.GetFileName(filePath)}'. It applies for "
+            + "the rest of this session but will not survive a restart. The viewer log (sidebar: View Log) "
+            + "says why.",
+            "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    /// <summary>
     /// A server tab's Server/Local/UTC picker changed (the raising tab already set the global mode via
     /// <see cref="ViewerTimeHelper.CurrentDisplayMode"/> and reloaded itself). Persist the new mode and sync
     /// every OTHER open tab's picker so they agree — the mode is process-wide, and a background tab reloads
@@ -1041,7 +1246,11 @@ public partial class MainWindow : Window
     {
         var settings = _appSettingsStore.Load();
         settings.TimeDisplayMode = mode.ToString();
-        _appSettingsStore.Save(settings);
+        if (!_appSettingsStore.Save(settings))
+        {
+            WarnSettingNotSaved("time display mode", _appSettingsStore.FilePath);
+        }
+
         SyncDisplayModeToOpenTabs(mode);
     }
 
@@ -1085,14 +1294,17 @@ public partial class MainWindow : Window
 
         var settings = _appSettingsStore.Load();
         settings.OverviewSortMode = ServerOverviewSort.ToToken(_overviewSortMode);
-        _appSettingsStore.Save(settings);
-
-        if (OverviewItemsControl.ItemsSource is IEnumerable<ServerSummaryItem> current)
+        if (!_appSettingsStore.Save(settings))
         {
-            OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
-                current.ToList(), _overviewSortMode,
-                s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+            WarnSettingNotSaved("Overview sort order", _appSettingsStore.FilePath);
         }
+
+        /* Sorts the FULL card set, never the bound list: with the needs-attention filter on, the bound list is
+           a subset, and sorting that would quietly discard every card the filter is hiding. */
+        _overviewCards = ServerOverviewSort.Order(
+            _overviewCards, _overviewSortMode,
+            s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+        ApplyOverviewCardFilter();
     }
 
     /// <summary>Attaches each server's tags as coloured pills to its Overview summary, joining the loaded tag
@@ -1123,17 +1335,19 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>Re-stamps tag pills onto the cards the Overview is currently showing (after a tag colour /
-    /// assignment change), reassigning ItemsSource so the change renders without a full per-server reload.
+    /// <summary>Re-stamps tag pills onto the Overview's cards (after a tag colour / assignment change) and
+    /// re-projects so the change renders without a full per-server reload. Stamps the FULL card set rather than
+    /// the bound list, so a card the needs-attention filter is hiding does not come back missing its pills.
     /// A no-op unless the Overview is populated.</summary>
     private void RestampOverviewTagPills()
     {
-        if (OverviewItemsControl.ItemsSource is IEnumerable<ServerSummaryItem> items)
+        if (_overviewCards.Count == 0)
         {
-            var list = items.ToList();
-            StampTagPills(list);
-            OverviewItemsControl.ItemsSource = list;
+            return;
         }
+
+        StampTagPills(_overviewCards);
+        ApplyOverviewCardFilter();
     }
 
     /// <summary>
@@ -1152,16 +1366,14 @@ public partial class MainWindow : Window
         var servers = _fleet.All;
         if (servers.Count == 0)
         {
-            OverviewItemsControl.ItemsSource = null;
-            FleetRollupContainer.Visibility = Visibility.Collapsed;
+            ClearOverviewCards();
             return;
         }
 
         var list = servers.ToList();
         if (list.Count == 0)
         {
-            OverviewItemsControl.ItemsSource = null;
-            FleetRollupContainer.Visibility = Visibility.Collapsed;
+            ClearOverviewCards();
             return;
         }
 
@@ -1190,7 +1402,11 @@ public partial class MainWindow : Window
             built,
             _overviewSortMode,
             s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
-        OverviewItemsControl.ItemsSource = cards;
+
+        /* The full set is the authority; the grid shows whatever the needs-attention filter leaves of it. A
+           refresh must not silently drop the filter, so this re-applies it rather than binding `cards` directly. */
+        _overviewCards = cards;
+        ApplyOverviewCardFilter();
 
         /* Fleet-wide NOC roll-up above the cards — the cross-server totals SQL aggregate (the read only
            Darling's central store can serve) plus the band counts / worst-N ranking reduced from the
@@ -1224,9 +1440,83 @@ public partial class MainWindow : Window
         FleetRollupContainer.Visibility = rollup.TotalServers > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         FleetWorstServersList.Visibility = rollup.HasProblems ? Visibility.Visible : Visibility.Collapsed;
-        FleetAdditionalProblemsText.Visibility =
+        FleetAdditionalProblems.Visibility =
             rollup.AdditionalProblemCount > 0 ? Visibility.Visible : Visibility.Collapsed;
         FleetAllHealthyText.Visibility = rollup.HasProblems ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Empties the Overview: no cards, no roll-up, and no stale authority left behind for the filter
+    /// or the tag re-stamp to project from.</summary>
+    private void ClearOverviewCards()
+    {
+        _overviewCards = new List<ServerSummaryItem>();
+        OverviewItemsControl.ItemsSource = null;
+        FleetRollupContainer.Visibility = Visibility.Collapsed;
+        ApplyOverviewAttentionCount(shown: 0);
+    }
+
+    /// <summary>
+    /// Projects <see cref="_overviewCards"/> onto the grid through the needs-attention filter (#2424) — the
+    /// ONE place ItemsSource is set for a populated Overview, so a refresh, a re-sort and a tag re-stamp cannot
+    /// each have their own opinion about whether the filter is still on.
+    ///
+    /// <para>The predicate is <see cref="FleetRollup.NeedsAttention"/>, the same banding the roll-up counted
+    /// the "+N more" with, so the grid the link lands on holds exactly the servers the link was counting.</para>
+    /// </summary>
+    private void ApplyOverviewCardFilter()
+    {
+        var shown = _overviewAttentionOnly
+            ? FleetRollup.NeedsAttention(_overviewCards)
+            : _overviewCards;
+
+        OverviewItemsControl.ItemsSource = shown;
+        ApplyOverviewAttentionCount(shown.Count);
+    }
+
+    /// <summary>
+    /// Shows what the filter did, beside the toggle that did it. Only rendered while the filter is on: a grid
+    /// showing every server needs no arithmetic, and a filtered one must never be mistakable for it.
+    ///
+    /// <para>The colour follows the sentence. This line has two of them — a count of servers wanting attention,
+    /// and an all-clear when the filter matched none — and painting the all-clear amber would be a colour
+    /// contradicting its own text, which is the family of defect this whole change is about. Set through
+    /// SetResourceReference (the alert badge's idiom) so it still tracks a theme change.</para>
+    /// </summary>
+    private void ApplyOverviewAttentionCount(int shown)
+    {
+        if (_overviewAttentionOnly)
+        {
+            OverviewAttentionCountText.Text = FleetRollup.AttentionFilterCountText(shown, _overviewCards.Count);
+            OverviewAttentionCountText.SetResourceReference(
+                ForegroundProperty, shown > 0 ? "WarningBrush" : "SuccessBrush");
+            OverviewAttentionCountText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        OverviewAttentionCountText.Text = string.Empty;
+        OverviewAttentionCountText.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>The needs-attention toggle: re-projects the grid from the unchanged card set, so turning it off
+    /// restores the full fleet without a store round-trip. Deliberately carries no IsLoaded guard, unlike the sort
+    /// selector — that one needs it because seeding the ComboBox raises SelectionChanged during construction, and
+    /// nothing seeds this box. A guard here would only be able to drop a real transition and leave a ticked box
+    /// over an unfiltered grid, which is the same lie as the one this fixes, in the other direction.</summary>
+    private void OverviewAttentionOnlyCheck_Changed(object sender, RoutedEventArgs e)
+    {
+        _overviewAttentionOnly = OverviewAttentionOnlyCheck.IsChecked == true;
+        ApplyOverviewCardFilter();
+    }
+
+    /// <summary>
+    /// "+N more need attention" — the servers the ranking's cap could not show. Clicking it turns the filter on
+    /// rather than doing the filtering itself, so the state lands in the toggle where the reader can see it is on
+    /// and can turn it off; the alternative, a grid that silently shrank, is the worse version of this defect.
+    /// </summary>
+    private void FleetAdditionalProblems_Click(object sender, MouseButtonEventArgs e)
+    {
+        OverviewAttentionOnlyCheck.IsChecked = true;
+        e.Handled = true;
     }
 
     /// <summary>Double-clicking an Overview card opens (or focuses) that server's tab (Lite's rule).</summary>
@@ -1522,7 +1812,10 @@ public partial class MainWindow : Window
         if (settings.ShowDialog() == true && settings.Result is not null)
         {
             _preferences = settings.Result;
-            _preferencesStore.Save(_preferences);
+            if (!_preferencesStore.Save(_preferences))
+            {
+                WarnSettingNotSaved("default time range and auto-refresh", _preferencesStore.FilePath);
+            }
         }
 
         /* Re-seed the runtime settings the viewer honors from whatever the window persisted (it self-saves):

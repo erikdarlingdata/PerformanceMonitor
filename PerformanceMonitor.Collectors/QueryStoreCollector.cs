@@ -392,7 +392,7 @@ END;
     /// <c>database_name</c> column, the same precedent the deadlocks / blocked_process_report XE
     /// collectors set. With this, each database's commit advances only its own watermark and an abort
     /// loses nothing. This also relocates query_store's cutoff computation into the per-item loop, which
-    /// is exactly where the 24h catch-up clamp (<see cref="WatermarkPolicy"/>) must be applied — and
+    /// is exactly where the catch-up clamp (<see cref="WatermarkPolicy"/>) must be applied — and
     /// since #1836 the clamp is applied by <see cref="BuildCutoffParameters"/> itself, so it holds on the
     /// Azure per-database path too, where the host reads this same per-database watermark but does not
     /// clamp (that branch is shared with the XE collectors, which must not be clamped).
@@ -1051,7 +1051,7 @@ OPTION(RECOMPILE);";
     /// newer than what this database already has are fetched. Falls back to 60 minutes back when the
     /// database has nothing stored yet.
     ///
-    /// <para>The 24h catch-up clamp (<see cref="WatermarkPolicy"/>) is applied HERE, in the definition,
+    /// <para>The catch-up clamp (<see cref="WatermarkPolicy"/>) is applied HERE, in the definition,
     /// rather than only in the host's enumeration loop (#1836). Query Store is the one
     /// unbounded-persisted source among the collectors — it retains ~30 days — so a service that was
     /// stopped for days must not come back and ask for the entire backlog in one cycle; that is the

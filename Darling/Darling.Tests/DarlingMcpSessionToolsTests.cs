@@ -69,8 +69,8 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData("get_session_stats", "server_name")]
-    [InlineData("get_active_queries", "server_name,hours_back,database_name,blocking_only,limit")]
-    [InlineData("get_waiting_tasks", "server_name,hours_back,limit")]
+    [InlineData("get_active_queries", "server_name,hours_back,database_name,blocking_only,limit,as_of")]
+    [InlineData("get_waiting_tasks", "server_name,hours_back,limit,as_of")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());

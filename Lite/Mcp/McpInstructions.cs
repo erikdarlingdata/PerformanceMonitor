@@ -32,79 +32,106 @@ internal static class McpInstructions
 
         ## Tool Reference
 
+        ### Reading an empty result
+
+        When a read comes back with no data, the `status` word says WHICH kind of nothing it is, and the four are not interchangeable. `empty` is a true negative: we looked and there was nothing to find. `unavailable` means this server could have that data and does not have it right now, so collection health is worth a look. `not_collected` means this server does not collect that at all — and when the reason is the ENGINE, the gap is PERMANENT: the collector serving that read does not run on this server's engine (an Azure SQL Database has no system_health session, no default trace and no SQL Agent; a PostgreSQL target collects none of the SQL Server signals at all, and the `get_pg_*` reads are the ones that answer there), so there is no session to start, no collector to enable, and nothing to check. The message names the engine and the collector. Do not send anyone to go and fix it. `precondition` is the one that IS worth acting on: this server could have that data, the collector is running, and a setup step on the monitored server is in the way — a Query Store that is off or has gone READ_ONLY, an Extended Events capture session that is not running, an extension that was never created, a grant the monitoring login was refused. The message names the precondition, quotes what the monitored server itself said, and gives the statement or grant that satisfies it. It is re-derived on EVERY read rather than decided when the connection was made, so once somebody does the thing it asked for the next call answers with data — usually with nothing to restart on the monitoring side. A few preconditions are the exception and SAY SO IN THEIR OWN MESSAGE: the fact that gates them is read once when the service connects to that server and cached for the connection's life, so satisfying them also needs the service to reconnect before collection resumes. Read the message rather than assuming the general case — it tells you which kind you have, and telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates.
+
+        ### Asking about a PAST window
+
+        Every tool below that takes `hours_back` also takes `as_of`: an optional ISO-8601 UTC instant that moves the END of the window off "now". `hours_back` stays the window's LENGTH. So the four hours around last Tuesday 03:00 is `as_of=2026-08-19T05:00:00Z, hours_back=4` — not `hours_back=170`.
+
+        Reach for it whenever the question is about a time rather than about the present, and do NOT substitute a wider `hours_back`: for an aggregate read a wider window is a DIFFERENT answer, not the same answer with more rows. It changes what a top-N returns, what an average is taken over, and how much a capped read truncates.
+
+        - Accepted forms: `2026-08-19T05:00:00Z`, `2026-08-19T05:00:00` (read as UTC), `2026-08-19T07:00:00+02:00`, `2026-08-19` (midnight UTC).
+        - An unparseable `as_of`, or one in the future, is REFUSED with a message rather than quietly answered as "now" — a read that silently reverts to now is indistinguishable from a correct one.
+        - An `as_of` older than anything the store still holds is NOT refused. It returns the read's normal `empty` / `unavailable` status, which means exactly what it says: we looked in the window you named and there was nothing in it.
+        - Tools that take no window at all (latest-snapshot reads like `get_memory_stats`, `get_file_io_stats`, `get_index_usage`, and the configuration reads) do not take `as_of` — they read the newest row, and there is no window to move.
+        - The analysis family DOES take it (#2506), and the anchor reaches the ENGINE rather than stopping at the tool: `get_analysis_facts` and `analyze_server` re-run fact collection and scoring over the anchored window, and `analyze_server`'s anomaly detection moves with it, so the window is compared against the hour-of-day x day-of-week baseline for the hours it actually covers instead of for the hours you happen to be asking in. `compare_analysis` hangs BOTH windows off the anchor, since `baseline_hours_back` has always been measured from the comparison window's end. `get_analysis_findings` is the odd one and worth reading twice: its window is on ANALYSIS TIME, so anchoring it asks what a scheduled analysis pass was SAYING then, which is a different question from re-analyzing that window now (that is `analyze_server` with the same anchor).
+        - `analyze_server` with an `as_of` is EXPLORATORY and does NOT persist its findings; the result says so in `persisted` / `persistence_note`. A finding row is stamped with the time the analysis RAN, and `get_analysis_findings` and the viewer's Recommendations tab treat the newest `analysis_time` as the server's CURRENT state — so writing a backdated run would make last week's findings today's headline and would inflate the occurrence stats of any live incident sharing a story path. Run it without `as_of` when you want the present analyzed and recorded.
+        - `get_pvs_stats` does not take it. It mixes a latest-snapshot measurement with a windowed trend, so anchoring only the windowed half would return a result whose two halves describe different instants.
+
         ### Discovery & Health Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `list_servers` | Lists all monitored SQL Server instances with status and last collection time | none |
-        | `get_collection_health` | Shows collector health: running, failing, or stale, plus the sweep_pressure verdict (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) | `server_name` |
+        | `get_collection_health` | Shows collector health: running, failing, or stale, plus the server's sweep_pressure block: a `verdict` for SUSTAINED demand (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) and a separate `peak_cycle_risk` for a SINGLE sweep (BODY_OVERRUN means one scheduled body cannot fit the budget even when the verdict reads OK, the signature of one infrequent heavy collector; `peak_collector` names it). Per-collector rows carry `avg_duration_ms`, `p95_duration_ms` and `max_duration_ms`: a mean far below the p95 means the collector's runs come in two sizes and the mean describes neither | `server_name` |
+        | `get_collection_log` | The RAW per-run collection log behind that rollup: one row per collector run with total duration split into time on the monitored server and time on the store, rows collected, status and any error. Reach for it when the rollup reads HEALTHY and collection still looks wrong, or to see what a collector was doing during a specific window. An empty result distinguishes a quiet window (`empty`, widen it) from a server that has never collected (`unavailable`, collection is not running) | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_current_waits_trend` | The two Current Waits series over time: waiting-task total wait per wait type per collection, and blocked-session counts per database per collection. `get_waiting_tasks` gives the snapshot and can never say whether now is worse than an hour ago; this is that question. Read the two series together — a wait-type spike with no blocked sessions is a resource wait, the same spike with them is contention. An empty result distinguishes a genuine all-clear (`empty`) from a server the collector has never sampled (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back`, `database_name`, `as_of` |
+        | `get_blocking_stats` | Blocking SEVERITY per minute: blocking duration (event count, total, max, avg wait) and deadlock severity (victim count plus total/max/avg wait across EVERY process in the graphs, not just victims). `get_blocking_trend` and `get_deadlock_trend` say how OFTEN; this says how BAD — ten one-second blocks and one ten-minute block are the same count and a different problem. An empty result distinguishes a genuinely clear window (`empty`) from a server where neither capture path has ever produced a row (`unavailable`), which is NOT a clean bill of health | `server_name`, `hours_back`, `as_of` |
         | `get_server_summary` | Quick health overview: CPU %, memory, blocking/deadlock counts | `server_name` |
         | `get_daily_summary` | Daily composite health band + wait/query/deadlock/blocking/CPU/memory/alert rollup for one day | `server_name`, `summary_date` (yyyy-MM-dd, default today) |
+        | `get_daily_summary_range` | The SAME rollup across a span of days — one row per collected day, the Performance Calendar's month grid. Use it when the question is WHICH day rather than how one day went: scan the bands, then call `get_daily_summary` for the day that stands out. A day with ANY collection appears even when every signal was quiet, so a day absent from the result is a gap in COLLECTION. `as_of` anchors the LAST day of the range. An empty result distinguishes a range outside this server's history (`empty`) from a server nothing has ever been collected for (`unavailable`) | `server_name`, `days_back` (default 30, max 366), `as_of` |
 
         ### Wait Statistics Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_wait_stats` | Top wait types aggregated over time period | `server_name`, `hours_back` (default 24), `limit` (default 20) |
-        | `get_wait_types` | Lists distinct wait types observed (use before `get_wait_trend`) | `server_name`, `hours_back` |
-        | `get_wait_trend` | Time-series for a specific wait type | `wait_type` (required), `server_name`, `hours_back` |
-        | `get_waiting_tasks` | Currently/recently waiting queries with details | `server_name`, `hours_back` (default 1), `limit` |
+        | `get_wait_stats` | Top wait types aggregated over time period | `server_name`, `hours_back` (default 24), `limit` (default 20), `as_of` |
+        | `get_wait_types` | Lists distinct wait types observed (use before `get_wait_trend`). An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server no wait stats have ever been stored for (`unavailable`) | `server_name`, `hours_back`, `as_of` |
+        | `get_wait_trend` | Time-series for a specific wait type | `wait_type` (required), `server_name`, `hours_back`, `as_of` |
+        | `get_waiting_tasks` | Currently/recently waiting queries with details | `server_name`, `hours_back` (default 1), `limit`, `as_of` |
 
         ### CPU Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_cpu_utilization` | SQL Server CPU vs other process CPU over time | `server_name`, `hours_back` (default 4) |
-        | `get_cpu_scheduler_pressure` | Latest scheduler snapshot: runnable queue depth, worker-thread utilization, queued/blocked requests, pressure warnings | `server_name`, `hours_back` (default 24) |
+        | `get_cpu_utilization` | SQL Server CPU vs other process CPU over time | `server_name`, `hours_back` (default 4), `as_of` |
+        | `get_cpu_scheduler_pressure` | Latest scheduler snapshot: runnable queue depth, worker-thread utilization, queued/blocked requests, pressure warnings | `server_name`, `hours_back` (default 24), `as_of` |
 
         ### Contention Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_latch_stats` | Latest latch-contention snapshot by class (waits + last-interval delta waits) | `server_name`, `hours_back` (default 24) |
-        | `get_spinlock_stats` | Latest spinlock-contention snapshot (collisions, spins, backoffs) | `server_name`, `hours_back` (default 24) |
+        | `get_latch_stats` | Latest latch-contention snapshot by class (waits + last-interval delta waits) | `server_name`, `hours_back` (default 24), `as_of` |
+        | `get_spinlock_stats` | Latest spinlock-contention snapshot (collisions, spins, backoffs) | `server_name`, `hours_back` (default 24), `as_of` |
 
         ### Plan Cache Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_plan_cache_bloat` | Single-use vs multi-use plan composition per cache/object type, with bloat-level classification | `server_name`, `hours_back` (default 24) |
+        | `get_plan_cache_bloat` | Single-use vs multi-use plan composition per cache/object type, with bloat-level classification | `server_name`, `hours_back` (default 24), `as_of` |
 
         ### Query Performance Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_top_queries_by_cpu` | Expensive queries from plan cache with DOP, spills, query_hash. `max_dop` is a lifetime-max for the cached plan, not current parallelism - confirm with `analyze_query_plan`. `cpu_attribution.attributed_cpu_ratio` says how much of the box's measured CPU the returned rows explain | `server_name`, `hours_back`, `top`, `database_name`, `parallel_only`, `min_dop` |
-        | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time, with the same `cpu_attribution` disclosure | `server_name`, `hours_back`, `top`, `database_name` |
-        | `get_query_store_top` | Expensive queries from Query Store (persistent) | `server_name`, `hours_back`, `top`, `database_name` |
-        | `get_query_trend` | Time-series for a specific query by query_hash | `query_hash` (required), `database_name` (required), `server_name`, `hours_back` |
-        | `get_query_duration_trend` | Average query duration over time (detect degradation) | `server_name`, `hours_back` |
+        | `get_top_queries_by_cpu` | Expensive queries from plan cache with DOP, spills, query_hash. `max_dop` is a lifetime-max for the cached plan, not current parallelism - confirm with `analyze_query_plan`. `cpu_attribution.attributed_cpu_ratio` says how much of the box's measured CPU the returned rows explain | `server_name`, `hours_back`, `top`, `database_name`, `parallel_only`, `min_dop`, `as_of` |
+        | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time, with the same `cpu_attribution` disclosure | `server_name`, `hours_back`, `top`, `database_name`, `as_of` |
+        | `get_query_store_top` | Expensive queries from Query Store (persistent) | `server_name`, `hours_back`, `top`, `database_name`, `as_of` |
+        | `get_query_heatmap` | The desktop viewer's Query Heatmap as a TABLE: how many DISTINCT queries fell into each (time bin x log-magnitude bucket) cell, with the most-executed query in each. The only query read with a TIME axis - the rankings above cannot show that a window had a quiet half and a bad half. Bins are 5 minutes by default, the viewer's own width, so both surfaces draw the same picture; raise `bucket_minutes` to cover a longer window in fewer cells. `limit` caps CELLS and truncation drops the OLDEST bins, so read `first_time_bin` / `last_time_bin`. Zero cells is three states and the read says which: never collected (`unavailable`), nothing in the window (`empty`, widen it), or collected and genuinely idle (`empty`) | `server_name`, `hours_back`, `metric`, `database_name`, `bucket_minutes`, `limit`, `as_of` |
+        | `get_query_store_regressions` | Queries whose Query Store performance got WORSE: the recent window's averages vs the BASELINE (every capture before it), with duration / CPU / reads regression percents, the execution-count-weighted extra duration (the ranking key), the plan counts on both sides and a severity band. `get_query_store_top` answers what is EXPENSIVE; this answers what CHANGED. Kept only where average CPU regressed > 25%. Zero rows is four states and the read says which — including "no baseline, so no regression is detectable", which is NOT a clean bill of health | `server_name`, `hours_back`, `database_name`, `limit`, `as_of` |
+        | `get_query_trend` | Time-series for a specific query by query_hash | `query_hash` (required), `database_name` (required), `server_name`, `hours_back`, `as_of` |
+        | `get_query_duration_trend` | Overall query elapsed-ms/sec + executions/sec over time, from the PLAN CACHE. `execution_count` and `executions_per_second` are the same quantity; the first is truncated to an integer, so read the second on a quiet server. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back`, `as_of` |
+        | `get_procedure_duration_trend` | The same series over procedure_stats. NOT a duplicate: query_stats smears a procedure's work across the statements inside it, this charges the whole call to the procedure. Read both to tell an ad-hoc regression from a procedure regression | `server_name`, `hours_back`, `as_of` |
+        | `get_query_store_duration_trend` | The same series over Query Store, which persists per interval and survives a plan-cache eviction or a restart. Each interval is counted once, at the hour the work RAN. Its `unavailable` names the cause the plan-cache trends do not have: Query Store may be OFF on every database | `server_name`, `hours_back`, `as_of` |
 
         ### Blocking & Deadlock Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_deadlocks` | Recent deadlock events with victim info | `server_name`, `hours_back`, `limit` |
-        | `get_deadlock_detail` | Full deadlock graph XML for deep analysis | `server_name`, `hours_back`, `limit` |
-        | `get_blocked_process_reports` | Parsed blocking from sp_HumanEventsBlockViewer (extended events) | `server_name`, `hours_back`, `limit` |
-        | `get_blocked_process_xml` | Raw blocked process report XML | `server_name`, `hours_back`, `limit` |
-        | `get_long_query_completions` | Longest completed queries (rpc/batch over the trace threshold) + attentions/cancels from the opt-in long-query trace, duration DESC (empty until the collector is enabled) | `server_name`, `hours_back`, `limit` |
-        | `get_blocking_trend` | Time-series of blocking event counts | `server_name`, `hours_back` |
-        | `get_deadlock_trend` | Time-series of deadlock event counts | `server_name`, `hours_back` |
+        | `get_deadlocks` | Recent deadlock events with victim info | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_deadlock_detail` | Full deadlock graph XML for deep analysis | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_blocked_process_reports` | Parsed blocking from sp_HumanEventsBlockViewer (extended events) | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_blocked_process_xml` | Raw blocked process report XML | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_long_query_completions` | Longest completed queries (rpc/batch over the trace threshold) + attentions/cancels from the opt-in long-query trace, duration DESC (empty until the collector is enabled) | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_blocking_trend` | Time-series of blocking event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back`, `as_of` |
+        | `get_deadlock_trend` | Time-series of deadlock event counts. An empty result distinguishes a genuine all-clear (`empty`, with the collector run counts in `hints` so you can see how many captures the window actually holds) from a window no collector covered (`unavailable`), which is NOT an all-clear | `server_name`, `hours_back`, `as_of` |
+        | `get_lock_wait_trend` | Every LCK% wait type's wait milliseconds per SECOND at each collection — the aggregate lock-wait lane. The two trends above count incidents and `get_wait_trend` charts ONE named wait type; this is the whole lock family as a rate, which is what shows lock pressure rising when no single type dominates. An empty result distinguishes a genuinely quiet window (`empty`, widen `hours_back`) from a server no wait stats have ever been stored for (`unavailable`), which is NOT a report of a server without lock contention | `server_name`, `hours_back`, `as_of` |
 
         ### Memory Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_memory_stats` | Latest memory snapshot: physical, buffer pool, plan cache | `server_name` |
-        | `get_memory_trend` | Memory usage over time | `server_name`, `hours_back` |
-        | `get_memory_clerks` | Top memory consumers by clerk type | `server_name` |
-        | `get_memory_grants` | Active/recent memory grants (detect grant pressure) | `server_name`, `hours_back` (default 1), `limit` |
-        | `get_resource_semaphore` | Latest resource-semaphore snapshot: workspace memory vs target/max ceiling, waiter/timeout/forced-grant pressure | `server_name`, `hours_back` (default 24) |
-        | `get_memory_pressure_events` | Ring buffer memory pressure notifications (sp_pressuredetector source) | `server_name`, `hours_back` |
+        | `get_memory_trend` | Memory usage over time. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back`, `as_of` |
+        | `get_memory_clerks` | Top memory consumers by clerk type. An empty result is `unavailable`, never a quiet period — a live SQL Server always has clerks, so nothing retained means the collector has not run or its rows aged out | `server_name` |
+        | `get_memory_grants` | Active/recent memory grants (detect grant pressure) | `server_name`, `hours_back` (default 1), `limit`, `as_of` |
+        | `get_resource_semaphore` | Latest resource-semaphore snapshot: workspace memory vs target/max ceiling, waiter/timeout/forced-grant pressure | `server_name`, `hours_back` (default 24), `as_of` |
+        | `get_memory_pressure_events` | Ring buffer memory pressure notifications (sp_pressuredetector source) | `server_name`, `hours_back`, `as_of` |
 
         ### I/O Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_file_io_stats` | Latest file I/O stats per database file with latency | `server_name` |
-        | `get_file_io_trend` | I/O latency trend over time per database | `server_name`, `hours_back` |
+        | `get_file_io_trend` | I/O latency trend over time per database. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back`, `as_of` |
 
         ### TempDB Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_tempdb_trend` | TempDB space: user objects, internal objects, version store | `server_name`, `hours_back` |
+        | `get_tempdb_trend` | TempDB space: user objects, internal objects, version store | `server_name`, `hours_back`, `as_of` |
 
         ### Storage & Index Tools
         | Tool | Purpose | Key Parameters |
@@ -117,14 +144,14 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_perfmon_stats` | Latest perfmon counters (batch requests/sec, etc.) | `server_name`, `counter_name`, `instance_name` |
-        | `get_perfmon_trend` | Time-series for a specific perfmon counter | `counter_name` (required), `server_name`, `hours_back` |
+        | `get_perfmon_trend` | Time-series for a specific perfmon counter | `counter_name` (required), `server_name`, `hours_back`, `as_of` |
 
         ### Alert Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_alert_history` | Recent alert history: what fired, when, email status | `hours_back` (default 24), `limit` (default 50) |
-        | `get_alert_settings` | Current alert thresholds and SMTP configuration | none |
-        | `get_mute_rules` | Configured mute rules that suppress specific recurring alerts (still logged) | `enabled_only` (default true) |
+        | `get_alert_history` | Recent alert history: what fired, when, email status | `hours_back` (default 24), `limit` (default 50), `as_of` |
+        | `get_alert_settings` | Every alert group's enable flag and thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, PVS, file growth, failed jobs, database state), plus cooldown, excluded databases, delivery mode, analysis cadence and SMTP configuration | none |
+        | `get_mute_rules` | Configured mute rules that suppress specific recurring alerts (still logged). An empty result distinguishes no rule ever written from rules that exist but have all lapsed, with the configured count in `hints` | `enabled_only` (default true) |
 
         ### Job Tools
         | Tool | Purpose | Key Parameters |
@@ -139,22 +166,23 @@ internal static class McpInstructions
         | `get_database_scoped_config` | Database-scoped configuration (MAXDOP, legacy CE, parameter sniffing) | `server_name`, `database_name` |
         | `get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds | `server_name`, `database_name` |
         | `get_trace_flags` | Active trace flags with global/session scope | `server_name` |
-        | `get_server_config_changes` | sp_configure change history (diff of on-connect snapshots) | `server_name`, `hours_back` (default 168) |
-        | `get_database_config_changes` | sys.databases change history (recovery model, RCSI, compat level, etc.) | `server_name`, `hours_back` (default 168) |
-        | `get_trace_flag_changes` | Trace flag enable/disable history (diff of on-connect snapshots) | `server_name`, `hours_back` (default 168) |
+        | `get_server_config_changes` | sp_configure change history (diff of on-connect snapshots) | `server_name`, `hours_back` (default 168), `as_of` |
+        | `get_database_config_changes` | sys.databases change history (recovery model, RCSI, compat level, etc.) | `server_name`, `hours_back` (default 168), `as_of` |
+        | `get_trace_flag_changes` | Trace flag enable/disable history (diff of on-connect snapshots) | `server_name`, `hours_back` (default 168), `as_of` |
 
         ### System Health & Default Trace Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_default_trace_events` | Significant Default Trace events: file auto-grow/shrink stalls, severe ErrorLog writes, schema DDL, security audits | `server_name`, `hours_back` (default 24), `limit` (default 100) |
-        | `get_health_parser_system_health` | Parsed sp_server_diagnostics health counters (spinlocks, latch warnings, dumps, CPU, bad pages) | `server_name`, `hours_back`, `limit` |
-        | `get_health_parser_severe_errors` | Severe errors (severity >= 19) from system_health | `server_name`, `hours_back`, `limit` |
-        | `get_health_parser_io_issues` | I/O warnings from system_health (15-second I/O, long/pending I/O) | `server_name`, `hours_back`, `limit` |
-        | `get_health_parser_scheduler_issues` | Non-yielding schedulers and scheduler-monitor warnings | `server_name`, `hours_back`, `limit` |
-        | `get_health_parser_memory_conditions` | Low-memory snapshots (RESOURCE_MEMPHYSICAL_LOW) with the memory-manager report | `server_name`, `hours_back`, `limit` |
-        | `get_health_parser_cpu_tasks` | CPU task/worker-thread snapshots (QUERY_PROCESSING) with deadlock/blocking flags | `server_name`, `hours_back`, `limit` |
-        | `get_health_parser_memory_broker` | Memory broker ratio changes and target adjustments | `server_name`, `hours_back`, `limit` |
-        | `get_health_parser_memory_node_oom` | Per-NUMA-node out-of-memory events | `server_name`, `hours_back`, `limit` |
+        | `get_default_trace_events` | Significant Default Trace events: file auto-grow/shrink stalls, severe ErrorLog writes, schema DDL, security audits | `server_name`, `hours_back` (default 24), `limit` (default 100), `as_of` |
+        | `get_health_parser_system_health` | Parsed sp_server_diagnostics health counters (spinlocks, latch warnings, dumps, CPU, bad pages) | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_health_parser_severe_errors` | Severe errors (severity >= 19) from system_health | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_health_parser_io_issues` | I/O warnings from system_health (15-second I/O, long/pending I/O) | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_health_parser_scheduler_issues` | Non-yielding schedulers and scheduler-monitor warnings | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_health_parser_memory_conditions` | Low-memory snapshots (RESOURCE_MEMPHYSICAL_LOW) with the memory-manager report | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_health_parser_cpu_tasks` | CPU task/worker-thread snapshots (QUERY_PROCESSING) with deadlock/blocking flags | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_health_parser_memory_broker` | Memory broker ratio changes and target adjustments | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_health_parser_memory_node_oom` | Per-NUMA-node out-of-memory events | `server_name`, `hours_back`, `limit`, `as_of` |
+        | `get_health_parser_significant_waits` | Individual wait_info events: a real session's non-BACKUP statement waited 500 ms+ on a non-idle wait type, with the wait type, duration and signal duration, resource, session id and the waiting SQL text. `get_wait_stats` gives the instance-wide totals and can never name the statement that paid them. An empty result says which nothing it is: events captured but none significant (the healthy answer), a quiet window (`empty`), or wait_info never captured (`unavailable`, NOT an all-clear) | `server_name`, `hours_back`, `limit`, `as_of` |
 
         ### Server Information Tools
         | Tool | Purpose | Key Parameters |
@@ -165,7 +193,7 @@ internal static class McpInstructions
         ### Session & Active Query Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_active_queries` | Active query snapshots from sys.dm_exec_requests — what was running at each collection point | `server_name`, `hours_back` (default 1), `database_name`, `blocking_only`, `limit` |
+        | `get_active_queries` | Active query snapshots from sys.dm_exec_requests — what was running at each collection point | `server_name`, `hours_back` (default 1), `database_name`, `blocking_only`, `limit`, `as_of` |
         | `get_session_stats` | Connection counts and resource usage grouped by application | `server_name` |
 
         ### Execution Plan Analysis Tools
@@ -190,11 +218,11 @@ internal static class McpInstructions
         ### Diagnostic Analysis Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `analyze_server` | Runs the inference engine: scores facts, traverses relationship graph, returns evidence-backed findings with severity and recommended next tools. A remediable finding also carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), with a two-sided risk-disclosure header on destructive changes; advisory only, never executed. Force-plan findings additionally carry `structured_remediation`: the verdict as machine-readable fields (eligible + named blockers), evidence, and split force/unforce/verify SQL | `server_name`, `hours_back` (default 4) |
-        | `get_analysis_facts` | Exposes raw scored facts from the collect+score pipeline — every observation the engine sees with base severity, amplifiers, and metadata | `server_name`, `hours_back` (default 4), `source` (filter), `min_severity` |
-        | `compare_analysis` | Compares two time periods (e.g., peak vs off-peak, before vs after a change) showing severity deltas for each fact | `server_name`, `hours_back` (default 4), `baseline_hours_back` (default 28) |
+        | `analyze_server` | Runs the inference engine: scores facts, traverses relationship graph, returns evidence-backed findings with severity and recommended next tools. A remediable finding also carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), with a two-sided risk-disclosure header on destructive changes; advisory only, never executed. Force-plan findings additionally carry `structured_remediation`: the verdict as machine-readable fields (eligible + named blockers), evidence, and split force/unforce/verify SQL. With `as_of` it analyzes a PAST window — anomaly baseline included — and is EXPLORATORY: the findings come back in full but are NOT persisted, which `persisted` / `persistence_note` state on every result | `server_name`, `hours_back` (default 4), `as_of` |
+        | `get_analysis_facts` | Exposes raw scored facts from the collect+score pipeline — every observation the engine sees with base severity, amplifiers, and metadata | `server_name`, `hours_back` (default 4), `source` (filter), `min_severity`, `as_of` |
+        | `compare_analysis` | Compares two time periods (e.g., peak vs off-peak, before vs after a change) showing severity deltas for each fact. When NEITHER window produced facts the result is `unavailable` rather than an all-zero comparison, because "nothing to compare" is not "nothing changed"; when only ONE window is empty the payload carries a `caveat` saying so, since every fact then counts as new or resolved by default. `baseline_hours_back` is measured from the comparison window's END, so `as_of` moves BOTH windows together | `server_name`, `hours_back` (default 4), `baseline_hours_back` (default 28), `as_of` |
         | `audit_config` | Edition-aware configuration audit: evaluates CTFP, MAXDOP, max memory, and max worker threads against best practices | `server_name` |
-        | `get_analysis_findings` | Retrieves persisted findings from previous analysis runs, deduplicated to one entry per diagnostic chain (`story_path_hash` + `incident_id`): the latest occurrence plus `occurrences`/`first_seen`/`last_seen`/`peak_severity` spanning the window; each remediable finding carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the persisted action, advisory only and never executed; force-plan findings additionally carry `structured_remediation` (verdict + evidence + split artifacts, machine-readable) | `server_name`, `hours_back` (default 24) |
+        | `get_analysis_findings` | Retrieves persisted findings from previous analysis runs, deduplicated to one entry per diagnostic chain (`story_path_hash` + `incident_id`): the latest occurrence plus `occurrences`/`first_seen`/`last_seen`/`peak_severity` spanning the window; each remediable finding carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the persisted action, advisory only and never executed; force-plan findings additionally carry `structured_remediation` (verdict + evidence + split artifacts, machine-readable). Its window is on ANALYSIS TIME, so `as_of` asks what analysis was saying then rather than re-analyzing that window now | `server_name`, `hours_back` (default 24), `as_of` |
         | `mute_analysis_finding` | Mutes a finding pattern by story_path_hash so it won't appear in future runs | `story_path_hash` (required), `server_name`, `reason` |
 
         ## Recommended Workflow

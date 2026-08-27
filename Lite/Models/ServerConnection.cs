@@ -192,21 +192,53 @@ public class ServerConnection : INotifyPropertyChanged
     public bool? HasCollectorErrors { get; set; }
 
     /// <summary>
+    /// The sidebar row's status, as a VALUE — the same <see cref="ServerCardStatus"/> the Overview card
+    /// renders (#2458). This row used to derive its own copy of the four-word ladder from this same flag
+    /// pair, on a different type, on a different surface: the sidebar and the card could therefore say
+    /// different things about one server and nothing would notice. Both now read
+    /// <see cref="ServerCardStatusRules.Classify"/>, which is the collapse #2429 argued for — with one
+    /// discriminant there is no flag combination left for the renderings to disagree about.
+    ///
+    /// <para><c>HasCollectorErrors</c> is <c>bool?</c> here and <c>bool</c> on the card, so "not yet
+    /// determined" folds to false. That is the string ladder's own reading, kept deliberately rather than
+    /// inherited by accident: a server whose collector health nobody has established yet is not a server
+    /// reporting failing collectors, and painting it amber would say it was.</para>
+    /// </summary>
+    [JsonIgnore]
+    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors == true);
+
+    /// <summary>
     /// Computed dot status for the sidebar indicator. One of: "Unknown", "Online", "Warning", "Offline".
     /// Drives the Ellipse fill via DataTrigger in MainWindow.xaml.
     /// </summary>
     [JsonIgnore]
-    public string DotStatus
-    {
-        get
-        {
-            if (IsOnline == true)
-                return HasCollectorErrors == true ? "Warning" : "Online";
-            if (IsOnline == false)
-                return "Offline";
-            return "Unknown"; // null — not yet checked
-        }
-    }
+    public string DotStatus => CardStatus.Word();
+
+    /// <summary>
+    /// What the dot means, for the ToolTip the sidebar Ellipse carries (#2458, answering #2422 one surface
+    /// over). The dot is the thing a reader points at first, and until now it was a coloured circle with no
+    /// way to ask what it meant — the same complaint #2429 answered on the viewer's card and #2451 on Lite's.
+    /// The first line is <see cref="ServerCardStatusRules.Headline"/>, so it is word-for-word what the
+    /// Overview card says for that state.
+    ///
+    /// <para>The middle line is the one this surface specifically needs. #2457 deliberately kept collection
+    /// freshness OUT of the status word and gave it its own banded row on the card; the sidebar has no such
+    /// row and <see cref="ServerConnection"/> carries no last-collection time to build one from, so a green
+    /// dot here is a connection answer being read in a place that offers no freshness answer at all. Saying
+    /// so — and naming where the freshness answer lives — is what stops the reader inferring one from the
+    /// other, which is the #2429/#2422 conflation in miniature.</para>
+    /// </summary>
+    [JsonIgnore]
+    public string DotTooltip => string.Join("\n",
+        CardStatus.Headline(),
+        "It reports the connection check only, not collection freshness — the Overview card's Last Collect row bands that.",
+        DotTooltipAction);
+
+    /// <summary>The line the sidebar dot's tooltip ends on — the gesture the ROW actually supports.
+    /// <c>ServerListView_MouseDoubleClick</c> connects; a single click only selects, so naming one would be
+    /// naming a no-op. Same sentence as the Overview card's closing line with the noun the reader is
+    /// pointing at, because the point of doing every surface is that they share a vocabulary.</summary>
+    private const string DotTooltipAction = "Double-click the row to open this server's tab";
 
     /// <summary>
     /// Display-only property for showing status in UI.
@@ -367,6 +399,33 @@ public class ServerConnection : INotifyPropertyChanged
         var builder = new SqlConnectionStringBuilder(baseConnStr)
         {
             InitialCatalog = server.UtilityDatabase
+        };
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
+    /// Like <see cref="ResolveConnectionString"/> but targets an explicitly named database (#2407).
+    ///
+    /// <para>Separate from <see cref="ResolveUtilityConnectionString"/> because it answers a different
+    /// question. That one asks "where is the community proc installed" and is a per-server setting; this one
+    /// asks "which database must the connection be opened in for the read to be legal", which on Azure SQL
+    /// Database is always the database being read — it has no cross-database execution, so a proc taking a
+    /// @database_name parameter can only ever be handed its own.</para>
+    /// </summary>
+    public static string ResolveConnectionStringForDatabase(
+        ServerConnection server,
+        string databaseName,
+        CredentialService credentialService,
+        IProfileLookup? profileLookup)
+    {
+        var baseConnStr = ResolveConnectionString(server, credentialService, profileLookup);
+
+        if (string.IsNullOrWhiteSpace(databaseName))
+            return baseConnStr;
+
+        var builder = new SqlConnectionStringBuilder(baseConnStr)
+        {
+            InitialCatalog = databaseName
         };
         return builder.ConnectionString;
     }

@@ -25,13 +25,13 @@ public partial class LocalDataService
     /// <summary>
     /// Gets aggregated wait stats for a server over a time period, sorted by delta wait time.
     /// </summary>
-    public async Task<List<WaitStatsRow>> GetWaitStatsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<WaitStatsRow>> GetWaitStatsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetWaitStatsAsync", "v_wait_stats top by delta");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
@@ -72,14 +72,40 @@ LIMIT 50";
     }
 
     /// <summary>
-    /// Gets the distinct wait types that have been collected for a server.
+    /// Whether this server has EVER recorded a wait sample, ignoring any window.
+    /// <para>Lets an empty get_wait_types say WHICH kind of nothing it found. "No wait types in the last N
+    /// hours" is true both of a quiet window and of a server nothing has been stored for, and those want
+    /// opposite responses — widen the window, versus go find out why collection is not running. Reads
+    /// <c>v_wait_stats</c>, the same source <see cref="GetDistinctWaitTypesAsync"/> reads. Deliberately
+    /// does NOT apply the ignored-wait-type exclusion the read applies: the question here is whether the
+    /// COLLECTOR has stored anything, not whether anything survives the display filter. Darling's twin is
+    /// <c>DarlingDataReader.HasAnyWaitStatAsync</c>; the two must stay in step so a user moving between the
+    /// SKUs is not told a different story about the same state.</para>
     /// </summary>
-    public async Task<List<string>> GetDistinctWaitTypesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<bool> HasAnyWaitStatAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        command.CommandText = @"
+SELECT 1
+FROM v_wait_stats
+WHERE server_id = $1
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>
+    /// Gets the distinct wait types that have been collected for a server.
+    /// </summary>
+    public async Task<List<string>> GetDistinctWaitTypesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
@@ -110,12 +136,12 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// <summary>
     /// Gets wait stats trend data for charting.
     /// </summary>
-    public async Task<List<WaitStatsTrendPoint>> GetWaitStatsTrendAsync(int serverId, string waitType, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<WaitStatsTrendPoint>> GetWaitStatsTrendAsync(int serverId, string waitType, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH raw AS

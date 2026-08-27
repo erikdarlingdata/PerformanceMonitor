@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Text.Json;
 
 namespace PerformanceMonitor.Common;
@@ -20,6 +21,17 @@ internal static class McpHelpers
     /// Maximum hours of history allowed (7 days).
     /// </summary>
     public const int MaxHoursBack = 168;
+
+    /// <summary>
+    /// Maximum days of history the daily-summary RANGE read allows (a year).
+    ///
+    /// <para>Separate from <see cref="MaxHoursBack"/> rather than derived from it: that ceiling is seven days,
+    /// which is a sensible bound on a per-collection window and useless on a calendar whose whole premise is
+    /// months. Bounded all the same, because the aggregate underneath scans the raw per-collection series for
+    /// every signal except the query count. Shared so the two SKUs cannot accept different spans and answer
+    /// the same question differently.</para>
+    /// </summary>
+    public const int MaxDailySummaryDaysBack = 366;
 
     /// <summary>
     /// Maximum rows/items to return.
@@ -70,6 +82,140 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// Validates a windowed read's two time knobs together and hands back the window's END — the single call
+    /// every windowed read makes in place of a bare <see cref="ValidateHoursBack"/>.
+    ///
+    /// <para>The span is checked BEFORE the anchor so a caller who sent both wrong is told about
+    /// <c>hours_back</c> first, exactly as they were before <c>as_of</c> existed. <paramref name="endUtc"/> is
+    /// only meaningful when this returns null.</para>
+    /// </summary>
+    public static string? ValidateWindow(int hoursBack, string? asOf, out DateTime endUtc)
+    {
+        endUtc = DateTime.UtcNow;
+
+        var hoursError = ValidateHoursBack(hoursBack);
+        if (hoursError != null)
+        {
+            return hoursError;
+        }
+
+        return ResolveAsOf(asOf, out endUtc);
+    }
+
+    /// <summary>
+    /// The <c>as_of</c> parameter's description, shared VERBATIM by every windowed read on both SKUs.
+    ///
+    /// <para>It is a constant rather than 100 hand-typed attribute strings for the reason the rest of the
+    /// two-SKU parity rules exist: the same parameter described two different ways on two servers is a
+    /// divergence no test would catch and every agent would notice.</para>
+    /// </summary>
+    public const string AsOfDescription =
+        "Optional UTC anchor for the END of the window, ISO-8601 (2026-08-18T14:30:00Z, or 2026-08-18 for " +
+        "midnight UTC). Omit to anchor at now. The window is the hours_back hours ENDING here, so a past " +
+        "incident is 'as_of the end of it, hours_back its length' — widening hours_back is NOT the same " +
+        "question, because a wider window is a different aggregate, not the same one with more rows.";
+
+    /// <summary>
+    /// <see cref="AsOfDescription"/> for the reads whose span is measured in DAYS rather than hours.
+    ///
+    /// <para>A separate constant rather than a reuse, because the shared one names <c>hours_back</c> in its
+    /// own text. A parameter description that names a parameter the tool does not have is worse than a
+    /// slightly generic one: the caller reads it, sends <c>hours_back</c>, and the key is ignored rather than
+    /// rejected. Same contract, same anchor, same resolver — only the unit of the span differs.</para>
+    /// </summary>
+    public const string AsOfDaysDescription =
+        "Optional UTC anchor for the LAST day of the range, ISO-8601 (2026-08-18T14:30:00Z, or 2026-08-18 for " +
+        "midnight UTC; only the UTC date is used). Omit to anchor at today. The range is the days_back days " +
+        "ENDING on that day, so a past month is 'as_of its last day, days_back its length' — widening " +
+        "days_back is NOT the same question, because it asks about a different span of days rather than the " +
+        "same one in more detail.";
+
+    /// <summary>
+    /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.
+    ///
+    /// <para>Not a grace period for asking about the future — it is the client-clock allowance. An agent that
+    /// computes "now" from its own clock and sends it as <c>as_of</c> must not be refused because that clock
+    /// runs a minute or two fast, and a stored read is answering out of a store whose newest row is minutes
+    /// old anyway. Anything beyond this is a real request for data that cannot exist yet.</para>
+    /// </summary>
+    public static readonly TimeSpan AsOfFutureTolerance = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// The ONLY spellings <c>as_of</c> accepts — an explicit allowlist rather than a general date parse.
+    ///
+    /// <para><see cref="DateTime.TryParse(string, IFormatProvider, DateTimeStyles, out DateTime)"/> would be
+    /// the obvious choice and is the wrong one: under the invariant culture it also accepts <c>08/18/2026</c>
+    /// as <c>M/d/yyyy</c>, so <c>01/02/2026</c> silently resolves to 2 January for a caller who meant 1
+    /// February. That is the failure this parameter exists to remove — an answer to a subtly different
+    /// question, with nothing to say so — one step removed from the silent fall back to "now" that IS refused.
+    /// An allowlist makes the parser agree with the documented contract instead of exceeding it.</para>
+    ///
+    /// <para><c>K</c> matches an empty offset, a <c>Z</c>, and a <c>±HH:mm</c>, which is what lets one format
+    /// cover all three documented shapes. A space in place of the <c>T</c> is deliberately NOT accepted: the
+    /// refusal names the forms that work, which is more useful than guessing at a fifth one.</para>
+    /// </summary>
+    private static readonly string[] AsOfFormats =
+    {
+        "yyyy-MM-dd",
+        "yyyy-MM-ddTHH:mmK",
+        "yyyy-MM-ddTHH:mm:ssK",
+        "yyyy-MM-ddTHH:mm:ss.FFFFFFFK",
+    };
+
+    /// <summary>
+    /// Resolves the END of a windowed read from the optional <c>as_of</c> anchor: <paramref name="endUtc"/>
+    /// receives <see cref="DateTime.UtcNow"/> when the caller sent nothing (the pre-#2495 behaviour, exactly),
+    /// or the parsed instant when they did. Returns null when the anchor is usable, an error message when it
+    /// is not.
+    ///
+    /// <para>REFUSES rather than substitutes, following <see cref="ValidateTop"/>: a caller who sent an anchor
+    /// we could not use asked a specific question, and quietly answering a different one — silently falling
+    /// back to now — is the failure mode this whole parameter exists to remove. A read that says "the last 4
+    /// hours" when it was asked for "the 4 hours ending Tuesday 03:00" is indistinguishable from a correct
+    /// answer.</para>
+    ///
+    /// <para>There is deliberately NO lower bound. An <c>as_of</c> older than anything the store holds is a
+    /// legitimate question with an honest answer — the read's own <c>empty</c> / <c>unavailable</c> status —
+    /// and the caller knows the anchor they sent, so that status is unambiguous. A hardcoded floor would have
+    /// to guess at retention, which is per-deployment, per-server and per-collector, and would refuse real
+    /// reads on a long-retention store. The SPAN is still bounded by <see cref="ValidateHoursBack"/>; only the
+    /// anchor is free.</para>
+    /// </summary>
+    public static string? ResolveAsOf(string? asOf, out DateTime endUtc)
+    {
+        var now = DateTime.UtcNow;
+        endUtc = now;
+
+        if (string.IsNullOrWhiteSpace(asOf))
+        {
+            return null;
+        }
+
+        /* AssumeUniversal so a bare "2026-08-18T14:30:00" is read as UTC rather than as the SERVICE host's
+           local time — the store is UTC throughout, the caller is an agent on some other machine, and a
+           silent local-time reading would shift the window by the host's offset with nothing to show for it.
+           AdjustToUniversal then normalises an explicit offset ("...+02:00") into the same UTC instant. */
+        if (!DateTime.TryParseExact(
+                asOf.Trim(),
+                AsOfFormats,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                out var parsed))
+        {
+            return $"Invalid as_of value '{asOf}'. Expected an ISO-8601 UTC instant: '2026-08-18T14:30:00Z', " +
+                   "'2026-08-18T14:30:00' (read as UTC), '2026-08-18T16:30:00+02:00', or '2026-08-18' for midnight UTC.";
+        }
+
+        if (parsed > now + AsOfFutureTolerance)
+        {
+            return $"as_of value '{asOf}' is in the future. A stored read cannot cover data that has not been collected yet; anchor at or before now (UTC).";
+        }
+
+        endUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+        return null;
+    }
+
+    /// <summary>
     /// Validates top/limit parameter. Returns null if valid, error message if invalid.
     /// </summary>
     public static string? ValidateTop(int top, string paramName = "limit")
@@ -100,6 +246,11 @@ internal static class McpHelpers
     /// <item><c>empty</c> — a true negative: we looked and there is genuinely nothing (all clear).</item>
     /// <item><c>not_collected</c> — the input names something this server does not collect.</item>
     /// <item><c>unavailable</c> — it existed but is not retrievable now (evicted, purged, or not collected yet).</item>
+    /// <item><c>precondition</c> — a setup step on the monitored server is unsatisfied, and the message says
+    /// which one and how to satisfy it (#2546). Distinct from <c>not_collected</c>, which is permanent, and
+    /// from <c>unavailable</c>, which sends the reader to collection health where they will find a collector
+    /// that is running and doing its best. Re-derived on every read, so a precondition satisfied a minute ago
+    /// stops being reported on the next call.</item>
     /// </list>
     /// </param>
     /// <param name="message">The human-readable explanation (kept intact from the prior bare-string text).</param>

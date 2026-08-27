@@ -68,12 +68,12 @@ ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
     /// <summary>
     /// Gets file I/O latency trend data broken down by file for charting (top 10 files by I/O activity).
     /// </summary>
-    public async Task<List<FileIoTrendPoint>> GetFileIoLatencyTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<FileIoTrendPoint>> GetFileIoLatencyTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH top_files AS (
@@ -132,6 +132,28 @@ ORDER BY f.collection_time, f.database_name, f.file_name";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Whether this server has EVER recorded a file I/O sample, ignoring any window.
+    /// <para>Lets an empty I/O trend say WHICH kind of nothing it found — see
+    /// <c>LocalDataService.HasAnyMemoryStatAsync</c> for the reasoning. Reads <c>v_file_io_stats</c>, the
+    /// same source <see cref="GetFileIoLatencyTrendAsync"/> reads. Darling's twin is
+    /// <c>DarlingTrendReader.HasAnyFileIoStatAsync</c>.</para>
+    /// </summary>
+    public async Task<bool> HasAnyFileIoStatAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_file_io_stats
+WHERE server_id = $1
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
 
     /// <summary>

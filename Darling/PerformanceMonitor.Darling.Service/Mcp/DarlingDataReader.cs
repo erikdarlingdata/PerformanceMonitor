@@ -65,6 +65,32 @@ internal static class DarlingDataReader
     /// <summary>One memory clerk's footprint at the latest snapshot.</summary>
     public sealed record MemoryClerkRow(string ClerkType, double MemoryMb);
 
+    /* #2484: the two series behind the viewer's Current Waits tab. Both read waiting_tasks, which the
+       snapshot reads already expose row-by-row -- get_waiting_tasks answers "what is waiting now" and
+       never "was it worse an hour ago", which is the question that decides whether anything is wrong. */
+    public sealed record WaitingTaskTrendRow(DateTime CollectionTime, string WaitType, long TotalWaitMs);
+
+    public sealed record BlockedSessionTrendRow(DateTime CollectionTime, string DatabaseName, long BlockedCount);
+
+    /*
+        One row of the RAW per-run collection log, as opposed to the CollectorHealth rollup above.
+        The rollup answers "is this collector healthy over seven days"; this answers "what happened
+        on each run", which is the question an operator actually has when collection looks wrong and
+        the rollup says HEALTHY. Durations are split the way the collectors report them -- total, the
+        part spent on the monitored server, and the part spent writing to the store -- because a
+        collector that is slow because the target is slow needs a different fix from one that is slow
+        because the store is.
+    */
+    public sealed record CollectionLogEntry(
+        string CollectorName,
+        DateTime CollectionTime,
+        double? DurationMs,
+        double? SqlDurationMs,
+        double? StoreDurationMs,
+        long? RowsCollected,
+        string? Status,
+        string? ErrorMessage);
+
     /// <summary>One database file's latest I/O snapshot; avg latency is computed by the tool.</summary>
     public sealed record FileIoRow(
         string DatabaseName, string FileName, string FileType, string PhysicalName, double SizeMb,
@@ -138,7 +164,7 @@ internal static class DarlingDataReader
     /// naive UTC by subtracting the per-batch UTC offset (#1262). Windows on <c>collection_time</c> (the
     /// reliable naive-UTC clock, not the server-local sample_time). Reads the base
     /// <c>cpu_utilization_stats</c> table (the de-skew window function needs collection_time alongside
-    /// sample_time). $1 server_id, $2 window start (naive UTC).
+    /// sample_time). $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string CpuUtilizationSql = """
         SELECT
@@ -152,16 +178,18 @@ internal static class DarlingDataReader
         FROM cpu_utilization_stats
         WHERE server_id = $1
         AND   collection_time >= $2
+        AND   collection_time <= $3
         ORDER BY sample_time
         """;
 
     public static async Task<List<CpuSample>> GetCpuUtilizationAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         var samples = new List<CpuSample>();
         await using var command = postgres.CreateCommand(CpuUtilizationSql);
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -284,6 +312,30 @@ internal static class DarlingDataReader
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Whether this server has EVER recorded a wait sample, ignoring any window.
+    /// <para>Lets an empty get_wait_types say WHICH kind of nothing it found. "No wait types in the last N
+    /// hours" is true both of a quiet window and of a server nothing has been stored for, and those want
+    /// opposite responses — widen the window, versus go find out why collection is not running. Reads
+    /// <c>v_wait_stats</c>, the same source <see cref="DistinctWaitTypesSql"/> reads, so it can never
+    /// report "collected" for rows the read cannot see. LIMIT 1, so it stops at the first row.</para>
+    /// </summary>
+    public const string HasAnyWaitStatSql = """
+        SELECT 1
+        FROM v_wait_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyWaitStatSql"/>.</summary>
+    public static async Task<bool> HasAnyWaitStatAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyWaitStatSql);
+        AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
     /// <summary>
@@ -471,7 +523,7 @@ internal static class DarlingDataReader
     /// <summary>
     /// tempdb space-usage samples over the window — the viewer's <c>TempDbTrendSql</c>. MB columns are
     /// <c>numeric(18,2)</c> → double precision; total_sessions_using_tempdb is bigint, top_session_id is
-    /// integer. $1 server_id, $2 window start (naive UTC).
+    /// integer. $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string TempDbTrendSql = """
         SELECT
@@ -487,16 +539,18 @@ internal static class DarlingDataReader
         FROM v_tempdb_stats
         WHERE server_id = $1
         AND   collection_time >= $2
+        AND   collection_time <= $3
         ORDER BY collection_time
         """;
 
     public static async Task<List<TempDbSample>> GetTempDbTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         var samples = new List<TempDbSample>();
         await using var command = postgres.CreateCommand(TempDbTrendSql);
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1096,10 +1150,15 @@ internal static class DarlingDataReader
     }
 
     /// <summary>
-    /// Per-collector 7-day health aggregate — the viewer's <c>CollectionHealthSql</c> (Lite's
-    /// <c>GetCollectionHealthAsync</c>): one row per collector with run/success/error counts, average
-    /// duration, last success/run/error timestamps, and the permission-denied count for the banding.
-    /// SKIPPED counts as a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
+    /// Per-collector 7-day health aggregate — Lite's <c>GetCollectionHealthAsync</c>: one row per
+    /// collector with run/success/error counts, the average / maximum / p95 single-run duration, last
+    /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
+    /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
+    ///
+    /// <para>16 columns since #2460, and no longer column-identical to the WPF viewer's own
+    /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
+    /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
+    /// the SAME ordinals, which is the parity that matters here — both MCP surfaces read positionally.</para>
     /// </summary>
     public const string CollectionHealthSql = """
         SELECT
@@ -1108,6 +1167,24 @@ internal static class DarlingDataReader
             SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
+            -- #2460: the mean above describes a collector whose runs all cost about the same, and
+            -- says nothing true about one whose runs come in two sizes. query_store on a dense shard
+            -- reported a 13,834 ms average over 1,155 runs where 958 of them yielded nothing and cost
+            -- ~36 ms, which puts the other 197 at ~80,900 ms EACH — each one on its own larger than
+            -- the whole 60,000 ms sweep budget. duration_ms has been written per run since V2;
+            -- nothing had ever read it as anything but a mean.
+            --
+            -- p95 rather than the max for the number a decision is made from: a max is one run, so a
+            -- single pathological cycle would make a collector look permanently terrible for the rest
+            -- of the window. p95 also scales itself to the sample — over 3,500 runs it discards the
+            -- one bad cycle, and over the six runs a daily collector gets in a week it lands on the
+            -- max, which is right, because with six samples there is no outlier anyone can afford to
+            -- throw away. DISC rather than CONT so the answer is a duration some run actually took
+            -- instead of an interpolation between the two modes, which would be a number describing
+            -- no run at all — the exact defect this column exists to end. Both engines ignore NULL
+            -- duration_ms here, as AVG already does. Byte-identical to Lite's DuckDB read.
+            MAX(duration_ms) AS max_duration_ms,
+            PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_duration_ms,
             MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
             MAX(collection_time) AS last_run_time,
             -- #1855: the message from the NEWEST failing run, not MAX()'s lexicographically greatest
@@ -1154,7 +1231,21 @@ internal static class DarlingDataReader
                      )
                 THEN 1
                 ELSE 0
-            END AS has_user_databases
+            END AS has_user_databases,
+            -- #2472: the per-database fan-out, described for ONE run — the dearest one in the window.
+            -- Five collectors run once per database and the run writes a single blended duration_ms, so
+            -- "eight databases at 10.1s" and "one at 62s beside seven at 2.7s" are the same 80,900 ms and
+            -- want opposite fixes. These four are that one run's parts, and their ratio
+            -- (slowest_item_ms * fanout_items / slowest_run_duration_ms) is 1.0 for an even fan-out and
+            -- 6.1 for the dominated example. All four come from the SAME row via slowest_rank rather than
+            -- four independent aggregates, because a slowest item taken from one run and a width taken
+            -- from another compose into a ratio describing no run that ever happened — the same defect
+            -- PERCENTILE_CONT was rejected for above. NULL throughout for a collector that never fans
+            -- out, which is most of them.
+            MAX(CASE WHEN slowest_rank = 1 THEN fanout_item_count END) AS fanout_items,
+            MAX(CASE WHEN slowest_rank = 1 THEN slowest_item END) AS slowest_item,
+            MAX(CASE WHEN slowest_rank = 1 THEN slowest_item_ms END) AS slowest_item_ms,
+            MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1170,6 +1261,13 @@ internal static class DarlingDataReader
                 duration_ms,
                 status,
                 error_message,
+                -- #2472: projected here because this subquery enumerates its columns rather than
+                -- SELECT *-ing them, so an aggregate outside that names a column the inner query does
+                -- not carry fails at the STORE and nowhere earlier — no compiler, no text assertion and
+                -- no local build can see it.
+                fanout_item_count,
+                slowest_item,
+                slowest_item_ms,
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY collector_name
@@ -1183,7 +1281,18 @@ internal static class DarlingDataReader
                     ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
                              collection_time DESC,
                              error_message DESC
-                ) AS error_rank
+                ) AS error_rank,
+                -- #2472: the window's dearest single ITEM, and with it the run that carried it. Ranked on
+                -- slowest_item_ms rather than duration_ms because the question is which database is
+                -- expensive, not which cycle was: a run whose total is the largest only because every
+                -- database was busy is exactly the shape a per-database override should NOT be aimed at.
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY slowest_item_ms IS NULL,
+                             slowest_item_ms DESC,
+                             collection_time DESC
+                ) AS slowest_rank
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -1209,15 +1318,22 @@ internal static class DarlingDataReader
                 SuccessCount = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
                 ErrorCount = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
                 AvgDurationMs = reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4)),
-                LastSuccessTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
-                LastRunTime = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-                LastError = reader.IsDBNull(7) ? null : reader.GetString(7),
-                LastErrorTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
-                PermissionDeniedCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
-                YieldCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
-                LastNote = reader.IsDBNull(11) ? null : reader.GetString(11),
-                NoteCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
-                TargetHasUserDatabases = !reader.IsDBNull(13) && Convert.ToInt64(reader.GetValue(13)) != 0,
+                MaxDurationMs = reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5)),
+                P95DurationMs = reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6)),
+                LastSuccessTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                LastRunTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+                LastError = reader.IsDBNull(9) ? null : reader.GetString(9),
+                LastErrorTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+                PermissionDeniedCount = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11)),
+                YieldCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
+                LastNote = reader.IsDBNull(13) ? null : reader.GetString(13),
+                NoteCount = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
+                TargetHasUserDatabases = !reader.IsDBNull(15) && Convert.ToInt64(reader.GetValue(15)) != 0,
+                /* Ordinals are positional and these four were APPENDED (#2472) — never inserted. */
+                FanoutItems = reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16)),
+                SlowestItem = reader.IsDBNull(17) ? null : reader.GetString(17),
+                SlowestItemMs = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18)),
+                SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19)),
             });
         }
 
@@ -1290,6 +1406,337 @@ internal static class DarlingDataReader
         AddTimestamp(command, endUtc);
     }
 
+    /// <summary>
+    /// The raw per-run collection log for one server inside an explicit window, newest first, capped.
+    /// <para>Bounded on BOTH sides rather than by a single now-relative lower bound, matching how the
+    /// viewer's Collection Log tab windows this read: a caller asking about a past incident wants the
+    /// rows from THEN, and an hours-back-from-now span cannot express that.</para>
+    /// <para>Reads <c>v_collection_log</c>, the same view the viewer uses, so the web dashboard and the
+    /// MCP surface cannot drift from what the desktop shows. $1 server_id, $2 window start, $3 window
+    /// end (naive UTC), $4 row cap.</para>
+    /// </summary>
+    public const string CollectionLogSql = """
+        SELECT
+            collector_name,
+            collection_time,
+            duration_ms,
+            sql_duration_ms,
+            duckdb_duration_ms,
+            rows_collected,
+            status,
+            error_message
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        ORDER BY collection_time DESC
+        LIMIT $4
+        """;
+
+    /// <summary>
+    /// Whether this server has EVER recorded a collector run, ignoring any window.
+    /// <para>Exists so an empty log read can say which kind of nothing it found. "No runs in the last
+    /// 24 hours" is true both of a quiet window and of a server that has never collected, and those
+    /// need opposite responses from the caller -- widen the window, versus go find out why collection
+    /// is not running. LIMIT 1 with no ordering, so it stops at the first row rather than scanning.</para>
+    /// </summary>
+    public const string HasAnyCollectionLogSql = """
+        SELECT 1
+        FROM v_collection_log
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyCollectionLogSql"/>.</summary>
+    public static async Task<bool> HasAnyCollectionLogAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyCollectionLogSql);
+        AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>Runs <see cref="CollectionLogSql"/>. See it for the window semantics.</summary>
+    public static async Task<List<CollectionLogEntry>> GetCollectionLogAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        DateTime windowStartUtc,
+        DateTime windowEndUtc,
+        int maxRows,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<CollectionLogEntry>();
+        await using var command = postgres.CreateCommand(CollectionLogSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddInt(command, maxRows);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new CollectionLogEntry(
+                reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5)),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Waiting-task total wait duration per wait type per collection, for one server over an explicit
+    /// window. The viewer's Current Waits reader verbatim. $1 server_id, $2 start, $3 end (naive UTC).
+    /// </summary>
+    public const string WaitingTaskTrendSql = """
+        SELECT
+            collection_time,
+            wait_type,
+            CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms
+        FROM waiting_tasks
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   wait_type IS NOT NULL
+        GROUP BY
+            collection_time,
+            wait_type
+        ORDER BY
+            collection_time,
+            wait_type
+        """;
+
+    /// <summary>
+    /// Whether the waiting-task collector has EVER sampled this server, ignoring any window.
+    /// <para>Separates an all-clear from missing data. Of the two, the wrong answer here is the
+    /// REASSURING one: "nothing was waiting" stops a caller looking, where "never collected" sends them
+    /// to check the collector. LIMIT 1, so it stops at the first row.</para>
+    /// </summary>
+    public const string HasAnyWaitingTaskSampleSql = """
+        SELECT 1
+        FROM waiting_tasks
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyWaitingTaskSampleSql"/>.</summary>
+    public static async Task<bool> HasAnyWaitingTaskSampleAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyWaitingTaskSampleSql);
+        AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>Runs <see cref="WaitingTaskTrendSql"/>.</summary>
+    public static async Task<List<WaitingTaskTrendRow>> GetWaitingTaskTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<WaitingTaskTrendRow>();
+        await using var command = postgres.CreateCommand(WaitingTaskTrendSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new WaitingTaskTrendRow(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Blocked-session count per database per collection, for one server over an explicit window.
+    /// <para>blocking_session_id > 0 is the blocked-ness test, so this counts sessions WAITING ON another
+    /// session rather than every waiting task. The optional database filter is kept from the viewer's read
+    /// rather than dropped for a simpler signature: on a busy instance one database usually owns the
+    /// blocking, and a series that cannot be narrowed to it answers a different question from the one the
+    /// viewer answers. $1 server_id, $2 start, $3 end (naive UTC), $4 database name or NULL.</para>
+    /// </summary>
+    public const string BlockedSessionTrendSql = """
+        SELECT
+            collection_time,
+            database_name,
+            COUNT(*) AS blocked_count
+        FROM waiting_tasks
+        WHERE server_id = $1
+        AND   blocking_session_id > 0
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   database_name IS NOT NULL
+        AND   ($4::text IS NULL OR database_name = $4)
+        GROUP BY
+            collection_time,
+            database_name
+        ORDER BY
+            collection_time,
+            database_name
+        """;
+
+    /// <summary>Runs <see cref="BlockedSessionTrendSql"/>.</summary>
+    public static async Task<List<BlockedSessionTrendRow>> GetBlockedSessionTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        string? databaseName = null, CancellationToken cancellationToken = default)
+    {
+        var rows = new List<BlockedSessionTrendRow>();
+        await using var command = postgres.CreateCommand(BlockedSessionTrendSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            Value = string.IsNullOrWhiteSpace(databaseName) ? DBNull.Value : databaseName,
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text,
+        });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new BlockedSessionTrendRow(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Blocking-duration aggregate per minute, the viewer's Blocking Stats read verbatim.
+    /// <para>XE blocked-process reports are the primary source and the DMV snapshot is the fallback, and
+    /// the fallback contributes ONLY when the XE source has no rows in the window at all. Mixing them
+    /// would double-count the same incident from two captures, so it is a fallback and never a union.
+    /// $1 server_id, $2 start, $3 end (naive UTC).</para>
+    /// </summary>
+    public const string BlockingDurationStatsSql = """
+        WITH bpr AS (
+            SELECT
+                DATE_TRUNC('minute', event_time) AS bucket,
+                COUNT(*) AS event_count,
+                CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
+                MAX(wait_time_ms) AS max_duration_ms,
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+            FROM v_blocked_process_reports
+            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            GROUP BY DATE_TRUNC('minute', event_time)
+        ),
+        dmv AS (
+            SELECT
+                DATE_TRUNC('minute', event_time) AS bucket,
+                COUNT(*) AS event_count,
+                CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
+                MAX(wait_time_ms) AS max_duration_ms,
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+            FROM v_dmv_blocking_snapshots
+            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            GROUP BY DATE_TRUNC('minute', event_time)
+        )
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
+        UNION ALL
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+        ORDER BY bucket
+        """;
+
+    public sealed record BlockingDurationStatsRow(
+        DateTime Time, long EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs);
+
+    /// <summary>
+    /// Whether ANY of the three capture paths behind the blocking-severity read has ever produced a row.
+    /// <para>Each can be off independently: the XE blocked-process report needs its session running, the
+    /// DMV snapshot needs its collector enabled, and deadlock capture is separate from both. Probing one
+    /// would report "never captured" for a server capturing fine through another; probing neither would
+    /// let a silent capture gap read as a clean bill of health.</para>
+    /// <para>Deadlocks are in here because the verdict gates on the blocking series AND the deadlock
+    /// series both being empty. Probing only the two blocking sources would call a server 'genuinely
+    /// clear' on the strength of blocking capture alone, while deadlock capture had never run -- the
+    /// reassuring-wrong answer this probe exists to prevent, missed for the deadlock half.</para>
+    /// </summary>
+    public const string HasAnyBlockingCaptureSql = """
+        SELECT 1
+        WHERE EXISTS (SELECT 1 FROM v_blocked_process_reports WHERE server_id = $1)
+        OR    EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1)
+        OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $1)
+        """;
+
+    /// <summary>Runs <see cref="HasAnyBlockingCaptureSql"/>.</summary>
+    public static async Task<bool> HasAnyBlockingCaptureAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyBlockingCaptureSql);
+        AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>Runs <see cref="BlockingDurationStatsSql"/>.</summary>
+    public static async Task<List<BlockingDurationStatsRow>> GetBlockingDurationStatsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<BlockingDurationStatsRow>();
+        await using var command = postgres.CreateCommand(BlockingDurationStatsSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new BlockingDurationStatsRow(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
+                reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4))));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The raw deadlock graphs in the window, for severity aggregation.
+    /// <para>Windowed on collection_time but ORDERED and bucketed by deadlock_time -- the graph carries
+    /// when the deadlock happened, while collection_time is only when we picked it up, and the two differ
+    /// by up to a collection interval. $1 server_id, $2 start, $3 end (naive UTC).</para>
+    /// </summary>
+    public const string DeadlockSeverityGraphsSql = """
+        SELECT
+            deadlock_time,
+            deadlock_graph_xml
+        FROM v_deadlocks
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        ORDER BY deadlock_time
+        """;
+
+    /// <summary>Runs <see cref="DeadlockSeverityGraphsSql"/>, returning graphs for the shared aggregator.</summary>
+    public static async Task<List<(DateTime? DeadlockTime, string? Xml)>> GetDeadlockGraphsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<(DateTime? DeadlockTime, string? Xml)>();
+        await using var command = postgres.CreateCommand(DeadlockSeverityGraphsSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add((
+                reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        return rows;
+    }
+
     private static void AddInt(NpgsqlCommand command, int value) =>
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = value });
 
@@ -1325,6 +1772,23 @@ internal sealed class CollectorHealth
     public long SuccessCount { get; set; }
     public long ErrorCount { get; set; }
     public double AvgDurationMs { get; set; }
+
+    /// <summary>
+    /// The single worst run in the window (#2460). A FACT, never a decision input: one pathological
+    /// cycle would otherwise make a collector read as permanently terrible for seven days. Its job is
+    /// to sit beside <see cref="P95DurationMs"/> — when the two agree the tail is routine, and when the
+    /// max towers over the p95 the max was a one-off.
+    /// </summary>
+    public double MaxDurationMs { get; set; }
+
+    /// <summary>
+    /// The 95th-percentile run in the window (#2460) — what a HEAVY run of this collector costs, as
+    /// opposed to what its runs cost on average. The number the sweep's peak-cycle arithmetic is built
+    /// from (via <see cref="SweepPressureClassifier.PeakRunMs"/>), because a mean over a bimodal
+    /// collector describes neither of its populations.
+    /// </summary>
+    public double P95DurationMs { get; set; }
+
     public DateTime? LastSuccessTime { get; set; }
     public DateTime? LastRunTime { get; set; }
     public string? LastError { get; set; }
@@ -1351,6 +1815,48 @@ internal sealed class CollectorHealth
     /// <see cref="HealthStatus"/> never sees it.
     /// </summary>
     public bool TargetHasUserDatabases { get; set; }
+
+    /* ── The per-database fan-out rollup (#2472) ─────────────────────────────────────────────────────
+       Four parts of ONE run — the window's dearest single item and the run that carried it. NULL on
+       every collector that does not fan out, which is 36 of the 41: the columns are only written by a
+       productive per-database run.
+
+       They exist because the tail statistics above cannot answer this. MaxDurationMs and P95DurationMs
+       aggregate over RUNS, and each run is one blended row, so the two shapes an operator has to tell
+       apart — an even fan-out and one dominated by a single database — produce identical values in
+       both. Worse on this fleet: query_store's runs are 84% empty enumerations on a busy shard and
+       100% on a quiet one, so its p95/avg ratio is already saturated by empty-versus-productive and
+       says nothing at all about which database is expensive. */
+
+    /// <summary>How many items that run fanned out over, or null when it did not fan out. The
+    /// denominator of <see cref="FanoutDominance"/>: without it a slowest-item duration is a number with
+    /// no baseline, because "62 seconds" means something different across 2 databases and across 12.</summary>
+    public int? FanoutItems { get; set; }
+
+    /// <summary>The dearest item in the window — a database name, for every fan-out that exists today.</summary>
+    public string? SlowestItem { get; set; }
+
+    /// <summary>What that item cost, SQL plus storage.</summary>
+    public int? SlowestItemMs { get; set; }
+
+    /// <summary>The whole run that item came from, so the share is against the number the operator sees
+    /// on the collection_log row rather than against a sum of item slices.</summary>
+    public int? SlowestRunDurationMs { get; set; }
+
+    /// <summary>
+    /// The answer, as one number: 1.0 is a perfectly even fan-out and it rises with concentration. Eight
+    /// databases at 10.1s each gives 1.0; one at 62s beside seven at 2.7s gives 6.1 — the same 80,900 ms
+    /// run either way. Roughly 2.0 or above is the shape a per-database schedule override or a stagger
+    /// can actually target; near 1.0 says the cost is the fan-out's WIDTH and bounded parallelism is the
+    /// lever instead (#2468).
+    ///
+    /// <para>Null when the collector does not fan out, and also when the run's duration is zero — a
+    /// ratio against nothing is not a smaller answer, it is a wrong one.</para>
+    /// </summary>
+    public double? FanoutDominance =>
+        FanoutItems is > 0 && SlowestItemMs.HasValue && SlowestRunDurationMs is > 0
+            ? (double)SlowestItemMs.Value * FanoutItems.Value / SlowestRunDurationMs.Value
+            : null;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 

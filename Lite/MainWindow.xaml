@@ -65,12 +65,23 @@
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <!-- Status dot (collection freshness) + the muted-bell silence indicator
-                             (#2031: a silenced server must not look healthy-quiet). -->
+                        <!-- Status dot (the CONNECTION check, not collection freshness — this label said
+                             "collection freshness" until #2458, copied from the Darling viewer where it is
+                             true; here IsOnline comes from ServerManager.GetConnectionStatus and the dot's
+                             own tooltip now says so) + the muted-bell silence indicator (#2031: a silenced
+                             server must not look healthy-quiet). -->
                         <StackPanel Grid.Column="0" Grid.RowSpan="2"
                                     Orientation="Horizontal" VerticalAlignment="Center">
+                            <!-- #2458: the dot renders the same ServerCardStatus the Overview card does, and
+                                 carries the same first line the card's tooltip opens on. It was a coloured
+                                 circle deriving its own copy of the four-word ladder, so the sidebar and the
+                                 card could disagree about one server; and it is the thing a reader points at
+                                 first, which is #2422's complaint one surface over. The tooltip also says what
+                                 the dot is NOT about: #2457 kept collection freshness on its own banded row on
+                                 the card, and this row has no such band. -->
                             <Ellipse Width="10" Height="10"
                                      Margin="0,0,8,0"
+                                     ToolTip="{Binding Server.Connection.DotTooltip}"
                                      VerticalAlignment="Center">
                                 <Ellipse.Style>
                                     <Style TargetType="Ellipse">
@@ -433,13 +444,27 @@
                                                                 </Grid>
                                                             </Viewbox>
                                                             <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
+                                                                     ToolTip="{Binding StatusTooltip}"
                                                                      VerticalAlignment="Center"/>
                                                         </StackPanel>
                                                         <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
                                                                    TextTrimming="CharacterEllipsis"
                                                                    Foreground="{DynamicResource ForegroundBrush}"/>
                                                     </DockPanel>
+                                                    <!-- #2437 (the Lite half of #2422): the status line carries the
+                                                         reason it is that colour. It was a bare word — a reader saw
+                                                         "Warning" in amber and had to scan the metric rows guessing
+                                                         which one it meant, on every card. The tooltip is built from
+                                                         the card's OWN displays (StatusReason), so it cannot disagree
+                                                         with the rows directly underneath it, and it says which axis
+                                                         the word is about: in Lite "Warning" is failing COLLECTORS,
+                                                         while a card in metric trouble still says "Online".
+                                                         Background=Transparent is load-bearing: a TextBlock with a
+                                                         null Background hit-tests on its rendered glyphs alone, so
+                                                         the tooltip would appear over the letters of "Warning" and
+                                                         nowhere in the space around them. -->
                                                     <TextBlock Text="{Binding StatusDisplay}" Foreground="{Binding StatusBrush}"
+                                                               Background="Transparent" ToolTip="{Binding StatusTooltip}"
                                                                FontSize="11" Margin="0,0,0,10"/>
                                                     <!-- Tag pills (#2020 2b-i): the server's tags as coloured chips,
                                                          collapsed when it has none so untagged cards are unchanged. -->
@@ -488,8 +513,16 @@
                                                         <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding BlockingDisplay}" Foreground="{Binding BlockingBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
                                                         <TextBlock Grid.Row="3" Grid.Column="0" Text="Deadlocks:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
                                                         <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding DeadlockDisplay}" Foreground="{Binding DeadlockBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
-                                                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Last Collect:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
-                                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding LastCollectionDisplay}" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
+                                                        <!-- Last Collect is a BANDED row (#2452): its brush comes from the shared
+                                                             ServerHealthClassifier, and it carries a tooltip that says the band is about
+                                                             collection stopping rather than about the server's metrics. Background="Transparent"
+                                                             on both cells is load-bearing, not decoration: a TextBlock with a null Background
+                                                             hit-tests on its rendered glyphs alone, so the tooltip would appear over the
+                                                             letters and nowhere in the space around them (#2429). -->
+                                                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Last Collect:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"
+                                                                   Background="Transparent" ToolTip="{Binding CollectionFreshnessTooltip}"/>
+                                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding LastCollectionDisplay}" Foreground="{Binding LastCollectionBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"
+                                                                   Background="Transparent" ToolTip="{Binding CollectionFreshnessTooltip}"/>
                                                     </Grid>
                                                 </StackPanel>
                                                 <!-- Offline overlay -->

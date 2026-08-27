@@ -23,6 +23,18 @@ namespace PerformanceMonitorLite.Services;
 /// try/catch + logging + in-memory cache (persist-then-cache ordering preserved).
 /// <see cref="LoadAllAsync"/> swallows errors and returns an empty set, matching
 /// the old LoadAsync ("start with empty rules if DB not ready").
+///
+/// <para><b>Four of the five write-lock sites are earned; <see cref="InsertAsync"/> is not (#2463).</b>
+/// Worth saying because <c>FindingStore.MuteStoryAsync</c> writes a mute row under the READ lock, and the
+/// pair reads as one convention contradicting another. It is not the same species of write.
+/// <c>config_mute_rules</c> is UPDATEd by an operator (<see cref="UpdateAsync"/>,
+/// <see cref="SetEnabledAsync"/>) and DELETEd by both the operator and a timer-driven expiry purge
+/// (<see cref="DeleteAsync"/>, <see cref="DeleteExpiredAsync"/>) that can be running at the same instant;
+/// DuckDB fails the loser of such a collision rather than queueing it, and the write lock is what stops
+/// that happening. Nothing but the analysis pass writes <c>analysis_muted</c>, so its append needs only
+/// the read lock. <see cref="InsertAsync"/> is an append too and by the rule needs only the read lock;
+/// it is left on the write lock so this store speaks with one voice. The rule and the measurements are
+/// on <c>DuckDbInitializer.s_dbLock</c>.</para>
 /// </summary>
 public sealed class DuckDbMuteRuleStore : IMuteRuleStore
 {

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -26,23 +27,40 @@ namespace PerformanceMonitorLite.Services;
 public sealed record BlockingDurationStatsPoint(
     DateTime Time, int EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs);
 
-/// <summary>
-/// One per-minute bucket of deadlock SEVERITY (the Blocking Stats sub-tab's deadlock companion to
-/// <see cref="BlockingDurationStatsPoint"/>): the count of deadlock VICTIM processes in the bucket plus the
-/// total / max / avg deadlock <c>wait_time</c> over EVERY process in the bucket's graphs. The Lite equivalent
-/// of the Dashboard's pre-aggregated <c>collect.blocking_deadlock_stats</c> (<c>victim_count</c> /
-/// <c>total_deadlock_wait_time_ms</c>) — computed by parsing the <c>deadlock_graph_xml</c> Lite already keeps
-/// with Lite's own <see cref="DeadlockProcessDetail.ParseFromRows"/> (the SAME parse the Deadlocks grid uses,
-/// so the two agree in-app), so like the blocking-duration aggregate it needs no collector and no schema
-/// change. Matches the Dashboard analyzer's semantics (<c>26_blocking_deadlock_analyzer.sql</c>:
-/// <c>victim_count = SUM(CASE WHEN … VICTIM)</c>, <c>total_deadlock_wait_time_ms = SUM(every process's
-/// wait_time)</c>).
-/// </summary>
-public sealed record DeadlockSeverityStatsPoint(
-    DateTime Time, int VictimCount, long TotalWaitMs, long MaxWaitMs, double AvgWaitMs);
+/* The DeadlockSeverityStatsPoint record moved to PerformanceMonitor.Common (#2484), because the headless
+   service needed the same shape and a third identical copy is how three surfaces end up disagreeing about
+   one deadlock. Only the RECORD is shared; the aggregation below stays here, since Lite parses graphs into
+   DeadlockProcessDetail where Darling uses DeadlockProcessNode -- unifying those is a separate question. */
 
 public partial class LocalDataService
 {
+    /// <summary>
+    /// Whether ANY of the three capture paths behind the blocking-severity read has ever produced a row.
+    /// <para>Both are checked because either can be off on a given server: the XE blocked-process report
+    /// needs its session running, the DMV snapshot needs its collector enabled, and deadlock capture is
+    /// separate from both -- the verdict gates on the blocking AND deadlock series being empty, so leaving
+    /// deadlocks out would call a server clear on blocking capture alone. Probing one would report
+    /// "never captured" for a server capturing fine through the other, and probing neither would let a
+    /// silent capture gap read as a clean bill of health. Darling's twin is
+    /// <c>DarlingDataReader.HasAnyBlockingCaptureAsync</c>.</para>
+    /// </summary>
+    public async Task<bool> HasAnyBlockingCaptureAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+WHERE EXISTS (SELECT 1 FROM v_blocked_process_reports WHERE server_id = $1)
+OR    EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $2)
+OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $3)";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
     /// <summary>
     /// Blocking-duration aggregate per minute — the SEVERITY companion to
     /// <see cref="GetBlockingTrendAsync"/>'s count-only trend, built on the SAME XE-preferred / DMV-fallback
@@ -55,12 +73,12 @@ public partial class LocalDataService
     /// count trend.
     /// </summary>
     public async Task<List<BlockingDurationStatsPoint>> GetBlockingDurationStatsAsync(
-        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* BPR per-minute severity buckets, falling back to the always-on DMV snapshot only when BPR has none
@@ -127,14 +145,14 @@ ORDER BY bucket";
     /// <see cref="GetRecentDeadlocksAsync"/>.
     /// </summary>
     public async Task<List<DeadlockSeverityStatsPoint>> GetDeadlockSeverityStatsAsync(
-        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         var rows = new List<DeadlockRow>();
 
         using (var connection = await OpenConnectionAsync())
         using (var command = connection.CreateCommand())
         {
-            var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+            var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
             command.CommandText = @"
 SELECT

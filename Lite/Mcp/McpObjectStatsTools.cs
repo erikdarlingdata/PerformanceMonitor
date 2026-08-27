@@ -23,7 +23,8 @@ public sealed class McpObjectStatsTools
             var rows = await dataService.GetObjectSizeGrowthAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
+                    ?? McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
             }
 
             var result = rows.Select(r => new
@@ -67,7 +68,8 @@ public sealed class McpObjectStatsTools
             var rows = await dataService.GetIndexUsageAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
+                    ?? McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
             }
 
             var result = rows.Select(r => new
@@ -114,7 +116,8 @@ public sealed class McpObjectStatsTools
             var rows = await dataService.GetIndexLockingAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
+                    ?? McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
             }
 
             var result = rows.Select(r => new

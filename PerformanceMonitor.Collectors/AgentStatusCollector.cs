@@ -35,7 +35,7 @@ namespace PerformanceMonitor.Collectors;
 /// has no SQL Agent and no <c>sys.dm_server_services</c>; AWS RDS is a managed service that does not expose the
 /// OS/service-control state <c>sys.dm_server_services</c> reads; a login without msdb access can't read the
 /// <c>sysjobschedules</c> next-run decode. <see cref="AppliesTo"/> =
-/// <c>!IsAzureSqlDb &amp;&amp; !IsAwsRds &amp;&amp; HasMsdbAccess</c>, the single authoritative gate both hosts
+/// <c>!IsAzureSqlDb &amp;&amp; !IsAwsRds</c>, the single authoritative gate both hosts
 /// consult, mirroring <see cref="RunningJobsCollector"/>. On-prem and Managed Instance collect normally.</para>
 /// </summary>
 public sealed class AgentStatusCollector : CollectorDefinitionBase<AgentStatusCollector.Row>
@@ -111,7 +111,7 @@ OPTION(RECOMPILE);";
     /// AppliesTo — the single authoritative gate both SKUs consult.
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        !target.IsAzureSqlDb && !target.IsAwsRds && target.HasMsdbAccess;
+        !target.IsAzureSqlDb && !target.IsAwsRds;
 
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 

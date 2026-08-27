@@ -63,8 +63,17 @@ public sealed class PgWaitStatsCollector : PostgresCollectorDefinitionBase<PgWai
     /* Case-insensitive on purpose: Aurora renamed events between majors without changing their ids
        (AutoVacuumMain on 16.11, AutovacuumMain on 17.7), so an ordinal set would filter on one major
        and quietly stop filtering on the other. Deltas key on the numeric event_id for the same reason. */
-    private static readonly HashSet<string> s_ignoredWaitTypes =
-        new(StringComparer.OrdinalIgnoreCase) { "Activity", "Client", "Timeout" };
+    /// <summary>
+    /// The wait TYPES neither PostgreSQL wait collector reports, shared rather than restated (#2630).
+    ///
+    /// <para>This is one editorial judgment about what counts as a wait, and it has to hold for both
+    /// sources or the same server gives two different answers depending on its flavor —
+    /// <c>pg_wait_sampling</c> is the stock-PostgreSQL answer to the question this collector answers on
+    /// Aurora, and #2625 now tells operators so in as many words. It excluded only <c>Activity</c>, and on
+    /// a target with real clients <c>ClientRead</c> was <b>100%</b> of the profile.</para>
+    /// </summary>
+    public static readonly IReadOnlySet<string> IgnoredWaitTypes =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Activity", "Client", "Timeout" };
 
     /* Signatures below are VERIFIED against live Aurora 16.11 and 17.7, not taken from the AWS
        reference, which is wrong about one of them:
@@ -147,7 +156,7 @@ WHERE w.wait_time > 0";
                context.IgnoredWaitTypes, which holds SQL Server wait-type names. An undecodable type
                (NULL type_name) is deliberately KEPT: it means the lookup did not know the type, and
                dropping it would hide exactly the new-wait-type case worth seeing. */
-            if (typeName is not null && s_ignoredWaitTypes.Contains(typeName))
+            if (typeName is not null && IgnoredWaitTypes.Contains(typeName))
             {
                 continue;
             }

@@ -122,9 +122,12 @@ public sealed class JobHistoryCollectorDefinitionTests
     {
         /* No SQL Agent / sysjobhistory on Azure SQL DB; Managed Instance and on-prem / RDS have it. */
         Assert.False(JobHistoryCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAzureSqlDb = true }));
-        /* No msdb access → every table this reads lives in msdb; skip (gate collapsed from
-           IsCollectorSupported into the shared AppliesTo). */
-        Assert.False(JobHistoryCollector.Instance.AppliesTo(new CollectorTargetInfo { HasMsdbAccess = false }));
+        /* NOT gated on msdb access (#2559). It is a GRANT rather than an engine capability, and it was
+           probed once and cached for the connection's life - so running the GRANT we advise did nothing
+           until a restart. This now attempts and fails into PERMISSIONS, which error 916 already maps to,
+           and CollectorHealthClassifier bands a never-permitted collector as NO_PERMISSIONS ahead of
+           FAILING, so it does not read as broken. */
+        Assert.True(JobHistoryCollector.Instance.AppliesTo(new CollectorTargetInfo { HasMsdbAccess = false }));
         /* NOT gated on AWS RDS — unlike running_jobs it never touches syssessions, so history reads fine. */
         Assert.True(JobHistoryCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAwsRds = true }));
         Assert.True(JobHistoryCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAzureManagedInstance = true }));

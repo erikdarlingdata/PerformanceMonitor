@@ -38,6 +38,166 @@ namespace PerformanceMonitor.Common
     }
 
     /// <summary>
+    /// One server's COLLECTION status, as a value rather than a rendered string — the discriminant every
+    /// Darling surface that reports "is this server reporting" renders. The Overview card's word and colour,
+    /// the sidebar row's dot, the fleet roll-up's label and the <c>list_servers</c> MCP status are all
+    /// renderings OF THIS.
+    ///
+    /// <para><b>Why it lives here and not in the viewer.</b> It used to be a viewer-local enum, and three
+    /// other places wrote their own copy of the same ladder anyway — one of them (the sidebar dot) had only
+    /// four of the five states, so a registered-but-never-collected server got a grey "Unknown" dot beside an
+    /// amber "Awaiting first collection" card, on the same screen, from the same
+    /// <see cref="ServerHealthClassifier.ClassifyFreshness"/> call (#2473). Two of the copies live in the
+    /// headless service, which cannot reference WPF, so the only place all four can render one ladder is
+    /// this assembly.</para>
+    ///
+    /// <para><b>Why the name is not "card status".</b> Lite has a <c>ServerCardStatus</c> of its own and it
+    /// answers a DIFFERENT question: Lite's word comes from a live connection check, this one from how old
+    /// the newest collection is. #2457 turned down folding freshness into Lite's word precisely so the two
+    /// axes stay apart, and the same distinction already has a type here —
+    /// <see cref="Models.ServerConnectionStatus"/> is the connection answer, this is the collection one.
+    /// Sharing a name across the two would have invited exactly the conflation both issues were about.</para>
+    /// </summary>
+    public enum ServerCollectionStatus
+    {
+        /// <summary>Collection is current.</summary>
+        Online,
+
+        /// <summary>Online, but the newest collection has lagged — the amber "Warning".</summary>
+        Stale,
+
+        /// <summary>Nothing has landed for long enough to call the server dark.</summary>
+        Offline,
+
+        /// <summary>Registered but never collected — the service has not reached it yet, not a dead server.</summary>
+        AwaitingFirstCollection,
+
+        /// <summary>Freshness was never classified. <see cref="ServerCollectionStatusRules.FlagsFor"/> cannot
+        /// produce this; a hand-built card can, which is exactly why it is a named state rather than a
+        /// fall-through.</summary>
+        Unknown,
+    }
+
+    /// <summary>
+    /// The three status flags a freshness band explodes into, as ONE value. Every surface that shows a server
+    /// carries these three as separate settable properties (WPF binds them individually — the offline overlay
+    /// reads <c>IsOnline</c>, the card border reads all three), so the flags cannot simply be replaced by the
+    /// discriminant. What they CAN be is derived in one place: the sidebar dot's own
+    /// <c>ApplyFreshness</c> set two of the three and silently dropped the third, which is the whole of #2473.
+    /// Returning them together is what makes dropping one a visible edit rather than an omission.
+    /// </summary>
+    /// <param name="IsOnline">Reachability: true = fresh or stale, false = offline, null = not reached yet.</param>
+    /// <param name="HasCollectorErrors">The amber warning flag — in Darling, a stale collection.</param>
+    /// <param name="AwaitingFirstCollection">No collection has EVER landed (a bootstrap state, not an outage).</param>
+    public readonly record struct ServerCollectionFlags(
+        bool? IsOnline,
+        bool HasCollectorErrors,
+        bool AwaitingFirstCollection);
+
+    /// <summary>
+    /// The collection-status ladder, in ONE function, plus the three renderings of its result. Nothing else
+    /// in the product may turn a freshness band into a status word.
+    ///
+    /// <para><b>The failure this exists to make impossible.</b> Four places derived this ladder independently:
+    /// the WPF Overview card, the WPF sidebar dot, the web/MCP fleet roll-up, and <c>list_servers</c>. Three
+    /// agreed; the sidebar dot had no arm for a never-collected server and fell through to grey "Unknown"
+    /// while the card one panel over said amber "Awaiting first collection" (#2473). That is the same defect
+    /// #2429 spent two review rounds on, and its argument applies unchanged: with a single discriminant there
+    /// is no combination left for the renderings to disagree about, because they no longer each decide.</para>
+    ///
+    /// <para><b>Three renderings, not one, and that is deliberate.</b> <see cref="Word"/> is what a human
+    /// reads on a card, a dot or a roll-up. <see cref="McpToken"/> is what an MCP client keys on — a
+    /// consumer API whose values were published as machine tokens and cannot be re-spelled without breaking
+    /// downstream automation. <see cref="Headline"/> is the sentence a tooltip opens on. They are three
+    /// renderings of one decision; only the decision is shared, and only the decision needed to be.</para>
+    /// </summary>
+    public static class ServerCollectionStatusRules
+    {
+        /// <summary>
+        /// The (<c>IsOnline</c>, <c>HasCollectorErrors</c>, <c>AwaitingFirstCollection</c>) triple, resolved.
+        /// The order matters and is the #2429 reading: an online server's flags win over an awaiting marker,
+        /// so a stale card cannot also claim to be awaiting its first collection.
+        /// </summary>
+        public static ServerCollectionStatus Classify(bool? isOnline, bool hasCollectorErrors, bool awaitingFirstCollection) =>
+            isOnline switch
+            {
+                true when hasCollectorErrors => ServerCollectionStatus.Stale,
+                true => ServerCollectionStatus.Online,
+                false => ServerCollectionStatus.Offline,
+                _ => awaitingFirstCollection ? ServerCollectionStatus.AwaitingFirstCollection : ServerCollectionStatus.Unknown,
+            };
+
+        /// <summary>
+        /// A freshness band exploded into the three flags every surface binds. <see cref="ServerFreshness.NeverCollected"/>
+        /// leaves <c>IsOnline</c> null on purpose: the truth is "unknown, not reached yet", not "was up and died",
+        /// and a red Offline on a merely-queued server is what sent a 24-server field report chasing a phantom
+        /// scheduler bug.
+        /// </summary>
+        public static ServerCollectionFlags FlagsFor(ServerFreshness freshness) => freshness switch
+        {
+            ServerFreshness.NeverCollected => new ServerCollectionFlags(null, false, true),
+            ServerFreshness.Offline => new ServerCollectionFlags(false, false, false),
+            ServerFreshness.Stale => new ServerCollectionFlags(true, true, false),
+            _ => new ServerCollectionFlags(true, false, false),
+        };
+
+        /// <summary>
+        /// Freshness straight to the discriminant, for the surfaces that carry no flags of their own. Composed
+        /// out of <see cref="FlagsFor"/> and <see cref="Classify"/> rather than switching on the band again —
+        /// a second switch is a second ladder even when it returns the same type, which is the correction
+        /// #2470 had to make once already.
+        /// </summary>
+        public static ServerCollectionStatus FromFreshness(ServerFreshness freshness)
+        {
+            var flags = FlagsFor(freshness);
+            return Classify(flags.IsOnline, flags.HasCollectorErrors, flags.AwaitingFirstCollection);
+        }
+
+        /// <summary>The words a human reads. They are also the <c>DataTrigger</c> values the WPF sidebar keys
+        /// its dot colour off, so a word that stopped matching would silently fall through to the muted default
+        /// dot rather than fail anything — which is why the viewer pins the trigger set against this enum.</summary>
+        public static string Word(this ServerCollectionStatus status) => status switch
+        {
+            ServerCollectionStatus.Stale => "Warning",
+            ServerCollectionStatus.Online => "Online",
+            ServerCollectionStatus.Offline => "Offline",
+            ServerCollectionStatus.AwaitingFirstCollection => "Awaiting first collection",
+            _ => "Unknown",
+        };
+
+        /// <summary>
+        /// The token the MCP <c>list_servers</c> / <c>get_server_status</c> surface publishes. It differs from
+        /// <see cref="Word"/> in exactly one arm, and the difference is load-bearing rather than sloppy:
+        /// <c>AwaitingFirstCollection</c> shipped as a machine token beside the pre-existing values, and MCP
+        /// status values are a consumer API — clients key on them, so re-spelling one is a breaking change.
+        /// Keeping the two vocabularies next to each other is what stops the next reader "fixing" the
+        /// inconsistency.
+        /// </summary>
+        public static string McpToken(this ServerCollectionStatus status) => status switch
+        {
+            ServerCollectionStatus.Stale => "Warning",
+            ServerCollectionStatus.Online => "Online",
+            ServerCollectionStatus.Offline => "Offline",
+            ServerCollectionStatus.AwaitingFirstCollection => "AwaitingFirstCollection",
+            _ => "Unknown",
+        };
+
+        /// <summary>What the word MEANS, in words — the first line of whichever tooltip renders it. Every arm
+        /// names collection explicitly, because the complaint in #2422 was precisely that a word and a colour
+        /// left the reader guessing which axis they were about. In Darling that axis is always collection
+        /// freshness: there is no live ping to a monitored server.</summary>
+        public static string Headline(this ServerCollectionStatus status) => status switch
+        {
+            ServerCollectionStatus.Stale => "Warning — collection has lagged on this server",
+            ServerCollectionStatus.Online => "Online — collection is current",
+            ServerCollectionStatus.Offline => "Offline — nothing has been collected for long enough to call the server dark",
+            ServerCollectionStatus.AwaitingFirstCollection =>
+                "Awaiting first collection — registered, but the service has not reached it yet",
+            _ => "Unknown — this server's collection freshness has not been classified",
+        };
+    }
+
+    /// <summary>
     /// Per-metric health bands for an Overview card's severity dots — a verbatim mirror of the Dashboard's
     /// <c>HealthSeverity</c>. <see cref="Unknown"/> is a metric with no collected data (e.g. Threads on Azure SQL
     /// DB) — it never escalates the card's overall band.
@@ -639,6 +799,48 @@ namespace PerformanceMonitor.Common
     /// this signal exists: before it, half-rate collection was only visible by reading service-log
     /// warnings (#2296 measured two servers at ~50 skip-warnings/hour with 40 of 40 collectors green).</para>
     ///
+    /// <para><b>The second dimension (#2446), and why it is not the verdict:</b> amortizing answers "can
+    /// this server's total demand fit inside its cadence on average", and an operator reading a skipped
+    /// relaunch is asking "did THIS sweep overrun". Those diverge exactly when one collector's single run
+    /// approaches the budget while its amortized cost is negligible — the signature of an infrequent heavy
+    /// collector. prod-sql-use2-multi-49 is the measured case: index_object_stats averages 37,207 ms of a
+    /// 60,000 ms body, and at a 1440-minute cadence contributes 26 ms/min to a 12,250 ms/min total that
+    /// reads OK at 20.4%. So <see cref="SweepPressure.PeakCycleMs"/> adds the collectors' single-run costs
+    /// WITHOUT amortizing: the body's cost on the cycle where every cadence comes due together. That cycle
+    /// is not a hypothetical worst case. Any set of positive integer cadences coincides on their LCM, so
+    /// the aligned body is a periodic certainty for ANY schedule, including one hand-edited in Lite's
+    /// schedule editor — the shipped defaults (1 | 5 | 60 | 1440) merely make it frequent, every 1440
+    /// minutes, rather than rare.</para>
+    ///
+    /// <para><b>Which single-run cost, and why not the mean (#2460):</b> #2446 built that cycle out of each
+    /// collector's AVERAGE duration, which is a contradiction whenever a collector's run cost is bimodal —
+    /// and on this fleet one of them plainly is. <c>query_store</c> on prod-sql-use2-multi-49 reported an
+    /// average of 13,834 ms over 1,155 runs, but 958 of those runs carried the empty-enumeration note and
+    /// cost about 36 ms each (measured on prod-sql-use2-alpha-01, which yields nothing on all 1,551 of its
+    /// runs and pays 36 ms for it). Back that out and the 197 PRODUCTIVE runs cost ~80,900 ms EACH — more
+    /// than the entire 60,000 ms budget, on their own, once each. 13,834 ms describes neither population;
+    /// it is an 83/17 blend that happens to land in a range that reads like a plausible single number, and
+    /// a "worst scheduled cycle" built from it understated that server's worst body by ~67,000 ms.
+    ///
+    /// So the caller now measures each collector's TAIL run cost as well as its mean — p95 of the same
+    /// window's <c>duration_ms</c> values, a statistic the store has always held per run and nothing has
+    /// ever read — and the peak cycle is built from <see cref="PeakRunMs"/>. p95 rather than the maximum
+    /// because a max is one run: a single pathological cycle would make a collector look permanently
+    /// terrible and every server on the fleet read BODY_OVERRUN, which is exactly how a second signal
+    /// teaches operators to skip it. p95 also degrades gracefully with sample size — over 3,500 runs it
+    /// discards the one bad cycle, and over the six runs a daily collector gets in a week there is no
+    /// outlier anyone can afford to discard, so it lands on the max by construction. The maximum is served
+    /// beside it as a fact rather than fed into a decision, because comparing a p95 to a max is what tells
+    /// a routine cost from a one-off.</para>
+    ///
+    /// <para>It is reported as its own field with its own vocabulary rather than folded into the verdict,
+    /// because a once-daily 37-second collector is not saturation and calling it SATURATED would spend the
+    /// word on a case where the capacity lever it recommends is the wrong lever. The verdict keeps meaning
+    /// sustained demand; BODY_OVERRUN means one scheduled body does not fit. A fleet scan can filter on
+    /// either, which a prose-only footnote would not allow — measured across the dogfood fleet, the two
+    /// servers that logged skipped relaunches read OK/BODY_OVERRUN (122% and 109% of budget) while a quiet
+    /// one read OK/FITS at 19%, so the dimensions are genuinely orthogonal and the new one discriminates.</para>
+    ///
     /// <para>Pure and static like <see cref="CollectorHealthClassifier"/>: the caller resolves each
     /// collector's cadence (from the shared schedule defaults, matching the banding's parity choice) and
     /// only the DECISION lives here, pinned by the same table in both suites.</para>
@@ -649,6 +851,14 @@ namespace PerformanceMonitor.Common
         public const string Ok = "OK";
         public const string AtRisk = "AT_RISK";
         public const string Saturated = "SATURATED";
+
+        /* #2446, the peak-cycle risk strings. Deliberately a SEPARATE vocabulary from the verdict's,
+           because the two answer different questions and a reader who meets BODY_OVERRUN sitting beside
+           OK must not be able to read it as a fourth saturation band. BODY_OVERRUN is the watchdog's own
+           wording ("collection body has not completed after Ns of execution - skipping relaunch"), so the
+           field an operator filters on and the service-log line they grep for say the same thing. */
+        public const string PeakCycleFits = "FITS";
+        public const string PeakCycleBodyOverrun = "BODY_OVERRUN";
 
         /// <summary>
         /// AT_RISK at 75% of budget: the amortized average leaves no headroom for variance — the slow
@@ -662,35 +872,215 @@ namespace PerformanceMonitor.Common
         public const double SaturatedBusyPercent = 100.0;
 
         /// <summary>
-        /// Amortized execution demand and its verdict. Each scheduled collector contributes its average
-        /// duration divided by its cadence in minutes — milliseconds of work demanded per minute of wall
-        /// time for a body that runs collectors serially. A non-recurring collector
-        /// (<paramref name="collectors"/> entry with frequency &lt;= 0: on-load, unknown) contributes
-        /// nothing — it does not compete for the sweep. Percent is against the 60,000 ms one minute
-        /// holds; the fastest shipped cadence is one minute, which is what makes the minute the budget.
+        /// The sweep budget one body has to finish in: the 60,000 ms the fastest shipped cadence holds.
+        /// Both dimensions are measured against this same minute, which is the point — the amortized
+        /// verdict asks whether the AVERAGE minute's demand fits inside it, and the peak cycle asks
+        /// whether the WORST scheduled minute's does.
         /// </summary>
-        public static SweepPressure Compute(IEnumerable<(string CollectorName, double AvgDurationMs, int FrequencyMinutes)> collectors)
+        public const double SweepBudgetMs = 60_000.0;
+
+        /// <summary>
+        /// BODY_OVERRUN at 100% of the budget, with no warning band beneath it. The amortized bands need
+        /// one because an average smooths spikes and 75% is where variance starts pushing a body over; the
+        /// peak cycle is already the worst scheduled case, and a headroom band on top of a worst case
+        /// would be a band on a band.
+        /// </summary>
+        public const double BodyOverrunPercent = 100.0;
+
+        /// <summary>
+        /// #2460: how far a collector's tail run has to stand above its mean before the peak-cycle note
+        /// says so out loud — twice the mean. For a two-mode population (an empty run costing <i>a</i>, a
+        /// productive one costing <i>b</i>, in an 83/17 mix) that fires once <i>b</i> is about 2.5x
+        /// <i>a</i>, which is comfortably past anything ordinary run-to-run variance produces and well
+        /// short of the 2,000x this was found on. A ratio rather than a millisecond gap so it means the
+        /// same thing for a 30 ms collector and a 30-second one.
+        /// </summary>
+        public const double BimodalTailRatio = 2.0;
+
+        /// <summary>
+        /// The single-run cost one scheduled body is charged for a collector: its p95, floored at its mean.
+        ///
+        /// <para>The floor is load-bearing, not defensive. p95 is not guaranteed to sit above the mean —
+        /// a collector with 99 runs at 10 ms and one at 1,000,000 ms has a mean of 10,009 ms and a p95 of
+        /// 10 ms — so taking the p95 unconditionally could compute a SMALLER aligned cycle than the
+        /// mean-based one #2446 shipped and make a BODY_OVERRUN it already caught disappear. Flooring
+        /// makes this change monotonic: the aligned cycle can only ever go up, so #2460 refines #2446's
+        /// answer and can never retract it.</para>
+        ///
+        /// <para>Lives here, public, because both SKUs' get_collection_health also render a per-collector
+        /// "% of the sweep budget per run" from the same rule, and a hand-copied floor in two tools is the
+        /// drift <see cref="FormatPeakCycleNote"/> exists to avoid.</para>
+        /// </summary>
+        public static double PeakRunMs(double avgDurationMs, double p95DurationMs) =>
+            Math.Max(avgDurationMs, p95DurationMs);
+
+        /// <summary>
+        /// Both answers in one pass, over one population of collectors.
+        ///
+        /// <para><b>Amortized execution demand and its verdict.</b> Each scheduled collector contributes
+        /// its average duration divided by its cadence in minutes — milliseconds of work demanded per
+        /// minute of wall time for a body that runs collectors serially. Percent is against the 60,000 ms
+        /// one minute holds; the fastest shipped cadence is one minute, which is what makes the minute the
+        /// budget. This half deliberately keeps using the MEAN even though #2460 hands the method a tail
+        /// statistic as well: sustained demand over a window IS the mean, and amortizing a p95 would claim
+        /// a rate of work the server never sustains.</para>
+        ///
+        /// <para><b>The peak cycle and its risk (#2446, #2460).</b> The same collectors' single-run costs
+        /// added WITHOUT being divided: what the body costs when every cadence comes due together, which
+        /// the nested shipped cadences make a periodic certainty rather than a hypothetical. Each
+        /// collector is charged <see cref="PeakRunMs"/> — its p95 floored at its mean — rather than its
+        /// mean, because a mean over a bimodal collector describes neither of its populations. Reported
+        /// separately from the verdict, never folded into it — see the type's remarks for why.</para>
+        ///
+        /// <para>A non-recurring collector (<paramref name="collectors"/> entry with frequency &lt;= 0:
+        /// on-load, unknown) contributes to NEITHER — it runs on connect, not in the recurring body, so it
+        /// does not compete for the sweep and is not part of any scheduled cycle. Nor can it become the
+        /// peak collector, which would otherwise name a collector that never shares a body with the ones
+        /// it is being compared against.</para>
+        /// </summary>
+        public static SweepPressure Compute(
+            IEnumerable<(string CollectorName, double AvgDurationMs, double P95DurationMs, int FrequencyMinutes)> collectors)
         {
             double busyMsPerMinute = 0;
-            foreach (var (_, avgDurationMs, frequencyMinutes) in collectors)
+            double peakCycleMs = 0;
+            string? peakCollectorName = null;
+            double peakCollectorPeakRunMs = 0;
+            double peakCollectorAvgDurationMs = 0;
+            int peakCollectorFrequencyMinutes = 0;
+
+            foreach (var (collectorName, avgDurationMs, p95DurationMs, frequencyMinutes) in collectors)
             {
-                if (frequencyMinutes <= 0 || avgDurationMs <= 0)
+                /* "Nothing measured" is BOTH statistics being empty, not the mean alone: a collector whose
+                   mean rounds to nothing is still allowed to contribute a tail, which is the whole shape
+                   #2460 is about. */
+                if (frequencyMinutes <= 0 || (avgDurationMs <= 0 && p95DurationMs <= 0))
                 {
                     continue;
                 }
 
                 busyMsPerMinute += avgDurationMs / frequencyMinutes;
+
+                /* The same population as the amortized sum, added WITHOUT being divided: what the body
+                   costs on the cycle where every cadence comes due together. Excluding the on-load
+                   collectors here is the same choice for the same reason — they run on connect, not in
+                   the recurring body, so they are not part of any scheduled cycle. */
+                var peakRunMs = PeakRunMs(avgDurationMs, p95DurationMs);
+                peakCycleMs += peakRunMs;
+
+                /* Ranked on the SINGLE-RUN cost, which is the question this field answers — and on the
+                   tail rather than the mean, so the collector named is the one that actually owns the
+                   body. On multi-49 that changes the answer: index_object_stats has the larger mean
+                   (37,207 ms against query_store's 13,834) but query_store's heavy run is ~80,900 ms, so
+                   it, not the daily collector, is what puts that body over the budget.
+
+                   Strict >, so an exact tie keeps the first collector the caller enumerated rather than
+                   letting the answer wobble with the row order of whatever query produced it. */
+                if (peakRunMs > peakCollectorPeakRunMs)
+                {
+                    peakCollectorName = collectorName;
+                    peakCollectorPeakRunMs = peakRunMs;
+                    peakCollectorAvgDurationMs = avgDurationMs;
+                    peakCollectorFrequencyMinutes = frequencyMinutes;
+                }
             }
 
-            var busyPercent = busyMsPerMinute / 60_000.0 * 100.0;
+            var busyPercent = busyMsPerMinute / SweepBudgetMs * 100.0;
             var verdict = busyPercent >= SaturatedBusyPercent ? Saturated
                 : busyPercent >= AtRiskBusyPercent ? AtRisk
                 : Ok;
 
-            return new SweepPressure(busyMsPerMinute, busyPercent, verdict);
+            var peakCyclePercent = peakCycleMs / SweepBudgetMs * 100.0;
+            var peakCycleRisk = peakCyclePercent >= BodyOverrunPercent ? PeakCycleBodyOverrun : PeakCycleFits;
+
+            return new SweepPressure(
+                busyMsPerMinute,
+                busyPercent,
+                verdict,
+                peakCycleMs,
+                peakCyclePercent,
+                peakCycleRisk,
+                peakCollectorName,
+                peakCollectorPeakRunMs,
+                peakCollectorAvgDurationMs,
+                peakCollectorFrequencyMinutes);
+        }
+
+        /// <summary>
+        /// The sentence a BODY_OVERRUN needs, composed HERE rather than at each SKU's tool the way
+        /// <see cref="CollectorHealthClassifier.FormatCollectionNote"/> is, because it interpolates the
+        /// numbers: two hand-copied format strings would drift the moment one of them was tuned, and the
+        /// whole point of this note is that the operator is reading it instead of the amortized figure.
+        /// Empty string when the peak cycle fits — a note that fires on the healthy case is how a signal
+        /// teaches people to ignore it.
+        /// </summary>
+        public static string FormatPeakCycleNote(SweepPressure pressure)
+        {
+            if (pressure is null
+                || !string.Equals(pressure.PeakCycleRisk, PeakCycleBodyOverrun, StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(pressure.PeakCollectorName))
+            {
+                return string.Empty;
+            }
+
+            /* #2460: the bimodal clause, appended only when this collector's tail really does stand above
+               its mean. On a collector whose runs all cost about the same the two numbers are the same
+               number, and "its mean run is 37,207 ms, so the mean understates one body by 0 ms" is the
+               kind of sentence that trains a reader to stop reading the note. */
+            var bimodalClause = pressure.PeakCollectorAvgDurationMs > 0
+                && pressure.PeakCollectorPeakRunMs >= pressure.PeakCollectorAvgDurationMs * BimodalTailRatio
+                ? string.Format(
+                    CultureInfo.InvariantCulture,
+                    " Its MEAN run is only {0:N0} ms, so its cost is bimodal and any figure built from that mean — the sustained verdict, the heaviest_collectors ranking, and this cycle before #2460 — understates one body by {1:N0} ms.",
+                    Math.Round(pressure.PeakCollectorAvgDurationMs),
+                    Math.Round(pressure.PeakCollectorPeakRunMs - pressure.PeakCollectorAvgDurationMs))
+                : string.Empty;
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "On the cycle where every scheduled cadence comes due together this body costs {0:N0} ms — {1:N1}% of the {2:N0} ms sweep budget — so that body cannot finish inside its cadence and its relaunch is skipped, however much headroom the sustained {3:N1}% reports. Its largest single contributor is {4}, {5:N0} ms on a heavy run and {6:N1}% of the budget on its own, every {7} minutes. Amortized over that cadence it is worth {8:N0} ms per minute, so the sustained figure and the heaviest_collectors ranked by it both understate what this collector does to one body.{9} The lever here is the schedule's shape — moving or splitting that collector so it stops sharing a cycle — not the capacity answer a SATURATED verdict calls for.",
+                Math.Round(pressure.PeakCycleMs),
+                pressure.PeakCyclePercent,
+                SweepBudgetMs,
+                pressure.BusyPercent,
+                pressure.PeakCollectorName,
+                Math.Round(pressure.PeakCollectorPeakRunMs),
+                pressure.PeakCollectorPeakRunMs / SweepBudgetMs * 100.0,
+                pressure.PeakCollectorFrequencyMinutes,
+                Math.Round(pressure.PeakCollectorAvgDurationMs / pressure.PeakCollectorFrequencyMinutes),
+                bimodalClause);
         }
     }
 
-    /// <summary>One server's sweep-pressure answer, as a single value so a caller cannot drop the verdict from its numbers.</summary>
-    public sealed record SweepPressure(double BusyMsPerMinute, double BusyPercent, string Verdict);
+    /// <summary>
+    /// One server's sweep-pressure answer, as a single value so a caller cannot drop the verdict from its
+    /// numbers — or, since #2446, drop the second dimension from the verdict.
+    /// </summary>
+    /// <param name="BusyMsPerMinute">Amortized execution demand: milliseconds of collector work per minute of wall time.</param>
+    /// <param name="BusyPercent"><paramref name="BusyMsPerMinute"/> against <see cref="SweepPressureClassifier.SweepBudgetMs"/>.</param>
+    /// <param name="Verdict">OK / AT_RISK / SATURATED — the SUSTAINED answer, and only that.</param>
+    /// <param name="PeakCycleMs">What the body costs on the cycle where every scheduled cadence coincides.</param>
+    /// <param name="PeakCyclePercent"><paramref name="PeakCycleMs"/> against the same budget.</param>
+    /// <param name="PeakCycleRisk">FITS / BODY_OVERRUN — the SINGLE-SWEEP answer. Never a verdict value.</param>
+    /// <param name="PeakCollectorName">The largest single contributor to that cycle, or null when nothing is scheduled.</param>
+    /// <param name="PeakCollectorPeakRunMs">
+    /// That collector's HEAVY single-run cost — <see cref="SweepPressureClassifier.PeakRunMs"/>, its p95
+    /// floored at its mean (#2460). What one aligned body is actually charged for it.
+    /// </param>
+    /// <param name="PeakCollectorAvgDurationMs">
+    /// That same collector's MEAN single-run cost. Carried beside the tail rather than replaced by it for
+    /// two reasons: the amortized line in the note has to be computed from the mean (that is what
+    /// amortization means), and the gap between the two IS the finding whenever the collector is bimodal.
+    /// </param>
+    /// <param name="PeakCollectorFrequencyMinutes">That collector's cadence — the number that makes its amortized share small.</param>
+    public sealed record SweepPressure(
+        double BusyMsPerMinute,
+        double BusyPercent,
+        string Verdict,
+        double PeakCycleMs,
+        double PeakCyclePercent,
+        string PeakCycleRisk,
+        string? PeakCollectorName,
+        double PeakCollectorPeakRunMs,
+        double PeakCollectorAvgDurationMs,
+        int PeakCollectorFrequencyMinutes);
 }

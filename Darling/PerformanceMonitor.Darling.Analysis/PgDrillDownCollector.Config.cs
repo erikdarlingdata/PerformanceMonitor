@@ -28,14 +28,14 @@ ORDER BY database_name";
 
     private async Task CollectConfigIssues(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(ConfigIssuesSql, connection);
         cmd.Parameters.AddWithValue(context.ServerId);
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             var issues = new List<string>();
             if (!reader.IsDBNull(2) && reader.GetBoolean(2)) issues.Add("auto_shrink ON");

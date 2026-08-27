@@ -42,17 +42,18 @@ public sealed class DarlingMcpDefaultTraceTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of events to return. Default 100.")] int limit = 100)
+        [Description("Maximum number of events to return. Default 100.")] int limit = 100,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var all = await DarlingDefaultTraceReader.ReadEventsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
@@ -63,7 +64,8 @@ public sealed class DarlingMcpDefaultTraceTools
                 .ToList();
 
             if (significant.Count == 0)
-                return McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events")
+                    ?? McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
 
             var events = significant.Take(limit).Select(r =>
             {

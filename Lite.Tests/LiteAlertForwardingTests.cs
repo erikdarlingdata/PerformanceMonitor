@@ -710,6 +710,35 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal("tempdb 91% used", fired.ShortMessage);    /* :435 toast body */
     }
 
+    /// <summary>
+    /// #2515, the SKU-parity half: Lite and Darling share the engine and the type, so the ceiling has to
+    /// change the decision identically on both. Darling's twin is
+    /// <c>AlertEngineTests.TempDb_TheAzureCeiling_SuppressesTheAlert_ThatTheAllocationWouldFire</c>, with the
+    /// same numbers — an operator must not get a page on one product and silence on the other for the same
+    /// tempdb.
+    /// </summary>
+    [Fact]
+    public async Task TempDb_TheAzureCeiling_SuppressesTheAlert_ThatTheAllocationWouldFire()
+    {
+        DisableAllChecks();
+        App.AlertTempDbSpaceEnabled = true;
+        Assert.Equal(80, App.AlertTempDbSpaceThresholdPercent);
+
+        var h = new Harness();
+        /* GP_S_Gen5_2 with one ~57 MB #temp table: 62.44 MB allocated, 65,536 MB of headroom behind it. */
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69, MaxSizeMb = 65_536 };
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* The identical snapshot with the ceiling unmeasured is the pre-#2515 reading, and it pages. */
+        var withoutCeiling = new Harness();
+        withoutCeiling.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69 };
+        await withoutCeiling.Build().EvaluateServerAsync(Harness.Snapshot());
+        var fired = Assert.Single(withoutCeiling.Deliverer.Outcomes);
+        Assert.Equal("96% used (60 MB)", fired.CurrentValue);
+        Assert.Equal("tempdb 96% used", fired.ShortMessage);
+    }
+
     [Fact]
     public async Task LongRunningJob_ToastBody_CarriesJobNamePercentAndMinutes()
     {

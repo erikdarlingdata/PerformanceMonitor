@@ -113,9 +113,11 @@ public sealed class StoreConfigProvider
             {
                 /* #2254: the seed is skipped, so any server added to darling.json AFTER the first start is
                    silently ignored — and --test-connection reads the FILE, so it validates those servers
-                   happily while the service never monitors them. Say so once per start instead of leaving the
-                   operator to discover it. */
-                await WarnAboutFileOnlyServersAsync(connection, config, cancellationToken);
+                   happily while the service never monitors them. #2552: the same skip makes every per-server
+                   SETTING in the file dead text for a server that IS registered, which was silent for the
+                   same reason and is the more common edit. Say both once per start instead of leaving the
+                   operator to discover them. */
+                await WarnAboutFileVersusStoreAsync(connection, config, cancellationToken);
             }
 
             /* LAST — its presence marks the seed complete (the reload gate keys on config_version). */
@@ -133,46 +135,79 @@ public sealed class StoreConfigProvider
     }
 
     /// <summary>
-    /// #2254: names the servers present in darling.json that the store does not have, once per start.
+    /// #2254 + #2552: the once-per-start report on where darling.json and the registry disagree. Two causes,
+    /// reported separately because they have two different remedies.
     ///
-    /// <para>The seed runs only while <c>config_monitored_servers</c> is empty, so a server added to the file
-    /// after the first successful start is a permanent no-op. What made that expensive in the field is that
-    /// <c>--test-connection</c> reads the FILE and validated the new server as PASS, so the operator had two
-    /// outputs that were each correct about different things and no way to see the disagreement: config edit,
-    /// service restart, support round trip.</para>
+    /// <para><b>Cause A — a server the store has never had (#2254).</b> The seed runs only while
+    /// <c>config_monitored_servers</c> is empty, so a server added to the file after the first successful
+    /// start is a permanent no-op. What made that expensive in the field is that <c>--test-connection</c>
+    /// reads the FILE and validated the new server as PASS, so the operator had two outputs that were each
+    /// correct about different things and no way to see the disagreement: config edit, service restart,
+    /// support round trip.</para>
     ///
-    /// <para>Compared on <b>server_id OR name</b> (#2158). It used to be id alone, on the grounds that the id
-    /// is what the collectors key on — correct while every row's id equalled the hash of its own address, and
-    /// wrong the moment an edit began PRESERVING a row's identity so a re-addressed server keeps its history.
-    /// After such an edit the file's derived id matches nothing, and an id-only comparison would report a
-    /// server that IS monitored as absent, then advise re-adding it — wrong advice, on every start, about the
-    /// one server the operator had just fixed. The name arm covers that; a genuinely removed server is gone
-    /// from the store under both keys, so the Viewer-Remove case still reports exactly as before.</para>
+    /// <para><b>Cause B — a server the store HAS, whose settings the file disagrees with (#2552).</b> Cause
+    /// A's warning made this one WORSE rather than better: it teaches the operator "adding a server to the
+    /// file does not register it", and the natural inference from that is that the file still drives the
+    /// servers the store already knows about. It does not — for a REGISTERED server every per-server setting
+    /// in darling.json is dead text. The field report was a PostgreSQL target refusing a self-signed
+    /// certificate: the operator applied the documented fix (<c>"trustServerCertificate": true</c>),
+    /// restarted, and got a BYTE-IDENTICAL error, because the store's row still said false and nothing
+    /// anywhere compared the two. That is the worst loop to leave open — a connection failure is exactly the
+    /// class of problem an operator fixes by editing config and restarting, and this was the one class of
+    /// edit that produced an unchanged error with no explanation.</para>
+    ///
+    /// <para>Cause B does NOT make the file authoritative and changes none of the ordering: the store still
+    /// wins, deliberately (#2254). The defect is that the disagreement was INVISIBLE.</para>
+    ///
+    /// <para>Both causes are matched on <b>server_id OR name</b> (#2158). It used to be id alone, on the
+    /// grounds that the id is what the collectors key on — correct while every row's id equalled the hash of
+    /// its own address, and wrong the moment an edit began PRESERVING a row's identity so a re-addressed
+    /// server keeps its history. After such an edit the file's derived id matches nothing, and an id-only
+    /// comparison would report a server that IS monitored as absent, then advise re-adding it — wrong advice,
+    /// on every start, about the one server the operator had just fixed. The name arm covers that; a genuinely
+    /// removed server is gone from the store under both keys, so the Viewer-Remove case still reports exactly
+    /// as before.</para>
     /// </summary>
-    private async Task WarnAboutFileOnlyServersAsync(
+    private async Task WarnAboutFileVersusStoreAsync(
         NpgsqlConnection connection, DarlingConfig config, CancellationToken ct)
     {
+        var storeServers = await ReadRegisteredServersForComparisonAsync(connection, ct);
+
+        /* Cause A asks "is this file entry REGISTERED at all", which a control-plane pause does not change —
+           so these sets are built from every row, disabled included. Filtering them would report a paused
+           server as never-monitored and advise re-adding it, which is the #2158 failure this method was
+           already fixed once to avoid. The enabled/disabled split belongs to the DRIFT pass, which asks a
+           different question; see WarnAboutSettingDrift. */
         var storeIds = new HashSet<int>();
         var storeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using (var command = new NpgsqlCommand("SELECT server_id, name FROM config_monitored_servers", connection))
-        await using (var reader = await command.ExecuteReaderAsync(ct))
+        foreach (var stored in storeServers)
         {
-            while (await reader.ReadAsync(ct))
+            storeIds.Add(stored.Config.ServerId);
+            if (!string.IsNullOrEmpty(stored.Config.Name))
             {
-                storeIds.Add(reader.GetInt32(0));
-                if (!reader.IsDBNull(1))
-                {
-                    storeNames.Add(reader.GetString(1));
-                }
+                storeNames.Add(stored.Config.Name);
             }
         }
 
         var fileOnly = ServersOnlyInFile(config.Servers, storeIds, storeNames);
-        if (fileOnly.Count == 0)
+        if (fileOnly.Count > 0)
         {
-            return;
+            await WarnAboutFileOnlyServersAsync(connection, fileOnly, ct);
         }
 
+        /* Runs unconditionally rather than behind the file-only early return that used to end this method:
+           the #2552 case is precisely the one where fileOnly is EMPTY — every server in the file is already
+           registered — so returning there is what made a registered server's settings drift silent. */
+        WarnAboutSettingDrift(config.Servers, storeServers);
+    }
+
+    /// <summary>
+    /// Cause A's two log lines (#2252 / #2258), split out from the caller so the drift pass is not gated on
+    /// there being anything to say here.
+    /// </summary>
+    private async Task WarnAboutFileOnlyServersAsync(
+        NpgsqlConnection connection, IReadOnlyList<string> fileOnly, CancellationToken ct)
+    {
         /* #2258: the OBSERVED registry is the tombstone, and it already exists. collect.servers gets a row
            upserted on every successful connect, and the Viewer's Remove deletes only from
            config_monitored_servers (the DESIRED config) — so a row surviving there means "this server really
@@ -230,6 +265,142 @@ public sealed class StoreConfigProvider
     }
 
     /// <summary>
+    /// Cause B's line (#2552): names every registered server whose darling.json entry disagrees with its
+    /// registry row, and every field it disagrees about, with both values.
+    ///
+    /// <para>The remedy names the Viewer and explicitly rules OUT <c>add_servers</c>. That tool cannot do
+    /// this: it partitions an already-monitored server out as <c>status:"duplicate"</c> before it validates
+    /// anything, so pointing an operator at it for a REGISTERED server would send them somewhere that
+    /// silently does nothing — the exact failure this warning exists to end. The Viewer's own duplicate
+    /// message ("Edit it from Manage Servers instead") already says where the edit lives.</para>
+    ///
+    /// <para>The <c>--test-connection</c> caveat is appended only when a CONNECTION-relevant field drifted.
+    /// The verb probes the file's connection settings, so it can report PASS for a connection the service
+    /// will never make — but it does not exercise the display name, the excluded-database list, the cost
+    /// figure or the delivery override, and a warning must not claim more than it can support.</para>
+    ///
+    /// <para><b>A DISABLED server gets its own line, at Information</b> — the same two-line shape cause A
+    /// already uses for "never monitored" (a warning) versus "deliberately removed" (information). Raised in
+    /// review on #2556, and the reviewer's first suggestion — filter the read to <c>is_enabled = TRUE</c> —
+    /// is the one option that must not be taken: that read also feeds cause A, which asks whether a file entry
+    /// is REGISTERED, and a paused server is. Filtering there would report it as never-monitored and advise
+    /// re-adding it. Suppressing it from the drift pass only was the other candidate and is rejected too, more
+    /// narrowly: #2552 is a defect about SILENCE being expensive, so answering it by adding a new silence is
+    /// the wrong direction, and the drift is exactly what the operator will walk back into when they
+    /// re-enable. What was genuinely wrong is the CLAIM — "the registry is what the service uses" is not true
+    /// of a server nothing is connecting to — so the disabled line drops it, drops the remedy, and drops the
+    /// <c>--test-connection</c> caveat, saying only what is true of a paused server.</para>
+    /// </summary>
+    private void WarnAboutSettingDrift(
+        IReadOnlyList<MonitoredServer>? fileServers, IReadOnlyList<RegisteredServer> storeServers)
+    {
+        var drifted = DescribeSettingDrift(fileServers, storeServers);
+        if (drifted.Count == 0)
+        {
+            return;
+        }
+
+        var live = drifted.Where(d => d.IsEnabled).ToList();
+        var paused = drifted.Where(d => !d.IsEnabled).ToList();
+
+        if (live.Count > 0)
+        {
+            var connectionCaveat = live.Any(d => d.Fields.Any(f => f.AffectsConnection))
+                ? " Note --test-connection reads darling.json, so it probes the FILE's settings and can report "
+                  + "PASS for a connection the service will never make."
+                : "";
+
+            _logger?.LogWarning(
+                "darling.json disagrees with the registry about {Count} monitored server(s), and the registry is "
+                + "what the service uses: {Details}. The store is authoritative after the first seed, so editing a "
+                + "registered server's settings in the file changes nothing and a restart cannot change that — "
+                + "edit them in the Viewer's Manage Servers window (the MCP add_servers tool cannot: an "
+                + "already-registered server is skipped as a duplicate).{ConnectionCaveat}",
+                live.Count,
+                FormatSettingDrift(live, MaxDriftedServersLogged),
+                connectionCaveat);
+        }
+
+        if (paused.Count > 0)
+        {
+            _logger?.LogInformation(
+                "darling.json also disagrees with the registry about {Count} server(s) that are registered but "
+                + "DISABLED: {Details}. Nothing is connecting to them, so neither value is in force today — but "
+                + "the registry's is the one that would take effect if they were re-enabled from the Viewer, not "
+                + "the file's.",
+                paused.Count,
+                FormatSettingDrift(paused, MaxDriftedServersLogged));
+        }
+    }
+
+    /// <summary>
+    /// How many drifted servers the log line NAMES. The count in the message is always the true total — this
+    /// is a display budget, like the alert renderer's incident cap, and nothing derives state from the
+    /// truncated list. A whole-fleet drift (a regenerated darling.json against a 42-server registry) is the
+    /// realistic way this line becomes unreadable, and an unreadable warning is a silent one.
+    /// </summary>
+    private const int MaxDriftedServersLogged = 10;
+
+    /// <summary>
+    /// The registry rows as <see cref="MonitoredServer"/>s, for both halves of the report above.
+    ///
+    /// <para><b><c>encrypted_password</c> is not in the SELECT list, and that is the credential guarantee.</b>
+    /// #2552 requires that no credential is ever compared or printed, and the way to guarantee that is
+    /// structural rather than editorial: the blob is never read, so there is nothing in memory for a later
+    /// edit to this file to leak into a log line. It must not be compared even if it were read — a file entry
+    /// legitimately carries a <c>file:</c>/<c>env:</c> reference (<see cref="DarlingSecretSource"/>) or a dev
+    /// plaintext password while the store row carries a DPAPI blob, and <see cref="BuildServerFromRow"/>
+    /// backfills exactly that pairing at read time. That is the SUPPORTED shape, so comparing them would
+    /// report a working configuration as drift on every start.</para>
+    ///
+    /// <para><c>capture_plans</c> is left unread for the opposite reason: it has no per-server darling.json
+    /// counterpart to disagree with (<c>capturePlans</c> is a top-level service setting and the seed writes
+    /// the per-server column NULL), so there is nothing to compare. <c>is_enabled</c> is read but never
+    /// COMPARED — it has no file counterpart either; it decides which of the two drift lines a server belongs
+    /// on. Every row is returned, enabled or not, because cause A's question is about registration.</para>
+    /// </summary>
+    private static async Task<IReadOnlyList<RegisteredServer>> ReadRegisteredServersForComparisonAsync(
+        NpgsqlConnection connection, CancellationToken ct)
+    {
+        var servers = new List<RegisteredServer>();
+        using var command = new NpgsqlCommand(@"
+SELECT server_id, name, host, database, auth, username, encrypt_mode, trust_server_certificate,
+       read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd,
+       alert_delivery_mode_override, engine, port, is_enabled
+FROM config_monitored_servers", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            servers.Add(new RegisteredServer(
+                new MonitoredServer
+                {
+                    /* The row's own primary key, so ServerId resolves to it rather than re-deriving the hash —
+                       the same reason BuildServerFromRow reads it (#2218). */
+                    StoredServerId = reader.GetInt32(0),
+                    Name = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    Host = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    Database = reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Auth = reader.IsDBNull(4) ? "integrated" : reader.GetString(4),
+                    Username = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    EncryptMode = reader.IsDBNull(6) ? "Mandatory" : reader.GetString(6),
+                    TrustServerCertificate = !reader.IsDBNull(7) && reader.GetBoolean(7),
+                    ReadOnlyIntent = !reader.IsDBNull(8) && reader.GetBoolean(8),
+                    MultiSubnetFailover = !reader.IsDBNull(9) && reader.GetBoolean(9),
+                    ExcludedDatabases = ReadTextArray(reader, 10),
+                    MonthlyCostUsd = reader.IsDBNull(11) ? 0m : reader.GetDecimal(11),
+                    AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(12) ? null : reader.GetString(12)),
+                    Engine = reader.IsDBNull(13) ? "sqlserver" : reader.GetString(13),
+                    Port = reader.IsDBNull(14) ? 0 : reader.GetInt32(14),
+                },
+                /* NOT NULL DEFAULT TRUE in the table, so the guard is for a store mid-migration; an unknown
+                   enablement reads as ENABLED, which is the direction that keeps the drift visible. */
+                IsEnabled: reader.IsDBNull(15) || reader.GetBoolean(15)));
+        }
+
+        return servers;
+    }
+
+    /// <summary>
     /// Splits the file-only servers into "never monitored" and "monitored once, since removed" (#2258), using the
     /// observed registry as the evidence.
     ///
@@ -278,6 +449,410 @@ public sealed class StoreConfigProvider
         }
 
         return (never, removed);
+    }
+
+    /// <summary>
+    /// One field on which a darling.json entry and its registry row disagree, ALREADY NORMALIZED — the two
+    /// values carried here are the ones that were compared, so the log line can never print a pair that
+    /// differs only in a way the service does not act on.
+    /// <para><paramref name="AffectsConnection"/> marks the fields the connection string is built from, which
+    /// is what gates the <c>--test-connection</c> caveat on the warning.</para>
+    /// </summary>
+    internal readonly record struct SettingDrift(
+        string Field, string FileValue, string StoreValue, bool AffectsConnection);
+
+    /// <summary>
+    /// One <c>config_monitored_servers</c> row: its settings, plus whether the control plane has it ENABLED.
+    /// Enablement is not a darling.json concept and is never compared — it only decides which of the two
+    /// drift lines the server belongs on, because "the registry is what the service uses" is not a true
+    /// sentence about a server nothing is connecting to.
+    /// </summary>
+    internal sealed record RegisteredServer(MonitoredServer Config, bool IsEnabled);
+
+    /// <summary>One registered server and every field its darling.json entry disagrees with (#2552).</summary>
+    internal sealed record ServerSettingDrift(string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields);
+
+    /// <summary>
+    /// Pairs each darling.json entry with its registry row and reports the fields they disagree on (#2552).
+    /// Pure, so the whole comparison is testable without a store.
+    ///
+    /// <para><b>Pairing.</b> Same either-or key as <see cref="ServersOnlyInFile"/>: the stored
+    /// <c>server_id</c> first, then the display name case-folded. One rule governs both arms — the match must
+    /// be unambiguous in BOTH directions, or the entry is skipped rather than guessed at. Nothing enforces
+    /// display-name uniqueness, and two file entries can derive one <c>server_id</c> (identical addresses,
+    /// where the seed's <c>ON CONFLICT DO NOTHING</c> left a single row), so a guess would print two entries'
+    /// settings as one server's drift and could contradict itself on the same line. That is the same "exactly
+    /// one match" discipline <see cref="BuildServerFromRow"/> applies before it copies a bootstrap secret, for
+    /// the same reason: a wrong pairing here is worse than no pairing.</para>
+    /// </summary>
+    internal static IReadOnlyList<ServerSettingDrift> DescribeSettingDrift(
+        IEnumerable<MonitoredServer>? fileServers, IReadOnlyList<RegisteredServer>? storeServers)
+    {
+        var drifted = new List<ServerSettingDrift>();
+        if (fileServers is null || storeServers is null || storeServers.Count == 0)
+        {
+            return drifted;
+        }
+
+        var file = fileServers.Where(s => s is not null).ToList();
+        var byId = new Dictionary<int, RegisteredServer>();
+        foreach (var stored in storeServers)
+        {
+            /* config_monitored_servers.server_id is the PRIMARY KEY, so a duplicate can only come from a
+               reader that produced one; last-wins rather than throwing, since this is a diagnostic. */
+            byId[stored.Config.ServerId] = stored;
+        }
+
+        var storeNameCounts = CountNames(storeServers.Select(s => s.Config.DisplayName));
+        var fileNameCounts = CountNames(file.Select(s => s.DisplayName));
+        var fileIdCounts = new Dictionary<int, int>();
+        foreach (var entry in file)
+        {
+            fileIdCounts[entry.ServerId] = fileIdCounts.TryGetValue(entry.ServerId, out var n) ? n + 1 : 1;
+        }
+
+        foreach (var entry in file)
+        {
+            RegisteredServer? match = null;
+            if (byId.TryGetValue(entry.ServerId, out var byIdMatch) && fileIdCounts[entry.ServerId] == 1)
+            {
+                match = byIdMatch;
+            }
+            else if (Count(storeNameCounts, entry.DisplayName) == 1 && Count(fileNameCounts, entry.DisplayName) == 1)
+            {
+                match = storeServers.First(s =>
+                    string.Equals(s.Config.DisplayName, entry.DisplayName, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (match is null)
+            {
+                /* Either not registered at all — ServersOnlyInFile reports that, and it is a different
+                   remedy — or an ambiguous name, which is deliberately not guessed at. */
+                continue;
+            }
+
+            var fields = CompareServerSettings(entry, match.Config);
+            if (fields.Count > 0)
+            {
+                drifted.Add(new ServerSettingDrift(match.Config.DisplayName, match.IsEnabled, fields));
+            }
+        }
+
+        return drifted;
+    }
+
+    private static Dictionary<string, int> CountNames(IEnumerable<string?> names)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in names)
+        {
+            var key = name ?? "";
+            counts[key] = counts.TryGetValue(key, out var n) ? n + 1 : 1;
+        }
+
+        return counts;
+    }
+
+    private static int Count(Dictionary<string, int> counts, string? name) =>
+        counts.TryGetValue(name ?? "", out var n) ? n : 0;
+
+    /// <summary>
+    /// Field-by-field, through the SAME folds the connect path and the collectors apply — because a
+    /// comparison that does not normalize warns about differences that do not exist, and an operator who is
+    /// told twice about a non-difference stops reading the line that matters. Every fold below is a real one
+    /// somewhere else in the service, not a convenience:
+    ///
+    /// <para><b>Every field name below is the darling.json KEY, spelled exactly.</b> The message is about
+    /// darling.json, so it names what the operator would edit — and it lets
+    /// <c>RegisteredServerSettingDriftTests</c> pin the set by REFLECTION over
+    /// <see cref="MonitoredServer"/>'s <c>[JsonPropertyName]</c> properties, with no mapping table in
+    /// between. A per-server setting added to the file later is therefore covered here or named by a red
+    /// test; it cannot go back to being silently dead text, which is the category #2552 belongs to rather
+    /// than the single field that was reported.</para>
+    ///
+    /// <list type="bullet">
+    /// <item><c>name</c> — falls back to the host when blank (<see cref="MonitoredServer.DisplayName"/>),
+    /// then compared case-SENSITIVELY: the store's spelling is what the Viewer and every alert render, so a
+    /// re-cased name in the file really is a change that is not taking effect.</item>
+    /// <item><c>host</c> — trimmed, case-insensitive, matching <c>DarlingWorker.ServerDefinitionEquals</c>.</item>
+    /// <item><c>database</c> — blank folds to the engine's implicit default (<c>master</c> for SQL Server,
+    /// <c>postgres</c> for PostgreSQL), which is what <see cref="MonitoredServerConnection"/> substitutes. So
+    /// a NULL column against an explicit <c>"master"</c> in the file is not drift, and the message prints the
+    /// database that is actually connected to. Compared case-SENSITIVELY on PostgreSQL and case-insensitively
+    /// on SQL Server, because that is what each engine does with the name: PostgreSQL matches the startup
+    /// packet's database against <c>pg_database.datname</c> byte for byte, so <c>ReportingDB</c> and
+    /// <c>reportingdb</c> are two databases there and folding them would MISS a real difference — the silent
+    /// direction, which is the one #2552 is about. On SQL Server the resolution is collation-dependent and
+    /// case-insensitive on every default collation, which is also what <c>ServerDefinitionEquals</c> assumes;
+    /// the stated limit is that a case-SENSITIVE server collation would hide a re-cased catalog name
+    /// there.</item>
+    /// <item><c>auth</c> — trimmed, case-insensitive; config validation already restricts it to
+    /// integrated/sql.</item>
+    /// <item><c>username</c> — only when the STORE row uses SQL auth, because that is the only case where the
+    /// connection string carries one; a stale username beside integrated auth is inert. Case-sensitive, since
+    /// a SQL login can be.</item>
+    /// <item><c>encryptMode</c> — the connect path's own fail-closed fold (trim, upper, anything unrecognized
+    /// becomes Mandatory), so <c>"strict"</c> against <c>"Strict"</c> is not drift and a typo against
+    /// <c>Mandatory</c> is not either. THE hazard #2552 named. It has a SECOND, engine-shaped half that the
+    /// first cut missed: SQL Server really does have three behaviours (three distinct
+    /// <c>SqlConnectionEncryptOption</c> values), but the PostgreSQL builder branches on <c>OPTIONAL</c>
+    /// alone — Strict and Mandatory both land on the same <c>SslMode</c> — so on a PostgreSQL target they are
+    /// ONE bucket, and reporting them as drift would be reporting a connection difference that does not
+    /// exist. The comparison collapses them there; the message still prints what each side actually says, so
+    /// the values shown are never invented.</item>
+    /// <item><c>engine</c> — folded through <see cref="MonitoredServer.TargetEngine"/>, so <c>"aurora"</c>
+    /// against <c>"postgres"</c> is one engine and not a disagreement.</item>
+    /// <item><c>port</c> — PostgreSQL only (SQL Server carries its port inside the host as <c>host,1433</c>),
+    /// with 0 folded to the driver default 5432 — so an unset port against an explicit 5432 is not drift.</item>
+    /// <item><c>readOnlyIntent</c> / <c>multiSubnetFailover</c> — SQL Server only: ApplicationIntent and
+    /// MultiSubnetFailover have no PostgreSQL equivalent and the Npgsql builder never sees them.</item>
+    /// <item><c>trustServerCertificate</c> — everywhere EXCEPT a PostgreSQL target whose stored mode is
+    /// Optional, where <c>SslMode.Prefer</c> is chosen without consulting the flag at all, so it is inert.
+    /// The gate reads the STORE's mode, since the store's is the one in force.</item>
+    /// <item><c>excludedDatabases</c> — trimmed, blanks dropped, de-duplicated and ORDERED, because it is
+    /// consumed as a <c>NOT IN</c> set (<c>DatabaseExclusionFilter</c>) where order and repetition change
+    /// nothing. Case follows the engine for the same reason <c>database</c> does, and it is live on BOTH:
+    /// the SQL Server collectors splice it against <c>d.name</c>, and <c>PostgresTargetProvider</c> splices
+    /// the same filter against <c>pg_database.datname</c> to choose the per-database fan-out — where
+    /// <c>NOT IN</c> is case-sensitive, so folding case would silently treat two different exclusions as
+    /// one.</item>
+    /// <item><c>monthlyCostUsd</c> — compared numerically, so 100 against 100.00 is not drift. Not
+    /// connection-relevant, but it does drive the FinOps figures, so it is not cosmetic either.</item>
+    /// <item><c>alertDeliveryModeOverride</c> — null means "inherit the global" (#1236) and prints as such.</item>
+    /// </list>
+    ///
+    /// <para><b>The credential is absent by construction.</b> <c>password</c> and <c>encryptedPassword</c>
+    /// are the ONLY two darling.json per-server keys this method deliberately does not compare. Neither is
+    /// read from the store (see <c>ReadRegisteredServersForComparisonAsync</c>) and neither is compared here,
+    /// so no blob, no <c>file:</c>/<c>env:</c> reference and no plaintext can reach a log line through this
+    /// path.</para>
+    ///
+    /// <para>The engine-gated fields read the STORE's engine, because the store is what the service connects
+    /// with — if the two disagree about the engine, that disagreement is reported on its own line and the
+    /// store's answer is the one in force.</para>
+    /// </summary>
+    internal static IReadOnlyList<SettingDrift> CompareServerSettings(MonitoredServer file, MonitoredServer store)
+    {
+        var drift = new List<SettingDrift>();
+        if (file is null || store is null)
+        {
+            return drift;
+        }
+
+        var storeIsPostgres = store.IsPostgres;
+
+        AddDrift(drift, "name", file.DisplayName, store.DisplayName, StringComparison.Ordinal, false);
+        AddDrift(drift, "host", Trimmed(file.Host), Trimmed(store.Host), StringComparison.OrdinalIgnoreCase, true);
+        /* PostgreSQL matches a database name byte for byte; SQL Server folds case on every default
+           collation. Getting this backwards on PostgreSQL would MISS a real difference, which is the
+           silent direction. */
+        var nameComparison = storeIsPostgres ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+
+        AddDrift(
+            drift,
+            "database",
+            EffectiveDatabase(file.Database, storeIsPostgres),
+            EffectiveDatabase(store.Database, storeIsPostgres),
+            nameComparison,
+            true);
+        AddDrift(drift, "auth", Trimmed(file.Auth), Trimmed(store.Auth), StringComparison.OrdinalIgnoreCase, true);
+
+        if (store.UsesSqlAuth)
+        {
+            AddDrift(
+                drift,
+                "username",
+                NoneIfBlank(Trimmed(file.Username)),
+                NoneIfBlank(Trimmed(store.Username)),
+                StringComparison.Ordinal,
+                true);
+        }
+
+        /* Displayed and compared SEPARATELY, and only here. The two are the same everywhere else, but on a
+           PostgreSQL target Strict and Mandatory are one connection while remaining two different words in
+           the file — so the comparison collapses them and the message still prints what each side says
+           rather than a value neither holds. */
+        var fileMode = EffectiveEncryptMode(file.EncryptMode);
+        var storeMode = EffectiveEncryptMode(store.EncryptMode);
+        if (!string.Equals(
+                EncryptModeConnectKey(fileMode, storeIsPostgres),
+                EncryptModeConnectKey(storeMode, storeIsPostgres),
+                StringComparison.Ordinal))
+        {
+            drift.Add(new SettingDrift("encryptMode", fileMode, storeMode, true));
+        }
+
+        AddDrift(drift, "engine", EngineToken(file), EngineToken(store), StringComparison.Ordinal, true);
+
+        /* Inert on a PostgreSQL target whose stored mode is Optional: that branch picks SslMode.Prefer
+           without ever reading the flag. Live everywhere else, including SQL Server's Optional, where
+           SqlClient still validates the certificate if the server negotiates encryption. */
+        if (!storeIsPostgres || !string.Equals(storeMode, "Optional", StringComparison.Ordinal))
+        {
+            AddDrift(
+                drift,
+                "trustServerCertificate",
+                Json(file.TrustServerCertificate),
+                Json(store.TrustServerCertificate),
+                StringComparison.Ordinal,
+                true);
+        }
+
+        if (storeIsPostgres)
+        {
+            AddDrift(
+                drift,
+                "port",
+                EffectivePostgresPort(file.Port),
+                EffectivePostgresPort(store.Port),
+                StringComparison.Ordinal,
+                true);
+        }
+        else
+        {
+            AddDrift(drift, "readOnlyIntent", Json(file.ReadOnlyIntent), Json(store.ReadOnlyIntent), StringComparison.Ordinal, true);
+            AddDrift(
+                drift,
+                "multiSubnetFailover",
+                Json(file.MultiSubnetFailover),
+                Json(store.MultiSubnetFailover),
+                StringComparison.Ordinal,
+                true);
+        }
+
+        AddDrift(
+            drift,
+            "excludedDatabases",
+            NormalizeExcludedDatabases(file.ExcludedDatabases, storeIsPostgres),
+            NormalizeExcludedDatabases(store.ExcludedDatabases, storeIsPostgres),
+            nameComparison,
+            false);
+
+        if (file.MonthlyCostUsd != store.MonthlyCostUsd)
+        {
+            drift.Add(new SettingDrift(
+                "monthlyCostUsd",
+                file.MonthlyCostUsd.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                store.MonthlyCostUsd.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                false));
+        }
+
+        AddDrift(
+            drift,
+            "alertDeliveryModeOverride",
+            file.AlertDeliveryModeOverride?.ToString() ?? "(inherit)",
+            store.AlertDeliveryModeOverride?.ToString() ?? "(inherit)",
+            StringComparison.Ordinal,
+            false);
+
+        return drift;
+    }
+
+    private static void AddDrift(
+        List<SettingDrift> into, string field, string fileValue, string storeValue, StringComparison comparison, bool affectsConnection)
+    {
+        if (!string.Equals(fileValue, storeValue, comparison))
+        {
+            into.Add(new SettingDrift(field, fileValue, storeValue, affectsConnection));
+        }
+    }
+
+    private static string Trimmed(string? value) => value?.Trim() ?? "";
+
+    private static string NoneIfBlank(string value) => string.IsNullOrEmpty(value) ? "(none)" : value;
+
+    private static string Json(bool value) => value ? "true" : "false";
+
+    /// <summary>The database the connection actually opens: blank means the engine's implicit default.</summary>
+    private static string EffectiveDatabase(string? database, bool isPostgres) =>
+        string.IsNullOrWhiteSpace(database) ? (isPostgres ? "postgres" : "master") : database.Trim();
+
+    /// <summary>
+    /// The encrypt mode the connection is actually built with — <see cref="MonitoredServerConnection"/>'s
+    /// fail-closed fold, in canonical casing so the log prints the mode in force rather than what was typed.
+    /// </summary>
+    private static string EffectiveEncryptMode(string? mode) => mode?.Trim().ToUpperInvariant() switch
+    {
+        "STRICT" => "Strict",
+        "OPTIONAL" => "Optional",
+        _ => "Mandatory",
+    };
+
+    /// <summary>
+    /// How many DISTINCT connections the three modes make on this engine, which is not the same number on
+    /// both. SQL Server maps them to three <c>SqlConnectionEncryptOption</c> values, so all three are
+    /// separate. The Npgsql builder branches on <c>OPTIONAL</c> alone — everything else takes the same
+    /// <c>SslMode</c> arm — so on PostgreSQL Strict and Mandatory are ONE bucket and reporting them as drift
+    /// would report a difference the connection cannot express.
+    /// </summary>
+    private static string EncryptModeConnectKey(string canonicalMode, bool isPostgres) =>
+        isPostgres && string.Equals(canonicalMode, "Strict", StringComparison.Ordinal)
+            ? "Mandatory"
+            : canonicalMode;
+
+    private static string EngineToken(MonitoredServer server) =>
+        server.IsPostgres ? "postgres" : "sqlserver";
+
+    /// <summary>0 means "the driver's default", which for Npgsql is 5432 — so the two are one value.</summary>
+    private static string EffectivePostgresPort(int port) =>
+        (port > 0 ? port : 5432).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The excluded-database list as the collectors see it: a set. <c>DatabaseExclusionFilter</c> splices it
+    /// into a <c>NOT IN</c>, so order, repetition and surrounding whitespace change nothing, and warning about
+    /// any of them would be warning about a difference that does not exist.
+    ///
+    /// <para>Case follows the ENGINE, because the <c>NOT IN</c> is evaluated by it: PostgreSQL compares
+    /// <c>datname</c> byte for byte (the list picks the per-database fan-out in
+    /// <c>PostgresTargetProvider.BuildDatabaseListPlan</c>), while SQL Server's <c>d.name</c> comparison folds
+    /// case on every default collation. Folding case on PostgreSQL would treat two genuinely different
+    /// exclusions as one, which is the silent direction.</para>
+    /// </summary>
+    private static string NormalizeExcludedDatabases(IEnumerable<string>? names, bool isPostgres)
+    {
+        if (names is null)
+        {
+            return "(none)";
+        }
+
+        var comparer = isPostgres ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+        var set = names
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n.Trim())
+            .Distinct(comparer)
+            .OrderBy(n => n, comparer)
+            .ToList();
+
+        return set.Count == 0 ? "(none)" : string.Join(", ", set);
+    }
+
+    /// <summary>
+    /// Renders the drift for the log line: <c>server: field (file=X, store=Y), field (…)</c>, servers joined
+    /// by <c> | </c>. Truncated to <paramref name="maxServers"/> with the remainder counted rather than
+    /// dropped silently. Pure, so the exact operator-facing text is pinned by a test.
+    /// </summary>
+    internal static string FormatSettingDrift(IReadOnlyList<ServerSettingDrift> drifted, int maxServers)
+    {
+        if (drifted is null || drifted.Count == 0)
+        {
+            return "";
+        }
+
+        var shown = maxServers > 0 && drifted.Count > maxServers ? maxServers : drifted.Count;
+        var parts = new List<string>(shown + 1);
+        for (int i = 0; i < shown; i++)
+        {
+            var server = drifted[i];
+            var fields = server.Fields.Select(f => $"{f.Field} (file={f.FileValue}, store={f.StoreValue})");
+            parts.Add($"{server.Server}: {string.Join(", ", fields)}");
+        }
+
+        if (shown < drifted.Count)
+        {
+            parts.Add($"and {drifted.Count - shown} more not listed");
+        }
+
+        return string.Join(" | ", parts);
     }
 
     /// <summary>
@@ -335,7 +910,7 @@ public sealed class StoreConfigProvider
            so the worker's post-seed baseline read reflects the seeded state and triggers no spurious reload. */
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, config_version, updated_at, updated_by)
-VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, 0, $6, 'seed')
+VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, $12, 0, $6, 'seed')
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.CapturePlans);
         command.Parameters.AddWithValue(config.Mcp.Enabled);

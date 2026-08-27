@@ -302,7 +302,12 @@ public partial class MainWindow : Window
             var (replicaTimeUtc, replicas) = await data.GetLatestAgReplicaStatesAsync(serverId);
             if (IsFresh(replicaTimeUtc))
             {
-                alerts.AddRange(_agAlertEvaluator.EvaluateReplicas(serverId, replicas));
+                alerts.AddRange(_agAlertEvaluator.EvaluateReplicas(
+                    serverId,
+                    replicas,
+                    App.AgDisconnectRefireMinutes > 0
+                        ? TimeSpan.FromMinutes(App.AgDisconnectRefireMinutes)
+                        : null));
             }
 
             var (databaseTimeUtc, databases) = await data.GetLatestAgDatabaseReplicaStatesAsync(serverId);
@@ -324,6 +329,12 @@ public partial class MainWindow : Window
             foreach (var alert in alerts)
             {
                 SendAgAlert(serverId, serverName, alert);
+
+                /* #2426: the re-fire window opens on DELIVERY, which is what the suppressed return above
+                   makes necessary — an acknowledged or silenced server still evaluates every sweep and
+                   sends nothing, and windows consumed by alerts nobody received would turn the re-fire back
+                   into the silence it exists to end. */
+                _agAlertEvaluator.NoteDelivered(alert);
             }
 
             bool IsFresh(DateTime? snapshotUtc) =>

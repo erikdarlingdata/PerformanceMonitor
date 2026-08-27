@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
@@ -40,12 +41,70 @@ public sealed class MigrationUpgradeLadderLiveTests
         "DARLING_TEST_PG not set — this test needs a scratch PostgreSQL (with the timescaledb " +
         "extension available) it may create roles and databases on.";
 
-    private const string FixtureRelativePath = "Darling/Darling.Tests/Fixtures/migration-ladder-v3.3.0.sql";
+    private const string FixtureDirectory = "Darling/Darling.Tests/Fixtures";
 
-    private const string ScratchDatabase = "darling_upgrade_ladder_test";
+    /// <summary>
+    /// The scratch database is named PER FIXTURE, and that is load-bearing rather than tidy.
+    ///
+    /// <para>The drop below is <c>WITH (FORCE)</c>, which terminates every backend on that database. With one
+    /// shared name the second fixture's drop force-killed the connection the FIRST fixture had returned to
+    /// Npgsql's pool — physically open, and as far as the pool knew, reusable. Npgsql then handed that dead
+    /// connection back on the next open of the same connection string, and the first write failed with
+    /// "Exception while writing to stream". Which is exactly what CI reported the moment this became a
+    /// Theory: v3.3.0 green, v3.5.0 red, and nothing wrong with either ladder.</para>
+    /// </summary>
+    private static string ScratchDatabaseFor(string fixtureFileName)
+    {
+        var version = Regex.Match(fixtureFileName, @"v(\d+)\.(\d+)\.(\d+)");
+        return version.Success
+            ? $"darling_upgrade_ladder_test_{version.Groups[1].Value}_{version.Groups[2].Value}_{version.Groups[3].Value}"
+            : "darling_upgrade_ladder_test";
+    }
 
-    [Fact]
-    public async Task PreviousReleaseStore_ClimbsTheCurrentLadder_ToTheTop()
+    /// <summary>
+    /// Every released-ladder fixture in the tree, so adding one at a release cut needs no edit here.
+    ///
+    /// <para>Deliberately a Theory over ALL of them rather than a Fact on the newest. The defect class is a
+    /// current-code generator emitting a column that an OLD rung replays, and the older the fixture the more
+    /// rungs get replayed to find it — v3.3.0 climbs 47 rungs to today's top where v3.5.0 climbs 7. Retiring
+    /// the old fixture at each cut, which is what this tool's own instructions say to do, would shrink that
+    /// surface every release until it caught nothing but the current cycle's own rungs.</para>
+    /// </summary>
+    public static TheoryData<string> LadderFixtures()
+    {
+        /* THROW rather than return empty, and the irony is the point: a [Theory] with zero data rows reports
+           zero test cases and stays GREEN. Returning an empty set here on a failed root walk-up would make
+           the entire upgrade-ladder climb vanish from a CI run with nothing red to notice — which is the same
+           silent-decay failure this whole change exists to fix, one layer down and in the fix itself. This
+           path cannot call Assert (it runs during data generation, not inside a test), so an exception is the
+           loud option available. */
+        var root = FindRepoRoot()
+            ?? throw new InvalidOperationException(
+                "Could not locate the repository root (walked up from the test binary looking for "
+                + "PerformanceMonitor.sln). The upgrade-ladder fixtures live in the source tree, and without "
+                + "them this Theory would silently contribute no test cases at all.");
+
+        var dir = Path.Combine(root, FixtureDirectory.Replace('/', Path.DirectorySeparatorChar));
+        var data = new TheoryData<string>();
+        foreach (var path in Directory.EnumerateFiles(dir, "migration-ladder-v*.sql").OrderBy(p => p, StringComparer.Ordinal))
+        {
+            data.Add(Path.GetFileName(path));
+        }
+
+        if (data.Count == 0)
+        {
+            /* Same reasoning: no fixtures is not "nothing to test", it is the upgrade gate missing. */
+            throw new InvalidOperationException(
+                $"No migration-ladder fixtures found in {dir}. The upgrade-path gate cannot run, and an empty "
+                + "Theory would report success by reporting nothing.");
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(LadderFixtures))]
+    public async Task PreviousReleaseStore_ClimbsTheCurrentLadder_ToTheTop(string fixtureFileName)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), SkipReason);
@@ -54,7 +113,9 @@ public sealed class MigrationUpgradeLadderLiveTests
         Assert.True(root is not null,
             "Could not locate the repository root (walked up from the test binary looking for " +
             "PerformanceMonitor.sln) — the fixture lives in the source tree.");
-        var fixturePath = Path.Combine(root!, FixtureRelativePath.Replace('/', Path.DirectorySeparatorChar));
+        var scratchDatabase = ScratchDatabaseFor(fixtureFileName);
+        var fixturePath = Path.Combine(
+            root!, FixtureDirectory.Replace('/', Path.DirectorySeparatorChar), fixtureFileName);
         Assert.True(File.Exists(fixturePath), $"Previous-release ladder fixture missing: {fixturePath}");
 
         /* Scratch database, dropped and recreated per run — the fixture creates schemas, hypertables,
@@ -70,19 +131,26 @@ public sealed class MigrationUpgradeLadderLiveTests
                 await role.ExecuteNonQueryAsync();
             }
 
+            /* Clear this process's own pooled connections to the scratch database BEFORE forcing the drop.
+               Per-fixture naming already stops one case killing another's pooled connection; this covers the
+               same hazard within a single case, where the pool key would be identical. Cheap, and the
+               alternative failure is a socket error thrown a long way from its cause. */
+            var scratchForPool = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = scratchDatabase };
+            NpgsqlConnection.ClearPool(new NpgsqlConnection(scratchForPool.ConnectionString));
+
             await using (var drop = new NpgsqlCommand(
-                $"DROP DATABASE IF EXISTS {ScratchDatabase} WITH (FORCE)", admin))
+                $"DROP DATABASE IF EXISTS {scratchDatabase} WITH (FORCE)", admin))
             {
                 await drop.ExecuteNonQueryAsync();
             }
 
-            await using (var create = new NpgsqlCommand($"CREATE DATABASE {ScratchDatabase}", admin))
+            await using (var create = new NpgsqlCommand($"CREATE DATABASE {scratchDatabase}", admin))
             {
                 await create.ExecuteNonQueryAsync();
             }
         }
 
-        var scratch = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = ScratchDatabase };
+        var scratch = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = scratchDatabase };
 
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync();
@@ -121,14 +189,55 @@ public sealed class MigrationUpgradeLadderLiveTests
             Assert.Equal(PgMigrations.Scripts.Max(m => m.Version), Convert.ToInt32(await top.ExecuteScalarAsync()));
         }
 
-        /* The #2119 column specifically: the fixture's V38-era dim genuinely lacks it, so its
-           presence proves the replayed rungs both passed and did their work. */
+        /* The #2119 column specifically. On the v3.3.0 fixture the V38-era dim genuinely lacks it, so its
+           presence proves the replayed rungs both passed and did their work; on a fixture cut after that
+           rung it is already there and this is a cheap sanity check rather than the proof. Asserted for
+           every fixture either way — the column must exist at the top of the ladder, whichever floor the
+           climb started from. */
         await using (var gz = new NpgsqlCommand(
             "SELECT count(*) FROM information_schema.columns WHERE table_name = 'query_plan_dim' AND column_name = '"
             + PayloadDimensions.CompressedContentColumn + "'", connection))
         {
             Assert.Equal(1L, await gz.ExecuteScalarAsync());
         }
+    }
+
+    /// <summary>
+    /// The fixture set must contain one for the MOST RECENT RELEASE — the guard that stops this guard from
+    /// decaying, which is not hypothetical: the fixture generator's own instructions say "regenerate at each
+    /// release cut", and both the 3.4.0 and 3.5.0 cuts shipped without it, leaving the only tested upgrade
+    /// population a 3.3.0 store while every real user was upgrading from 3.5.0.
+    ///
+    /// <para>Derived from CHANGELOG.md's newest released heading rather than from a pinned version constant,
+    /// because a constant is the same kind of thing that decayed: it would need remembering at exactly the
+    /// moment the fixture needed remembering. The release cut moves the heading, and this fails until the
+    /// fixture beside it exists. No live PostgreSQL needed, so it runs on every build rather than only where
+    /// DARLING_TEST_PG is set — the climb tests are gated, and a gate is a poor place for the check that says
+    /// the gated thing is testing the right store.</para>
+    /// </summary>
+    [Fact]
+    public void TheMostRecentRelease_HasALadderFixture()
+    {
+        var root = FindRepoRoot();
+        Assert.True(root is not null, "Could not locate the repository root.");
+
+        var changelog = File.ReadAllText(Path.Combine(root!, "CHANGELOG.md"));
+        var released = Regex.Match(changelog, @"^## \[(\d+\.\d+\.\d+)\]", RegexOptions.Multiline);
+        Assert.True(released.Success, "CHANGELOG.md has no released version heading to derive the expected fixture from.");
+
+        var version = released.Groups[1].Value;
+        var expected = $"migration-ladder-v{version}.sql";
+        var path = Path.Combine(root!, FixtureDirectory.Replace('/', Path.DirectorySeparatorChar), expected);
+
+        Assert.True(
+            File.Exists(path),
+            $"No migration-ladder fixture for the most recent release ({version}). The upgrade-path test is "
+            + $"therefore climbing from some OLDER store than the one users are actually upgrading from. "
+            + $"Regenerate it at the release cut:\n"
+            + $"  git worktree add /tmp/pm-v{version} v{version}\n"
+            + $"  cd Darling/tools/generate-ladder-fixture && dotnet run "
+            + $"-p:StorageProject=/tmp/pm-v{version}/Darling/PerformanceMonitor.Darling.Storage/PerformanceMonitor.Darling.Storage.csproj "
+            + $"-- ../../Darling.Tests/Fixtures/{expected}");
     }
 
     /// <summary>Same walk-up idiom as <c>DocCommentHygieneTests.FindRepoRoot</c>.</summary>

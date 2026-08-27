@@ -26,8 +26,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the windowed-trend MCP slice — get_memory_trend / get_perfmon_trend / get_file_io_trend /
-/// get_query_trend / get_query_duration_trend over the Postgres store, the same names Lite and (for four of
-/// the five) the Dashboard expose. Ungated: the exact five-tool surface, each tool's MCP parameter contract
+/// get_query_trend / get_query_duration_trend / get_procedure_duration_trend /
+/// get_query_store_duration_trend over the Postgres store, the same names Lite and (for four of
+/// the seven) the Dashboard expose. Ungated: the exact seven-tool surface, each tool's MCP parameter contract
 /// (server_name optional; counter_name required on get_perfmon_trend; query_hash + database_name required on
 /// get_query_trend), the read-SQL pins (Postgres dialect, positional params, the collector columns the schema
 /// generator emits, BOTH-sides collection_time window), and the Gemini-clean advertised schema (#1074).
@@ -39,7 +40,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         "get_file_io_trend",
         "get_memory_trend",
         "get_perfmon_trend",
+        "get_procedure_duration_trend",
         "get_query_duration_trend",
+        "get_query_store_duration_trend",
         "get_query_trend",
     };
 
@@ -49,7 +52,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheFiveTrendTools()
+    public void ToolSurface_ExactlyTheSevenTrendTools()
     {
         var names = ToolMethods()
             .Select(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name)
@@ -72,11 +75,13 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_memory_trend", "server_name,hours_back")]
-    [InlineData("get_perfmon_trend", "counter_name,server_name,hours_back")]
-    [InlineData("get_file_io_trend", "server_name,hours_back")]
-    [InlineData("get_query_trend", "query_hash,database_name,server_name,hours_back")]
-    [InlineData("get_query_duration_trend", "server_name,hours_back")]
+    [InlineData("get_memory_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_perfmon_trend", "counter_name,server_name,hours_back,as_of")]
+    [InlineData("get_file_io_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_query_trend", "query_hash,database_name,server_name,hours_back,as_of")]
+    [InlineData("get_query_duration_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_procedure_duration_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_query_store_duration_trend", "server_name,hours_back,as_of")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());
@@ -148,6 +153,71 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("executions_per_second", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #2484: the procedure trend is the query trend over a DIFFERENT table, and that is the whole reason it
+    /// exists. If this ever reads query_stats it has silently become a second name for its sibling.
+    /// </summary>
+    [Fact]
+    public void ProcedureDurationTrendSql_SameRate_OverProcedureStats()
+    {
+        var sql = DarlingTrendReader.ProcedureDurationTrendSql;
+        Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v_procedure_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM query_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_elapsed_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("LAG(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("elapsed_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("executions_per_second", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2484: the Query Store trend carries the #1841 tier-2 interval placement, copied from the viewer's
+    /// read rather than rewritten. Both arms are pinned because losing either one changes the numbers: drop
+    /// arm 1 and every open interval is charged to each cycle that fetched it; drop arm 2 and rows collected
+    /// before the fix vanish from the chart entirely.
+    /// </summary>
+    [Fact]
+    public void QueryStoreDurationTrendSql_KeepsBothIntervalArms_AndPlacesWorkWhenItRan()
+    {
+        var sql = DarlingTrendReader.QueryStoreDurationTrendSql;
+        Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal);
+
+        /* Arm 1: dedup to the interval's final snapshot, placed at the hour the work RAN. */
+        Assert.Contains("ROW_NUMBER() OVER", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc AS point_time", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc IS NOT NULL", sql, StringComparison.Ordinal);
+
+        /* Arm 2: the legacy rows, split on the same column so the two arms partition with no overlap. */
+        Assert.Contains("UNION ALL", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time AS point_time", sql, StringComparison.Ordinal);
+
+        Assert.Contains("duration_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("executions_per_second", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2484: each probe must read the SAME table its trend reads. A probe on a different source could
+    /// report a server as sampled for rows the trend can never see — the wrong branch in exactly the case
+    /// the probe exists to get right. They are windowless by design: a time bound would make the probe
+    /// answer the same question the read just did.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(DarlingTrendReader.HasAnyQueryStatSql), "query_stats")]
+    [InlineData(nameof(DarlingTrendReader.HasAnyProcedureStatSql), "procedure_stats")]
+    [InlineData(nameof(DarlingTrendReader.HasAnyQueryStoreStatSql), "query_store_stats")]
+    public void TrendProbes_ReadTheirOwnTable_WindowlessAndLimited(string sqlName, string table)
+    {
+        var sql = SqlByName(sqlName);
+        Assert.Contains("FROM " + table, sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void QueryHistorySql_OneQuery_CarriesDeltas_ReadsBaseTable()
     {
@@ -169,6 +239,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingTrendReader.DistinctPerfmonCountersSql))]
     [InlineData(nameof(DarlingTrendReader.FileIoLatencyTrendSql))]
     [InlineData(nameof(DarlingTrendReader.QueryDurationTrendSql))]
+    [InlineData(nameof(DarlingTrendReader.ProcedureDurationTrendSql))]
+    [InlineData(nameof(DarlingTrendReader.QueryStoreDurationTrendSql))]
+    [InlineData(nameof(DarlingTrendReader.HasAnyQueryStatSql))]
+    [InlineData(nameof(DarlingTrendReader.HasAnyProcedureStatSql))]
+    [InlineData(nameof(DarlingTrendReader.HasAnyQueryStoreStatSql))]
     [InlineData(nameof(DarlingTrendReader.QueryHistorySql))]
     public void Reads_ArePostgresDialect_NoTsqlIsms(string sqlName)
     {
@@ -189,6 +264,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         nameof(DarlingTrendReader.DistinctPerfmonCountersSql) => DarlingTrendReader.DistinctPerfmonCountersSql,
         nameof(DarlingTrendReader.FileIoLatencyTrendSql) => DarlingTrendReader.FileIoLatencyTrendSql,
         nameof(DarlingTrendReader.QueryDurationTrendSql) => DarlingTrendReader.QueryDurationTrendSql,
+        nameof(DarlingTrendReader.ProcedureDurationTrendSql) => DarlingTrendReader.ProcedureDurationTrendSql,
+        nameof(DarlingTrendReader.QueryStoreDurationTrendSql) => DarlingTrendReader.QueryStoreDurationTrendSql,
+        nameof(DarlingTrendReader.HasAnyQueryStatSql) => DarlingTrendReader.HasAnyQueryStatSql,
+        nameof(DarlingTrendReader.HasAnyProcedureStatSql) => DarlingTrendReader.HasAnyProcedureStatSql,
+        nameof(DarlingTrendReader.HasAnyQueryStoreStatSql) => DarlingTrendReader.HasAnyQueryStoreStatSql,
         _ => DarlingTrendReader.QueryHistorySql,
     };
 
@@ -217,6 +297,18 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("delta_worker_time", qs, StringComparison.Ordinal);
         Assert.Contains("query_hash", qs, StringComparison.Ordinal);
         Assert.Contains("query_plan_hash", qs, StringComparison.Ordinal);
+
+        var procs = PgSchemaGenerator.CreateTable(ProcedureStatsCollector.Instance);
+        Assert.Contains("delta_execution_count", procs, StringComparison.Ordinal);
+        Assert.Contains("delta_elapsed_time", procs, StringComparison.Ordinal);
+
+        /* The Query Store trend places its points at interval_start_time_utc, so the column has to exist
+           on the collected table or arm 1 silently returns nothing and arm 2 quietly serves everything. */
+        var store = PgSchemaGenerator.CreateTable(QueryStoreCollector.Instance);
+        Assert.Contains("interval_start_time_utc", store, StringComparison.Ordinal);
+        Assert.Contains("execution_count", store, StringComparison.Ordinal);
+        Assert.Contains("avg_duration_us", store, StringComparison.Ordinal);
+        Assert.Contains("runtime_stats_interval_id", store, StringComparison.Ordinal);
     }
 
     private static List<ModelContextProtocol.Protocol.Tool> BuildToolSchemas()
@@ -232,7 +324,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     public void AdvertisedSchema_IsGeminiClean_RequiredParamsMatchLite()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(5, tools.Count);
+        /* Derived from the pinned name list rather than restated, so a new trend tool cannot land with
+           this literal left describing the old surface. */
+        Assert.Equal(TrendToolSurface.Length, tools.Count);
 
         var violations = tools.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
@@ -243,6 +337,8 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Empty(DarlingMcpSchemaAssert.RequiredOf(byName["get_memory_trend"]));
         Assert.Empty(DarlingMcpSchemaAssert.RequiredOf(byName["get_file_io_trend"]));
         Assert.Empty(DarlingMcpSchemaAssert.RequiredOf(byName["get_query_duration_trend"]));
+        Assert.Empty(DarlingMcpSchemaAssert.RequiredOf(byName["get_procedure_duration_trend"]));
+        Assert.Empty(DarlingMcpSchemaAssert.RequiredOf(byName["get_query_store_duration_trend"]));
     }
 }
 

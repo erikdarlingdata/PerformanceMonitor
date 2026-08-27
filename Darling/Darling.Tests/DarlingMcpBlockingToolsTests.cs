@@ -26,9 +26,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the blocking / deadlock diagnostic-depth MCP slice — get_blocking, get_deadlocks,
-/// get_deadlock_detail, get_blocked_process_xml, and the per-minute get_blocking_trend / get_deadlock_trend
-/// over the Postgres store. Ungated: the tool surface is
-/// EXACTLY the six names (all static, on a [McpServerToolType] class, returning Task&lt;string&gt;); each
+/// get_deadlock_detail, get_blocked_process_xml, the per-minute get_blocking_trend / get_deadlock_trend and
+/// the aggregate get_lock_wait_trend (#2484) over the Postgres store. Ungated: the tool surface is
+/// EXACTLY the seven names (all static, on a [McpServerToolType] class, returning Task&lt;string&gt;); each
 /// param contract matches Lite's; every read SQL is Postgres-dialect, positional-param, reads the collector
 /// columns the schema generator emits, and windows on the naive-UTC collection_time; and the advertised
 /// tools/list schema is Gemini-clean.
@@ -43,6 +43,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         "get_deadlock_detail",
         "get_deadlock_trend",
         "get_deadlocks",
+        "get_lock_wait_trend",
     };
 
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpBlockingTools)
@@ -51,7 +52,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheSixBlockingTools()
+    public void ToolSurface_ExactlyTheSevenBlockingTools()
     {
         var toolMethods = ToolMethods();
         var names = toolMethods
@@ -75,55 +76,77 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// Lite's parameter contract, pinned as a PREFIX rather than as the whole list (#2159).
+    /// Lite's parameter contract, pinned as an ORDERED SUBSEQUENCE of Darling's (#2159, widened by #2495).
     ///
     /// <para>This used to assert the full parameter list, which was the same thing until Darling's incident
-    /// readers gained a trailing optional <c>dedup_key</c> that Lite does not have. The guarantee that actually
-    /// matters was never "the lists are identical" — it is that a client written against LITE's contract still
-    /// calls Darling correctly. A trailing optional parameter preserves exactly that, positionally and by name,
-    /// so the prefix is the honest form of the assertion and the full-list form was over-tight.</para>
+    /// readers gained a trailing optional <c>dedup_key</c> that Lite does not have; it then asserted a PREFIX,
+    /// which held only while every parameter Lite gained after that landed before <c>dedup_key</c>. #2495
+    /// appended <c>as_of</c> to BOTH SKUs — last on each, the same convention <c>dedup_key</c> followed — so
+    /// Lite's list is no longer a prefix of Darling's: Darling reads <c>…, limit, dedup_key, as_of</c> while
+    /// Lite reads <c>…, limit, as_of</c>.</para>
     ///
-    /// <para>Anything appended must therefore stay optional AND stay at the end. <c>StartsWith</c> semantics are
-    /// spelled out by comparing the first N rather than by trusting a substring of a joined string, so a
-    /// REORDERING that keeps the same names still fails.</para>
+    /// <para>The guarantee that actually matters was never "the lists are identical", and it is not positional
+    /// either: MCP invokes by NAME, and the only C# call sites (the <c>/api/read</c> dispatch) do not pass
+    /// Darling's extra optionals at all. It is that <b>a client written against Lite's contract still calls
+    /// Darling correctly</b> — every Lite name present in Lite's relative order, and every Darling-only extra
+    /// OPTIONAL so the client never has to supply one. A dropped parameter, a REORDERING, or a required
+    /// Darling-only addition each still fail.</para>
     /// </summary>
     [Theory]
-    [InlineData("get_blocking", "server_name,hours_back,limit")]
-    [InlineData("get_deadlocks", "server_name,hours_back,limit")]
-    [InlineData("get_deadlock_detail", "server_name,hours_back,limit")]
-    [InlineData("get_blocked_process_xml", "server_name,hours_back,limit")]
-    [InlineData("get_blocking_trend", "server_name,hours_back")]
-    [InlineData("get_deadlock_trend", "server_name,hours_back")]
+    [InlineData("get_blocking", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_deadlocks", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_deadlock_detail", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_blocked_process_xml", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_blocking_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_deadlock_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_lock_wait_trend", "server_name,hours_back,as_of")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         var expected = expectedCsv.Split(',');
-        var actual = McpParams(toolName).Select(p => p.Name).ToArray();
+        var actual = McpParams(toolName);
+        var actualNames = actual.Select(p => p.Name).ToArray();
 
         Assert.True(actual.Length >= expected.Length,
-            $"{toolName} dropped a parameter Lite has: [{string.Join(",", actual)}]");
-        Assert.Equal(expected, actual.Take(expected.Length).ToArray());
+            $"{toolName} dropped a parameter Lite has: [{string.Join(",", actualNames)}]");
+
+        /* Every Lite name, in Lite's order, with Darling's own additions filtered out. */
+        Assert.Equal(expected, actualNames.Where(n => expected.Contains(n, StringComparer.Ordinal)).ToArray());
+
+        /* And nothing Darling adds on top may be required, or a Lite-shaped call could not be made at all. */
+        foreach (var extra in actual.Where(p => !expected.Contains(p.Name, StringComparer.Ordinal)))
+            Assert.True(extra.Optional, $"{toolName}.{extra.Name} is Darling-only and must be optional");
     }
 
     /// <summary>
-    /// #2159's <c>dedup_key</c>, pinned as a TRAILING OPTIONAL parameter on exactly the three incident readers
+    /// #2159's <c>dedup_key</c>, pinned as an APPENDED OPTIONAL parameter on exactly the three incident readers
     /// that can resolve a fingerprint — and pinned as absent everywhere else.
     ///
-    /// <para>Optional and trailing is what keeps <see cref="ParamContract_MatchesLite"/> true, so it is asserted
-    /// here rather than left to review. Absent on the trend tools because a per-minute count series has no single
+    /// <para>It was pinned as the LAST parameter until #2495 appended <c>as_of</c> to both SKUs behind it.
+    /// Moving <c>dedup_key</c> to keep it last would have relocated an already-shipped parameter to preserve a
+    /// property (position) that no caller of an MCP tool can observe, so what is pinned now is what the
+    /// property was always standing in for, and what keeps <see cref="ParamContract_MatchesLite"/> true:
+    /// <c>dedup_key</c> is optional, and it sits AFTER every parameter Lite has, so a Lite-shaped call never
+    /// meets it. Absent on the trend tools because a per-minute count series has no single
     /// incident to resolve to, and absent on <c>get_blocked_process_xml</c> because it is reached FROM an incident
     /// the operator has already identified rather than used to find one.</para>
     /// </summary>
     [Fact]
-    public void ParamContract_DedupKeyIsATrailingOptionalOnTheIncidentReaders()
+    public void ParamContract_DedupKeyIsAnAppendedOptionalOnTheIncidentReaders()
     {
         foreach (var tool in new[] { "get_blocking", "get_deadlocks", "get_deadlock_detail" })
         {
             var ps = McpParams(tool);
-            Assert.Equal("dedup_key", ps[^1].Name);
-            Assert.True(ps[^1].Optional, $"{tool}.dedup_key must be optional so Lite-shaped calls still work");
+            var names = ps.Select(p => p.Name).ToArray();
+
+            Assert.Contains("dedup_key", names);
+            Assert.True(ps.Single(p => p.Name == "dedup_key").Optional,
+                $"{tool}.dedup_key must be optional so Lite-shaped calls still work");
+            Assert.True(
+                Array.IndexOf(names, "dedup_key") > Array.IndexOf(names, "limit"),
+                $"{tool}.dedup_key must sit after every parameter Lite has, so a Lite-shaped call never meets it");
         }
 
-        foreach (var tool in new[] { "get_blocking_trend", "get_deadlock_trend", "get_blocked_process_xml" })
+        foreach (var tool in new[] { "get_blocking_trend", "get_deadlock_trend", "get_lock_wait_trend", "get_blocked_process_xml" })
             Assert.DoesNotContain("dedup_key", McpParams(tool).Select(p => p.Name));
     }
 
@@ -212,6 +235,49 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         }
     }
 
+    /// <summary>
+    /// The lock-wait lane (#2484), pinned as the VIEWER'S query rather than as a query that happens to work.
+    ///
+    /// <para>Three properties, each of which is a real defect if it drifts. The LCK filter, or the read stops
+    /// being about locks. The LAG partitioned BY WAIT TYPE, without which one wait type's cadence is used to
+    /// divide another's delta. And the CAST to double precision before the division — integer division would
+    /// report a 3 ms delta over a 60-second interval as ZERO, which is #2507's defect (a quiet server reading
+    /// as an idle one) one read over.</para>
+    /// </summary>
+    [Fact]
+    public void LockWaitTrendSql_FiltersLockWaits_LagsPerWaitType_AndDividesAsDouble()
+    {
+        var sql = DarlingBlockingTrendReader.LockWaitTrendSql;
+
+        Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("wait_type LIKE 'LCK%'", sql, StringComparison.Ordinal);
+        Assert.Contains("LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds", sql, StringComparison.Ordinal);
+
+        /* A negative delta is the counter reset across a restart, not a negative wait. */
+        Assert.Contains("WHERE delta_wait_time_ms >= 0", sql, StringComparison.Ordinal);
+
+        var lower = sql.ToLowerInvariant();
+        Assert.DoesNotContain("getdate", lower);
+        Assert.DoesNotContain("top (", lower);
+        Assert.DoesNotContain("isnull(", lower);
+        Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The anchor pinned by IDENTITY, not merely by name: <c>get_lock_wait_trend</c>'s <c>as_of</c> must carry
+    /// the SHARED description constant. That constant exists because the same parameter described two
+    /// different ways on two SKUs is a divergence no other test would see.
+    /// </summary>
+    [Fact]
+    public void LockWaitTrend_AnchorCarriesTheSharedDescription()
+    {
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_lock_wait_trend");
+        var asOf = method.GetParameters().Single(p => p.Name == "as_of");
+
+        Assert.Equal(McpHelpers.AsOfDescription, asOf.GetCustomAttribute<DescriptionAttribute>()!.Description);
+    }
+
     [Theory]
     [InlineData(nameof(DarlingBlockingReader.BlockedProcessReportsSql))]
     [InlineData(nameof(DarlingBlockingReader.DmvBlockingSnapshotsSql))]
@@ -264,10 +330,10 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllSixTools()
+    public void AdvertisedSchema_IsGeminiClean_ForAllSevenTools()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(6, tools.Count);
+        Assert.Equal(7, tools.Count);
         var violations = tools.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
     }

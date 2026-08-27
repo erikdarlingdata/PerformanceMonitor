@@ -32,6 +32,18 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class ViewerServerTab
 {
+    /// <summary>
+    /// #2400: the read-only refusal names WHICH write is blocked, because the previous wording ("reconnect
+    /// with a read-write profile") reads as "grant this viewer write access to my production SQL Server" —
+    /// which is the one thing it does not mean, and a reasonable person declines rather than asks. The write
+    /// is an INSERT into config_command in the monitoring store; the monitored server is only ever READ, by
+    /// the service, over its own connection.
+    /// </summary>
+    private const string ReadOnlySeatMessage =
+        "Read-only viewer — the live fetch queues a request for the service in the MONITORING STORE, which a "
+        + "read-only seat can't write to. Nothing is sent to or written on the monitored server. Reconnect "
+        + "with a read-write store profile to fetch live active queries.";
+
     /// <summary>Refresh button — fires the live fetch (never auto-fires; a live server hit is explicit).</summary>
     private async void RefreshCurrentActiveQueries_Click(object sender, RoutedEventArgs e)
         => await LoadCurrentActiveQueriesAsync();
@@ -42,8 +54,7 @@ public partial class ViewerServerTab
            rather than attempting an enqueue that would throw. */
         if (_dataService.IsReadOnly)
         {
-            CurrentActiveQueriesStatus.Text =
-                "Read-only viewer — reconnect with a read-write profile to fetch live active queries.";
+            CurrentActiveQueriesStatus.Text = ReadOnlySeatMessage;
             return;
         }
 
@@ -76,8 +87,7 @@ public partial class ViewerServerTab
         catch (ViewerReadOnlyException)
         {
             /* Grants changed under us between the IsReadOnly check and the enqueue. */
-            CurrentActiveQueriesStatus.Text =
-                "Read-only viewer — reconnect with a read-write profile to fetch live active queries.";
+            CurrentActiveQueriesStatus.Text = ReadOnlySeatMessage;
         }
         catch (Exception ex)
         {

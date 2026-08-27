@@ -234,7 +234,7 @@ internal static class DarlingPeerDirectory
         if (matching.Count > 0)
         {
             /* Two peers can legitimately both claim a name (overlapping `matches`, e.g. "use1" and
-               "prod-pos"), so the follow-on sentence agrees in number rather than saying "That is a SEPARATE
+               "prod-sql"), so the follow-on sentence agrees in number rather than saying "That is a SEPARATE
                store" about a list of two. */
             var single = matching.Count == 1;
             text.Append(subject)

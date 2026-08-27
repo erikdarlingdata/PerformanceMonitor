@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -137,6 +137,9 @@ public sealed class DarlingMcpHostService : BackgroundService
            network exposure block is restart-only by design). */
         DarlingConfig? config = null;
         var lastFailedStartUtc = DateTime.MinValue;
+        /* #2389: the last control-plane-override report emitted, so a steady disagreement is stated once per
+           distinct state instead of on every 5s poll tick. */
+        string? lastOverrideReport = null;
         while (!stoppingToken.IsCancellationRequested)
         {
             if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
@@ -169,13 +172,29 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             var published = _state.Read();
-            var enabled = published?.Enabled ?? config.Mcp.Enabled;
-            var desiredPort = published?.Port ?? config.Mcp.Port;
 
-            switch (DecideMcpAction(_app is not null, _runningPort, enabled, desiredPort))
+            /* #2389: the store still wins whenever the worker has published (unchanged), but the resolution
+               now carries WHICH plane supplied each value, so neither the start line nor a disagreement has to
+               be inferred from two INFO lines five seconds apart. */
+            var toggle = DarlingHostBinding.ResolveEndpointToggle(
+                published is null ? null : (published.Enabled, published.Port), config.Mcp.Enabled, config.Mcp.Port);
+
+            /* Report the DISAGREEMENT at the point of override, not the outcome. Once per distinct state (the
+               last-reported string, the same shape as the firewall check's ShouldReport) so a steady mismatch
+               says its piece once per service start rather than every poll tick, while a LATER re-divergence —
+               someone toggling the store after boot — is still reported. */
+            var overrideReport = DarlingHostBinding.DescribeToggleOverride(toggle, "mcp", "MCP", config.Mcp.Enabled, config.Mcp.Port);
+            if (overrideReport is not null && !string.Equals(overrideReport, lastOverrideReport, StringComparison.Ordinal))
+            {
+                _logger.LogWarning("{Report}", overrideReport);
+            }
+
+            lastOverrideReport = overrideReport;
+
+            switch (DecideMcpAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
             {
                 case McpSupervisorAction.Start when DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff:
-                    if (!await TryStartServerAsync(config, desiredPort, stoppingToken))
+                    if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
                     }
@@ -188,9 +207,9 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                 case McpSupervisorAction.Restart:
                     _logger.LogInformation(
-                        "MCP port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, desiredPort);
+                        "MCP port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, toggle.Port);
                     await StopServerAsync(stoppingToken);
-                    if (!await TryStartServerAsync(config, desiredPort, stoppingToken))
+                    if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
                     }
@@ -258,15 +277,21 @@ public sealed class DarlingMcpHostService : BackgroundService
     }
 
     /// <summary>
-    /// One start ATTEMPT of the inner MCP web app at <paramref name="effectivePort"/> (#1560): the whole
+    /// One start ATTEMPT of the inner MCP web app at <paramref name="toggle"/>'s port (#1560): the whole
     /// pre-supervisor startup body, with two changes — the port comes from the live control-plane value
     /// rather than the file, and every bail path returns false so the supervisor can retry with backoff
     /// instead of standing down for the process lifetime. The bind/network/token decisions still come from
     /// the FILE-loaded config (network exposure is deliberately restart-only); returns true when the app
     /// is started and listening.
+    /// <para>#2389: the toggle carries the enable/port PROVENANCE, not just the port, so the start line names
+    /// the plane each half of the bind came from — the operator greps that line and stops reading, so it has
+    /// to admit when it is starting on file values the control plane may be about to contradict.</para>
     /// </summary>
-    private async Task<bool> TryStartServerAsync(DarlingConfig config, int effectivePort, CancellationToken stoppingToken)
+    private async Task<bool> TryStartServerAsync(
+        DarlingConfig config, DarlingHostBinding.EndpointToggle toggle, CancellationToken stoppingToken)
     {
+        var effectivePort = toggle.Port;
+
         /* Decide the effective bind PURELY, then map the reason -> severity here (Round-4 #7: the caller,
            not the pure fn, chooses LogCritical vs LogWarning; tests assert (Mode, Reason) without a logger). */
         var bind = ResolveMcpBind(config.Mcp, config.Postgres.Managed);
@@ -510,6 +535,16 @@ public sealed class DarlingMcpHostService : BackgroundService
                    and the Dashboard expose, over Darling's Postgres store (STORED reads, no live hit).
                    These are the tools the analysis findings' next_tools recommendations point at. */
                 .WithGeminiCompatibleTools<DarlingMcpDataTools>()
+                /* get_query_store_regressions (#2484) — the viewer's Query Store Regressions tab. Every
+                   other Query Store read answers what is EXPENSIVE; this answers what got WORSE, which is
+                   not derivable from the first (the costliest query is usually the one that always was).
+                   A STORED read over the same query_store_stats the tools above read. */
+                .WithGeminiCompatibleTools<DarlingMcpQueryStoreRegressionTools>()
+                /* get_query_heatmap (#2484) — the viewer's Query Heatmap tab. The interactive plot is
+                   desktop-only by design; the READ behind it is not, and a bucketed table is the same
+                   answer. It is the only query read with a TIME axis: the rankings above cannot show that
+                   a window had a quiet half and a bad half. A STORED read over the same query_stats. */
+                .WithGeminiCompatibleTools<DarlingMcpQueryHeatmapTools>()
                 /* The diagnostic-depth data-read tools (blocking/deadlocks, sessions, config-history,
                    index/object) — get_blocking / get_deadlocks / get_deadlock_detail /
                    get_blocked_process_xml, get_session_stats / get_active_queries / get_waiting_tasks,
@@ -556,6 +591,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                    pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
                    peak memory, neither of which the SQL Server tools have an equivalent for. */
                 .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
+                /* get_pg_plans — the plan itself, not a pointer to one (#2567). Registered beside the
+                   statement tools because that is the join: a plan is read alongside the statement it
+                   belongs to, on query_id. */
+                .WithGeminiCompatibleTools<DarlingMcpPgPlanTools>()
                 /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
                    PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
                 .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()
@@ -581,6 +620,47 @@ public sealed class DarlingMcpHostService : BackgroundService
                    sampled, so "no blocking" here means "none was sampled" and the tool reports its own
                    capture count so that distinction cannot be lost. */
                 .WithGeminiCompatibleTools<DarlingMcpPgBlockingTools>()
+                /* get_pg_database_stats — four questions off one cluster-wide view: temp-file spills (the
+                   PostgreSQL answer to "why is this query slow" that no other read here can give on a stock
+                   target), the buffer-cache hit ratio, a server-recorded deadlock count, and the
+                   commit/rollback split. The one read whose reset handling is part of its contract: a
+                   statistics reset is reported as a reset rather than surfacing as a negative rate. */
+                .WithGeminiCompatibleTools<DarlingMcpPgDatabaseTools>()
+                /* get_pg_index_usage — per-index scan counts with the catalog facts that decide whether an
+                   index can actually go. The half that is not in pg_stat_user_indexes is the point: a
+                   unique index backing a constraint enforces it without ever registering a scan, so advice
+                   derived from the counter alone tells somebody to drop their primary key. */
+                .WithGeminiCompatibleTools<DarlingMcpPgIndexUsageTools>()
+                /* get_pg_table_bloat — the damage the vacuum reads above measure the cause of. The only
+                   read here whose headline number is an ESTIMATE, and the one whose contract is that it
+                   suppresses that number rather than captioning it when its inputs cannot be trusted. */
+                .WithGeminiCompatibleTools<DarlingMcpPgTableBloatTools>()
+                /* get_pg_session_states — the session side of the xmin horizon, and the one read here whose
+                   job includes REFUSING a causal claim. get_pg_xmin_horizon says a session is holding the
+                   horizon; this says which one, and — measured on a live instance — says when an
+                   idle-in-transaction session that looks identical is holding nothing at all, because a
+                   READ COMMITTED transaction that only read has already released its snapshot. */
+                .WithGeminiCompatibleTools<DarlingMcpPgSessionStatesTools>()
+                /* #2659: these six shipped REGISTERED NOWHERE. They were implemented, documented, dispatched
+                   by the web API and counted in the instructions census, and an agent could not call one of
+                   them — the web dashboard could, which is why it went unnoticed. Registration here is
+                   per-class and explicit, with no assembly scan, so a tools class is reachable only if
+                   someone remembers this line and nothing failed when they did not.
+                   McpToolTypeRegistrationTests now derives the check by reflection instead of trusting it. */
+                .WithGeminiCompatibleTools<DarlingMcpPgServerStateTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgIndexTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgKernelStatsTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgPredicateTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgReplicationStatsTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgWaitSamplingTools>()
+                /* get_pg_deadlocks / get_pg_deadlock_detail (#2661) - the reports themselves, out of the
+                   server log, rather than pg_stat_database's count. */
+                .WithGeminiCompatibleTools<DarlingMcpPgDeadlockTools>()
+                /* get_pg_wait_trend / get_pg_query_duration_trend / get_pg_io_trend /
+                   get_pg_database_trend (#2663) - the PostgreSQL time series. Fourteen trend reads shipped
+                   and none worked on this engine. All four live on one tools class, so this line covers
+                   the later two as well - which is the only reason adding them needed no edit here. */
+                .WithGeminiCompatibleTools<DarlingMcpPgTrendTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()
@@ -595,10 +675,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                    get_mute_rules via the service-side PgMuteRuleStore), the CURRENT-config snapshot trio
                    (get_server_config / get_database_config / get_trace_flags — latest capture, the companion to
                    the *_changes diff tools), and the health overview (get_server_summary + the daily rollup
-                   get_daily_summary, folded through the shared DailyHealthBandCalculator). Same names Lite and
-                   the Dashboard expose, all STORED reads over Darling's Postgres store (no live hit). The
-                   blocking-trend / deadlock-trend, memory-pressure-event, and wait-type siblings ride along on
-                   the existing blocking / memory-grant / core data-read classes above. */
+                   get_daily_summary and its #2484 range sibling get_daily_summary_range — the Performance
+                   Calendar's month grid — both folded through the shared DailyHealthBandCalculator). Same
+                   names Lite and the Dashboard expose, all STORED reads over Darling's Postgres store (no live
+                   hit). The blocking-trend / deadlock-trend / lock-wait-trend, memory-pressure-event, and
+                   wait-type siblings ride along on the existing blocking / memory-grant / core data-read
+                   classes above. */
                 .WithGeminiCompatibleTools<DarlingMcpAlertTools>()
                 .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
                 .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
@@ -613,8 +695,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 .WithGeminiCompatibleTools<DarlingMcpAgTools>()
                 /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                    _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
-                   _severe_errors / _system_health — the same names the Dashboard exposes. Where the Dashboard
-                   reads its server-side-parsed collect.HealthParser_* tables, these shred the raw
+                   _severe_errors / _significant_waits / _system_health — the same names the Dashboard
+                   exposes. Where the Dashboard reads its server-side-parsed collect.HealthParser_*
+                   tables, these shred the raw
                    system_health_events on read via the shared SystemHealthParser (Common) and gate with the
                    service-side twin of the viewer's SystemEventSignificance, exactly as the viewer's System
                    Events tab does — the same SIGNIFICANT warning set, no live hit. */
@@ -643,9 +726,22 @@ public sealed class DarlingMcpHostService : BackgroundService
                    resolver the read tools use. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
                    config.config_monitored_servers (the encrypted_password column stays SELECT-carved) — never the
                    config pivot or a schema-wide write. */
-                .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>();
+                .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>()
+                /* Optional GCF (Graph Compact Format) output: a single call-tool filter that,
+                   when DARLING_OUTPUT_FORMAT=gcf, re-encodes each tool's JSON result as a GCF
+                   generic wire. Registered once; covers every tool. Opt-in, lossless, and
+                   never larger than the JSON (see GcfCallToolFilter / GcfOutput). */
+                .WithRequestFilters(filters => filters.AddCallToolFilter(GcfCallToolFilter.Instance));
 
             _app = builder.Build();
+
+            /* #2479 item 5: every gate below used to refuse silently, so "is my token wrong or my CIDR
+               wrong" was answerable only from the client, which sees one opaque status code. One log per
+               refusal is rate-limited per (gate, source) because this port is LAN-exposed on purpose and
+               an exposed port meets a scanner eventually - see DarlingHttpRefusalLog for the shape and
+               what it deliberately never writes. Created here, per started server, so a rebind starts
+               with a clean budget rather than inheriting the previous listener's scan. */
+            var refusals = new DarlingHttpRefusalLog();
 
             /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
                #1576 fix. The loopback bind is tokenless by design (the network gates below install only in
@@ -661,6 +757,12 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 if (!DarlingHostBinding.IsAllowedHost(context.Request.Host.Host, networkListenIp))
                 {
+                    refusals.Report(
+                        _logger, "MCP", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
+                        context.Connection.RemoteIpAddress,
+                        $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
+                        + " (a loopback name/IP, or mcp.network.listen when LAN-exposed)",
+                        DateTime.UtcNow);
                     context.Response.StatusCode = StatusCodes.Status400BadRequest;
                     return;
                 }
@@ -682,8 +784,33 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                 _app.Use(async (context, next) =>
                 {
-                    if (!IsBearerTokenAuthorized(context.Request.Headers.Authorization.ToString(), token))
+                    /* Materialized once: StringValues.ToString() allocates, and the refusal path below needs
+                       the same header again to tell "no credential" from "wrong credential" (review catch on
+                       #2479). IsBearerTokenAuthorized keeps taking the raw header rather than returning what
+                       it parsed - its signature is pinned by DarlingMcpHostTests and DarlingHostBindingTests,
+                       and threading a result type through it to save one parse on an ALREADY-REFUSED request
+                       is not a trade worth making. */
+                    var authorization = context.Request.Headers.Authorization.ToString();
+
+                    if (!IsBearerTokenAuthorized(authorization, token))
                     {
+                        /* THREE client states, never the token's value. Each one is a different next step
+                           for the operator, which is the whole point of logging this at all:
+
+                             no header            -> a client that was never configured with a token
+                             header, not a Bearer -> a client configured wrong (Basic, a bare token, an
+                                                     empty "Bearer ") - it IS sending something
+                             a Bearer that misses -> a token that does not match this endpoint's
+
+                           Review catch on #2479: ExtractBearerToken returns null for the first TWO, so
+                           testing only it reported "nothing was presented" about a client that presented
+                           a malformed header - collapsing precisely the ambiguity this exists to resolve.
+                           None of the three says anything about what the token IS. */
+                        refusals.Report(
+                            _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
+                            context.Connection.RemoteIpAddress,
+                            DescribeBearerRefusal(authorization),
+                            DateTime.UtcNow);
                         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                         context.Response.Headers.WWWAuthenticate = "Bearer";
                         return;
@@ -696,6 +823,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                 {
                     if (!IsRemoteAddressAllowed(context.Connection.RemoteIpAddress, cidr))
                     {
+                        refusals.Report(
+                            _logger, "MCP", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
+                            context.Connection.RemoteIpAddress,
+                            $"its address is outside mcp.network.allowFrom ({cidr})",
+                            DateTime.UtcNow);
                         context.Response.StatusCode = StatusCodes.Status403Forbidden;
                         return;
                     }
@@ -706,16 +838,40 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             _app.MapMcp();
 
+            /* #2389: name the authority for each half of what is being started. enabled/port come from
+               whichever plane the supervisor resolved; listen/allowFrom/token are always darling.json. */
+            var origin = DarlingHostBinding.DescribeToggleOrigin(toggle);
             if (networkMode)
             {
                 _logger.LogInformation(
-                    "Starting MCP server on http://{Listen}:{Port} (LAN-exposed to {Cidr} behind a bearer token + in-app CIDR; loopback also bound)",
-                    primaryBind, effectivePort, allowedCidr);
+                    "Starting MCP server on http://{Listen}:{Port} (LAN-exposed to {Cidr} behind a bearer token + in-app CIDR; loopback also bound) — "
+                    + "enabled/port from {Origin}; listen/allowFrom/token from darling.json mcp.network (file-only, restart-only)",
+                    primaryBind, effectivePort, allowedCidr, origin);
             }
             else
             {
-                _logger.LogInformation("Starting MCP server on http://localhost:{Port} (loopback only)", effectivePort);
+                _logger.LogInformation(
+                    "Starting MCP server on http://localhost:{Port} (loopback only) — enabled/port from {Origin}",
+                    effectivePort, origin);
             }
+
+            /* #2479 item 6: the network block is read ONCE and held for the process lifetime by design.
+               Say so at every start, in BOTH modes - the loopback line above never mentioned the block at
+               all, and loopback-when-you-expected-LAN is exactly the state being diagnosed.
+
+               The null-conditional is load-bearing, not defensive. config.Mcp.Network is McpNetworkConfig?
+               and is NULL on the default secure config - no mcp.network block at all - which is exactly the
+               state this line exists to describe. The dereferences at 313/317 are safe because they sit
+               inside if (networkMode), where the bind resolution has already proven a block exists; this
+               one runs unconditionally, so a bare .IsConfigured throws on every start of an un-exposed
+               server, gets swallowed by the catch below, and retry-fails forever because the config never
+               changes. Review catch on #2479. */
+            _logger.LogInformation(
+                "{Report}",
+                DarlingHostBinding.DescribeNetworkBlockLifetime(
+                    "mcp", "MCP", config.Mcp.Network?.IsConfigured ?? false, networkMode,
+                    networkMode ? primaryBind.ToString() : null,
+                    networkMode ? allowedCidr.ToString() : null));
 
             /* StartAsync, not RunAsync (#1560): the supervisor loop owns the wait — the app keeps
                serving until StopServerAsync (toggle-off, port change, or shutdown). */
@@ -865,6 +1021,33 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         var token = value.Substring(prefix.Length).Trim();
         return string.IsNullOrEmpty(token) ? null : token;
+    }
+
+    /// <summary>
+    /// PURE: why a bearer check refused, in the operator's terms — three states, not two (#2479).
+    ///
+    /// <para><see cref="ExtractBearerToken"/> answers null for BOTH "no header" and "a header that is not a
+    /// well-formed Bearer", so a refusal line built on it alone tells an operator nothing was presented
+    /// while their client is sending <c>Authorization: Basic …</c> every second. Those are different
+    /// faults with different fixes — one client has no token configured, the other has it configured
+    /// wrong — and telling them apart is the reason this line exists.</para>
+    ///
+    /// <para>Says nothing about the token's value, and cannot: it reads only the header's SHAPE.</para>
+    /// </summary>
+    internal static string DescribeBearerRefusal(string? authorizationHeaderValue)
+    {
+        if (string.IsNullOrWhiteSpace(authorizationHeaderValue))
+        {
+            return "no 'Authorization: Bearer <token>' header was presented";
+        }
+
+        if (ExtractBearerToken(authorizationHeaderValue) is null)
+        {
+            return "an Authorization header WAS presented but is not a 'Bearer <token>' "
+                + "(wrong scheme, or an empty token after 'Bearer')";
+        }
+
+        return "the presented bearer token does not match mcp.network.encryptedToken";
     }
 
     /// <summary>

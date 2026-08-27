@@ -18,9 +18,9 @@ public partial class DrillDownCollector
 {
     private async Task CollectFileLatencyBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -41,8 +41,8 @@ LIMIT 10";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -69,9 +69,9 @@ LIMIT 10";
     /// </summary>
     private async Task CollectAutogrowthPercentFiles(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -93,8 +93,8 @@ LIMIT 50";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             var database = reader.IsDBNull(0) ? "" : reader.GetString(0);
             var fileType = reader.IsDBNull(1) ? "" : reader.GetString(1);
@@ -122,9 +122,9 @@ LIMIT 50";
 
     private async Task CollectTempDbBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -140,8 +140,8 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {

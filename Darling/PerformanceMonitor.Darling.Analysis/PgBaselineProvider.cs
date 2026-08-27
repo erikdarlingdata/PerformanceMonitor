@@ -214,7 +214,7 @@ public class PgBaselineProvider
 
             return buckets;
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
             /* A command TIMEOUT and a genuine connection fault are the same message here, and that cost real
                diagnosis time on the dogfood box: Npgsql surfaces its own client-side timeout as

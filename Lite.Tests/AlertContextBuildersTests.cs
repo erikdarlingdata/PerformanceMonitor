@@ -276,12 +276,37 @@ public class AlertContextBuildersTests
             {
                 ("Total Reserved", $"{800d:F0} MB"),
                 ("Unallocated", $"{200d:F0} MB"),
+                /* #2515: no MaxSizeMb on this fixture, so the ceiling was never measured and the
+                   percentage above is still against the allocation — which the detail now says out loud
+                   rather than leaving the reader to assume a denominator. */
+                ("Max Size", "Unknown"),
                 ("User Objects", $"{500d:F0} MB"),
                 ("Internal Objects", $"{250d:F0} MB"),
                 ("Version Store", $"{50d:F0} MB"),
                 ("Top Consumer", $"Session #55 ({123.4:F0} MB)")
             },
             item.Fields);
+    }
+
+    /// <summary>
+    /// #2515: the three states of the ceiling render as three different words, because they are three
+    /// different facts. "Unlimited" and "Unknown" take the same denominator but they do not mean the same
+    /// thing, and printing either as a number would claim a measurement that was never taken.
+    /// </summary>
+    [Theory]
+    [InlineData(65536d, "65536 MB")]
+    [InlineData(-1d, "Unlimited")]
+    [InlineData(0d, "Unknown")]
+    public void BuildTempDbSpaceContext_RendersTheCeilingsThreeStates(double maxSizeMb, string expected)
+    {
+        var context = AlertContextBuilders.BuildTempDbSpaceContext(new TempDbSpaceInfo
+        {
+            TotalReservedMb = 800,
+            UnallocatedMb = 200,
+            MaxSizeMb = maxSizeMb
+        });
+
+        Assert.Equal(("Max Size", expected), context!.Details[0].Fields[2]);
     }
 
     [Fact]
@@ -294,7 +319,7 @@ public class AlertContextBuildersTests
             TopConsumerSessionId = 0
         });
 
-        Assert.Equal(("Top Consumer", "None"), context!.Details[0].Fields[5]);
+        Assert.Equal(("Top Consumer", "None"), context!.Details[0].Fields[6]);
     }
 
     /* ---------------- anomalous jobs ---------------- */

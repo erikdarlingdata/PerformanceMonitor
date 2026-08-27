@@ -91,6 +91,37 @@ internal static class DarlingSystemHealthReader
         return xmls;
     }
 
+    /// <summary>
+    /// Whether this server has EVER recorded a system_health event of one type, ignoring any window.
+    /// <para>Lets an empty parse-on-read result say WHICH kind of nothing it found. Zero significant rows
+    /// is true both of a healthy window and of a server whose system_health events were never collected,
+    /// and the two want opposite responses -- widen the window, versus go find out why nothing is being
+    /// captured. Probes <c>v_system_health_events</c>, the SAME source
+    /// <see cref="SystemHealthEventsByTypeSql"/> reads, so it cannot report a server as captured for rows
+    /// the read itself can never see. Scoped to the event_type because that is the granularity the caller
+    /// asked about: a server capturing sp_server_diagnostics but no wait_info has not been sampled for
+    /// waits, whatever its other categories hold. LIMIT 1, so it stops at the first row.
+    /// $1 server_id, $2 event_type.</para>
+    /// </summary>
+    public const string HasAnyEventOfTypeSql = """
+        SELECT 1
+        FROM v_system_health_events
+        WHERE server_id = $1
+        AND   event_type = $2
+        AND   event_xml IS NOT NULL
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyEventOfTypeSql"/>.</summary>
+    public static async Task<bool> HasAnyEventOfTypeAsync(
+        NpgsqlDataSource postgres, int serverId, string eventType, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyEventOfTypeSql);
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddText(command, eventType);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
     /// <summary>Loads the server's latest database_id → database_name map for Severe Errors DB resolution.</summary>
     public static async Task<Dictionary<int, string>> GetDatabaseNameMapAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)

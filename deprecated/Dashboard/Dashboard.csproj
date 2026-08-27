@@ -7,7 +7,7 @@
     <StartupObject>PerformanceMonitorDashboard.Program</StartupObject>
     <AssemblyName>PerformanceMonitorDashboard</AssemblyName>
     <Product>SQL Server Performance Monitor Dashboard</Product>
-    <Version>3.5.0</Version>
+    <Version>3.6.0</Version>
     <AssemblyVersion>3.3.0.0</AssemblyVersion>
     <FileVersion>3.3.0.0</FileVersion>
     <InformationalVersion>3.3.0</InformationalVersion>

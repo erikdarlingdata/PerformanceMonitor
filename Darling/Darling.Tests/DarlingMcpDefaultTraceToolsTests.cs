@@ -58,7 +58,7 @@ public sealed class DarlingMcpDefaultTraceToolsSurfaceAndSqlTests
             .Where(x => x.GetCustomAttribute<DescriptionAttribute>() is not null)
             .Select(x => (x.Name!, x.HasDefaultValue))
             .ToArray();
-        Assert.Equal(new[] { "server_name", "hours_back", "limit" }, p.Select(x => x.Item1).ToArray());
+        Assert.Equal(new[] { "server_name", "hours_back", "limit", "as_of" }, p.Select(x => x.Item1).ToArray());
         Assert.All(p, x => Assert.True(x.Item2, $"{x.Item1} must be optional"));
     }
 

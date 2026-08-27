@@ -79,8 +79,8 @@ public sealed class StoreIsOnThisMachineTests
 
     /// <summary>THE CASE THAT WARNS: a store on another host, which is how the #2255 report was configured.</summary>
     [Theory]
-    [InlineData("Host=prod-pos-use2-monitor-01;Port=5641;Database=darling")]
-    [InlineData("Host=10.149.55.242;Port=5432;Database=darling")]
+    [InlineData("Host=prod-sql-use2-monitor-01;Port=5641;Database=darling")]
+    [InlineData("Host=10.0.0.10;Port=5432;Database=darling")]
     [InlineData("Host=store.internal.example.com;Database=darling")]
     [InlineData("Server=otherbox;Database=darling")]
     public void ARemoteStoreWarns(string connectionString)

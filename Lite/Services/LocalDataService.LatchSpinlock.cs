@@ -89,13 +89,13 @@ ORDER BY latch_class, collection_time";
     /// The Latch Stats latest-snapshot grid: every latch class captured at the most recent collection in
     /// the window, ordered by the last interval's delta wait time then cumulative wait time, capped at 20.
     /// </summary>
-    public async Task<List<LatchStatsSnapshotRow>> GetLatchStatsSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<LatchStatsSnapshotRow>> GetLatchStatsSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetLatchStatsSnapshotAsync", "v_latch_stats latest snapshot");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH latest AS
@@ -209,13 +209,13 @@ ORDER BY spinlock_name, collection_time";
     /// The Spinlock Stats latest-snapshot grid: every spinlock captured at the most recent collection in
     /// the window, ordered by the last interval's delta collisions then cumulative collisions, capped at 20.
     /// </summary>
-    public async Task<List<SpinlockStatsSnapshotRow>> GetSpinlockStatsSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<SpinlockStatsSnapshotRow>> GetSpinlockStatsSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSpinlockStatsSnapshotAsync", "v_spinlock_stats latest snapshot");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH latest AS

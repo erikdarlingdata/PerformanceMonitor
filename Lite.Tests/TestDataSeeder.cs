@@ -1367,10 +1367,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 0,
     }
 
     /// <summary>
-    /// Seeds tempdb_stats across 16 collection points.
+    /// Seeds tempdb_stats across 16 collection points. <paramref name="maxSizeMb"/> is the #2515 growth
+    /// ceiling: null seeds NULL, which is what every row collected before the v56 migration looks like and
+    /// the state the callers here want by default.
     /// </summary>
     internal async Task SeedTempDbAsync(double reservedMb, double unallocatedMb,
-        double userObjectMb = 0, double internalObjectMb = 0, double versionStoreMb = 0)
+        double userObjectMb = 0, double internalObjectMb = 0, double versionStoreMb = 0,
+        double? maxSizeMb = null)
     {
         if (userObjectMb == 0) userObjectMb = reservedMb * 0.6;
         if (internalObjectMb == 0) internalObjectMb = reservedMb * 0.3;
@@ -1387,8 +1390,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 0,
 INSERT INTO tempdb_stats
     (collection_id, collection_time, server_id, server_name,
      user_object_reserved_mb, internal_object_reserved_mb,
-     version_store_reserved_mb, total_reserved_mb, unallocated_mb)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
+     version_store_reserved_mb, total_reserved_mb, unallocated_mb, max_size_mb)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
 
             var t = TestPeriodStart.AddMinutes(i * 15);
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
@@ -1400,6 +1403,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
             cmd.Parameters.Add(new DuckDBParameter { Value = versionStoreMb });
             cmd.Parameters.Add(new DuckDBParameter { Value = reservedMb });
             cmd.Parameters.Add(new DuckDBParameter { Value = unallocatedMb });
+            cmd.Parameters.Add(new DuckDBParameter { Value = maxSizeMb.HasValue ? maxSizeMb.Value : (object)DBNull.Value });
 
             await cmd.ExecuteNonQueryAsync();
         }

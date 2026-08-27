@@ -72,13 +72,13 @@ ORDER BY collection_time";
     /// (every scheduler / worker / NUMA / OS-memory pressure column + the collector's CASE-computed
     /// warning flags), feeding the metric grid. Returns null when the window holds no snapshot.
     /// </summary>
-    public async Task<CpuSchedulerSnapshot?> GetCpuSchedulerSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<CpuSchedulerSnapshot?> GetCpuSchedulerSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetCpuSchedulerSnapshotAsync", "v_cpu_scheduler_stats latest snapshot");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT

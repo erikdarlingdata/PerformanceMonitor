@@ -41,6 +41,16 @@ namespace Darling.Tests;
 /// closed and whether they are written single-line or spread over many. The mixed form is the one a
 /// closing-tag matcher cannot see at all: a single-line summary followed by a multi-line one.</para>
 ///
+/// <para><b>An ATTRIBUTE does not end a doc run (#2445).</b> The #2190 rule keyed off a contiguous run of
+/// <c>///</c> lines, so a stacked pair separated by an attribute line was two runs of one opening each and
+/// invisible — which is exactly how a displaced block sat on dev carrying
+/// <c>[SupportedOSPlatform("windows")]</c> with it, silently platform-annotating the record struct it landed
+/// on. Attributes belong to the member BELOW them, so a run continues across them: a <c>///</c> line, any
+/// number of attribute lines, and more <c>///</c> lines all still document one member. An attribute never
+/// STARTS a run — one above a doc block is that member's own, and the doc block below it is still its first
+/// summary. Widening the rule this way found exactly one offender in the whole tree, the one it was written
+/// for, which is the measurement that says it is a sharpened rule rather than a looser one.</para>
+///
 /// <para><b>Coverage limit, stated rather than assumed.</b> CI path filters are per-project, so this runs on
 /// any pull request that trips the <c>darling</c> or <c>core</c> filter, and on every nightly and release
 /// build — but a change touching ONLY Lite or Installer will not run it, and would be caught on the next
@@ -98,6 +108,9 @@ public sealed class DocCommentHygieneTests
             "an insertion pushed it away from. Seven of the eight found in #1745 were displaced doc blocks " +
             "whose real member had been left undocumented, and deleting them would have lost the documentation " +
             "rather than deduplicating it.\n\n" +
+            "Where the two summaries are separated by an ATTRIBUTE line, the attribute travelled with the " +
+            "displaced block and is now annotating the wrong member — move or delete BOTH, not just the text " +
+            "(#2445).\n\n" +
             "Where an insertion split a block, also check whether the member it came from has since been " +
             "re-documented in place. If it has, the stray text is a stranded HEAD rather than the whole block, " +
             "and moving it back would create the very duplicate this rule forbids — confirm sentence by " +
@@ -124,12 +137,24 @@ public sealed class DocCommentHygieneTests
     /* A stacked run reaching end of file with no member under it. Not valid C#, but it pins the scan's
        one-past-the-end step: a run that never meets a non-doc line has to be closed, not dropped. */
     [InlineData(true, "/// <summary>\n/// A.\n/// <summary>\n/// B.")]
+    /* Split by an attribute, which is how the stranded ConfigureFirewallAsync block hid on dev: two runs of
+       one opening each to the pre-#2445 rule, one member with two summaries in fact. */
+    [InlineData(true, "/// <summary>\n/// A.\n/// </summary>\n[SupportedOSPlatform(\"windows\")]\n/// <summary>\n/// B.\n/// </summary>\nvoid M();")]
     /* One summary plus the other doc tags that legitimately follow it. */
     [InlineData(false, "/// <summary>\n/// A.\n/// </summary>\n/// <param name=\"x\">X.</param>\n/// <returns>Y.</returns>\nvoid M(int x);")]
     /* One summary carrying several <para> blocks, as most of this repo's docs do. */
     [InlineData(false, "/// <summary>\n/// A.\n///\n/// <para>B.</para>\n///\n/// <para>C.</para>\n/// </summary>\nvoid M();")]
     /* Two members, one summary each: the declarations between them end each run. */
     [InlineData(false, "/// <summary>A.</summary>\nint A;\n/// <summary>B.</summary>\nint B;")]
+    /* A documented member that also carries attributes — the ordinary shape of most of this repo. Widening
+       the run across attributes must not turn this into an offender. */
+    [InlineData(false, "/// <summary>A.</summary>\n[Fact]\n[Trait(\"k\", \"v\")]\nvoid M();")]
+    /* The negative control for that widening, and the one that would catch it going too far: two members that
+       each have a summary and an attribute must stay two runs, not merge into one with two openings. */
+    [InlineData(false, "/// <summary>A.</summary>\n[Fact]\nvoid A();\n/// <summary>B.</summary>\n[Fact]\nvoid B();")]
+    /* An attribute ABOVE a doc block belongs to that same member and must not open a run of its own, or the
+       block below it would be counted as a second summary. */
+    [InlineData(false, "[Fact]\n/// <summary>A.</summary>\nvoid M();")]
     /* Escaped mentions in prose are not openings — this very file is full of them. */
     [InlineData(false, "/// <summary>\n/// Two &lt;summary&gt; mentions in one &lt;summary&gt; block.\n/// </summary>\nvoid M();")]
     public void DetectorCountsSummaryOpeningsPerDocRun(bool stacked, string source)
@@ -142,9 +167,13 @@ public sealed class DocCommentHygieneTests
     }
 
     /// <summary>
-    /// Every contiguous run of <c>///</c> lines carrying more than one <c>&lt;summary&gt;</c> opening, as the
-    /// run's first line and the line of each opening. A run ends at the first line that is not a doc comment,
-    /// which is what ties it to exactly one member: the declaration itself terminates it.
+    /// Every run of <c>///</c> lines carrying more than one <c>&lt;summary&gt;</c> opening, as the run's first
+    /// line and the line of each opening. A run ends at the first line that is neither a doc comment nor an
+    /// attribute, which is what ties it to exactly one member: the declaration itself terminates it.
+    /// <para>Attributes are inside the run rather than ending it (#2445) because they document the member
+    /// BELOW them, so <c>/// … [Attr] /// …</c> is one member with two summaries. They cannot OPEN a run: an
+    /// attribute reached while <c>start == 0</c> falls through to the terminator branch, which is a no-op
+    /// there, so an attribute written above a doc block leaves that block as the run's first opening.</para>
     /// </summary>
     private static List<(int Start, List<int> Openings)> StackedSummaryRuns(string[] lines)
     {
@@ -157,7 +186,8 @@ public sealed class DocCommentHygieneTests
 
         for (var i = 0; i <= lines.Length; i++)
         {
-            if (i < lines.Length && lines[i].TrimStart().StartsWith("///", StringComparison.Ordinal))
+            var trimmed = i < lines.Length ? lines[i].TrimStart() : string.Empty;
+            if (i < lines.Length && trimmed.StartsWith("///", StringComparison.Ordinal))
             {
                 if (start == 0)
                 {
@@ -166,6 +196,10 @@ public sealed class DocCommentHygieneTests
                 }
 
                 openings.AddRange(Enumerable.Repeat(i + 1, SummaryOpening.Matches(lines[i]).Count));
+            }
+            else if (start != 0 && trimmed.StartsWith("[", StringComparison.Ordinal))
+            {
+                /* Inside a run: an attribute annotates the member below it, so it separates nothing. */
             }
             else if (start != 0)
             {

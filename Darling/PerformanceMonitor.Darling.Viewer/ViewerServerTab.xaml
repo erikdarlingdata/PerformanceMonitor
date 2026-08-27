@@ -1,4 +1,4 @@
-<UserControl x:Class="PerformanceMonitor.Darling.Viewer.ViewerServerTab"
+﻿<UserControl x:Class="PerformanceMonitor.Darling.Viewer.ViewerServerTab"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
@@ -54,6 +54,32 @@
              latch/spinlock, CPU scheduler, plan cache, System Events, …) gets it. Copy/Export delegate to the
              shared PerformanceMonitor.Ui DataGridExport (ViewerServerTab.CopyExport.cs). Defined before
              DarkGridRow so the StaticResource resolves. -->
+        <!-- #2612: the predicate grid's own menu. The shared DataGridContextMenu deliberately stays
+             read-only - it is on every grid in the Viewer, and an ACTION that reaches the monitored server
+             does not belong on all of them. This one exists only where the candidate does, which is also
+             exactly how the feature was scoped: driven from a specific predicate row a human is already
+             looking at, never swept. -->
+        <ContextMenu x:Key="PredicateStatsContextMenu">
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
+            </MenuItem>
+            <Separator/>
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
+            </MenuItem>
+            <Separator/>
+            <MenuItem Header="_Test an index on this column..." Click="TestHypotheticalIndex_Click"
+                      ToolTip="Asks the server whether the planner would use an index on this column. Nothing is executed and no index is built - the candidate is visible only inside one session and is discarded before the answer comes back.">
+                <MenuItem.Icon><TextBlock Text="&#x1F9EA;"/></MenuItem.Icon>
+            </MenuItem>
+        </ContextMenu>
+
         <ContextMenu x:Key="DataGridContextMenu">
             <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
@@ -409,6 +435,15 @@
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,4">
                     <TextBlock x:Name="ServerNameText" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}"/>
+                    <!-- #2530: the engine badge. Collapsed, not defaulted to "SQL Server", when the store
+                         records no engine kind for this server: the tab set such a server gets is a DEFAULT,
+                         not a finding, and labelling it would state a fact nothing has established. -->
+                    <Border x:Name="ServerEngineBadge" Visibility="Collapsed" Margin="8,0,0,0" Padding="6,1"
+                            CornerRadius="3" VerticalAlignment="Center"
+                            Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                        <TextBlock x:Name="ServerEngineText" FontSize="11" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    </Border>
                     <TextBlock x:Name="ServerFreshnessText" FontSize="12" VerticalAlignment="Center" Margin="8,0,0,0"
                                Foreground="{DynamicResource ForegroundMutedBrush}"
                                ToolTip="Newest collection time across all collectors — the service collects, the viewer reads"/>
@@ -789,6 +824,7 @@
                                         VerticalAlignment="Center"/>
                                 <TextBlock x:Name="CurrentActiveQueriesStatus"
                                            Text="Click Refresh to fetch what is running on the server right now."
+                                           TextWrapping="Wrap" MaxWidth="640"
                                            FontSize="12" Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
                             </StackPanel>
                             <DataGrid Grid.Row="1" x:Name="CurrentActiveQueriesGrid" Style="{StaticResource DarkGrid}"
@@ -3587,6 +3623,960 @@
                         <DataGridTextColumn Binding="{Binding QueryHash}" Width="150">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryHash" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Hash" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </TabItem>
+
+        <!-- ══════════════════════════════════════════════════════════════════════════════════════════
+             POSTGRESQL INNER TABS (#2530) — indices 19-24, the counterpart of the web dashboard's
+             POSTGRES_TABS registry. Declared here rather than in a second TabControl so both engines'
+             tabs keep FIXED indices: for a PostgreSQL server every TabItem above is collapsed and these
+             six are shown, and every SQL Server index constant (which drill-down navigation keys on) is
+             untouched. Registry, headers and panel-to-collector mapping: ViewerPostgresTabs.cs, which
+             ViewerPostgresTabsTests holds to CollectorCatalog in both directions.
+
+             Every panel carries its own note TextBlock ABOVE its grid. That is the point of the tab set,
+             not decoration: the defect this closes is twelve blank SQL Server tabs that say nothing about
+             why they are blank, and a PostgreSQL panel with no rows has to say which of the three reasons
+             it is — nothing to report, nothing collected yet, or a collector this engine will never run
+             (the shared CollectorEngineCapability sentence, the same one the MCP surface and the web
+             dashboard print).
+             ══════════════════════════════════════════════════════════════════════════════════════════ -->
+
+        <TabItem x:Name="PgOverviewTab" Header="Overview" Visibility="Collapsed">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" x:Name="PgEngineBanner" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                <TextBlock Grid.Row="1" x:Name="PgOverviewNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="2" x:Name="PgCollectorHealthGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- LEAST severe first, same rule. These two happen to be mutually exclusive
+                                 (BuildPostgresCollectorHealth only sets IsFault when there is no engine
+                                 gap), so the order is not load-bearing today — it is written this way so it
+                                 stays correct if that ever stops being true, and so one rule covers every
+                                 row style on these tabs rather than one rule and one exception. -->
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsPermanentGap}" Value="True">
+                                    <Setter Property="Background" Value="#22FFFFFF"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsFault}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Collector" Binding="{Binding Collector}" Width="180"/>
+                        <DataGridTextColumn Header="Store Table" Binding="{Binding StoreTable}" Width="200"/>
+                        <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="180"/>
+                        <DataGridTextColumn Header="Last Run" Binding="{Binding LastRun}" Width="140"/>
+                        <DataGridTextColumn Header="Runs" Binding="{Binding Runs}" ElementStyle="{StaticResource NumericCell}" Width="70"/>
+                        <DataGridTextColumn Header="Failed" Binding="{Binding FailedRuns}" ElementStyle="{StaticResource NumericCell}" Width="70"/>
+                        <DataGridTextColumn Header="Rows" Binding="{Binding RowsCollected}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTemplateColumn Header="Why" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Explanation}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Explanation}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2545 the extension axis. Sits under the collector grid because it answers the question
+                     that grid raises and cannot: a collector missing for want of an extension is a SETUP
+                     step rather than a wall, and this is where the step is named. -->
+                <TextBlock Grid.Row="3" x:Name="PgExtensionsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="4" x:Name="PgExtensionsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <!-- installed/outdated are per-database facts and available/absent are cluster-wide,
+                             so the database this row was read in is what makes the State column legible. -->
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
+                        <DataGridTextColumn Header="Extension" Binding="{Binding ExtensionName}" Width="200"/>
+                        <DataGridTextColumn Header="State" Binding="{Binding State}" Width="130"/>
+                        <DataGridTextColumn Header="Installed (this database)" Binding="{Binding InstalledVersion}" Width="170"/>
+                        <DataGridTextColumn Header="Server Offers" Binding="{Binding DefaultVersion}" Width="130"/>
+                        <DataGridTemplateColumn Header="What It Would Give Us" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Comment}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Comment}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2658 the server's own configuration, beneath the extension axis because it is the same
+                     kind of fact one layer in: extensions say what this server CAN do, settings say what it
+                     was told to do. Non-default first - several hundred parameters sorted alphabetically is
+                     a dump, and the ones somebody chose are the answer. -->
+                <TextBlock Grid.Row="5" x:Name="PgServerConfigNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="6" x:Name="PgServerConfigGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Setting" Binding="{Binding Name}" Width="240"/>
+                        <DataGridTextColumn Header="Value" Binding="{Binding Setting}" Width="160"/>
+                        <DataGridTextColumn Header="Unit" Binding="{Binding Unit}" Width="70"/>
+                        <!-- The compiled-in default, so the change is visible without a table of defaults
+                             that would rot at every major. -->
+                        <DataGridTextColumn Header="Default" Binding="{Binding BootValue}" Width="140"/>
+                        <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="150"/>
+                        <!-- postmaster / sighup / user: whether changing this needs a restart, a reload, or
+                             nothing. Half of what an operator wants the moment they decide to change it. -->
+                        <DataGridTextColumn Header="Change Needs" Binding="{Binding Context}" Width="120"/>
+                        <DataGridTextColumn Header="Pending Restart" Binding="{Binding PendingRestart}" Width="120"/>
+                        <DataGridTextColumn Header="Description" Binding="{Binding ShortDescription}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </TabItem>
+
+        <TabItem x:Name="PgActivityTab" Header="Activity" Visibility="Collapsed">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" x:Name="PgActivityNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <TabControl Grid.Row="1" x:Name="PgActivitySubTabs" Background="Transparent" BorderThickness="0"
+                            ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                    <TabItem Header="Blocking">
+                        <Grid Margin="0,8,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" x:Name="PgBlockingNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="1" x:Name="PgBlockingChainsGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Captured" Binding="{Binding CapturedAt}" Width="140"/>
+                                    <DataGridTextColumn Header="Root PID" Binding="{Binding RootPid}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Backend ID" Binding="{Binding RootBackendId}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Databases" Binding="{Binding Databases}" Width="150"/>
+                                    <DataGridTextColumn Header="Victims" Binding="{Binding TotalVictims}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
+                                    <DataGridTextColumn Header="Direct" Binding="{Binding DirectVictims}" ElementStyle="{StaticResource NumericCell}" Width="70"/>
+                                    <DataGridTextColumn Header="Depth" Binding="{Binding Depth}" Width="80"/>
+                                    <DataGridTextColumn Header="Worst Wait" Binding="{Binding WorstVictimWait}" Width="110"/>
+                                    <DataGridTextColumn Header="Root State" Binding="{Binding RootState}" Width="150"/>
+                                    <DataGridTextColumn Header="In Xact For" Binding="{Binding RootXactDuration}" Width="110"/>
+                                    <DataGridTextColumn Header="User" Binding="{Binding RootUsername}" Width="120"/>
+                                    <DataGridTextColumn Header="Application" Binding="{Binding RootApplicationName}" Width="160"/>
+                                    <DataGridTextColumn Header="Seen As Root" Binding="{Binding SamplesAsRoot}" Width="110"/>
+                                    <DataGridTemplateColumn Header="Root Query" Width="320">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding RootQuery}" TextTrimming="CharacterEllipsis" ToolTip="{Binding RootQuery}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTemplateColumn Header="Worst Victim Query" Width="320">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding WorstVictimQuery}" TextTrimming="CharacterEllipsis" ToolTip="{Binding WorstVictimQuery}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTextColumn Header="Caveats" Binding="{Binding Caveats}" Width="200"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <Expander Grid.Row="2" x:Name="PgBlockingCyclesExpander" Header="Lock cycles (no root — every participant is blocked, so these appear on no chain)"
+                                      IsExpanded="False" Margin="0,8,0,0" Foreground="{DynamicResource ForegroundBrush}">
+                                <DataGrid x:Name="PgBlockingCyclesGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
+                                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Captured" Binding="{Binding CapturedAt}" Width="140"/>
+                                        <DataGridTextColumn Header="Participants" Binding="{Binding ParticipantCount}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                        <DataGridTextColumn Header="PIDs" Binding="{Binding Pids}" Width="220"/>
+                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
+                                        <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="160"/>
+                                        <DataGridTextColumn Header="Queued Behind" Binding="{Binding BlockedBehindCount}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                                        <DataGridTextColumn Header="Queued PIDs" Binding="{Binding BlockedBehindPids}" Width="*"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </Expander>
+                        </Grid>
+                    </TabItem>
+                    <!-- #2544 locks. A SIBLING of Blocking rather than part of it, because they answer
+                         different questions from the same event: Blocking has the blocked/blocker PAIRS from
+                         pg_blocking_pids(), and this has the MODE and RELATION from pg_locks, which is what
+                         decides the remedy. An ungranted AccessExclusiveLock is a DDL queue; RowExclusiveLock
+                         contention is ordinary write traffic; the pair shape is identical. -->
+                    <TabItem Header="Locks">
+                        <Grid Margin="0,8,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" x:Name="PgLockStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="1" x:Name="PgLockStatsGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Granted" Binding="{Binding Granted}" Width="80"/>
+                                    <DataGridTextColumn Header="Mode" Binding="{Binding Mode}" Width="180"/>
+                                    <DataGridTextColumn Header="Lock Type" Binding="{Binding LockType}" Width="120"/>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
+                                    <!-- Relation name is legitimately blank for a lock in ANOTHER database
+                                         (pg_locks is cluster-wide, pg_class is not), so the OID rides beside
+                                         it rather than the row being dropped or given a name it does not have. -->
+                                    <DataGridTextColumn Header="Relation" Binding="{Binding RelationName}" Width="180"/>
+                                    <DataGridTextColumn Header="Relation OID" Binding="{Binding RelationOid}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Max Backends" Binding="{Binding MaxBackends}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                                    <DataGridTextColumn Header="Max Wait (ms)" Binding="{Binding MaxWaitMs}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                                    <DataGridTextColumn Header="Seen In" Binding="{Binding Captures}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Of Captures" Binding="{Binding TotalCaptures}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeen}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
+                    <TabItem Header="Query Shapes">
+                        <Grid Margin="0,8,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <!-- The statement grid is the primary panel and gets twice the height: the
+                                     per-database counters below it are the follow-up question (did this
+                                     spill?), not a second list of equal standing. -->
+                                <RowDefinition Height="2*"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                                            <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                                            <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" x:Name="PgStatementsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="1" x:Name="PgTopQueriesGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="DB OID" Binding="{Binding DatabaseId}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Calls" Binding="{Binding Calls}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Total (ms)" Binding="{Binding TotalExecTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Avg (ms)" Binding="{Binding AvgExecTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTextColumn Header="Max (ms)" Binding="{Binding MaxExecTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTextColumn Header="Rows" Binding="{Binding RowsReturned}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTextColumn Header="Cache Hit %" Binding="{Binding CacheHitPct}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Temp Read" Binding="{Binding TempRead}" Width="120"/>
+                                    <DataGridTextColumn Header="Temp Written" Binding="{Binding TempWritten}" Width="120"/>
+                                    <DataGridTextColumn Header="Peak Memory" Binding="{Binding PeakMemory}" Width="120"/>
+                                    <DataGridTextColumn Header="WAL" Binding="{Binding WalWritten}" Width="110"/>
+                                    <DataGridTemplateColumn Header="Statement" Width="*">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding QueryText}" TextTrimming="CharacterEllipsis" ToolTip="{Binding QueryText}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock Grid.Row="2" Text="Per-database counters — where the spills, the deadlocks and the rollbacks are" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                            <TextBlock Grid.Row="3" x:Name="PgDatabasesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="4" x:Name="PgDatabaseStatsGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
+                                    <DataGridTextColumn Header="Temp Files" Binding="{Binding TempFiles}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTextColumn Header="Temp Bytes" Binding="{Binding TempBytes}" Width="120"/>
+                                    <DataGridTextColumn Header="Deadlocks" Binding="{Binding Deadlocks}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTextColumn Header="Cache Hit %" Binding="{Binding CacheHitPct}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Commits" Binding="{Binding XactCommit}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Rollbacks" Binding="{Binding XactRollback}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Rollback %" Binding="{Binding RollbackPct}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Stats Reset" Binding="{Binding StatsReset}" Width="140"/>
+                                    <DataGridTextColumn Header="Caveats" Binding="{Binding Caveats}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <!-- #2603 kcache. Sits under the statement grid rather than on a tab of its
+                                 own because it answers the question that grid raises and cannot: elapsed
+                                 time cannot separate a statement that WAITED from one that burned CPU.
+                                 Same queryid, so the two rows are the same statement. -->
+                            <TextBlock Grid.Row="5" Text="OS CPU and disk per statement - what the kernel actually charged" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                            <TextBlock Grid.Row="6" x:Name="PgKernelStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="7" x:Name="PgKernelStatsGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="CPU (ms)" Binding="{Binding TotalCpuMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="User (ms)" Binding="{Binding ExecUserTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="System (ms)" Binding="{Binding ExecSystemTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <!-- Bytes that reached the DEVICE. Zero means the page cache served
+                                         the read, not that nothing was read. -->
+                                    <DataGridTextColumn Header="Disk Read (bytes)" Binding="{Binding ExecReadBytes}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                                    <DataGridTextColumn Header="Disk Write (bytes)" Binding="{Binding ExecWriteBytes}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                                    <DataGridTextColumn Header="Major Faults" Binding="{Binding MajorFaults}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <!-- #2566 captured plans. Under the statement grid because a plan only means
+                                 something next to the statement it belongs to, joined on query_id. The
+                                 JSON here is REDACTED at collection - auto_explain emits query text and
+                                 filter literals verbatim, and neither reaches the store. -->
+                            <TextBlock Grid.Row="8" Text="Captured execution plans - grouped by plan shape" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                            <TextBlock Grid.Row="9" x:Name="PgCapturedPlansNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="10" x:Name="PgCapturedPlansGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="Top Node" Binding="{Binding TopNodeType}" Width="150"/>
+                                    <DataGridTextColumn Header="Nodes" Binding="{Binding NodeCount}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
+                                    <!-- Ranked by total: a plan that takes 40ms constantly costs more than
+                                         one that took 900ms once, which is usually a cold cache. -->
+                                    <DataGridTextColumn Header="Total (ms)" Binding="{Binding TotalDurationMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Max (ms)" Binding="{Binding MaxDurationMs}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTextColumn Header="Avg (ms)" Binding="{Binding AvgDurationMs}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <!-- CAPTURES, not executions: the collector reads an overlapping tail
+                                         of the log, so this is a frequency signal rather than a count. -->
+                                    <DataGridTextColumn Header="Captures" Binding="{Binding Captures}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTemplateColumn Header="Plan (redacted)" Width="*">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding PlanJson}" TextTrimming="CharacterEllipsis" ToolTip="{Binding PlanJson}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
+                </TabControl>
+            </Grid>
+        </TabItem>
+
+        <!-- Vacuum (#2530, #2540). FOUR panels now, still one causal chain, still read top to bottom: a
+             session holds a transaction open, the transaction holds the xmin horizon, the horizon starves
+             vacuum, and vacuum falling behind ends in wraparound.
+
+             Session states is placed FIRST because it is the link UPSTREAM of what used to be panel 1. The
+             horizon grid names the CLASS of holder; only this grid names the session, and the fix is always
+             in whatever opened that transaction. It is also the only panel that can say a long
+             idle-in-transaction session pins NOTHING, which is the correction the rest of the tab cannot
+             make and the reason it has to be met before the vacuum backlog below it. -->
+        <TabItem x:Name="PgVacuumTab" Header="Vacuum" Visibility="Collapsed">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="2*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+</Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" x:Name="PgVacuumNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
+                <TextBlock Grid.Row="1" Text="1. Which session is holding a transaction open — and whether it pins anything at all" FontWeight="SemiBold" Margin="0,0,0,2"/>
+                <TextBlock Grid.Row="2" x:Name="PgSessionStatesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="3" x:Name="PgSessionStatesGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- LEAST severe first, so the LAST match wins. The three are not exclusive and
+                                 they are not degrees of one thing: amber is a session idle in transaction
+                                 that pins NOTHING (a held connection and its locks, costing vacuum zero),
+                                 red is a sustained xmin holder (the thing that actually starves vacuum),
+                                 and grey outranks both because a redacted row carries no trustworthy state
+                                 at all — painting it by a severity would assert exactly what the redaction
+                                 denies. -->
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsLongIdleTransaction}" Value="True">
+                                    <Setter Property="Background" Value="#33FFB86B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsSustainedHorizonHolder}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StateUnknown}" Value="True">
+                                    <Setter Property="Background" Value="#22808080"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="PID" Binding="{Binding Pid}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
+                        <DataGridTextColumn Header="Backend" Binding="{Binding BackendId}" Width="120"/>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
+                        <DataGridTextColumn Header="User" Binding="{Binding Username}" Width="110"/>
+                        <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="160"/>
+                        <DataGridTextColumn Header="Client" Binding="{Binding ClientAddr}" Width="120"/>
+                        <DataGridTextColumn Header="Backend Type" Binding="{Binding BackendType}" Width="120"/>
+                        <DataGridTextColumn Header="State" Binding="{Binding LastState}" Width="130"/>
+                        <!-- Immediately after the state, because it is the column that decides whether the
+                             state above it means anything: "pins nothing" here and the long idle duration
+                             two columns along is a forgotten commit, not a vacuum problem. -->
+                        <DataGridTextColumn Header="Pinned Horizon (peak)" Binding="{Binding PeakHorizonAge}" Width="160"/>
+                        <DataGridTextColumn Header="Held Horizon In" Binding="{Binding HorizonHoldShare}" Width="140"/>
+                        <DataGridTextColumn Header="Idle In Xact" Binding="{Binding IdleInTransactionShare}" Width="140"/>
+                        <DataGridTextColumn Header="Peak Xact" Binding="{Binding PeakXactDuration}" Width="110"/>
+                        <DataGridTextColumn Header="Peak State" Binding="{Binding PeakStateDuration}" Width="110"/>
+                        <DataGridTextColumn Header="Peak Query" Binding="{Binding PeakQueryDuration}" Width="110"/>
+                        <DataGridTextColumn Header="Backend Age" Binding="{Binding BackendAge}" Width="110"/>
+                        <DataGridTextColumn Header="Peak xmin Age" Binding="{Binding PeakXminAge}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTextColumn Header="Peak XID Age" Binding="{Binding PeakXidAge}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTextColumn Header="Last Wait" Binding="{Binding LastWait}" Width="150"/>
+                        <DataGridTextColumn Header="Command" Binding="{Binding LastCommandTag}" Width="110"/>
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding LastQueryId}" Width="140"/>
+                        <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="First Seen" Binding="{Binding FirstSeenAt}" Width="140"/>
+                        <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeenAt}" Width="140"/>
+                        <DataGridTextColumn Header="On The Instance" Binding="{Binding InstanceContext}" Width="220"/>
+                        <DataGridTemplateColumn Header="Caveats" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Caveats}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Caveats}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <TextBlock Grid.Row="4" Text="2. What holds the xmin horizon — vacuum cannot reclaim anything newer than this" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="5" x:Name="PgXminNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="6" x:Name="PgXminHorizonGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Cause" Binding="{Binding Source}" Width="200"/>
+                        <DataGridTextColumn Header="Holding Now" Binding="{Binding IsWinnerText}" Width="110"/>
+                        <DataGridTextColumn Header="xmin Age" Binding="{Binding XminAge}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTextColumn Header="Peak In Window" Binding="{Binding PeakXminAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Held In" Binding="{Binding WinnerShare}" Width="130"/>
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="140"/>
+                        <DataGridTextColumn Header="Holder" Binding="{Binding Holder}" Width="200"/>
+                        <DataGridTemplateColumn Header="Detail" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Detail}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <TextBlock Grid.Row="7" Text="3. Autovacuum backlog — ranked by how far past each table's OWN threshold it is, not by raw dead tuples" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="8" x:Name="PgAutovacuumNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="9" x:Name="PgAutovacuumGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding AutovacuumDisabled}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
+                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="120"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="200"/>
+                        <DataGridTextColumn Header="Autovacuum" Binding="{Binding AutovacuumState}" Width="110"/>
+                        <DataGridTextColumn Header="Dead Tuples" Binding="{Binding DeadTuples}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Live Tuples" Binding="{Binding LiveTuples}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Dead %" Binding="{Binding DeadTuplePct}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="Vacuum Threshold" Binding="{Binding VacuumThreshold}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Past Threshold" Binding="{Binding ThresholdRatio}" Width="120"/>
+                        <DataGridTextColumn Header="Dead Trend" Binding="{Binding DeadTupleTrend}" Width="130"/>
+                        <DataGridTextColumn Header="Inserts Since Vacuum" Binding="{Binding InsertsSinceVacuum}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
+                        <DataGridTextColumn Header="Insert Threshold" Binding="{Binding InsertVacuumThreshold}" Width="130"/>
+                        <DataGridTextColumn Header="Mods Since Analyze" Binding="{Binding ModsSinceAnalyze}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
+                        <DataGridTextColumn Header="Analyze Threshold" Binding="{Binding AnalyzeThreshold}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Autovacuum Runs" Binding="{Binding AutovacuumCount}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Last Autovacuum" Binding="{Binding LastAutovacuum}" Width="140"/>
+                        <DataGridTextColumn Header="Last Vacuum" Binding="{Binding LastVacuum}" Width="140"/>
+                        <DataGridTextColumn Header="Last Autoanalyze" Binding="{Binding LastAutoanalyze}" Width="140"/>
+                        <DataGridTextColumn Header="Last Analyze" Binding="{Binding LastAnalyze}" Width="140"/>
+                        <DataGridTextColumn Header="Size" Binding="{Binding TotalSize}" Width="110"/>
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <TextBlock Grid.Row="10" Text="4. Freeze headroom — how much transaction-ID space is left before the emergency vacuum, and before a shutdown" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="11" x:Name="PgWraparoundNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="12" x:Name="PgWraparoundGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
+                        <DataGridTextColumn Header="Frozen XID Age" Binding="{Binding FrozenXidAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="% To Emergency" Binding="{Binding PctTowardEmergencyVacuum}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="% To Wraparound" Binding="{Binding PctTowardWraparound}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="XIDs Left" Binding="{Binding XidsRemaining}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Freeze Max Age" Binding="{Binding FreezeMaxAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="MultiXID Age" Binding="{Binding MinMultiXidAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="% To MultiXID Emergency" Binding="{Binding PctTowardMultixactEmergency}" ElementStyle="{StaticResource NumericCell}" Width="170"/>
+                        <DataGridTextColumn Header="% To MultiXID Wraparound" Binding="{Binding PctTowardMultixactWraparound}" ElementStyle="{StaticResource NumericCell}" Width="180"/>
+                        <DataGridTextColumn Header="MultiXIDs Left" Binding="{Binding MultiXidsRemaining}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="MultiXID Freeze Max Age" Binding="{Binding MultixactFreezeMaxAge}" ElementStyle="{StaticResource NumericCell}" Width="170"/>
+                        <DataGridTextColumn Header="Peak XID Age" Binding="{Binding WindowPeakFrozenXidAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Peak MultiXID Age" Binding="{Binding WindowPeakMinMultiXidAge}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
+                        <DataGridTextColumn Header="Connections" Binding="{Binding ConnectionsAllowed}" Width="120"/>
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            
+                <TextBlock Grid.Row="13" Text="5. Can this server capture execution plans at all — and if not, which step is missing" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="14" x:Name="PgPlanCaptureNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="15" x:Name="PgPlanCaptureGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True"
+                          AutoGenerateColumns="False" IsReadOnly="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Facet" Binding="{Binding Facet}" Width="170"/>
+                        <DataGridTextColumn Header="Satisfied" Binding="{Binding Satisfied}" Width="80"/>
+                        <DataGridTextColumn Header="Observed" Binding="{Binding Observed}" Width="240"/>
+                        <DataGridTextColumn Header="What it means / what to do" Binding="{Binding Detail}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2661 deadlocks, last on Activity because they are blocking at its limit: a chain the
+                     server had to break by cancelling somebody. Below the blocking panels because blocking
+                     is the far more common finding, and a deadlock grid is usually empty. -->
+                <TextBlock Grid.Row="16" x:Name="PgDeadlocksNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="17" x:Name="PgDeadlocksGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150"/>
+                        <!-- The session the server cancelled. It is the end whose application saw an error,
+                             which is usually the only end anybody noticed. -->
+                        <DataGridTextColumn Header="Victim PID" Binding="{Binding VictimPid}" Width="90"/>
+                        <DataGridTextColumn Header="Sessions" Binding="{Binding ParticipantCount}" Width="80"/>
+                        <DataGridTextColumn Header="Lock Modes" Binding="{Binding LockModes}" Width="150"/>
+                        <DataGridTextColumn Header="Resources" Binding="{Binding Resources}" Width="220"/>
+                        <DataGridTextColumn Header="Victim Statement" Binding="{Binding VictimStatement}" Width="*"/>
+                        <!-- Re-reads of the SAME report, not repeats: the collector re-reads an overlapping
+                             log tail on purpose, and a genuinely repeated deadlock is its own row. -->
+                        <DataGridTextColumn Header="Sightings" Binding="{Binding TimesSeen}" Width="80"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </TabItem>
+
+        <TabItem x:Name="PgWaitsTab" Header="Waits" Visibility="Collapsed">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" x:Name="PgWaitsNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="1" x:Name="PgWaitStatsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Wait Type" Binding="{Binding WaitType}" Width="200"/>
+                        <DataGridTextColumn Header="Wait Event" Binding="{Binding WaitEvent}" Width="260"/>
+                        <DataGridTextColumn Header="Waits" Binding="{Binding TotalWaits}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTextColumn Header="Total Wait (ms)" Binding="{Binding TotalWaitTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Avg Wait (ms)" Binding="{Binding AvgWaitTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <!-- #2603. A SIBLING of the panel above rather than a replacement: that one reads
+                     Aurora's aurora_stat_system_waits() and exists only there, this one reads
+                     pg_wait_sampling and attributes each wait to the QUERY that waited, on any
+                     PostgreSQL that loads the module. On most servers exactly one of the two has
+                     rows, and which one it is says which instrument the server offers. -->
+                <TextBlock Grid.Row="2" x:Name="PgWaitSamplingNote" FontSize="12" Margin="0,12,0,8" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="3" x:Name="PgWaitSamplingGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <!-- CPU/Running is not a wait: it is the backend on processor, which the
+                             module reports as a NULL event and this labels rather than leaving blank. -->
+                        <DataGridTextColumn Header="Class" Binding="{Binding EventType}" Width="110"/>
+                        <DataGridTextColumn Header="Event" Binding="{Binding Event}" Width="200"/>
+                        <!-- ESTIMATED, and the header says so: samples x profile period from a
+                             sampling profiler, not a measured duration. -->
+                        <DataGridTextColumn Header="Est. Wait (ms)" Binding="{Binding EstimatedWaitMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Backends" Binding="{Binding BackendCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <!-- Zero means the wait belonged to no statement - a background process -
+                             rather than an unknown query. Joins pg_statement_stats.queryid. -->
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="180"/>
+                        <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
+                        <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </TabItem>
+
+        <TabItem x:Name="PgIoTab" Header="I/O" Visibility="Collapsed">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" x:Name="PgIoNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="1" x:Name="PgIoStatsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Backend" Binding="{Binding BackendType}" Width="160"/>
+                        <DataGridTextColumn Header="Object" Binding="{Binding ObjectType}" Width="140"/>
+                        <!-- The context's MEANING rides as the cell tooltip. It is the dimension with no SQL
+                             Server counterpart and the one that changes the remedy, but it is a paragraph;
+                             one copy, from the shared reader that produces the value. -->
+                        <DataGridTemplateColumn Header="Context" Width="140">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Context}" TextTrimming="CharacterEllipsis" ToolTip="{Binding ContextMeaning}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Reads" Binding="{Binding Reads}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Read Time (ms)" Binding="{Binding ReadTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Avg Read (ms)" Binding="{Binding AvgReadMs}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTextColumn Header="% Read Time" Binding="{Binding PctOfTotalReadTime}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Hits" Binding="{Binding Hits}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Hit %" Binding="{Binding HitPct}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="Extends" Binding="{Binding Extends}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Extend Time (ms)" Binding="{Binding ExtendTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Evictions" Binding="{Binding Evictions}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Reuses" Binding="{Binding Reuses}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Writes" Binding="{Binding Writes}" Width="120"/>
+                        <DataGridTextColumn Header="Write Time (ms)" Binding="{Binding WriteTimeMs}" Width="130"/>
+                        <DataGridTextColumn Header="Op Size" Binding="{Binding OpSize}" Width="100"/>
+                        <DataGridTextColumn Header="Read Volume" Binding="{Binding ReadVolume}" Width="120"/>
+                        <DataGridTextColumn Header="Write Volume" Binding="{Binding WriteVolume}" Width="120"/>
+                        <DataGridTextColumn Header="Stats Reset" Binding="{Binding StatsReset}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2544 write side. A metric PER ROW rather than one very wide row: the three source
+                     views are cluster-wide singletons, so a snapshot is a single row of 26 counters, and a
+                     26-column grid one row deep is unreadable and unsortable. Per-row also gives each
+                     metric somewhere to carry its own note, which matters here because several are NULL for
+                     a version reason rather than an absence-of-activity reason. -->
+                <TextBlock Grid.Row="2" x:Name="PgWriteStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="3" x:Name="PgWriteStatsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="130"/>
+                        <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="230"/>
+                        <DataGridTextColumn Header="Change Over Window" Binding="{Binding Value}" ElementStyle="{StaticResource NumericCell}" Width="180"/>
+                        <DataGridTextColumn Header="What It Means" Binding="{Binding Note}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2544 buffer pool contents. Third end of the same subject as the two grids above:
+                     pg_stat_io says who issued an I/O, the write panel says whether the server kept up, and
+                     this says what the memory is actually holding. -->
+                <TextBlock Grid.Row="4" x:Name="PgBufferUsageNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="5" x:Name="PgBufferUsageGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
+                        <!-- Blank means ANOTHER database's relation or a shared catalog, not a missing name:
+                             the pool is cluster-wide while pg_class is per-database. -->
+                        <DataGridTextColumn Header="Relation" Binding="{Binding RelationName}" Width="200"/>
+                        <DataGridTextColumn Header="Buffers" Binding="{Binding Buffers}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="% of Pool" Binding="{Binding PctOfPool}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Dirty" Binding="{Binding DirtyBuffers}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="% Dirty" Binding="{Binding PctDirty}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <!-- Clock-sweep usage count, 0-5. All at 0 or 1 means the relation is occupying
+                             memory it is not earning. -->
+                        <DataGridTextColumn Header="Avg Usage" Binding="{Binding AvgUsageCount}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Pool Used" Binding="{Binding PoolBuffersUsed}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Pool Total" Binding="{Binding PoolBuffersTotal}" ElementStyle="{StaticResource NumericCell}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </TabItem>
+
+        <TabItem x:Name="PgReplicationTab" Header="Replication" Visibility="Collapsed">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" x:Name="PgReplicationNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="1" x:Name="PgReplicationSlotsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- LEAST severe first. Both triggers set Background and WPF applies the LAST
+                                 match, and these two are not exclusive: an invalidated slot is usually also
+                                 inactive, because its subscriber has already gone. Declaring inactive last
+                                 would paint the informational amber over the red on exactly the rows that
+                                 need the red. -->
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsInactive}" Value="True">
+                                    <Setter Property="Background" Value="#33FFB86B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsInvalidated}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Slot" Binding="{Binding SlotName}" Width="200"/>
+                        <DataGridTextColumn Header="Type" Binding="{Binding SlotType}" Width="110"/>
+                        <DataGridTextColumn Header="Active" Binding="{Binding ActiveText}" Width="90"/>
+                        <DataGridTextColumn Header="WAL Status" Binding="{Binding WalStatus}" Width="120"/>
+                        <DataGridTextColumn Header="Conflicting" Binding="{Binding Conflicting}" Width="110"/>
+                        <DataGridTextColumn Header="Retained WAL" Binding="{Binding RetainedWal}" Width="130"/>
+                        <DataGridTextColumn Header="Retained Trend" Binding="{Binding RetainedWalTrend}" Width="140"/>
+                        <DataGridTextColumn Header="Safe WAL Left" Binding="{Binding SafeWalSize}" Width="130"/>
+                        <DataGridTextColumn Header="xmin Age" Binding="{Binding XminAge}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Catalog xmin Age" Binding="{Binding CatalogXminAge}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Inactive Since" Binding="{Binding InactiveSince}" Width="140"/>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
+                        <DataGridTextColumn Header="Plugin" Binding="{Binding Plugin}" Width="140"/>
+                        <DataGridTextColumn Header="Invalidation" Binding="{Binding InvalidationReason}" Width="220"/>
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2544 replication CONNECTIONS, beneath the slots grid. A slot is a promise to retain
+                     WAL and exists with nobody attached; this is who is actually streaming. Worst-in-window
+                     rides beside the latest value because a replica that drifts far behind and recovers
+                     looks perfect in any single sample. -->
+                <TextBlock Grid.Row="2" x:Name="PgReplicationStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="3" x:Name="PgReplicationStatsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Standby" Binding="{Binding ApplicationName}" Width="150"/>
+                        <DataGridTextColumn Header="Client" Binding="{Binding ClientAddr}" Width="140"/>
+                        <DataGridTextColumn Header="State" Binding="{Binding State}" Width="110"/>
+                        <!-- A sync standby falling behind BLOCKS COMMITS on the primary, so the same lag is
+                             a different severity here than for an async one. -->
+                        <DataGridTextColumn Header="Sync" Binding="{Binding SyncState}" Width="90"/>
+                        <DataGridTextColumn Header="Replay Behind (bytes)" Binding="{Binding ReplayBytesBehind}" ElementStyle="{StaticResource NumericCell}" Width="160"/>
+                        <DataGridTextColumn Header="Worst Behind (bytes)" Binding="{Binding WorstReplayBytesBehind}" ElementStyle="{StaticResource NumericCell}" Width="160"/>
+                        <DataGridTextColumn Header="Replay Lag (ms)" Binding="{Binding ReplayLagMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Worst Lag (ms)" Binding="{Binding WorstReplayLagMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <!-- Seen in far fewer samples than were taken means the standby has been
+                             DISCONNECTING, which every other column reports as healthy. -->
+                        <DataGridTextColumn Header="Seen In" Binding="{Binding Samples}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="Of Samples" Binding="{Binding TotalSamples}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Connected Since" Binding="{Binding BackendStart}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </TabItem>
+
+        <!-- Storage (#2541, #2542). Two grids, bloat above index usage: the bloat number is an ESTIMATE
+             and the more dangerous of the two to act on, so it is read first and its note says so before
+             any percentage is visible. -->
+        <TabItem x:Name="PgStorageTab" Header="Storage" Visibility="Collapsed">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" x:Name="PgStorageNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <TextBlock Grid.Row="1" x:Name="PgTableBloatNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="2" x:Name="PgTableBloatGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- A SUPPRESSED estimate is painted last and therefore wins, because it is not
+                                 a severity at all: the row has no trustworthy percentage, and colouring it
+                                 by one would be the exact mistake this whole surface exists to avoid. -->
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsHighBloat}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding EstimateSuppressed}" Value="True">
+                                    <Setter Property="Background" Value="#22808080"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
+                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="110"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="180"/>
+                        <DataGridTextColumn Header="Heap" Binding="{Binding HeapSize}" Width="100"/>
+                        <DataGridTextColumn Header="Bloat (est.)" Binding="{Binding BloatEstimate}" Width="120"/>
+                        <DataGridTextColumn Header="Bloat % (est.)" Binding="{Binding BloatPctEstimate}" Width="120"/>
+                        <DataGridTextColumn Header="Dead Tuples" Binding="{Binding DeadTuplePct}" Width="120"/>
+                        <DataGridTextColumn Header="TOAST" Binding="{Binding ToastSize}" Width="100"/>
+                        <DataGridTextColumn Header="Indexes" Binding="{Binding IndexSize}" Width="100"/>
+                        <DataGridTextColumn Header="Heap Growth" Binding="{Binding HeapGrowth}" Width="120"/>
+                        <DataGridTextColumn Header="Confidence" Binding="{Binding Confidence}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock Grid.Row="3" x:Name="PgIndexUsageNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="4" x:Name="PgIndexUsageGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
+                            <!-- LEAST severe first, so the LAST match wins. An index can be both unscanned
+                                 and invalid; invalid is the stronger statement and must not be painted over
+                                 by the softer amber. -->
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsUnscanned}" Value="True">
+                                    <Setter Property="Background" Value="#33FFB86B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsInvalid}" Value="True">
+                                    <Setter Property="Background" Value="#33FF6B6B"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                        <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="200"/>
+                        <DataGridTextColumn Header="Size" Binding="{Binding IndexSize}" Width="100"/>
+                        <DataGridTextColumn Header="Scans in Window" Binding="{Binding ScansInWindow}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Lifetime Scans" Binding="{Binding TotalScans}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Last Scan" Binding="{Binding LastScan}" Width="140"/>
+                        <DataGridTextColumn Header="Blocks" Binding="{Binding BlockAccesses}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="Can It Go?" Binding="{Binding Droppability}" Width="220"/>
+                        <DataGridTextColumn Header="Definition" Binding="{Binding IndexDefinition}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2543 column statistics. The INPUT the bloat estimate above is computed from, and an
+                     answer in its own right: a plan says what the planner did, these say why it thought so.
+                     Deliberately carries NO most_common_vals or histogram_bounds - those hold raw column
+                     values, and collecting them would copy customer data into the monitoring store. -->
+                <TextBlock Grid.Row="5" x:Name="PgColumnStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="6" x:Name="PgColumnStatsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <!-- These statistics describe ONE database and the collector sweeps every database
+                             on the target, so the schema/table pair alone does not identify a row. -->
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
+                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="120"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="180"/>
+                        <DataGridTextColumn Header="Column" Binding="{Binding ColumnName}" Width="160"/>
+                        <DataGridTextColumn Header="Top Value Share" Binding="{Binding TopValueFrequency}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Correlation" Binding="{Binding Correlation}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <!-- NEGATIVE IS A RATIO of row count, not a count: -1 means distinct is about every
+                             row. The header says so because the number alone reads as nonsense. -->
+                        <DataGridTextColumn Header="Distinct (neg = ratio)" Binding="{Binding NDistinct}" ElementStyle="{StaticResource NumericCell}" Width="160"/>
+                        <DataGridTextColumn Header="Null Frac" Binding="{Binding NullFrac}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Avg Width" Binding="{Binding AvgWidth}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Common Values" Binding="{Binding CommonValueCount}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Captured" Binding="{Binding CaptureTime}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <!-- #2603 qualstats. The other half of the index question: the grids above record
+                     indexes that were USED, this records predicates that were EVALUATED - including the
+                     ones with no index behind them, which nothing else here can see because nothing
+                     records a scan that had no index to record. -->
+                <TextBlock Grid.Row="7" Text="Predicates and planner estimate error - index candidates, and columns the planner misjudges" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="8" x:Name="PgPredicateStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="9" x:Name="PgPredicateStatsGrid" Style="{StaticResource DarkGrid}"
+                          ContextMenu="{StaticResource PredicateStatsContextMenu}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
+                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="100"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                        <DataGridTextColumn Header="Column" Binding="{Binding ColumnName}" Width="150"/>
+                        <!-- The operator changes whether an index would help at all: '~~' is LIKE. -->
+                        <DataGridTextColumn Header="Op" Binding="{Binding Operator}" Width="70"/>
+                        <DataGridTextColumn Header="Filtered %" Binding="{Binding FilteredPct}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Rows Evaluated" Binding="{Binding RowsEvaluated}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <!-- Large means the plan was built on a wrong row count, which an index alone
+                             will not fix - a different problem from poor selectivity. -->
+                        <DataGridTextColumn Header="Est. Error x" Binding="{Binding WorstEstimateErrorRatio}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <!-- Usually NOT 1: the extension defaults to 1/max_connections, so these counts
+                             are a sample and the panel has to say so. -->
+                        <DataGridTextColumn Header="Sample Rate" Binding="{Binding SampleRate}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2561 index bloat, MEASURED via pgstatindex rather than estimated. Sits under index
+                     usage because the two are halves of one question: is this index earning its keep, and
+                     is it wasting space doing it. Ranked by reclaimable BYTES, never by density. -->
+                <TextBlock Grid.Row="7" x:Name="PgIndexBloatNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="8" x:Name="PgIndexBloatGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
+                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="110"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                        <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="190"/>
+                        <DataGridTextColumn Header="Size (bytes)" Binding="{Binding IndexBytes}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Reclaimable (est.)" Binding="{Binding EstimatedReclaimableBytes}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
+                        <!-- The server's RAW figure. A healthy index sits near 90, so this is NOT
+                             100-minus-bloat and the header deliberately does not imply it is. -->
+                        <DataGridTextColumn Header="Leaf Density %" Binding="{Binding AvgLeafDensity}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Fragmentation %" Binding="{Binding LeafFragmentation}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Empty Pages" Binding="{Binding EmptyPages}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTemplateColumn Header="Not Measured Because" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding SkippedReason}" TextTrimming="CharacterEllipsis" ToolTip="{Binding SkippedReason}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>

@@ -18,6 +18,7 @@
     "enabled": true,
     "port": 5153,
     "network": {
+      "// tls": "Without this the token above and the session cookie it mints cross the network in the clear, and allowFrom 0.0.0.0/0 bounds nothing. To enable: mount a PEM pair as the web_tls_cert / web_tls_key secrets (see docker-compose.yml) and add \"tls\": { \"certPath\": \"/run/secrets/web_tls_cert\", \"keyPath\": \"/run/secrets/web_tls_key\" } here. A bad or expired certificate keeps the dashboard loopback-only rather than falling back to HTTP, which in a container means unreachable — that is the intended failure.",
       "listen": "0.0.0.0",
       "allowFrom": "0.0.0.0/0",
       "token": "file:/run/secrets/web_token"

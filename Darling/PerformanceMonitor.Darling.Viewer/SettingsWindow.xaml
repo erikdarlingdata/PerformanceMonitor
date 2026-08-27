@@ -439,6 +439,19 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertFileGrowthCheckBox" Content="Database file grew over" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertFileGrowthRiseMbBox" Width="60" Text="10240" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="MB within" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertFileGrowthLookbackMinutesBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="min, or is over" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertFileGrowthVolumePercentBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="% of its volume (0 disables either gate)" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>

@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Tests;
 ///
 /// <para><b>The defect.</b> <c>query_hash</c> is a SHAPE hash, so dynamic SQL built with per-value literals
 /// fragments one logical statement across as many hashes as there are literal sets — measured at 21 for a single
-/// <c>API.GetInventoryWithLabsV5</c> statement on <c>prod-pos-use2-apex-01</c>. Ranking by hash therefore
+/// <c>API.GetInventoryWithLabsV5</c> statement on <c>prod-sql-use2-alpha-01</c>. Ranking by hash therefore
 /// STRUCTURALLY cannot surface it: two fragments together were 58-65% of the instance's worker_time in every
 /// window sampled, while the hash never entered the 168-hour top 20 and the ranking as a whole accounted for
 /// roughly a tenth of the box's CPU. Nothing in the output said so.</para>

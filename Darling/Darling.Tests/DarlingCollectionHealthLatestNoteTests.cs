@@ -209,22 +209,103 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
         }
     }
 
+    /// <summary>
+    /// #2460, Darling half: the two duration statistics, against a REAL Postgres, on the population that
+    /// motivated them. A source pin cannot tell PERCENTILE_DISC from AVG — both are valid SQL returning
+    /// one number — and the whole finding is that one of those numbers describes no run that ever ran.
+    ///
+    /// <para>The fixture is prod-sql-use2-multi-49's query_store at 1/11.55 scale, same 83/17 shape: 83
+    /// runs carrying the empty-enumeration note at the 36 ms prod-sql-use2-alpha-01 measurably pays for it,
+    /// and 17 productive runs at the ~80,933 ms the store's own numbers force. Lite.Tests pins the
+    /// IDENTICAL fixture and the identical expected values against live DuckDB, which is the parity that
+    /// matters: the two engines were asked the same question and had to give the same answer, including
+    /// on the NULL-duration row — an ordered-set aggregate ignoring nulls is engine behaviour neither
+    /// query states, and a p95 that came back NULL would silently collapse to the mean.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheDurationStatistics_SplitABimodalCollector_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live duration-statistics test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            for (var i = 0; i < 83; i++)
+            {
+                await SeedDurationAsync(connection, ct, "query_store", MinutesAgo(600 - i), 36,
+                    EnumeratedCollectorDriver.EmptyEnumerationMessage);
+            }
+
+            for (var i = 0; i < 17; i++)
+            {
+                await SeedDurationAsync(connection, ct, "query_store", MinutesAgo(400 - i), 80_933, null);
+            }
+
+            /* A failed run with no duration recorded. */
+            await SeedDurationAsync(connection, ct, "query_store", MinutesAgo(300), null, null, "ERROR");
+
+            await using var postgres = NpgsqlDataSource.Create(cs!);
+            var health = await DarlingDataReader.GetCollectionHealthAsync(
+                postgres, ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-7)), ct);
+            var queryStore = health.Single(h => h.CollectorName == "query_store");
+
+            Assert.Equal(101, queryStore.TotalRuns);
+            Assert.Equal(83, queryStore.NoteCount);
+
+            Assert.Equal(13_788.49, queryStore.AvgDurationMs, 2);
+            Assert.Equal(80_933, queryStore.MaxDurationMs, 3);
+            Assert.Equal(80_933, queryStore.P95DurationMs, 3);
+
+            /* The finding, as an assertion: one number says this collector fits a body four times over,
+               the other says one run of it does not fit at all, and both are honest about the same 101
+               runs. Charged its mean, the aligned cycle called it 23% of a body; charged its heavy run,
+               135% of one. */
+            Assert.True(queryStore.AvgDurationMs < SweepPressureClassifier.SweepBudgetMs,
+                $"the mean was {queryStore.AvgDurationMs} ms");
+            Assert.True(queryStore.P95DurationMs > SweepPressureClassifier.SweepBudgetMs,
+                $"a heavy run was {queryStore.P95DurationMs} ms");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
     /* ── helpers ── */
 
     /// <summary>Whole seconds so the assertions can compare ticks against what Postgres stored.</summary>
     private static DateTime MinutesAgo(int minutes) =>
         DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-minutes));
 
-    private static async Task SeedAsync(
+
+    private static Task SeedAsync(
         NpgsqlConnection connection, CancellationToken ct,
         string collector, DateTime collectionTimeUtc, string status, string? message) =>
+        SeedDurationAsync(connection, ct, collector, collectionTimeUtc, 100, message, status);
+
+    /// <summary>#2460: the same seed with the run's own duration_ms spelled out, null included.</summary>
+    private static async Task SeedDurationAsync(
+        NpgsqlConnection connection, CancellationToken ct,
+        string collector, DateTime collectionTimeUtc, int? durationMs, string? message, string status = "SUCCESS") =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO collection_log
     (log_id, server_id, server_name, collector_name, collection_time,
      duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             CollectionIdGenerator.Next(), ServerId, ServerName, collector,
-            DarlingMcpTestData.Naive(collectionTimeUtc), 100, status, message, 10, 80, 20);
+            DarlingMcpTestData.Naive(collectionTimeUtc), durationMs, status, message, 10, 80, 20);
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

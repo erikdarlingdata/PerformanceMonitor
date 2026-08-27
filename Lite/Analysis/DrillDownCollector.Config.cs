@@ -18,9 +18,9 @@ public partial class DrillDownCollector
 {
     private async Task CollectConfigIssues(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -36,8 +36,8 @@ ORDER BY database_name";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             var issues = new List<string>();
             if (!reader.IsDBNull(2) && reader.GetBoolean(2)) issues.Add("auto_shrink ON");

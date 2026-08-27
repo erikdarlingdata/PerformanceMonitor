@@ -261,7 +261,13 @@ public partial class MainWindow
         var isFavorite = _serverStore.ToggleFavorite(server.ServerName);
         server.IsFavorite = isFavorite;
         ReapplyFavoritesToServerList();
-        StatusText.Text = isFavorite ? $"Pinned {server.DisplayName}" : $"Unpinned {server.DisplayName}";
+
+        /* #2434: the status line is this action's whole report, so it must not say the pin happened when
+           viewer-servers.json refused the write — the star would be back where it was on the next launch
+           with nothing said. The store's log line has the reason; this is the half the user sees. */
+        StatusText.Text = _serverStore.LastSaveSucceeded
+            ? (isFavorite ? $"Pinned {server.DisplayName}" : $"Unpinned {server.DisplayName}")
+            : $"Could not save the pin for {server.DisplayName} — see the viewer log. It will be back as it was on the next launch.";
     }
 
     private async void ServerContextMenu_Edit_Click(object sender, RoutedEventArgs e)
@@ -321,7 +327,10 @@ public partial class MainWindow
         try
         {
             await _dataService.DeleteMonitoredServerAsync(server.ServerId);
-            /* Drop the viewer-local favorite pin + alert-acknowledgement state for the gone server. */
+            /* Drop the viewer-local favorite pin + alert-acknowledgement state for the gone server.
+               Deliberately not gated on the write (#2434), unlike the pin toggle and the import above:
+               this is removing a pin for a server that no longer exists, so a refused write leaves a stale
+               entry nothing reads rather than losing anything the operator would miss. The store logs it. */
             _serverStore.SetFavorite(server.ServerName, false);
             _alertStateService.RemoveServerState(server.ServerId);
             await LoadServersAsync(preserveSelection: true);
@@ -676,7 +685,17 @@ public partial class MainWindow
                 pushedToStore = await ViewerServerMigration.ImportFromStoreAsync(_serverStore, ProfileStore, _dataService);
             }
 
-            var message = $"Imported {imported} server definition(s).";
+            /* #2434: "Imported N" is a claim about a file, and the registry write behind it can refuse —
+               it does when viewer-servers.json could not be read AND could not be copied aside, which is
+               exactly when the operator most needs to be told rather than reassured. Only checked when
+               something was actually imported: with nothing to write, no write was attempted. */
+            var registrySaved = imported == 0 || _serverStore.LastSaveSucceeded;
+
+            var message = registrySaved
+                ? $"Imported {imported} server definition(s)."
+                : $"Read {imported} server definition(s), but they could not be saved to "
+                  + $"{Path.GetFileName(ViewerServerStore.DefaultFilePath())} — see the viewer log. They will "
+                  + "not be there on the next launch.";
             if (skipped > 0)
             {
                 message += $"\nSkipped {skipped} already-configured server(s).";
@@ -692,7 +711,8 @@ public partial class MainWindow
             message += "\n\nServer credentials are NOT importable (they live only in Windows Credential Manager, " +
                        "per user). Re-enter any SQL/service-principal secret in Manage Servers.";
 
-            MessageBox.Show(message, "Import Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(message, "Import Settings", MessageBoxButton.OK,
+                registrySaved ? MessageBoxImage.Information : MessageBoxImage.Warning);
 
             if (imported > 0 || pushedToStore > 0)
             {

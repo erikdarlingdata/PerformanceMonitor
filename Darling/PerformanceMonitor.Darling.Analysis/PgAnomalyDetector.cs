@@ -40,9 +40,10 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// Postgres discipline (see PgFindingStore): the SQL is Lite-verbatim against the
 /// V4 passthrough views (already dialect-shared — no QUALIFY in the detector
 /// queries), with every window bound a naive-UTC Kind-Unspecified parameter.
-/// Lite's SQL contains no bare NOW()/CURRENT_TIMESTAMP; the one C#-side "now"
-/// (the 30-day baseline-data gate in <see cref="HasBaselineDataSql"/>'s $2) is
-/// bound as a naive-UTC parameter exactly like Lite binds DateTime.UtcNow.
+/// Lite's SQL contains no bare NOW()/CURRENT_TIMESTAMP; the 30-day baseline-data
+/// gate in <see cref="HasBaselineDataSql"/>'s $2 is bound as a naive-UTC parameter
+/// exactly like Lite binds it, and since #2506 comes off the window's end rather
+/// than off the clock, so every bound in this class is window-derived.
 /// SQL is exposed const so Darling.Tests can pin the dialect ungated
 /// ($N positional parameters, no QUALIFY, no bare now(), no N'' literals) —
 /// the PgFindingStore/DarlingAlertReadAdapter pattern.
@@ -106,7 +107,13 @@ public class PgAnomalyDetector
         var anomalies = new List<Fact>();
 
         // Check if baseline period has any data at all — if not, skip all anomaly detection.
-        if (!await HasBaselineDataAsync(context.ServerId, context.CancellationToken))
+        /* #2506: the gate's 30 days are measured back from the WINDOW's end, not from the clock. Every
+           other bound in this class already comes off context.TimeRangeStart/End, and the baseline this
+           gate is guarding is computed at context.TimeRangeStart too — so asking "was anything collected
+           in the 30 days before now" while the baseline reads the 30 days before an anchored window was
+           the one place the two could disagree. Identical for an unanchored pass, whose TimeRangeEnd IS
+           now. */
+        if (!await HasBaselineDataAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken))
             return anomalies;
 
         // Existing detection methods (upgraded to time-bucketed baselines)
@@ -129,8 +136,10 @@ public class PgAnomalyDetector
 
     /// <summary>
     /// Baseline-data gate: wait_stats as canary — if waits are collected, other data is too.
-    /// $2 is the ONLY "now"-derived bound in this class (DateTime.UtcNow.AddDays(-30), bound
-    /// naive-UTC Kind-Unspecified — never a bare now(), which would be timestamptz).
+    /// $2 is <c>context.TimeRangeEnd.AddDays(-30)</c>, bound naive-UTC Kind-Unspecified — never a bare
+    /// now(), which would be timestamptz. It was <c>DateTime.UtcNow.AddDays(-30)</c> until #2506; the
+    /// two are the same value on every unanchored pass, and only the window-derived form stays correct
+    /// when the pass is anchored at a past instant.
     /// </summary>
     public const string HasBaselineDataSql = @"
 SELECT (SELECT COUNT(*) FROM v_wait_stats
@@ -365,7 +374,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 }
             }
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Object stats anomaly detection failed: {Message}", ex.Message);
         }
@@ -375,7 +384,7 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// Checks if the server has enough historical data for meaningful baselines.
     /// Uses wait_stats as canary — if waits are collected, other data is too.
     /// </summary>
-    private async Task<bool> HasBaselineDataAsync(int serverId, CancellationToken cancellationToken)
+    private async Task<bool> HasBaselineDataAsync(int serverId, DateTime windowEnd, CancellationToken cancellationToken)
     {
         try
         {
@@ -383,14 +392,14 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             using var cmd = new NpgsqlCommand(HasBaselineDataSql, connection);
             cmd.Parameters.AddWithValue(serverId);
-            /* Lite binds DateTime.UtcNow.AddDays(-30) here too — the parameterized "now",
-               made Kind-Unspecified for the naive-UTC timestamp columns. */
-            cmd.Parameters.AddWithValue(AsNaive(DateTime.UtcNow.AddDays(-30)));
+            /* Lite binds the same window end minus 30 days here — the parameterized "now" (or the
+               #2506 anchor), made Kind-Unspecified for the naive-UTC timestamp columns. */
+            cmd.Parameters.AddWithValue(AsNaive(windowEnd.AddDays(-30)));
 
             var count = Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken) ?? 0);
             return count > 0;
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
             /* Silent on a genuine fault BY DESIGN (Lite's gate posture: an unreadable canary reads
                as "no baseline data" and detection just sits out the pass) — but shutdown residue is
@@ -462,7 +471,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] CPU anomaly detection failed: {Message}", ex.Message);
         }
@@ -573,7 +582,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Wait anomaly detection failed: {Message}", ex.Message);
         }
@@ -671,7 +680,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 });
             }
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Blocking anomaly detection failed: {Message}", ex.Message);
         }
@@ -763,7 +772,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 });
             }
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] I/O anomaly detection failed: {Message}", ex.Message);
         }
@@ -827,7 +836,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Batch request anomaly detection failed: {Message}", ex.Message);
         }
@@ -891,7 +900,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Session anomaly detection failed: {Message}", ex.Message);
         }
@@ -956,7 +965,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Query duration anomaly detection failed: {Message}", ex.Message);
         }
@@ -1022,7 +1031,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Memory anomaly detection failed: {Message}", ex.Message);
         }

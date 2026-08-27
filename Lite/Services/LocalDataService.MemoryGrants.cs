@@ -60,12 +60,12 @@ ORDER BY collection_time";
     /// Gets memory grant chart data aggregated by collection_time and pool_id
     /// for the Memory Grants sub-tab charts.
     /// </summary>
-    public async Task<List<MemoryGrantChartPoint>> GetMemoryGrantChartDataAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<MemoryGrantChartPoint>> GetMemoryGrantChartDataAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -117,12 +117,12 @@ ORDER BY collection_time, pool_id";
     /// <see cref="GetMemoryGrantChartDataAsync"/>, which aggregates a per-pool grant subset for the charts;
     /// this returns one row per (pool_id, resource_semaphore_id) with the ceiling metrics intact.
     /// </summary>
-    public async Task<List<ResourceSemaphoreRow>> GetResourceSemaphoreSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<ResourceSemaphoreRow>> GetResourceSemaphoreSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH latest AS

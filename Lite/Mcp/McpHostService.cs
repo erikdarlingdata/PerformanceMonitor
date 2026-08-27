@@ -27,6 +27,13 @@ public sealed class McpHostService : BackgroundService
     private readonly int _port;
     private WebApplication? _app;
 
+    /// <summary>
+    /// The port this host was built to listen on. Exposed so a caller reporting the endpoint's state asks
+    /// the running host rather than re-reading settings.json, which can have become unreadable since the
+    /// host started and would then answer with a default that is not the live port (#2431).
+    /// </summary>
+    public int Port => _port;
+
     public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port)
     {
         _dataService = dataService;

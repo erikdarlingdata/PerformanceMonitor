@@ -8,9 +8,9 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -92,6 +92,9 @@ public sealed class ViewerPreferencesStore
 {
     private static readonly JsonSerializerOptions s_jsonOptions = new() { WriteIndented = true };
 
+    /// <summary>The <see cref="ViewerLogger"/> source every diagnostic from this store is filed under.</summary>
+    private const string LogSource = "ViewerPreferencesStore";
+
     private readonly string _filePath;
 
     /// <param name="filePath">Override the on-disk location (tests pass a temp file); null uses <see cref="DefaultFilePath"/>.</param>
@@ -103,6 +106,26 @@ public sealed class ViewerPreferencesStore
     /// <summary>The resolved settings file path (surfaced mainly so tests and diagnostics can name it).</summary>
     public string FilePath => _filePath;
 
+    /// <summary>
+    /// What the last <see cref="Load"/> on this instance found. Same three-way split as
+    /// <see cref="ViewerAppSettingsStore.LastLoadState"/>, and for the same reason: a missing
+    /// viewer-preferences.json is a first run and must stay silent, while a present one that could not be
+    /// read is a configuration the viewer is currently ignoring.
+    /// </summary>
+    public SettingsFileState LastLoadState { get; private set; } = SettingsFileState.Absent;
+
+    /// <summary>Why the last <see cref="Load"/> could not read the file, or null when it could.</summary>
+    public string? LastLoadProblem { get; private set; }
+
+    /// <summary>
+    /// The settings the last <see cref="Load"/> could not read, by NAME, and empty when there were none
+    /// (#2456). Non-empty means the rest of the file loaded normally and only these reverted to their
+    /// defaults — the distinction <see cref="LastLoadProblem"/> alone cannot make, and the reason the
+    /// startup dialog can now say which settings were lost instead of only where the parse stopped.
+    /// </summary>
+    public IReadOnlyList<SettingsMemberProblem> LastLoadUnreadableMembers { get; private set; } =
+        Array.Empty<SettingsMemberProblem>();
+
     /// <summary>%APPDATA%\PerformanceMonitorDarling\viewer-preferences.json.</summary>
     public static string DefaultFilePath()
     {
@@ -113,42 +136,29 @@ public sealed class ViewerPreferencesStore
     }
 
     /// <summary>
-    /// Reads the settings, returning defaults when the file does not exist yet or cannot be read/parsed —
-    /// the viewer never blocks on a first run or a corrupt file. Loaded values are clamped to valid ranges.
+    /// Reads the preferences, returning defaults when the file does not exist yet or cannot be
+    /// read/parsed. Loaded values are clamped to valid ranges. A present-but-unreadable file is reported
+    /// rather than silently treated as absent (#2434).
     /// </summary>
     public ViewerPreferences Load()
     {
-        try
-        {
-            if (!File.Exists(_filePath))
-            {
-                return new ViewerPreferences();
-            }
-
-            var json = File.ReadAllText(_filePath);
-            var preferences = JsonSerializer.Deserialize<ViewerPreferences>(json, s_jsonOptions);
-            return (preferences ?? new ViewerPreferences()).Normalize();
-        }
-        catch (Exception ex)
-        {
-            /* The viewer writes no application log of its own (its diagnostics go to Debug output), so a
-               corrupt-file fallback is a Debug trace, not a log entry — and never a crash on startup. */
-            Debug.WriteLine($"ViewerPreferencesStore: failed to load '{_filePath}', using defaults: {ex.Message}");
-            return new ViewerPreferences();
-        }
+        var read = ViewerSettingsFile.Load<ViewerPreferences>(_filePath, LogSource, s_jsonOptions);
+        LastLoadState = read.State;
+        LastLoadProblem = read.Problem;
+        LastLoadUnreadableMembers = read.UnreadableMembers ?? Array.Empty<SettingsMemberProblem>();
+        return read.Value!.Normalize();
     }
 
-    /// <summary>Writes the settings as indented JSON, creating the app-data directory on first save.</summary>
-    public void Save(ViewerPreferences preferences)
+    /// <summary>
+    /// Writes the preferences as indented JSON, creating the app-data directory on first save, and returns
+    /// whether the write happened. Collapsing a sidebar group is a whole-file rewrite of this document and
+    /// nobody thinks of it as a save, which is precisely why the unreadable case is copied aside first and
+    /// a refusal is reported rather than swallowed (#2434).
+    /// </summary>
+    public bool Save(ViewerPreferences preferences)
     {
         ArgumentNullException.ThrowIfNull(preferences);
 
-        var directory = Path.GetDirectoryName(_filePath);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        File.WriteAllText(_filePath, JsonSerializer.Serialize(preferences, s_jsonOptions));
+        return ViewerSettingsFile.Save(_filePath, preferences, LogSource, s_jsonOptions);
     }
 }

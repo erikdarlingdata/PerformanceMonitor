@@ -32,7 +32,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// Darling twin of Lite's <c>_lastCollectionNote</c>; null (the default) leaves the row's message column
 /// null exactly as before.
 /// </summary>
-public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs, string? Note = null);
+/// <param name="Fanout">
+/// The per-database rollup for a run that fanned out, null for one that did not (#2472). Defaulted because
+/// the great majority of construction sites here are the early returns of runs that never reached a fan-out
+/// — a single query, an enumeration that yielded nothing — and null is their correct answer rather than a
+/// value they forgot to supply. The one site that MUST set it is the success return.
+/// </param>
+public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs, string? Note = null, FanoutCost? Fanout = null);
 
 /// <summary>
 /// Runs a shared collector definition against one monitored server and binary-COPYs the rows
@@ -179,6 +185,40 @@ public sealed class DarlingCollectorRunner
            false = 'none': plain text into query_plan_xml so direct-SQL consumers read it bare.
            The worker passes () => config.PlanXmlCompression == "gzip"; tests pass a constant. */
         _compressPlanContent = compressPlanContent ?? (() => true);
+    }
+
+    /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
+       in-memory by design (#2538), and a fresh instance every cycle would silently re-read the same tail
+       forever while looking like it was making progress. */
+    private RdsPlanIngestor? _rdsPlans;
+
+    /// <summary>
+    /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
+    ///
+    /// <para>Reported as a normal <see cref="CollectorRunResult"/> so the cycle accounts for it exactly like
+    /// a collector: same <c>collection_log</c> row, same rows-collected number, same health surface. The
+    /// TRANSPORT differs; the bookkeeping should not, or an operator would have to know which route a
+    /// target used before they could read its collection history.</para>
+    /// </summary>
+    public async Task<CollectorRunResult> IngestRdsPlansAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
+    {
+        _rdsPlans ??= new RdsPlanIngestor(_postgres, logger: _logger);
+
+        var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        var started = Stopwatch.GetTimestamp();
+
+        var rows = await _rdsPlans.IngestAsync(
+            server.ServerId, server.StorageName, host, cancellationToken);
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
+           filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
+           different from every other target's. */
+        return new CollectorRunResult(rows, 0, elapsedMs,
+            rows == 0 ? "no new auto_explain plans in the RDS log window" : null);
     }
 
     public async Task<CollectorRunResult> RunAsync<TRow>(
@@ -328,6 +368,13 @@ public sealed class DarlingCollectorRunner
         long storageMs = 0;
         var rowsWritten = 0;
 
+        /* The per-database rollup (#2472). Both fan-out shapes feed it — the enumeration driver's
+           onItemComplete hook and the Azure per-database connection loop — so a collector that fans out on
+           one branch on Azure and the other on-prem reports the same shape either way. A run that never
+           fans out never calls Observe and the accumulator stays empty, which is how the columns end up
+           NULL on ~98 percent of collection_log rows. */
+        var fanout = new FanoutCostAccumulator();
+
         /* The collection_log note for this run (#1837) — null on every ordinary path. Only the enumeration
            branch sets it, but it is declared here so the note reaches the single success return below when
            items WERE found and merely some of their probes failed. Lite's twin is _lastCollectionNote. */
@@ -378,6 +425,11 @@ public sealed class DarlingCollectorRunner
             var failed = 0;
             Exception? firstFailure = null;
 
+            /* #2623: the names, not just the count. A partial loss composes a note naming which databases
+               were skipped, because the count alone does not tell an operator whether the ONE database
+               that matters is in the collected set or the skipped one. */
+            var failedDatabases = new List<string>();
+
             /* #1875: this path reads the trailing probe-failure set once PER DATABASE, so the note and the
                log cap are decided for the cycle after the loop rather than inside it — see
                CycleProbeFailures for why neither generalizes from the single-read plain path. */
@@ -417,7 +469,7 @@ public sealed class DarlingCollectorRunner
                            documented first-run window, per database. No clamp is applied HERE because
                            this branch also serves the XE ring-buffer collectors (deadlocks / BPR),
                            where flooring a stale watermark would WRONGLY truncate legitimate catch-up
-                           — those sources roll past 24h on their own. query_store also reaches this
+                           — those sources roll past the catch-up horizon on their own. query_store also
                            branch on Azure SQL DB (#1836) and does need the bound, so it applies
                            WatermarkPolicy.ClampCatchup inside its own cutoff computation: the clamp
                            travels with the collector that needs it instead of with the path. */
@@ -540,15 +592,29 @@ public sealed class DarlingCollectorRunner
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
-                    sqlMs += sqlSlice.ElapsedMilliseconds;
+                    /* Read ONCE. The stopwatch is still running, so a second read a few statements later
+                       returns a larger number, and the per-item total would then exceed the blended total
+                       it is a ratio against — a dominance a hair above the truth, on every Azure run
+                       (#2472). Small, and wrong in the direction that matters. */
+                    var dbSqlMs = sqlSlice.ElapsedMilliseconds;
+                    sqlMs += dbSqlMs;
 
                     /* Flush this database before reading the next — peak memory is one database's rows. */
+                    long dbStorageMs = 0;
                     if (batch.Count > 0)
                     {
                         var storageSlice = Stopwatch.StartNew();
                         rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
-                        storageMs += storageSlice.ElapsedMilliseconds;
+                        dbStorageMs = storageSlice.ElapsedMilliseconds;
+                        storageMs += dbStorageMs;
                     }
+
+                    /* #2472: this database's slice, counted even when its batch was empty — an empty batch
+                       still paid for its read, and that read is in the blended total the rollup is a ratio
+                       against. Observed here rather than beside the log line below for the same reason the
+                       completion hook fires after the flush: both slices are only known once the write is
+                       done. */
+                    fanout.Observe(databaseName, dbSqlMs + dbStorageMs);
 
                     /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the
@@ -604,6 +670,7 @@ public sealed class DarlingCollectorRunner
                     var budgetFailure = EnumeratedCollectorDriver.ItemBudgetException(
                         definition.PerItemWallClockBudget!.Value);
                     failed++;
+                    failedDatabases.Add(databaseName);
                     firstFailure ??= budgetFailure;
 
                     /* Same #2111 stamp the generic arm makes, and it MATTERS more here: this is what turns
@@ -626,6 +693,7 @@ public sealed class DarlingCollectorRunner
                     /* OOM is filtered OUT of this per-database skip and propagates: it is fatal, not a
                        routine one-database miss. */
                     failed++;
+                    failedDatabases.Add(databaseName);
                     firstFailure ??= ex;
 
                     /* #2111: the yield-to-live stamp + adaptive-shrink count for the Azure SQL DB
@@ -647,7 +715,10 @@ public sealed class DarlingCollectorRunner
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
                which is exactly what this path carried before. */
-            collectionNote = cycleProbeFailures.Note;
+            collectionNote = EnumeratedCollectorDriver.MergeNotes(
+                cycleProbeFailures.Note,
+                EnumeratedCollectorDriver.BuildPartialFailureNote(
+                    failed, attempted, failedDatabases, firstFailure?.Message));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
@@ -738,7 +809,7 @@ public sealed class DarlingCollectorRunner
 
                 var driverResult = await EnumeratedCollectorDriver.RunAsync<TRow>(
                     items,
-                    /* Per-database watermark refresh + the 24h catch-up clamp, computed INSIDE the loop —
+                    /* Per-database watermark refresh + the catch-up clamp, computed INSIDE the loop —
                        this is the per-item cutoff site the plan's LOUD FLAG requires the clamp to live at.
                        Only query_store (the sole enumeration collector with a per-database timestamp
                        watermark) reaches this; the two snapshot collectors are watermark-less. */
@@ -909,6 +980,12 @@ public sealed class DarlingCollectorRunner
                     writeBatch: (batch, ct) => WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, ct),
                     onItemComplete: (item, batchCount, itemSqlMs, itemStorageMs) =>
                     {
+                        /* #2472: the per-database cost the blended collection_log row cannot carry. Counted
+                           for every completed item, including the quiet ones the log line below skips —
+                           their read time is in the blended total, so leaving them out would inflate the
+                           dominance ratio of whichever database happened to have rows. */
+                        fanout.Observe(item, itemSqlMs + itemStorageMs);
+
                         /* #2111: a completed item resets the adaptive-shrink count — recovery returns
                            the member to the full catch-up width on its next cycle. */
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
@@ -1085,7 +1162,7 @@ public sealed class DarlingCollectorRunner
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
-        return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote);
+        return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result);
     }
 
     /// <summary>

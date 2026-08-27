@@ -59,7 +59,7 @@ FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1));";
         _logger = logger;
     }
 
-    public async Task<string?> FetchPlanXmlAsync(int serverId, string planHandle)
+    public async Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(planHandle))
         {
@@ -82,13 +82,13 @@ FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1));";
             };
 
             await using var connection = new SqlConnection(builder.ConnectionString);
-            await connection.OpenAsync();
+            await connection.OpenAsync(cancellationToken);
 
             await using var command = new SqlCommand(PlanQuery, connection);
             command.CommandTimeout = 15;
             command.Parameters.AddWithValue("@plan_handle", planHandle);
 
-            var result = await command.ExecuteScalarAsync();
+            var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result == null || result is DBNull)
             {
                 return null;
@@ -96,8 +96,12 @@ FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1));";
 
             return result.ToString();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #2443: an abandoned fetch is not a plan that failed to come back. Degrading it to null
+               here would log an ERROR for work we called off AND let the pass carry on enriching
+               against a token that has already fired — the sibling by-sql_handle fetch has excluded
+               cancellation from this arm since it was written, and this one now agrees. */
             _logger?.LogError("[PgPlanFetcher] Failed to fetch plan for handle {PlanHandle}: {Message}", planHandle, ex.Message);
             return null;
         }

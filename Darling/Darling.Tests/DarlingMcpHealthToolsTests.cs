@@ -27,9 +27,10 @@ using Reader = PerformanceMonitor.Darling.Service.Mcp.DarlingHealthReader;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the health-overview MCP slice — get_server_summary (one-shot per-server health) and get_daily_summary
-/// (the daily rollup folded through the SHARED DailyHealthBandCalculator) over the Postgres store. Ungated: the
-/// tool surface is EXACTLY the two names (all static, on a [McpServerToolType] class, returning
+/// Pins the health-overview MCP slice — get_server_summary (one-shot per-server health), get_daily_summary
+/// (the daily rollup folded through the SHARED DailyHealthBandCalculator) and get_daily_summary_range (#2484:
+/// the same rollup across a span of days, the Performance Calendar's month grid) over the Postgres store.
+/// Ungated: the tool surface is EXACTLY the three names (all static, on a [McpServerToolType] class, returning
 /// Task&lt;string&gt;); each param contract matches Lite's / the Dashboard's; the read SQL is Postgres-dialect,
 /// positional-param; the daily band wires through the shared calculator; and the advertised tools/list schema
 /// is Gemini-clean.
@@ -39,6 +40,7 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
     private static readonly string[] HealthToolSurface =
     {
         "get_daily_summary",
+        "get_daily_summary_range",
         "get_server_summary",
     };
 
@@ -48,7 +50,7 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheTwoHealthTools()
+    public void ToolSurface_ExactlyTheThreeHealthTools()
     {
         var toolMethods = ToolMethods();
         var names = toolMethods
@@ -74,6 +76,11 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
     [Theory]
     [InlineData("get_server_summary", "server_name")]
     [InlineData("get_daily_summary", "server_name,summary_date")]
+    /* The range read is a SIBLING rather than a wider get_daily_summary: the single-day tool returns a flat
+       object of scalars and this returns rows, and the Overview tab reads both, which it could not do if they
+       were one read (no tab may fetch a read twice). Its span is in DAYS, so it carries the day-grained
+       anchor description rather than the hours one. */
+    [InlineData("get_daily_summary_range", "server_name,days_back,as_of")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)
     {
         Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());
@@ -175,11 +182,29 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         return provider.GetServices<McpServerTool>().Select(t => t.ProtocolTool).ToList();
     }
 
+    /// <summary>
+    /// The anchor pinned by IDENTITY, not merely by name: <c>get_daily_summary_range</c>'s <c>as_of</c> must
+    /// carry the DAY-grained shared constant. Not the hours one, which names <c>hours_back</c> in its own text
+    /// — a description naming a parameter the tool does not have is worse than a generic one, because an
+    /// unknown query key is ignored rather than rejected and the caller never learns their span was dropped.
+    /// </summary>
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForBothTools_NoRequiredParams()
+    public void DailySummaryRange_AnchorCarriesTheDayGrainedSharedDescription()
+    {
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_daily_summary_range");
+        var asOf = method.GetParameters().Single(p => p.Name == "as_of");
+
+        Assert.Equal(McpHelpers.AsOfDaysDescription, asOf.GetCustomAttribute<DescriptionAttribute>()!.Description);
+        Assert.NotEqual(McpHelpers.AsOfDescription, McpHelpers.AsOfDaysDescription);
+        Assert.DoesNotContain("hours_back", McpHelpers.AsOfDaysDescription, StringComparison.Ordinal);
+        Assert.Contains("days_back", McpHelpers.AsOfDaysDescription, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AdvertisedSchema_IsGeminiClean_ForEveryTool_NoRequiredParams()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(2, tools.Count);
+        Assert.Equal(3, tools.Count);
         var violations = tools.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
         foreach (var t in tools)

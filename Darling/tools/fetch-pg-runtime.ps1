@@ -51,7 +51,7 @@
 #>
 
 # pwsh 7+ only, and not for style: under Windows PowerShell 5.1 this script runs on .NET
-# Framework, whose ZipFile.CreateFromDirectory writes BACKSLASH entry separators — a
+# Framework, whose ZipFile.CreateFromDirectory writes BACKSLASH entry separators - a
 # non-conformant zip that Info-ZIP/unzip mangles. CI runs this step under `shell: pwsh`;
 # requiring 7 here makes a local build byte-behave like the shipped one.
 #Requires -Version 7.0

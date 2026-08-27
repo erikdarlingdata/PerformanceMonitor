@@ -654,7 +654,8 @@ SELECT
     internal_object_reserved_mb,
     version_store_reserved_mb,
     top_session_tempdb_mb,
-    top_session_id
+    top_session_id,
+    max_size_mb
 FROM tempdb_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -680,7 +681,11 @@ LIMIT 1";
                 InternalObjectReservedMb = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
                 VersionStoreReservedMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
                 TopConsumerMb = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                TopConsumerSessionId = reader.IsDBNull(6) ? 0 : reader.GetInt32(6)
+                TopConsumerSessionId = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                /* NULL on every row collected before the V81 rung, and 0 is what "no ceiling measured"
+                   is spelled as — so history keeps reporting the percentage it always did rather than
+                   dividing by a zero cap. */
+                MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7))
             };
         }
 

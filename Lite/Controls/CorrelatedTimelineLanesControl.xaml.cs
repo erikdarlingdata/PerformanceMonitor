@@ -581,10 +581,16 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         var charts = new[] { CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart };
         foreach (var chart in charts)
-        {
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
+
+        /* #2535: same defect as #2533 on the Darling viewer, same fix. Every lane's X and Y limits are
+           final by now, so this is the one place that can see all five gutters at once and hand them the
+           widest. It has to run on EVERY refresh, not once at Initialize: ClearChart() calls
+           WpfPlot.Reset(), which swaps in a fresh Plot and takes any axis floor with it. */
+        LaneAxisAligner.AlignLeftGutters(charts);
+
+        foreach (var chart in charts)
             chart.Refresh();
-        }
     }
 
     /// <summary>

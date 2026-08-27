@@ -1830,6 +1830,17 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("AG Replica Disconnected", h.Deliverer.Outcomes[1].MetricName);
         Assert.Contains("STILL disconnected", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
 
+        /* #2426, caught in review: the DETAIL has to say it too, and this is the assertion that pays for the
+           branch. ShortMessage is the interactive toast body and reaches neither the history row nor the
+           email — DarlingAlertDeliverer forwards DetailText — so pinning only the short message would leave
+           an operator opening Alert Detail on the sixth re-announcement reading text byte-identical to the
+           first notice, which is the problem the knob exists to end. Both halves asserted, in both
+           directions: the re-fire says so and names the interval, and the opening EDGE does not, or every
+           first notice would claim to be a repeat. */
+        Assert.Contains("STILL DISCONNECTED", h.Deliverer.Outcomes[1].DetailText, StringComparison.Ordinal);
+        Assert.Contains("re-alerting every 10 min", h.Deliverer.Outcomes[1].DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("STILL", h.Deliverer.Outcomes[0].DetailText, StringComparison.Ordinal);
+
         /* Reconnect clears the clock, so a later outage starts a fresh episode rather than re-firing late. */
         h.Now = h.Now.AddMinutes(1);
         await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "CONNECTED") }, Ct);

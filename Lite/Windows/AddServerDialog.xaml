@@ -153,7 +153,7 @@
             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                 <TextBlock Text="Utility DB:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="80"/>
                 <TextBox x:Name="UtilityDatabaseBox" Width="250"
-                         ToolTip="Database where community stored procedures (sp_IndexCleanup) are installed. Leave empty to use the connection database."/>
+                         ToolTip="Database where community stored procedures (sp_IndexCleanup) are installed. Leave empty to use the connection database.&#10;&#10;Ignored on Azure SQL Database (#2407): it has no cross-database execution, so a procedure can only read the database it runs in. Install sp_IndexCleanup in each database you want to analyse; Index Analysis connects to the named database directly."/>
             </StackPanel>
             <CheckBox x:Name="ReadOnlyIntentCheckBox" Content="Read-_only intent (for AG listeners and readable replicas)"
                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,6,0,0"

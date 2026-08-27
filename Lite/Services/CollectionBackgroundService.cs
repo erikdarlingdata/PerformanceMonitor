@@ -53,8 +53,46 @@ public class CollectionBackgroundService : BackgroundService
     private DateTime _lastDismissedAlertsCleanupTime = DateTime.UtcNow;
 
     /* Server IDs whose scheduled analysis is currently running — prevents relaunching
-       analysis for a server whose previous (possibly hung) pass has not finished. */
-    private readonly ConcurrentDictionary<int, byte> _analysisInFlight = new();
+       analysis for a server whose previous (possibly hung) pass has not finished. The value
+       carries when the pass started and how loudly it has been reported, because #2412's defect
+       was that a pass which never finishes leaves this marker set FOREVER and the server is then
+       skipped in silence on every later cycle. */
+    private readonly ConcurrentDictionary<int, AnalysisPassState> _analysisInFlight = new();
+
+    /* How far past its budget an in-flight pass must be before the loop starts reporting it. The
+       ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored
+       the cancellation raised at that budget — wedged inside a single store read, or waiting on
+       the store's read lock behind a long archival, neither of which any token can reach. */
+    private const int StuckAnalysisMultiple = 3;
+
+    /* Reports back off by doubling. Scheduled analysis runs on a 30-minute default cadence, so a
+       fixed repeat interval would either be slower than the cadence (useless) or produce one line
+       per cycle forever (the spam that makes a log unreadable). Doubling gives eight lines in the
+       first day against forty-eight cycles, and a handful per day after — loud enough to be noticed, quiet enough to
+       stay noticed. Capped so the shift cannot run away on a long-lived process. */
+    private const int StuckAnalysisMaxBackoffDoublings = 20;
+
+    /* How long the loop gives a cancelled pass to unwind. It serves twice, and the two are not
+       the same wait. On the TIMEOUT path it extends the loop's patience past the budget, so a pass
+       that honours its cancellation is observed finishing rather than racing the loop's own timer.
+       On SHUTDOWN it is the hold below that keeps a pass from being orphaned, which is a wait the
+       loop's Task.Delay cannot provide because that delay observes the stopping token and so
+       collapses the instant it fires. Same five seconds as the Darling twin's shutdown grace. */
+    private static readonly TimeSpan AnalysisUnwindGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Bookkeeping for one in-flight analysis pass. A class, not a struct, so the loop can update
+    /// the report counters in place without a read-modify-write race against the completion
+    /// continuation (which only ever removes the whole entry).
+    /// </summary>
+    private sealed class AnalysisPassState
+    {
+        public AnalysisPassState(DateTime startedUtc) => StartedUtc = startedUtc;
+
+        public DateTime StartedUtc { get; }
+        public int SkippedCycles { get; set; }
+        public int ReportCount { get; set; }
+    }
 
     /* Archive every hour, retention once per day */
     private static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
@@ -195,7 +233,7 @@ public class CollectionBackgroundService : BackgroundService
     }
 
     /// <summary>#2058: fills the Query Store history the live path never takes — the 60-minute
-    /// first-contact tail and 24h-clamped outage holes — newest-first, strictly behind the live
+    /// first-contact tail and clamp-bounded outage holes — newest-first, strictly behind the live
     /// path's floor, never past the resolved query_store retention. See
     /// RemoteCollectorService.QueryStoreBackfill for the worker itself.</summary>
     private async Task RunQueryStoreBackfillIfDueAsync(CancellationToken stoppingToken)
@@ -424,11 +462,16 @@ public class CollectionBackgroundService : BackgroundService
             var serverId = RemoteCollectorService.GetDeterministicHashCode(serverName);
 
             /* Skip a server whose previous analysis is still running — a hung
-               connection that outlived its timeout would otherwise pile up tasks. */
-            if (!_analysisInFlight.TryAdd(serverId, 0))
+               connection that outlived its timeout would otherwise pile up tasks. The skip is
+               still right; what was wrong is that it used to happen in silence. */
+            if (!_analysisInFlight.TryAdd(serverId, new AnalysisPassState(DateTime.UtcNow)))
             {
+                ReportStuckAnalysis(serverId, serverName, timeout);
                 continue;
             }
+
+            CancellationTokenSource? passCts = null;
+            var passStarted = false;
 
             try
             {
@@ -436,25 +479,84 @@ public class CollectionBackgroundService : BackgroundService
                    flag, so a shared instance whose task is abandoned on timeout would
                    block analysis for every other server. */
                 var analysisService = new AnalysisService(_duckDb, planFetcher);
-                var analyzeTask = analysisService.AnalyzeAsync(serverId, serverName, hoursBack: 4);
+
+                /* #2412: the TOKEN is the timeout now; the Task.Delay below is only this loop's
+                   patience. Two things had to change for the budget to mean anything.
+
+                   The pass has to leave this thread. DuckDB.NET implements no async execution —
+                   every read completes synchronously on whichever thread called it — so an
+                   AnalyzeAsync invoked here ran the whole fact-collection phase INLINE and handed
+                   back an already-completed task. The race below could never fire for the phase
+                   that would actually be slow, and a wedged read took the entire collection loop
+                   down with it rather than just this server's analysis. Task.Run puts the pass on
+                   the pool, which makes the race real and keeps collection alive regardless.
+
+                   And something has to raise the cancellation. CancelAfter does it at the same
+                   budget the loop waits on. Arming it BEFORE the task exists means Cancel can
+                   never race the completion continuation's Dispose. */
+                passCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                passCts.CancelAfter(timeout);
+
+                var cts = passCts;
+                var analyzeTask = Task.Run(
+                    () => analysisService.AnalyzeAsync(serverId, serverName, hoursBack: 4, cts.Token),
+                    CancellationToken.None);
 
                 /* Clear the in-flight marker only when the task truly finishes — not
                    when the timeout below moves us on — so a hung server is not relaunched. */
                 _ = analyzeTask.ContinueWith(
-                    completed => _analysisInFlight.TryRemove(serverId, out _),
+                    completed =>
+                    {
+                        _analysisInFlight.TryRemove(serverId, out _);
+                        cts.Dispose();
+                    },
                     TaskScheduler.Default);
 
-                var finished = await Task.WhenAny(analyzeTask, Task.Delay(timeout, stoppingToken));
+                /* From here the continuation owns the marker and the token source. Neither
+                   Task.Run nor ContinueWith throws, so there is no window where the pass exists
+                   without something committed to cleaning up after it. */
+                passStarted = true;
+
+                /* Wait the budget PLUS a short grace, so a pass that honours its cancellation is
+                   seen finishing here. Losing that race now carries real information: the pass was
+                   asked to stop and did not. Note this delay observes the stopping token and so
+                   collapses the moment it fires — shutdown is handled by the hold below, not here. */
+                var finished = await Task.WhenAny(
+                    analyzeTask, Task.Delay(timeout + AnalysisUnwindGrace, stoppingToken));
 
                 if (stoppingToken.IsCancellationRequested)
                 {
+                    /* Hold briefly for the pass to unwind instead of orphaning it (the Darling
+                       twin's #2299 discipline). Offloading onto the pool is what makes this
+                       necessary: the store work used to run inline on this thread and so could not
+                       still be in flight at this line, and now it can — walking away from it
+                       mid-InsertFindingsAsync leaves that write to be torn off by process
+                       teardown. CancellationToken.None on purpose: stoppingToken has already
+                       FIRED, so passing it here would cancel the wait instantly and defeat the
+                       grace entirely. A pass that outlives the hold is left to the in-flight
+                       marker, which keeps it from being relaunched either way. */
+                    try
+                    {
+                        await analyzeTask.WaitAsync(AnalysisUnwindGrace, CancellationToken.None);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        /* Shutdown — quiet and expected. */
+                    }
+                    catch (TimeoutException)
+                    {
+                        _logger?.LogDebug(
+                            "Analysis for {Server} did not unwind within {Grace}s of shutdown — it is abandoned in place",
+                            serverName, (int)AnalysisUnwindGrace.TotalSeconds);
+                    }
+
                     break;
                 }
 
                 if (finished != analyzeTask)
                 {
                     _logger?.LogWarning(
-                        "Scheduled analysis for {Server} exceeded {Timeout}s — skipped this cycle",
+                        "Scheduled analysis for {Server} exceeded {Timeout}s and has not unwound the cancellation raised at that budget — skipped this cycle. The server stays skipped while the pass remains in flight; it will be reported again if it stays that way.",
                         serverName, App.AnalysisTimeoutSeconds);
                     continue;
                 }
@@ -462,6 +564,21 @@ public class CollectionBackgroundService : BackgroundService
                 /* Analysis already persisted via SaveFindingsAsync inside AnalyzeAsync.
                    Only route findings to the notification channels when delivery is on. */
                 var findings = await analyzeTask;
+
+                /* A pass cut short at its budget unwound as asked and returned nothing, so there
+                   is nothing to route — say that, rather than letting a cancelled cycle read as a
+                   clean all-clear. Gated on the empty result as well as the token so that a pass
+                   which genuinely finished in the last instant before the deadline still delivers
+                   what it found; the only thing the two conditions can jointly mislabel is a real
+                   run that found nothing, whose delivery would have been a no-op anyway. */
+                if (findings.Count == 0 && cts.IsCancellationRequested)
+                {
+                    _logger?.LogWarning(
+                        "Scheduled analysis for {Server} exceeded {Timeout}s and was cancelled — no findings this cycle; the next cycle recomputes them",
+                        serverName, App.AnalysisTimeoutSeconds);
+                    continue;
+                }
+
                 if (notify)
                 {
                     await _notificationService.NotifyAsync(findings);
@@ -474,11 +591,53 @@ public class CollectionBackgroundService : BackgroundService
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Scheduled analysis failed for {Server}", serverName);
-                /* If analyzeTask was never created (e.g. ctor threw), the continuation
-                   never ran — clear the marker defensively. */
-                _analysisInFlight.TryRemove(serverId, out _);
+                /* If the pass was never launched (e.g. the ctor threw), no continuation exists to
+                   clear the marker or release the token source — do both here or this server is
+                   skipped forever, which is the very defect this loop is being fixed for. Once the
+                   pass IS running the continuation owns them, and clearing them here would both
+                   pull the token out from under a live pass and re-admit it next cycle. */
+                if (!passStarted)
+                {
+                    _analysisInFlight.TryRemove(serverId, out _);
+                    passCts?.Dispose();
+                }
             }
         }
+    }
+
+    /// <summary>
+    /// #2412: reports a server whose analysis pass is still in flight from an earlier cycle. The
+    /// in-flight guard is deliberately released only on true completion — that is what stops a hung
+    /// server piling up tasks — but it also means a pass that never completes leaves the marker set
+    /// for the life of the process, and every later cycle skipped that server with nothing said. A
+    /// cancellation raised at the budget clears the great majority of those; what remains is the
+    /// pass wedged where no token reaches, and this is what makes that visible instead of silent.
+    /// </summary>
+    private void ReportStuckAnalysis(int serverId, string serverName, TimeSpan timeout)
+    {
+        if (!_analysisInFlight.TryGetValue(serverId, out var state))
+        {
+            /* Finished between the TryAdd above and this read — it was never stuck. */
+            return;
+        }
+
+        state.SkippedCycles++;
+
+        var inFlightFor = DateTime.UtcNow - state.StartedUtc;
+        var reportAfter =
+            (timeout * StuckAnalysisMultiple) *
+            Math.Pow(2, Math.Min(state.ReportCount, StuckAnalysisMaxBackoffDoublings));
+
+        if (inFlightFor < reportAfter)
+        {
+            return;
+        }
+
+        state.ReportCount++;
+
+        _logger?.LogError(
+            "Scheduled analysis for {Server} has been in flight for {Minutes:F0} minutes — over {Multiple}x its {Timeout}s budget — and did not stop when cancelled at that budget. {Skipped} analysis cycle(s) have been skipped for this server since, and every later cycle is skipped too until the pass unwinds or the app restarts. Analysis for every other server is unaffected.",
+            serverName, inFlightFor.TotalMinutes, StuckAnalysisMultiple, App.AnalysisTimeoutSeconds, state.SkippedCycles);
     }
 
     private void LogProcessMemory()

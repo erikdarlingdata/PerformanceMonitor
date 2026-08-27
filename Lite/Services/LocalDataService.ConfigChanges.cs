@@ -104,10 +104,10 @@ public partial class LocalDataService
     /// snapshot up to the window end (keeping the pre-window baseline), then diffs per configuration_name via
     /// the shared <see cref="ConfigChangeDiff"/>.</summary>
     public async Task<List<ServerConfigChangeRow>> GetServerConfigChangesAsync(
-        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetServerConfigChangesAsync", "v_server_config snapshot diff");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadServerConfigSnapshotsAsync(serverId, endTime);
         return ConfigChangeDiff.DiffServerConfigChanges(snapshots, startTime, endTime)
             .Select(c => new ServerConfigChangeRow(c))
@@ -118,10 +118,10 @@ public partial class LocalDataService
     /// snapshot up to the window end then UNPIVOTs the wide row per (database, setting) whose value moved via
     /// the shared <see cref="ConfigChangeDiff"/>. #1319: the global database filter is pushed into SQL.</summary>
     public async Task<List<DatabaseConfigChangeRow>> GetDatabaseConfigChangesAsync(
-        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetDatabaseConfigChangesAsync", "v_database_config snapshot diff");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadDatabaseConfigSnapshotsAsync(serverId, endTime, databaseNames);
         return ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startTime, endTime)
             .Select(c => new DatabaseConfigChangeRow(c))
@@ -132,10 +132,10 @@ public partial class LocalDataService
     /// window end then set-diffs consecutive captures via the shared <see cref="ConfigChangeDiff"/> (flag
     /// appears = enabled, disappears = disabled, status/scope moves = modified).</summary>
     public async Task<List<TraceFlagChangeRow>> GetTraceFlagChangesAsync(
-        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetTraceFlagChangesAsync", "v_trace_flags snapshot diff");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadTraceFlagSnapshotsAsync(serverId, endTime);
         return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, startTime, endTime)
             .Select(c => new TraceFlagChangeRow(c))

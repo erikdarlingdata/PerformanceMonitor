@@ -68,7 +68,8 @@
     // secure default (loopback-only, byte-for-byte today's behavior: no pg_hba network rule, no
     // firewall rule, ssl=off). When present with a non-loopback "listen", the service reconciles it
     // on every start: it adds the bind IP to listen_addresses, generates a self-signed TLS cert for
-    // verify-full, writes a marked `hostssl darling <role> <allowFrom> scram-sha-256` pg_hba rule +
+    // verify-full, writes a marked `hostssl darling <role> <allowFrom> scram-sha-256` pg_hba rule
+    // per admitted role +
     // reloads, and best-effort adds a firewall rule (also add the exact scoped rule yourself; see
     // Darling/README.md). Reconciliation is symmetric (delete the block to close the box) and
     // fail-closed: any invalid/incomplete field degrades the store to loopback + a critical log line,
@@ -79,11 +80,29 @@
     //   "listen": "192.168.1.205",      // the specific bind IP (preferred; = the cert's iPAddress SAN).
     //                                    // "0.0.0.0" = all interfaces (then connect by a cert SAN name).
     //   "allowFrom": "192.168.1.0/24",  // pg_hba + firewall CIDR (its address family must match "listen").
-    //   "role": "viewer"                // "viewer" (default, read-only remote — the secure default) or
+    //   "role": "viewer"                // "viewer" (default, read-only remote — the secure default),
     //                                    // "admin" (full remote WRITES; the service warns, because admin
-    //                                    // holds the config-table service-credential pivot). Never the superuser.
+    //                                    // holds the config-table service-credential pivot), or BOTH as
+    //                                    // "admin,viewer" — one hostssl line per role, so an admin seat
+    //                                    // and read-only seats reach the same store, and narrowing
+    //                                    // allowFrom later tightens every one of them. Never the
+    //                                    // superuser, never all; one bad element rejects the whole value.
     // }
   },
+  // SEEDED ONCE, then read-only. This list bootstraps config.config_monitored_servers on the first
+  // successful start and is never consulted for it again: after that the STORE is authoritative for
+  // which servers are monitored AND for every per-server setting below. So on a seeded box, editing
+  // "host" / "database" / "auth" / "username" / "encryptMode" / "trustServerCertificate" /
+  // "excludedDatabases" / "port" / "engine" / "name" here changes nothing, and neither does adding a
+  // server — a restart cannot apply either. Add servers with the Viewer's Add Server dialog or the MCP
+  // add_servers tool; CHANGE an already-registered server from the Viewer's Manage Servers window
+  // (add_servers skips one that is already monitored as a duplicate). The service names any
+  // disagreement between this list and the registry once per start, in the log.
+  // Two exceptions that ARE still read from this file on every start, because they are never written to
+  // the store: the SQL-auth secret ("encryptedPassword" / "password", including an "env:NAME" or
+  // "file:/path" reference), and this whole file when the store is unreachable.
+  // Note --test-connection reads THIS FILE, so on a seeded box it probes the file's settings rather than
+  // the ones the service will actually connect with.
   "servers": [
     {
       // Integrated auth (recommended): grant the service account VIEW SERVER STATE etc.
@@ -242,10 +261,19 @@
   // (loopback-only HTTP, today's behavior). When present with a non-loopback "listen", the web host binds the
   // LAN interface behind an in-app CIDR check and a token gate: a browser presents the token ONCE via
   // ?token=, which is exchanged for an HMAC-signed session cookie (then the token is stripped from the URL).
-  // LOOPBACK stays TOKENLESS even while exposed (the surface is read-only). Fail-closed: any missing
-  // precondition (token / valid allowFrom / managed mode) keeps it loopback-only. There is deliberately NO
-  // TLS (a browser over plain HTTP on a trusted LAN); the MITM control is a TLS REVERSE PROXY in front of the
-  // port, same as MCP -- so this is a trusted-LAN opt-in, NEVER internet-exposed.
+  // LOOPBACK is exempt from the CIDR check ONLY -- while exposed it presents the token like anyone else
+  // (#1649: the Custom Views composer is a write path, so a tokenless local process could mutate views).
+  // A dashboard with NO "network" block registers no auth middleware at all and stays tokenless.
+  // Fail-closed: any missing precondition (token / valid allowFrom / managed mode) keeps it loopback-only.
+  // TLS is OPT-IN via the "tls" block (#2562) and applies to the network listener only -- loopback stays
+  // plain HTTP, because the certificate names the LAN address rather than "localhost". WITHOUT it the token
+  // and its session cookie cross the segment in the clear and every exposed start warns about exactly that;
+  // "allowFrom" bounds who can ROUTE to the port, never what an on-path attacker reads off the wire. The
+  // product consumes a certificate, it does not issue one: no ACME, and no self-signed fallback (that would
+  // buy encryption without authentication and train you to click through the warning). An internal CA is the
+  // normal answer here. A missing, unreadable, ambiguous or EXPIRED certificate keeps the dashboard
+  // loopback-only rather than quietly serving the LAN over HTTP. A TLS reverse proxy in front of the port
+  // remains a perfectly good alternative -- it is what MCP still relies on. NEVER internet-exposed either way.
   // "enabled"/"port" here are the SEED; after first start they live in the control plane and the Viewer's
   // Settings toggles them LIVE (the service starts/stops/rebinds the endpoint within seconds - no restart).
   // The "network" exposure block below stays file-defined and restart-only; the Viewer toggle still stops an
@@ -258,7 +286,21 @@
     // "network": {
     //   "listen": "192.168.1.205",                     // specific bind IP preferred; "0.0.0.0" = all interfaces.
     //   "allowFrom": "192.168.1.0/24",                 // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).
-    //   "encryptedToken": "<output of --encrypt-password>"  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
+    //   "encryptedToken": "<output of --encrypt-password>",  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
+    //
+    //   // OPTIONAL TLS (#2562) -- omit the whole block for plain HTTP. Give ONE form, never both.
+    //   // The certificate must name the address browsers actually use ("listen" above), or every visit
+    //   // is a warning; issue it from your internal CA. Renew it: an EXPIRED certificate takes the
+    //   // dashboard down (by design -- it will not fall back to HTTP), and the service logs a warning
+    //   // for the last 30 days before that happens.
+    //   "tls": {
+    //     "pfxPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.pfx",
+    //     "encryptedPfxPassword": "<output of --encrypt-password>"  // or "pfxPassword" (file:/env: reference, or plaintext for dev)
+    //                                                               // omit both if the bundle has no password
+    //     // ... OR a PEM pair instead of the two lines above:
+    //     // "certPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.crt",
+    //     // "keyPath":  "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.key"
+    //   }
     // }
   },
 
@@ -291,12 +333,12 @@
   //   "thisStoreCovers": "the 42 us-east-1 SQL Server primaries",
   //   "stores": [
   //     {
-  //       "name": "prod-pos-use2-monitor-01",
+  //       "name": "prod-sql-use2-monitor-01",
   //       "covers": "the readable replicas of those same 42 primaries, in-region from us-east-2",
   //       "matches": ["use2"]
   //     },
   //     {
-  //       "name": "prod-pos-pg-monitor-01",
+  //       "name": "prod-sql-pg-monitor-01",
   //       "covers": "the Aurora PostgreSQL clusters",
   //       "matches": ["-aurora-", ".cluster-"]
   //     }

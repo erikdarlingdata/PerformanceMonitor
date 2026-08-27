@@ -14,7 +14,8 @@
 // ever land at the END of its table; reflecting it here keeps the oracle describing the schema a fresh
 // store is actually built with, while every pre-existing column stays frozen. Precedent: ag_replica_role
 // (v36), replica_role (v47), runtime_stats_interval_id + interval_start_time_utc (v49, #1841 tier 2). A
-// NOT NULL relaxation is NOT an append — that goes in IntentionalStorageDivergences instead.
+// NOT NULL relaxation is NOT an append — that goes in IntentionalStorageDivergences instead. Also
+// max_size_mb on tempdb_stats (v56, #2515).
 // </auto-generated>
 
 using System.Collections.Generic;
@@ -132,7 +133,8 @@ internal static class GoldenCollectorSchema
     unallocated_mb DECIMAL(18,2),
     total_sessions_using_tempdb BIGINT,
     top_session_id INTEGER,
-    top_session_tempdb_mb DECIMAL(18,2)
+    top_session_tempdb_mb DECIMAL(18,2),
+    max_size_mb DECIMAL(18,2)
 )",
         ["memory_grant_stats"] = @"CREATE TABLE IF NOT EXISTS memory_grant_stats (
     collection_id BIGINT PRIMARY KEY,

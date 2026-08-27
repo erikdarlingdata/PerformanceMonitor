@@ -19,9 +19,9 @@ public partial class DrillDownCollector
     private async Task CollectQueriesAtSpike(AnalysisFinding finding, AnalysisContext context)
     {
         // Find the peak CPU time, then get queries active within 2 minutes of it
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         // Step 1: Find when the spike occurred
         using var peakCmd = connection.CreateCommand();
@@ -38,9 +38,9 @@ LIMIT 1";
 
         DateTime? peakTime = null;
         int peakCpu = 0;
-        using (var peakReader = await peakCmd.ExecuteReaderAsync())
+        using (var peakReader = await peakCmd.ExecuteReaderAsync(context.CancellationToken))
         {
-            if (await peakReader.ReadAsync())
+            if (await peakReader.ReadAsync(context.CancellationToken))
             {
                 peakTime = peakReader.GetDateTime(0);
                 peakCpu = peakReader.GetInt32(1);
@@ -69,9 +69,9 @@ LIMIT 5";
         queryCmd.Parameters.Add(new DuckDBParameter { Value = peakTime.Value.AddMinutes(2) });
 
         var items = new List<object>();
-        using (var reader = await queryCmd.ExecuteReaderAsync())
+        using (var reader = await queryCmd.ExecuteReaderAsync(context.CancellationToken))
         {
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 items.Add(new
                 {
@@ -103,9 +103,9 @@ LIMIT 5";
 
     private async Task CollectTopCpuQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -127,8 +127,8 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -148,9 +148,9 @@ LIMIT 5";
 
     private async Task CollectTopSpillingQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -170,8 +170,8 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -193,9 +193,9 @@ LIMIT 5";
     /// </summary>
     private async Task CollectParameterSensitiveQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -251,8 +251,8 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -281,9 +281,9 @@ LIMIT 5";
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -489,8 +489,8 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -527,9 +527,9 @@ LIMIT 5";
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -561,8 +561,8 @@ GROUP BY database_name, query_hash";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
 
-        using var reader = await cmd.ExecuteReaderAsync();
-        if (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        if (await reader.ReadAsync(context.CancellationToken))
         {
             finding.DrillDown!["bad_actor_query"] = new
             {
@@ -583,9 +583,9 @@ GROUP BY database_name, query_hash";
 
     private async Task CollectPendingGrants(AnalysisFinding finding, AnalysisContext context)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -605,8 +605,8 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {

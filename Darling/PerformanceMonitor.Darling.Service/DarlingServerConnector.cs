@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
@@ -370,6 +371,15 @@ SELECT
                 PostgresMajorVersion = majorVersion,
                 PostgresVersionNum = versionNum,
                 IsAurora = isAurora,
+                /* #2633: derived from the ENDPOINT, because nothing else here can see it. IsAwsRds is
+                   probed with a T-SQL detection query on the SQL Server path, so before this it was
+                   silently false for every PostgreSQL target — which made the second half of
+                   pg_plan_capture's `IsAurora || IsAwsRds` dispatch unreachable and sent plain RDS
+                   PostgreSQL down the pg_read_file route, where a managed instance has no filesystem to
+                   read and the failure names a grant that would never have helped. Aurora was unaffected
+                   because IsAurora carries it, which is why the fleet never showed this. */
+                IsAwsRds = RdsEndpoint.TryParse(
+                    new NpgsqlConnectionStringBuilder(connectionString).Host) is not null,
                 IsInRecovery = isInRecovery,
             },
             StorageName = storageName,
@@ -481,20 +491,13 @@ SELECT
             $"{role}, {flavour} — {applies}";
     }
 
-    /// <summary>Human-readable SERVERPROPERTY('EngineEdition') description for the probe result.</summary>
-    public static string DescribeEngineEdition(int engineEdition) => engineEdition switch
-    {
-        1 => "Personal/Desktop",
-        2 => "Standard",
-        3 => "Enterprise",
-        4 => "Express",
-        5 => "Azure SQL Database",
-        6 => "Azure Synapse Analytics",
-        8 => "Azure SQL Managed Instance",
-        9 => "Azure SQL Edge",
-        11 => "Azure Synapse serverless SQL pool",
-        _ => $"Unknown ({engineEdition})",
-    };
+    /// <summary>Human-readable SERVERPROPERTY('EngineEdition') description for the probe result.
+    /// <para>Delegates to <see cref="CollectorEngineCapability.DescribeEngineEdition"/> (#2511) rather than
+    /// keeping a second switch: the capability messages both MCP surfaces return name the edition, and two
+    /// edition tables in one repo drift — with the copy nobody is reading being the one that drifts.</para>
+    /// </summary>
+    public static string DescribeEngineEdition(int engineEdition) =>
+        CollectorEngineCapability.DescribeEngineEdition(engineEdition);
 }
 
 /// <summary>

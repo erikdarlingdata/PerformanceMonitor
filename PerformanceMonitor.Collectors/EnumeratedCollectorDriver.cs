@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,6 +20,62 @@ namespace PerformanceMonitor.Collectors;
 
 /// <summary>Per-run outcome of the enumeration driver: rows written and the summed SQL/storage slice times.</summary>
 public readonly record struct EnumeratedRunResult(int Rows, long SqlMs, long StorageMs);
+
+/// <summary>
+/// What a per-database fan-out cost, rolled up to the one thing a blended <c>collection_log</c> row cannot
+/// say: how many items it covered, which one was dearest, and what that one cost (#2472).
+///
+/// <para>The point is the RATIO, not the parts. <c>SlowestItemMs * ItemCount / duration_ms</c> is 1.0 for a
+/// perfectly even fan-out and rises with concentration, so 8 databases at 10.1s each reads 1.0 and one at
+/// 62s beside seven at 2.7s reads 6.1 — two runs that are both 80,900 ms and want opposite fixes. Neither
+/// <c>max_duration_ms</c> nor <c>p95_duration_ms</c> can tell them apart, because both aggregate over RUNS
+/// and each of those runs is one row.</para>
+///
+/// <para>Deliberately a rollup and not a distribution. The full per-item series would need its own retained
+/// hypertable; this rides three nullable columns on a row that is written anyway, and answers the question
+/// the remedies in #2468 actually turn on.</para>
+/// </summary>
+/// <param name="ItemCount">Items whose cost was counted — every item that completed a read, empty batch or not,
+/// because their SQL slices are in the blended total too and the ratio has to be against the same denominator.</param>
+/// <param name="SlowestItem">The dearest item's name (a database, for every fan-out that exists today).</param>
+/// <param name="SlowestItemMs">That item's SQL plus storage milliseconds.</param>
+public readonly record struct FanoutCost(int ItemCount, string SlowestItem, int SlowestItemMs);
+
+/// <summary>
+/// Accumulates a fan-out's per-item costs into one <see cref="FanoutCost"/>. Shared by both SKUs and by both
+/// fan-out shapes — the enumeration driver's <c>onItemComplete</c> hook and the Azure per-database connection
+/// loop — because two hand-rolled copies of "keep the biggest" is how the two paths would come to disagree
+/// about what a slow database is.
+/// </summary>
+public sealed class FanoutCostAccumulator
+{
+    private int _itemCount;
+    private string? _slowestItem;
+
+    /* -1, not 0: an item that genuinely cost 0 ms still has to become the slowest one when it is the only
+       item, and 0 as the floor would leave SlowestItem null on a fan-out that really did run. */
+    private long _slowestMs = -1;
+
+    /// <summary>Records one item's total cost. Ties keep the FIRST item seen, so a run's answer does not
+    /// wobble between equally-priced databases from cycle to cycle.</summary>
+    public void Observe(string item, long itemMs)
+    {
+        _itemCount++;
+        if (itemMs > _slowestMs)
+        {
+            _slowestMs = itemMs;
+            _slowestItem = item;
+        }
+    }
+
+    /// <summary>The rollup, or null when nothing fanned out — a plain single-query collector, or an
+    /// enumeration that yielded no items. Null is the honest answer there: the columns say "this run had no
+    /// fan-out", which is not the same claim as "its fan-out was free".</summary>
+    public FanoutCost? Result =>
+        _itemCount > 0 && _slowestItem is not null
+            ? new FanoutCost(_itemCount, _slowestItem, (int)Math.Min(_slowestMs, int.MaxValue))
+            : null;
+}
 
 /// <summary>
 /// One item the enumeration query could not PROBE (#1837): the enumeration reached the item but the
@@ -109,7 +166,7 @@ public sealed class CycleProbeFailures
 /// The driver owns only the control flow — iteration, cancellation, the per-item catch SHAPE, the
 /// per-item flush, and the interleaved SQL/storage timing. Everything app-specific stays in the
 /// caller's delegates: the SQL connection and per-item query (readItem), the storage engine
-/// (writeBatch), the host store's per-database watermark read and its 24h clamp (perItemWatermark),
+/// (writeBatch), the host store's per-database watermark read and its catch-up clamp (perItemWatermark),
 /// and the log text / display name (onItemComplete / onItemError). This is the seam the plan required:
 /// no app or collector semantics leak into the shared loop.
 /// </para>
@@ -211,6 +268,42 @@ public static class EnumeratedCollectorDriver
     public const string WallClockBudgetErrorFormat =
         "abandoned after exceeding its {0} per-database wall-clock budget; the range was not "
         + "collected and will be re-read next cycle (the watermark did not advance)";
+
+    /// <summary>
+    /// The collection-log note for a per-database cycle where SOME databases failed and the rest
+    /// succeeded (#2623). <c>{0}</c> = how many failed, <c>{1}</c> = how many were attempted,
+    /// <c>{2}</c> = up to <see cref="MaxNamedFailedDatabases"/> of their names, <c>{3}</c> = the first
+    /// error's message.
+    ///
+    /// <para>
+    /// Tolerating the failure is right - one unreachable database must not cost the other twenty-nine -
+    /// but before this note the cycle recorded SUCCESS, whatever the survivors produced, and NOTHING
+    /// else. When the failing database is the only one with data, that is SUCCESS with zero rows, which
+    /// is exactly the shape of a target that genuinely has nothing to report. Three collectors were
+    /// broken that way for three schema versions (#2622); the one that surfaced as an ERROR did so only
+    /// because it happened to fail in every database, tripping the all-failed escalation.
+    /// </para>
+    ///
+    /// <para>
+    /// Names, not just a count, unlike <see cref="ProbeFailureNoteFormat"/>: a probe failure is usually
+    /// one login problem repeated across every database, where the names add nothing, while THIS is
+    /// usually a few specific databases and the name is the whole lead. Capped for the case where it
+    /// is not.
+    /// </para>
+    /// </summary>
+    public const string PartialDatabaseFailureNoteFormat =
+        "{0} of {1} database(s) failed and were skipped ({2}) - any rows this cycle are from the "
+        + "survivors ONLY, so a low or zero row count here is not evidence the server is quiet; "
+        + "first error: {3}";
+
+    /// <summary>
+    /// How many failed database names <see cref="BuildPartialFailureNote"/> spells out before collapsing
+    /// the rest into "and N more". The note column is a one-line summary read at a glance.
+    /// </summary>
+    public const int MaxNamedFailedDatabases = 3;
+
+    /// <summary><see cref="PartialDatabaseFailureNoteFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_partialFailureNote = CompositeFormat.Parse(PartialDatabaseFailureNoteFormat);
 
     /// <summary><see cref="ProbeFailureNoteFormat"/> parsed once (CA1863) — the const stays the greppable, pinnable text.</summary>
     private static readonly CompositeFormat s_probeFailureNote = CompositeFormat.Parse(ProbeFailureNoteFormat);
@@ -331,6 +424,55 @@ public static class EnumeratedCollectorDriver
     }
 
     /// <summary>
+    /// Composes <see cref="PartialDatabaseFailureNoteFormat"/> for a per-database cycle that lost SOME
+    /// databases but not all. Returns null when nothing failed, and null when EVERYTHING failed - the
+    /// all-failed case rethrows the first failure so the run is classified as an error, and a note on a
+    /// row about to be marked ERROR would only compete with the error message.
+    /// </summary>
+    public static string? BuildPartialFailureNote(
+        int failed, int attempted, IReadOnlyList<string> failedDatabases, string? firstError)
+    {
+        if (failed <= 0 || attempted <= 0 || failed >= attempted)
+        {
+            return null;
+        }
+
+        var named = failedDatabases.Count <= MaxNamedFailedDatabases
+            ? string.Join(", ", failedDatabases)
+            : string.Join(", ", failedDatabases.Take(MaxNamedFailedDatabases))
+              + $", and {failedDatabases.Count - MaxNamedFailedDatabases} more";
+
+        if (string.IsNullOrWhiteSpace(named))
+        {
+            named = UnnamedItem;
+        }
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            s_partialFailureNote,
+            failed,
+            attempted,
+            named,
+            string.IsNullOrWhiteSpace(firstError) ? NoErrorText : firstError);
+    }
+
+    /// <summary>
+    /// Joins two collection-log notes, either of which may be null. Shared because both hosts now compose
+    /// a cycle note from two independent sources - probe failures and skipped databases - and a cycle can
+    /// legitimately have both; whichever host wrote its own join would be the one that silently dropped
+    /// one of them.
+    /// </summary>
+    public static string? MergeNotes(string? first, string? second)
+    {
+        if (string.IsNullOrWhiteSpace(first))
+        {
+            return string.IsNullOrWhiteSpace(second) ? null : second;
+        }
+
+        return string.IsNullOrWhiteSpace(second) ? first : $"{first}; {second}";
+    }
+
+    /// <summary>
     /// Advances to the optional trailing result set and reads its (item_name, error_text) rows. No such
     /// result set — the shape every enumeration had before #1837, and every payload collector before
     /// #1851 — returns an empty list. The single implementation behind BOTH channels: the enumeration
@@ -429,7 +571,7 @@ public static class EnumeratedCollectorDriver
             var itemToken = itemBudget?.Token ?? cancellationToken;
             try
             {
-                /* Per-database watermark refresh (query_store): its cutoff — including the 24h catch-up
+                /* Per-database watermark refresh (query_store): its cutoff — including the catch-up
                    clamp — is computed HERE, inside the loop, so each database's commit advances only its
                    own watermark and an abort loses no other database's intervals. Inside the budget on
                    purpose: it is a store read, and a store that has stopped answering is exactly the kind

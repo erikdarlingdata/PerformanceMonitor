@@ -54,6 +54,18 @@ public partial class App : Application
             return;
         }
 
+        /* Minimal file logging (ported from Lite's AppLogger) so the sidebar's View Log / Open Log
+           Folder buttons have a real target and operator bug reports carry viewer diagnostics.
+
+           Initialized HERE, ahead of the theme read below, rather than after the single-instance dance
+           where it used to sit (#2434). That read is the viewer's FIRST touch of viewer-settings.json, so
+           it is the first thing that can discover the file is unreadable — and ViewerLogger.Log drops
+           anything enqueued before Initialize, which would have made the earliest and most useful
+           diagnostic the one guaranteed to vanish. Nothing between here and its old position depends on
+           the ordering: Initialize creates a directory and starts a timer, and it swallows its own
+           failure. */
+        ViewerLogger.Initialize();
+
         /* Apply the saved color theme through ThemeManager (App.xaml merges Dark as the design-time
            default) so ThemeManager owns the app-level merged dictionary at runtime, before StartupUri
            creates MainWindow. Reads the viewer-local settings directly (cheap JSON read) so the very
@@ -74,10 +86,6 @@ public partial class App : Application
            are unaffected (ScottPlot renders via SkiaSharp/CPU into a bitmap, not WPF's GPU path). Matches Lite. */
         System.Windows.Media.RenderOptions.ProcessRenderMode =
             System.Windows.Interop.RenderMode.SoftwareOnly;
-
-        /* Minimal file logging (ported from Lite's AppLogger) so the sidebar's View Log / Open Log
-           Folder buttons have a real target and operator bug reports carry viewer diagnostics. */
-        ViewerLogger.Initialize();
 
         /* Single-instance with upgrade handoff (shared PerformanceMonitor.Ui coordinator, mirroring Lite /
            Dashboard). Runs before base.OnStartup creates the StartupUri window, so a second launch surfaces

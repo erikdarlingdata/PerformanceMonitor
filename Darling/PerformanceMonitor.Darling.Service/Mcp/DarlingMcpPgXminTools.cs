@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -59,17 +60,18 @@ public sealed class DarlingMcpPgXminTools
     public static async Task<string> GetPgXminHorizon(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to analyze, used for the persistence figures. Default 24.")] int hours_back = 24)
+        [Description("Hours of history to analyze, used for the persistence figures. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingPgXminReader.GetPgXminHorizonAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
@@ -78,6 +80,16 @@ public sealed class DarlingMcpPgXminTools
                holder" is a real finding that redirects the investigation rather than a dead end. */
             if (rows.Count == 0)
             {
+                /* ...but only when this server COULD have a horizon. On a SQL Server target "nothing is
+                   holding back the xmin horizon" is a confident all-clear about a mechanism that does not
+                   exist there, which is the same defect one engine over (#2532). */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_xmin_horizon");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,

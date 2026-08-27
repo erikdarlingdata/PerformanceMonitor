@@ -70,7 +70,6 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData("get_table_index_sizes")]
-    [InlineData("get_index_usage")]
     [InlineData("get_object_locking")]
     [InlineData("get_database_sizes")]
     public void ParamContract_ServerNameOnly_Optional(string toolName)
@@ -78,6 +77,25 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         var p = McpParams(toolName);
         Assert.Equal(new[] { "server_name" }, p.Select(x => x.Name).ToArray());
         Assert.True(p.Single().Optional);
+    }
+
+    /// <summary>
+    /// #2636 moved <c>get_index_usage</c> off the server-name-only contract, and it had to.
+    ///
+    /// <para>Rows sort unused-first across the WHOLE server behind a cap, so on an instance with enough
+    /// unused indexes in one database the entire answer comes from that database and every Active index
+    /// elsewhere is invisible. A field report hit exactly that: healthy collection, full retention, zero
+    /// returned rows for the database asked about, and nothing in the answer to distinguish "not returned"
+    /// from "not collected". <c>database_name</c> is what makes the question askable and <c>limit</c> is
+    /// what makes the cap the caller's; both stay OPTIONAL, so every existing caller behaves as before.</para>
+    /// </summary>
+    [Fact]
+    public void IndexUsage_TakesADatabaseFilterAndALimit_BothOptional()
+    {
+        var p = McpParams("get_index_usage");
+
+        Assert.Equal(new[] { "server_name", "database_name", "limit" }, p.Select(x => x.Name).ToArray());
+        Assert.All(p, x => Assert.True(x.Optional, $"{x.Name} must stay optional — existing callers pass neither"));
     }
 
     [Fact]

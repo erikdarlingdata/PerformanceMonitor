@@ -167,7 +167,15 @@ internal static class DarlingObjectStatsReader
     /// <summary>
     /// Per-index usage at the latest snapshot — Lite's <c>GetIndexUsageAsync</c> ported to Postgres:
     /// seeks/scans/lookups/updates with the Unused / Write-only / Active classification, unused-first then
-    /// largest reserved. Counters are cumulative since the last restart. $1 server_id, $2 cap.
+    /// largest reserved. Counters are cumulative since the last restart.
+    /// <para>$1 server_id, $2 database filter (NULL = every database), $3 cap.</para>
+    /// <para>#2636: the ordering and the cap interact badly and a field report found the sharp edge. Unused
+    /// sorts ahead of everything SERVER-WIDE, so on an instance with 200+ unused indexes concentrated in one
+    /// legacy database, the entire capped result is consumed by that database and every Active index in every
+    /// other database is invisible — with nothing in the answer to say so. The reporter's database had
+    /// healthy collection, full retention and zero returned rows, which reads exactly like a collection
+    /// failure. The database filter is what makes the question answerable; the count below is what stops the
+    /// answer being read as complete.</para>
     /// </summary>
     public const string IndexUsageSql = """
         SELECT
@@ -194,18 +202,40 @@ internal static class DarlingObjectStatsReader
         FROM v_index_object_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+        AND   ($2::text IS NULL OR database_name = $2::text)
         ORDER BY
             CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
             reserved_mb DESC
-        LIMIT $2
+        LIMIT $3
         """;
 
+    /// <summary>
+    /// How many rows the same filter MATCHES, before the cap (#2636). Read alongside the rows so the answer
+    /// can say it was truncated and by how much — the reporter's complaint was not that a cap exists, it was
+    /// that nothing distinguished "not returned" from "not collected".
+    /// <para>A second query rather than a window function over the first: the count has to be of the whole
+    /// match, and a COUNT(*) OVER () inside a LIMITed statement returns the count of what survived the
+    /// LIMIT — which is the exact mistake this is here to report.</para>
+    /// </summary>
+    public const string IndexUsageMatchCountSql = """
+        SELECT count(*)
+        FROM v_index_object_stats
+        WHERE server_id = $1
+        AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+        AND   ($2::text IS NULL OR database_name = $2::text)
+        """;
+
+    /// <summary>
+    /// The rows the cap allowed. <paramref name="databaseName"/> null means every database — the shape the
+    /// tool had before #2636, kept so callers that genuinely want a server-wide sweep still get one.
+    /// </summary>
     public static async Task<List<IndexUsageRow>> GetIndexUsageAsync(
-        NpgsqlDataSource postgres, int serverId, int top, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, int top, string? databaseName = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexUsageRow>();
         await using var command = postgres.CreateCommand(IndexUsageSql);
         DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -228,6 +258,20 @@ internal static class DarlingObjectStatsReader
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// How many index rows the same server and database filter match at the latest snapshot, ignoring the
+    /// cap (#2636).
+    /// </summary>
+    public static async Task<long> GetIndexUsageMatchCountAsync(
+        NpgsqlDataSource postgres, int serverId, string? databaseName = null, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(IndexUsageMatchCountSql);
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
+
+        return await command.ExecuteScalarAsync(cancellationToken) is long count ? count : 0;
     }
 
     /* ─────────────────────────── object locking ─────────────────────────── */

@@ -33,6 +33,11 @@ public sealed class DarlingCommandExecutorTests
     /// <summary>A fake host — the store-write / probe branches never call it; asserts if they do.</summary>
     private sealed class ThrowingHost : IDarlingCommandHost
     {
+
+        /* #2612: not exercised by these dispatch tests — the pin that the command REACHES the host
+           lives beside the other worker-delegated verbs. */
+        public Task<CommandOutcome> TestHypotheticalIndexAsync(int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("host should not be called for this command");
         public Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken)
             => throw new InvalidOperationException("host should not be called for this command");
 
@@ -56,6 +61,11 @@ public sealed class DarlingCommandExecutorTests
     /// custom-N-vs-default parsing round-trip (no live store or SQL Server).</summary>
     private sealed class PurgeRecordingHost : IDarlingCommandHost
     {
+
+        /* #2612: not exercised by these dispatch tests — the pin that the command REACHES the host
+           lives beside the other worker-delegated verbs. */
+        public Task<CommandOutcome> TestHypotheticalIndexAsync(int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("host should not be called for this command");
         public bool WasCalled { get; private set; }
         public int? ReceivedCustomRetentionDays { get; private set; }
 
@@ -87,6 +97,11 @@ public sealed class DarlingCommandExecutorTests
     /// fetch_plan claim/execute/report round-trip (the store path, without a live SQL Server).</summary>
     private sealed class PlanReturningHost : IDarlingCommandHost
     {
+
+        /* #2612: not exercised by these dispatch tests — the pin that the command REACHES the host
+           lives beside the other worker-delegated verbs. */
+        public Task<CommandOutcome> TestHypotheticalIndexAsync(int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("host should not be called for this command");
         public PlanFetchRequest? Received { get; private set; }
         public int ReceivedServerId { get; private set; }
 
@@ -117,6 +132,11 @@ public sealed class DarlingCommandExecutorTests
     /// for the fetch_active_queries claim/execute/report round-trip (the store path, without a live SQL Server).</summary>
     private sealed class ActiveQueriesReturningHost : IDarlingCommandHost
     {
+
+        /* #2612: not exercised by these dispatch tests — the pin that the command REACHES the host
+           lives beside the other worker-delegated verbs. */
+        public Task<CommandOutcome> TestHypotheticalIndexAsync(int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("host should not be called for this command");
         public int ReceivedServerId { get; private set; } = int.MinValue;
 
         public Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken)

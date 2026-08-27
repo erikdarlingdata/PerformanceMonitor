@@ -41,6 +41,11 @@ public partial class DrillDownCollector
     {
         foreach (var finding in findings)
         {
+            /* #2443: between findings is the natural abandon point — the per-finding catch below
+               deliberately does NOT swallow an abandonment, so this throw (and any residue from a
+               drill-down mid-read) unwinds the pass to the service's single Information line. */
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             try
             {
                 finding.DrillDown = new Dictionary<string, object>();
@@ -124,7 +129,7 @@ public partial class DrillDownCollector
                 if (finding.DrillDown.Count == 0)
                     finding.DrillDown = null;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
             {
                 AppLogger.Error("DrillDownCollector",
                     $"Drill-down failed for {finding.StoryPath}: {ex.GetType().Name}: {ex.Message}");

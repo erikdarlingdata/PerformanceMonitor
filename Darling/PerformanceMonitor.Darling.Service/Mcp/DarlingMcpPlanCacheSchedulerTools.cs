@@ -34,21 +34,23 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
     public static async Task<string> GetPlanCacheBloat(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of data to analyze. Default 24.")] int hours_back = 24)
+        [Description("Hours of data to analyze. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingPlanCacheSchedulerReader.GetPlanCacheBloatAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "plan_cache_stats")
+                    ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
             var totalPlans = rows.Sum(r => (long)r.TotalPlans);
             var totalSingleUse = rows.Sum(r => (long)r.SingleUsePlans);
@@ -103,7 +105,8 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
         {
             var item = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(postgres, resolved.ServerId);
             if (item == null)
-                return McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_scheduler_stats")
+                    ?? McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
 
             var workerUtilizationPercent = item.MaxWorkersCount > 0
                 ? Math.Round(item.TotalCurrentWorkersCount * 100.0 / item.MaxWorkersCount, 2)

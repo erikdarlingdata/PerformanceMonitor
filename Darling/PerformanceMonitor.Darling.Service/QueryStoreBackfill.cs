@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// live path never takes. Phase 1 made the LIVE path hole-free, but two bounded windows still
 /// discard history by design: first contact takes only the trailing 60 minutes of a ~30-day
 /// catalog, and post-outage catch-up is clamped to <see cref="WatermarkPolicy.MaxCatchup"/> (the
-/// #1556 incident fix, tightened to 1h by #2102) as a bounded, logged hole. One mechanism fills
+/// #1556 incident fix, tightened by #2102) as a bounded, logged hole. One mechanism fills
 /// both, and every slice of it windows at most <see cref="QueryStoreBackfillState.MaxSliceSpan"/>
 /// at a time (#2102 — the query's cost grows with window width, so an unchunked wide range on a
 /// big database re-times-out forever instead of draining):
@@ -40,7 +40,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// is the #1960 design constraint: the two paths can never race for the same boundary.</para>
 ///
 /// <para><b>Clamp holes (post-outage).</b> An interior gap is invisible to MIN/MAX, so the runner
-/// records it at the moment the 24h clamp fires — (raw watermark, clamped floor), merged wider on
+/// records it at the moment the catch-up clamp fires — (raw watermark, clamped floor), merged wider on
 /// a repeat clamp — under this worker's own <c>collector_state</c> rows
 /// (<see cref="StateCollectorName"/>; deliberately NOT the definition's StateKeys machinery, so
 /// query_store itself still declares none). The worker services the hole newest-first and shrinks

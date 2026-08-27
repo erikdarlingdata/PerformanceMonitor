@@ -23,8 +23,10 @@ namespace Lite.Tests;
 /// the running_jobs/job_history/agent_status msdb gate) was silently ignored by Darling. That layer is gone.
 /// These pins assert:
 /// <list type="number">
-/// <item>each moved gate's <c>AppliesTo</c> truth table (Azure SQL DB / AWS RDS / no-msdb / pre-2016), so a
-/// gate can't silently regress;</item>
+/// <item>each moved gate's <c>AppliesTo</c> truth table (Azure SQL DB / AWS RDS / pre-2016), so a
+/// gate can't silently regress. msdb access is deliberately NOT among them since #2559 — it is a grant
+/// rather than an engine capability, so the Agent collectors attempt and fail into PERMISSIONS instead of
+/// gating off on a cached probe;</item>
 /// <item>that the by-name surface Lite dispatches through (<see cref="CollectorCatalog.AppliesTo(string, CollectorTargetInfo)"/>)
 /// agrees with the definition's own <c>AppliesTo</c> that Darling's runner calls — the proof both SKUs now
 /// gate identically off ONE surface;</item>
@@ -62,23 +64,44 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     /// <summary>
-    /// #2150 field report: this fired 11x consecutive on an Azure SQL DB elastic pool with error 262,
-    /// "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'". The query reads
-    /// <c>tempdb.sys.dm_db_file_space_usage</c> three-part, which a non-administrative login on Azure
-    /// SQL DB cannot be granted, so the collector could only ever fail there.
-    /// <para>Managed Instance must KEEP collecting — it has a real tempdb — which is why this asserts
-    /// both directions rather than just the skip.</para>
+    /// tempdb_stats applies EVERYWHERE, Azure SQL Database included (#2512).
+    ///
+    /// <para><b>This assertion was flipped, and it is worth being precise about what it used to pin.</b>
+    /// It was written for the #2150 field report — 11x consecutive on an Azure SQL DB elastic pool with
+    /// error 262, "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'" — and it pinned
+    /// TWO different claims in one <c>Assert.False</c>. The first, that the three-part
+    /// <c>tempdb.sys.dm_db_file_space_usage</c> reference cannot be served on Azure SQL Database, was
+    /// checkable and is false: the collector's SQL runs verbatim on GP_S_Gen5_2 and HS_S_Gen5_2 and returns
+    /// real, moving numbers (see <see cref="TempDbStatsCollector.AppliesTo"/> for the measurement). The
+    /// second, that a login might not be able to READ it, is true — but it is a property of the login, not
+    /// of the tier, so it belongs to the fault classifier
+    /// (<see cref="SqlServerPermissionErrors.IsPermissionDenied"/>, which now covers 262) and not to a gate
+    /// that denies every properly-permissioned Azure target to spare the one that is not.</para>
+    ///
+    /// <para><b>The other half of this pin never changed and is the reason it survives rather than being
+    /// deleted.</b> Managed Instance was never gated — it has a real tempdb and full DMV access — and the
+    /// original comment says outright that asserting BOTH directions is what stops an "anything Azure"
+    /// gate creeping in. That risk runs the other way now: this must not be re-narrowed to Azure SQL DB
+    /// later on the strength of the stale doc comment, so both directions still get asserted.</para>
     /// </summary>
     [Fact]
-    public void TempDbStats_AppliesTo_SkipsOnlyAzureSqlDb()
+    public void TempDbStats_AppliesTo_EveryTarget_IncludingAzureSqlDb()
     {
-        Assert.False(TempDbStatsCollector.Instance.AppliesTo(AzureSqlDb));  /* error 262 in tempdb */
+        /* #2512: the gate is gone. The DMVs bind and return real data on both Azure SQL DB tiers. */
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(AzureSqlDb));
+        /* Never gated, and must stay that way — MI has a real tempdb. */
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(AzureMi));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(AwsRds));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(OnPrem2016));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(OnPrem2014));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(NoMsdb));
         Assert.True(TempDbStatsCollector.Instance.AppliesTo(Unknown));
+
+        /* The surface the runners actually call — the composed engine gate — must agree, or Darling
+           would still skip what Lite now runs. AppliesTo alone cannot see that half. */
+        Assert.True(CollectorCatalog.AppliesTo(TempDbStatsCollector.Instance, AzureSqlDb));
+        Assert.True(CollectorCatalog.AppliesTo(TempDbStatsCollector.Instance, AzureMi));
+        Assert.True(CollectorCatalog.AppliesTo(TempDbStatsCollector.Instance.Name, AzureSqlDb));
     }
 
     [Fact]
@@ -112,21 +135,21 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     [Fact]
-    public void RunningJobs_AppliesTo_SkipsAzureSqlDbRdsAndNoMsdb()
+    public void RunningJobs_AppliesTo_SkipsAzureSqlDbAndRds_ButAttemptsWithoutMsdb()
     {
         Assert.False(RunningJobsCollector.Instance.AppliesTo(AzureSqlDb));
         Assert.False(RunningJobsCollector.Instance.AppliesTo(AwsRds));    /* joins msdb.dbo.syssessions */
-        Assert.False(RunningJobsCollector.Instance.AppliesTo(NoMsdb));
+        Assert.True(RunningJobsCollector.Instance.AppliesTo(NoMsdb));   // #2559: reported, not dispatched on
         Assert.True(RunningJobsCollector.Instance.AppliesTo(AzureMi));
         Assert.True(RunningJobsCollector.Instance.AppliesTo(OnPrem2016));
         Assert.True(RunningJobsCollector.Instance.AppliesTo(Unknown));
     }
 
     [Fact]
-    public void JobHistory_AppliesTo_SkipsAzureSqlDbAndNoMsdb_ButNotRds()
+    public void JobHistory_AppliesTo_SkipsAzureSqlDb_ButNotRdsAndNotNoMsdb()
     {
         Assert.False(JobHistoryCollector.Instance.AppliesTo(AzureSqlDb));
-        Assert.False(JobHistoryCollector.Instance.AppliesTo(NoMsdb));
+        Assert.True(JobHistoryCollector.Instance.AppliesTo(NoMsdb));   // #2559: reported, not dispatched on
         Assert.True(JobHistoryCollector.Instance.AppliesTo(AwsRds));      /* never touches syssessions */
         Assert.True(JobHistoryCollector.Instance.AppliesTo(AzureMi));
         Assert.True(JobHistoryCollector.Instance.AppliesTo(OnPrem2016));
@@ -134,11 +157,11 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     [Fact]
-    public void AgentStatus_AppliesTo_SkipsAzureSqlDbRdsAndNoMsdb()
+    public void AgentStatus_AppliesTo_SkipsAzureSqlDbAndRds_ButAttemptsWithoutMsdb()
     {
         Assert.False(AgentStatusCollector.Instance.AppliesTo(AzureSqlDb));
         Assert.False(AgentStatusCollector.Instance.AppliesTo(AwsRds));    /* no sys.dm_server_services */
-        Assert.False(AgentStatusCollector.Instance.AppliesTo(NoMsdb));
+        Assert.True(AgentStatusCollector.Instance.AppliesTo(NoMsdb));   // #2559: reported, not dispatched on
         Assert.True(AgentStatusCollector.Instance.AppliesTo(AzureMi));
         Assert.True(AgentStatusCollector.Instance.AppliesTo(OnPrem2016));
         Assert.True(AgentStatusCollector.Instance.AppliesTo(Unknown));
@@ -185,10 +208,12 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     [Fact]
-    public void HasMsdbAccess_DefaultsToTrue_SoUnknownTargetsStillAttemptAgentCollectors()
+    public void HasMsdbAccess_DefaultsToTrue_AndTheAgentCollectorsAttemptRegardless()
     {
-        /* The probe returns NULL ⇒ assume access; every bare CollectorTargetInfo must mirror that, or the
-           three Agent collectors would silently gate off on the unknown path. */
+        /* The probe returns NULL ⇒ assume access, and every bare CollectorTargetInfo mirrors that. Since
+           #2559 the three Agent collectors attempt whatever this says, so the default no longer decides
+           dispatch — but it is still the value reported on a connection surface, and it staying true is
+           what keeps an unclassified target from being described as having no msdb access. */
         Assert.True(new CollectorTargetInfo().HasMsdbAccess);
         Assert.True(RunningJobsCollector.Instance.AppliesTo(new CollectorTargetInfo()));
         Assert.True(JobHistoryCollector.Instance.AppliesTo(new CollectorTargetInfo()));

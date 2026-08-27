@@ -52,6 +52,14 @@ public sealed class CredentialResolver
         => ServerConnection.ResolveUtilityConnectionString(server, _credentialService, _profileLookup);
 
     /// <summary>
+    /// Resolves a connection string targeting a NAMED database rather than the server's configured default
+    /// or utility database (#2407). Azure SQL Database has no cross-database execution, so a proc that reads
+    /// a database has to be run from inside it — the Utility DB indirection cannot apply there.
+    /// </summary>
+    public string GetConnectionStringForDatabase(ServerConnection server, string databaseName)
+        => ServerConnection.ResolveConnectionStringForDatabase(server, databaseName, _credentialService, _profileLookup);
+
+    /// <summary>
     /// Profile-aware stored-credential check (N-1).
     /// </summary>
     public bool HasStoredCredentials(ServerConnection server)

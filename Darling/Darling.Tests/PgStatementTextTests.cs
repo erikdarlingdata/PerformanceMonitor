@@ -208,7 +208,8 @@ public sealed class PgStatementTextTests
         /* MAX, because the read's grain is (queryid, database_id) while text is keyed on queryid alone —
            one text per group by construction, so this picks it without widening the GROUP BY. */
         Assert.Contains("MAX(t.query_text) AS query_text", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY queryid, database_id", sql, StringComparison.Ordinal);
+        /* #2554: qualified, because THIS join is what made it ambiguous. */
+        Assert.Contains("GROUP BY differenced.queryid, database_id", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

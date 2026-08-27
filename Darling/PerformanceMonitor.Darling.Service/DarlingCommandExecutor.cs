@@ -308,6 +308,21 @@ WHERE status = 'in_progress'
                 return await _host.ExecuteActualPlanAsync(command.TargetServerId!.Value, actualPlanRequest, cancellationToken);
             }
 
+            case CommandKind.TestHypotheticalIndex:
+            {
+                /* Re-parsed here so the host receives the structured request, mirroring the two branches
+                   above. The payload is an IDENTIFIER plus a candidate; the host resolves the statement
+                   text from the store and never takes it from the caller. */
+                if (!HypotheticalIndexRequest.TryParse(command.ArgsJson, out var hypotheticalRequest))
+                {
+                    return new CommandOutcome(false, "invalid args_json",
+                        ErrorJson("test_hypothetical_index args_json was missing or malformed"));
+                }
+
+                return await _host.TestHypotheticalIndexAsync(
+                    command.TargetServerId!.Value, hypotheticalRequest, cancellationToken);
+            }
+
             case CommandKind.FetchActiveQueries:
                 /* Worker-delegated like fetch_plan (needs the target's LIVE connection to read the running-request
                    DMVs). Takes NO args — the target_server_id on the command row is the whole request; the host
@@ -408,6 +423,24 @@ WHERE status = 'in_progress'
                 return ActualPlanRequest.TryParse(command.ArgsJson, out _)
                     ? new CommandPlan(CommandKind.ExecuteActualPlan, null, null, "actual plan captured", null)
                     : Fail("execute_actual_plan requires args_json with a query_hash");
+
+            case "test_hypothetical_index":
+                /* Worker-delegated (needs the target's LIVE connection to plan against its statistics) and the
+                   store (to resolve the statement text from the queryid). #2612: the ONE PostgreSQL command
+                   that makes the product act rather than read, so it rides the same read-write-seat-only
+                   enqueue as execute_actual_plan — but it is a lesser class than that one, and the message
+                   says so rather than leaving the reader to infer it: EXPLAIN without ANALYZE does not run
+                   the statement, a hypothetical index is never written anywhere, and both are undone before
+                   the call returns. */
+                if (command.TargetServerId is null)
+                {
+                    return Fail("test_hypothetical_index requires target_server_id");
+                }
+
+                return HypotheticalIndexRequest.TryParse(command.ArgsJson, out _)
+                    ? new CommandPlan(CommandKind.TestHypotheticalIndex, null, null, "hypothetical index tested", null)
+                    : Fail("test_hypothetical_index requires args_json with queryid, schemaName, tableName and a "
+                           + "non-empty columns array of plain identifiers");
 
             case "fetch_active_queries":
                 /* Worker-delegated like fetch_plan (needs the target's LIVE runtime connection to read what is
@@ -629,6 +662,11 @@ public enum CommandKind
     /// the host, running the shared Active Queries collector's query) and return the rows in result_json. Read-only.</summary>
     FetchActiveQueries,
 
+    /// <summary><c>test_hypothetical_index</c>: plan one stored statement twice on a PostgreSQL target — with and
+    /// without a candidate index the planner can see but nothing builds — and report whether it would be used
+    /// (#2612). Nothing is executed, nothing is written, and the experiment is undone before the call returns.</summary>
+    TestHypotheticalIndex,
+
     /// <summary>Bad arguments or an unknown command_type — report failed without touching the store.</summary>
     Fail,
 }
@@ -675,6 +713,15 @@ public interface IDarlingCommandHost
     /// outcome rather than a raw SQL error.
     /// </summary>
     Task<CommandOutcome> ExecuteActualPlanAsync(int serverId, ActualPlanRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Plans one stored PostgreSQL statement with and without a candidate index (#2612).
+    ///
+    /// <para>Consent-class like <see cref="ExecuteActualPlanAsync"/> in that it makes the product ACT on a
+    /// monitored server, and unlike it in what that costs: no statement is executed, nothing is written,
+    /// the candidate exists only inside one session, and the session is cleaned before this returns.</para>
+    /// </summary>
+    Task<CommandOutcome> TestHypotheticalIndexAsync(int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken);
 
     /// <summary>
     /// <c>fetch_active_queries</c>: read the LIVE running-request DMV snapshot from the target server on demand

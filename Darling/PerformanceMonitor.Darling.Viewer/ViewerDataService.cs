@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -14,6 +14,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -23,21 +24,36 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// One row of the servers table, as the viewer's server list shows it. Was a positional record; it is now
 /// a class because the ported Lite server-row chrome needs mutable, change-notifying runtime state on each
 /// row — the favorite star (<see cref="IsFavorite"/>, matched from the viewer's registry) and the
-/// collection-freshness status dot (<see cref="IsOnline"/> / <see cref="HasCollectorErrors"/> →
-/// <see cref="DotStatus"/>) update in place on the refresh timers without resetting the list's selection.
+/// collection-freshness status dot (<see cref="IsOnline"/> / <see cref="HasCollectorErrors"/> /
+/// <see cref="AwaitingFirstCollection"/> → <see cref="CardStatus"/> → <see cref="DotStatus"/>) update in
+/// place on the refresh timers without resetting the list's selection.
 /// The Postgres-sourced fields stay immutable (get-only); only the sidebar overlay state is settable.
 /// Equality is now reference-based, which every consumer already relies on (they key on
 /// <see cref="ServerId"/> or hold the list's own instances).
 /// </summary>
 public sealed class DarlingServer : INotifyPropertyChanged
 {
+    /// <param name="engineKind">
+    /// <c>servers.engine_kind</c> as the store holds it (#2530) - one of
+    /// <see cref="MonitoredEngineKind.All"/>, or null for a row no connect has stamped since the V82 rung
+    /// landed. Defaulted so the two reader call sites are the only places that have to know the column
+    /// exists, and so the test fakes that construct a SQL Server row keep compiling unchanged.
+    /// </param>
+    /// <param name="engineEdition">
+    /// <c>servers.sql_engine_edition</c>. Carried beside the kind because
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> takes BOTH axes and asks kind first: a
+    /// PostgreSQL target's edition is 0, which the edition axis correctly reads as "no claim". Passing 0
+    /// here for a server whose edition has not been read is exactly that same silence.
+    /// </param>
     public DarlingServer(
         int serverId,
         string serverName,
         string displayName,
         bool isEnabled,
         int? sqlMajorVersion,
-        decimal monthlyCostUsd = 0)
+        decimal monthlyCostUsd = 0,
+        string? engineKind = null,
+        int engineEdition = CollectorEngineCapability.UnknownEngineEdition)
     {
         ServerId = serverId;
         ServerName = serverName;
@@ -45,6 +61,8 @@ public sealed class DarlingServer : INotifyPropertyChanged
         IsEnabled = isEnabled;
         SqlMajorVersion = sqlMajorVersion;
         MonthlyCostUsd = monthlyCostUsd;
+        EngineKind = engineKind;
+        EngineEdition = engineEdition;
     }
 
     public int ServerId { get; }
@@ -53,6 +71,35 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public bool IsEnabled { get; }
     public int? SqlMajorVersion { get; }
     public decimal MonthlyCostUsd { get; }
+
+    /// <summary>The raw <c>servers.engine_kind</c> token, or null when the store makes no claim. Kept raw
+    /// rather than decoded to an enum so an unrecognised token written by a NEWER service survives the trip
+    /// to <see cref="EngineDescription"/>, which shows the operator the literal string to search for.</summary>
+    public string? EngineKind { get; }
+
+    /// <summary><c>servers.sql_engine_edition</c>; <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
+    /// when the probe has not run or the target has no such property (every PostgreSQL target).</summary>
+    public int EngineEdition { get; }
+
+    /// <summary>
+    /// True only when the store SAYS this target is PostgreSQL. Absence is not evidence for either engine,
+    /// so a null or unrecognised token is false and the server keeps the SQL Server surface - the
+    /// pre-#2530 behaviour, which is the only safe default for the servers that have not reconnected since
+    /// the engine-kind rung landed.
+    /// </summary>
+    public bool IsPostgres => MonitoredEngineKind.IsPostgres(EngineKind);
+
+    /// <summary>
+    /// How the engine reads in the per-server header, or null when the store makes no claim - in which case
+    /// the header shows NO engine label rather than "SQL Server", because the tabs such a server gets are a
+    /// default rather than a finding. An unrecognised token renders as the raw token: the describer's
+    /// "an unrecognised engine" is worded to sit mid-sentence in the capability messages and reads wrong as
+    /// a label, and the literal string is what an operator would grep their store for.
+    /// </summary>
+    public string? EngineDescription =>
+        !MonitoredEngineKind.IsKnown(EngineKind)
+            ? (string.IsNullOrWhiteSpace(EngineKind) ? null : EngineKind.Trim())
+            : MonitoredEngineKind.DescribeEngineKind(EngineKind);
 
     /// <summary>"SQL Server 2022"-style label for the server list; empty when the version is unknown.</summary>
     public string VersionLabel => ViewerDataService.SqlVersionLabel(SqlMajorVersion);
@@ -87,7 +134,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
             {
                 _isOnline = value;
                 OnPropertyChanged(nameof(IsOnline));
-                OnPropertyChanged(nameof(DotStatus));
+                RaiseDotChanged();
             }
         }
     }
@@ -104,34 +151,103 @@ public sealed class DarlingServer : INotifyPropertyChanged
             {
                 _hasCollectorErrors = value;
                 OnPropertyChanged(nameof(HasCollectorErrors));
-                OnPropertyChanged(nameof(DotStatus));
+                RaiseDotChanged();
+            }
+        }
+    }
+
+    private bool _awaitingFirstCollection;
+
+    /// <summary>
+    /// True when no collection has EVER landed for this server: the service hasn't reached it yet — a
+    /// registered-but-queued server during bootstrap, not a dead one. The row had no such flag until #2473,
+    /// which is precisely why its dot went grey "Unknown" while the Overview card one panel over said amber
+    /// "Awaiting first collection" about the same server, off the same freshness call.
+    /// </summary>
+    public bool AwaitingFirstCollection
+    {
+        get => _awaitingFirstCollection;
+        set
+        {
+            if (_awaitingFirstCollection != value)
+            {
+                _awaitingFirstCollection = value;
+                OnPropertyChanged(nameof(AwaitingFirstCollection));
+                RaiseDotChanged();
             }
         }
     }
 
     /// <summary>
-    /// Sidebar status-dot vocabulary — "Online"/"Warning"/"Offline"/"Unknown", identical to Lite's
-    /// <c>ServerConnection.DotStatus</c> so the ported server-row DataTriggers colour the Ellipse the same way.
+    /// The sidebar row's status, as a VALUE — the same <see cref="ServerCollectionStatus"/> the Overview card
+    /// renders (#2473). This row used to derive its own copy of the status ladder from the same flags, on a
+    /// different type, on a different surface, and with only four of the five states: the sidebar and the card
+    /// could therefore say different things about one server, and for a never-collected server they did. Both
+    /// now read <see cref="ServerCollectionStatusRules.Classify"/>, which is the collapse #2429 argued for —
+    /// with one discriminant there is no flag combination left for the renderings to disagree about.
     /// </summary>
-    public string DotStatus => IsOnline switch
+    public ServerCollectionStatus CardStatus =>
+        ServerCollectionStatusRules.Classify(IsOnline, HasCollectorErrors, AwaitingFirstCollection);
+
+    /// <summary>
+    /// Sidebar status-dot vocabulary — the SAME words the Overview card's <c>StatusDisplay</c> shows, because
+    /// both render <see cref="CardStatus"/>. They are also the <c>DataTrigger</c> values MainWindow.xaml keys
+    /// the Ellipse fill off, so a state with no trigger falls through to the muted grey default rather than
+    /// failing anything — which is how "Awaiting first collection" was silently grey. The trigger set is
+    /// pinned against the enum in <c>ViewerSidebarDotRendersTheCardStatusTests</c>.
+    /// </summary>
+    public string DotStatus => CardStatus.Word();
+
+    /// <summary>
+    /// What the dot means, for the ToolTip the sidebar Ellipse carries — the answer to #2422 one surface over,
+    /// and the thing that makes an amber dot legible at all. The card's amber covers two states (a stale
+    /// collection and a never-collected server) and the card disambiguates them with a WORD; a dot has no room
+    /// for one, so the tooltip does that job instead. The first line is
+    /// <see cref="ServerCollectionStatusRules.Headline"/>, word-for-word what the Overview card says for the
+    /// same state.
+    ///
+    /// <para>The second line names the axis. In Darling every one of these words is a COLLECTION answer —
+    /// there is no live ping to a monitored server — which is the opposite of Lite, where the identically
+    /// coloured dot reports a connection check. A reader who uses both should not have to infer which. The
+    /// third names the gesture THIS surface supports: <c>ServerList_MouseDoubleClick</c> opens the tab, and a
+    /// single click only selects, so naming one would be naming a no-op.</para>
+    /// </summary>
+    public string DotTooltip => string.Join(
+        "\n",
+        CardStatus.Headline(),
+        "Darling has no live ping: this is how old the newest collection is, not a connection check.",
+        "Double-click the row to open this server's tab");
+
+    /// <summary>Raises the change notifications for everything derived from the three status flags. One
+    /// helper rather than three call sites per setter: <see cref="DotTooltip"/> was added after
+    /// <see cref="DotStatus"/>, and a derived member that a setter forgets to announce is a dot that stops
+    /// updating in place — silent, and only visible on a list refresh.</summary>
+    private void RaiseDotChanged()
     {
-        true => HasCollectorErrors ? "Warning" : "Online",
-        false => "Offline",
-        _ => "Unknown"
-    };
+        OnPropertyChanged(nameof(CardStatus));
+        OnPropertyChanged(nameof(DotStatus));
+        OnPropertyChanged(nameof(DotTooltip));
+    }
 
     /// <summary>
     /// Sets the dot from the same collection-freshness classification the Overview cards use
-    /// (<see cref="ServerSummaryItem.ClassifyFreshness"/>): Fresh → Online, Stale → the amber Warning,
-    /// Offline → red, NeverCollected → the grey Unknown dot (the service hasn't reached the server yet —
-    /// during a fleet bootstrap that is "queued", not "dead"). Both instants are UTC (the store is naive
-    /// UTC; nowUtc is <see cref="DateTime.UtcNow"/>).
+    /// (<see cref="ServerSummaryItem.ClassifyFreshness"/>), through the same
+    /// <see cref="ServerCollectionStatusRules.FlagsFor"/> mapping: Fresh → Online, Stale → the amber Warning,
+    /// Offline → red, NeverCollected → the amber "Awaiting first collection" (the service hasn't reached the
+    /// server yet — during a fleet bootstrap that is "queued", not "dead"). Both instants are UTC (the store
+    /// is naive UTC; nowUtc is <see cref="DateTime.UtcNow"/>).
+    ///
+    /// <para>This method used to set two flags out of three by hand and drop the awaiting marker on the floor.
+    /// Nothing about a block of assignments makes a missing one visible, which is why the flags now arrive as
+    /// a single value (#2473).</para>
     /// </summary>
     public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
     {
-        var freshness = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc);
-        IsOnline = freshness == ServerFreshness.NeverCollected ? null : freshness != ServerFreshness.Offline;
-        HasCollectorErrors = freshness == ServerFreshness.Stale;
+        var flags = ServerCollectionStatusRules.FlagsFor(
+            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc));
+        IsOnline = flags.IsOnline;
+        HasCollectorErrors = flags.HasCollectorErrors;
+        AwaitingFirstCollection = flags.AwaitingFirstCollection;
     }
 
     // ── Per-server alert "needs attention" badge state (from the polled alert history, ack-aware) ──
@@ -233,8 +349,16 @@ public sealed class DarlingServer : INotifyPropertyChanged
 /// </summary>
 public sealed partial class ViewerDataService : IAsyncDisposable
 {
+    /// <summary>
+    /// The observed server registry. <c>engine_kind</c> (#2530) and <c>sql_engine_edition</c> ride along
+    /// because the per-server tab set and every PostgreSQL panel's own explanation are derived from them -
+    /// see <see cref="ViewerPostgresTabs"/>. Both are read here AND in
+    /// <c>ViewerDataService.MonitoredServers.cs</c>'s <c>ManagedServersSql</c>: that one is what the sidebar
+    /// actually uses on a seeded store, so a discriminator added to only this query would have left every
+    /// real deployment on the SQL Server tab set.
+    /// </summary>
     public const string ServersSql =
-        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0) FROM servers ORDER BY display_name";
+        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0) FROM servers ORDER BY display_name";
 
     /// <summary>
     /// The authoritative read-only probe (V8 security hardening): does the connected role hold INSERT
@@ -528,7 +652,35 @@ SELECT
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'query_store_health'),
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_store_text' AND column_name = 'query_hash'),
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_service' AND column_name = 'compose_statement_timeout_seconds'),
-    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'file_growth_enabled')";
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'file_growth_enabled'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'collection_log' AND column_name = 'slowest_item_ms'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'tempdb_stats' AND column_name = 'max_size_mb'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'servers' AND column_name = 'engine_kind'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_database_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_index_usage_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_table_bloat_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_session_states'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_plan_capture_readiness'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_write_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_extension_availability'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_lock_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_column_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_replication_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_buffer_usage'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_index_bloat'),
+    /* V95 probes a COLUMN, not a table. The three tables it touches all already exist at V94, so table
+       existence cannot separate the rungs and information_schema.columns is the only sentinel that can. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_column_stats'
+                                                     AND   column_name = 'database_name'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_wait_sampling'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_kernel_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_predicate_stats'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_plan_capture'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'servers' AND column_name = 'postgres_major_version'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_io_stats' AND column_name = 'read_bytes'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_server_config'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_deadlocks'),
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pg_deadlocks_identity')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -549,7 +701,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79));
             }
 
             return null;
@@ -574,7 +726,7 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false)
     {
         /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
            A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
@@ -628,6 +780,234 @@ SELECT
         /* #2349: newest first. The arm below STAYS — a store migrated to exactly 78 must map to 78 rather
            than falling through. The column is named only in the probe line, not in this prose, per the V71
            finding: the coverage ratchet strips information_schema lines but cannot strip a comment. */
+        /* #2472: newest first. The arm below STAYS — a store migrated to exactly 79 must map to 79 rather
+           than falling through. The column is named only in the probe line, not in this prose, per the V71
+           finding: the coverage ratchet strips information_schema lines but cannot strip a comment.
+
+           This rung's gate earns its place rather than being bookkeeping. The service writes the fan-out
+           rollup on every productive per-database run and Collection Health reads it; a viewer on a V79
+           store would find the column missing and the read would throw rather than degrade, so the banner
+           has to fire before the tab does. */
+        /* #2515: newest first. The arm below STAYS — a store migrated to exactly 80 must map to 80 rather
+           than falling through. The column is named only in the probe line, not in this prose, per the V71
+           finding: the coverage ratchet strips information_schema lines but cannot strip a comment.
+
+           The reason to gate is the standing invariant rather than a read that would throw — no viewer query
+           names this column; the SERVICE's alert adapter is what reads it. RequiredStoreSchemaVersion is
+           StorageVersion.SchemaVersion, so a fully-migrated store has to map to EXACTLY this or the banner
+           reports a mismatch on a store that is current. What the banner buys on the way is worth having: a
+           store still at 80 has no ceiling recorded anywhere in its history, so every tempdb percentage in it
+           is the old distance-to-next-autogrow measurement, and the operator should know that before reading
+           one. */
+        /* #2540: newest first, and the arms below STAY — a store migrated to exactly 85 must map to 85
+           rather than falling through. The table is named only in the probe line, not in this prose, per
+           the V71 finding: the coverage ratchet strips information_schema lines but cannot strip a comment.
+
+           A collector-table rung would ordinarily get no arm at all — see the V63-V69 note below — and this
+           one is here for the standing invariant: it is the TOP rung, RequiredStoreSchemaVersion is
+           StorageVersion.SchemaVersion, and a fully-migrated store must map to EXACTLY that or the version
+           banner reports a mismatch against a store that is current. Nothing in the viewer reads the table;
+           the read that does is on the MCP surface.
+
+           The three comment blocks that used to stack here were moved down onto the arms they describe
+           (#2530 → V82, #2539 → V83, #2542 → V85). They had drifted upward as each new rung inserted its
+           own block above them, which is how a comment ends up explaining an arm two rungs away from the
+           one it was written for. Keep the block with its arm. */
+        /* V104 (#2661): the deadlock lookup index. An INDEX sentinel rather than a table one, because
+           V103 created the table and V104 only indexes it — a store stopped between the two has the table
+           and not the index, which is a real interrupted-upgrade state and exactly what these arms exist to
+           distinguish. The TOP rung, so it must map exactly or the connect-time gate refuses a store that
+           is perfectly current. */
+        if (hasPgDeadlockIdentity)
+        {
+            return 104;
+        }
+
+        /* V103 (#2661): collect.pg_deadlocks itself. */
+        if (hasPgDeadlocks)
+        {
+            return 103;
+        }
+
+        /* V102 (#2658): the pg_settings snapshot. Table-existence sentinel. Was the top rung until V103
+           landed and keeps its own arm, because a store stopped between them is a real state during an
+           interrupted upgrade. */
+        if (hasPgServerConfig)
+        {
+            return 102;
+        }
+
+        /* V101 (#2655): PostgreSQL 18's measured I/O byte columns. Column sentinel. Was the top rung until
+           V102 landed and keeps its own arm, because a store stopped between the two is a real state
+           during an interrupted upgrade. */
+        if (hasPg18IoBytes)
+        {
+            return 101;
+        }
+
+        /* V100 (#2653): the PostgreSQL major on the registry. A COLUMN sentinel, like V82's next door. Was
+           the top rung until V101 landed and keeps its own arm, because a store stopped between the two is
+           a real state during an interrupted upgrade. */
+        if (hasPgMajorVersion)
+        {
+            return 100;
+        }
+
+        /* V99 (#2566): pg_plan_capture. Was the top rung until V100 landed and keeps its own arm, because a
+           store stopped between the two is a real state during an interrupted upgrade. */
+        if (hasPgPlanCapture)
+        {
+            return 99;
+        }
+
+        /* V98 (#2603): pg_predicate_stats. Was the top rung until V99 landed and keeps its own arm, because
+           a store stopped between the two is a real state during an interrupted upgrade. */
+        if (hasPgPredicateStats)
+        {
+            return 98;
+        }
+
+        /* V97 (#2603): pg_kernel_stats. Was the top rung until V98 landed and keeps its own arm, because a
+           store stopped between the two is a real state during an interrupted upgrade. */
+        if (hasPgKernelStats)
+        {
+            return 97;
+        }
+
+        /* V96 (#2603): pg_wait_sampling. Was the top rung until V97 landed and keeps its own arm, because a
+           store stopped between the two is a real state during an interrupted upgrade. */
+        if (hasPgWaitSampling)
+        {
+            return 96;
+        }
+
+        /* V95 (#2599): database_name on the three per-database PostgreSQL tables. Was the top rung until
+           V96 landed and keeps its own arm, because a store stopped between the two is a real state during
+           an interrupted upgrade. */
+        if (hasPgPerDatabaseAttribution)
+        {
+            return 95;
+        }
+
+        /* V94 (#2561): b-tree index bloat, measured. Was the top rung until V95 landed and keeps its own
+           arm, because a store stopped between the two is a real state during an interrupted upgrade. */
+        if (hasPgIndexBloat)
+        {
+            return 94;
+        }
+
+        /* V93 (#2544, buffers): what is resident in shared buffers. Was the top rung until V94 landed and
+           keeps its own arm, because a store stopped between the two is a real state during an interrupted
+           migration. Formerly the TOP rung — RequiredStoreSchemaVersion is StorageVersion.SchemaVersion and a
+           fully-migrated store must map to exactly that, or the version banner reports a mismatch on a store
+           that is current. */
+        if (hasPgBufferUsage)
+        {
+            return 93;
+        }
+
+        /* V92 (#2544, replication): connected standbys and their distance from the primary. Was the top rung
+           until V93 landed and keeps its own arm, because a store stopped between the two is a real state
+           during an interrupted migration. */
+        if (hasPgReplicationStats)
+        {
+            return 92;
+        }
+
+        /* V91 (#2543): per-column planner statistics. Was the top rung until V92 landed and keeps its own
+           arm, because a store stopped between the two is a real state during an interrupted migration. */
+        if (hasPgColumnStats)
+        {
+            return 91;
+        }
+
+        /* V90 (#2544, locks): lock state by mode, type and relation. Was the top rung until V91 landed and
+           keeps its own arm, because a store stopped between the two is a real state during an interrupted
+           migration. */
+        if (hasPgLockStats)
+        {
+            return 90;
+        }
+
+        /* V89 (#2545): which extensions this target has, could have, or cannot have. Was the top rung until
+           V90 landed and keeps its own arm, because a store stopped between the two is a real state during
+           an interrupted migration. */
+        if (hasPgExtensionAvailability)
+        {
+            return 89;
+        }
+
+        /* V88 (#2544): the write side — checkpoints, background writer, WAL. Was the top rung until V89
+           landed and keeps its own arm, because a store stopped between the two is a real state during an
+           interrupted migration. */
+        if (hasPgWriteStats)
+        {
+            return 88;
+        }
+
+        /* V87 (#2564): whether a PostgreSQL target could capture plans at all. Was the top rung until V88
+           landed and is kept as its own arm rather than folded away, because a store stopped between the two
+           is a real state during an interrupted migration. */
+        if (hasPgPlanCaptureReadiness)
+        {
+            return 87;
+        }
+
+        if (hasPgSessionStates)
+        {
+            return 86;
+        }
+
+        /* #2542: below the top arm now, and still not redundant — a store stopped between the V84 and V85
+           rungs is a real state during an interrupted migration, and without its own arm it would report 84
+           while carrying V85's table. */
+        if (hasPgTableBloatStats)
+        {
+            return 85;
+        }
+
+        /* #2541: the index-usage rung. Below V85, above V83, for the reason every arm here is ordered
+           newest-first — a V86 store also has V84's table, so testing V84 first would report every current
+           store as two rungs behind and raise an upgrade banner against a store that is fine. */
+        if (hasPgIndexUsageStats)
+        {
+            return 84;
+        }
+
+        /* #2539: the arm below STAYS — a store migrated to exactly 82 must map to 82 rather than falling
+           through. The table is named only in the probe line, not in this prose, per the V71 finding.
+
+           A collector-table rung would ordinarily get no arm at all; this one was the TOP rung when it
+           landed, which is why it has one. Nothing in the viewer reads the table; the read that does is on
+           the MCP surface. */
+        if (hasPgDatabaseStats)
+        {
+            return 83;
+        }
+
+        /* #2530: the arm below STAYS — a store migrated to exactly 81 must map to 81 rather than falling
+           through. The column is named only in the probe line, not in this prose, per the V71 finding.
+
+           This rung's gate is worth having for what it tells the OPERATOR, not only for the standing
+           RequiredStoreSchemaVersion invariant: a store below it records nothing that says a target is
+           PostgreSQL, so every PostgreSQL server in it is indistinguishable from a SQL Server that has
+           never connected — and every surface that branches on engine kind is therefore reading a fact
+           that store cannot supply. */
+        if (hasServerEngineKind)
+        {
+            return 82;
+        }
+
+        if (hasTempDbMaxSize)
+        {
+            return 81;
+        }
+
+        if (hasCollectionLogFanoutRollup)
+        {
+            return 80;
+        }
+
         if (hasFileGrowthAlert)
         {
             return 79;
@@ -1102,7 +1482,9 @@ SELECT
                 reader.IsDBNull(2) ? serverName : reader.GetString(2),
                 !reader.IsDBNull(3) && reader.GetBoolean(3),
                 reader.IsDBNull(4) ? null : reader.GetInt32(4),
-                reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))));
+                reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7)));
         }
 
         return servers;

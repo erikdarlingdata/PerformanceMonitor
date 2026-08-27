@@ -17,19 +17,21 @@ public sealed class McpSessionTools
         [Description("Hours of data to retrieve. Default 1.")] int hours_back = 1,
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description("Show only queries involved in blocking (blocking_session_id > 0 or is a head blocker).")] bool blocking_only = false,
-        [Description("Maximum number of rows to return. Default 50.")] int limit = 50)
+        [Description("Maximum number of rows to return. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var rows = await dataService.GetLatestQuerySnapshotsAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetLatestQuerySnapshotsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_snapshots")
+                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
             IEnumerable<QuerySnapshotRow> filtered = rows;
 
@@ -94,7 +96,8 @@ public sealed class McpSessionTools
         {
             var rows = await dataService.GetLatestSessionStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "session_stats")
+                    ?? McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
             var totalConnections = rows.Sum(r => r.ConnectionCount);
             var totalRunning = rows.Sum(r => r.RunningCount);

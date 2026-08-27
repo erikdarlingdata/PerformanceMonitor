@@ -49,13 +49,13 @@ public sealed class AnalysisShutdownResidueTests
     [Fact]
     public void EveryShutdownShapeIsAbandonedOnceTheTokenFires()
     {
-        Assert.True(AnalysisShutdown.IsShutdownAbandon(new OperationCanceledException(), s_fired));
-        Assert.True(AnalysisShutdown.IsShutdownAbandon(new ObjectDisposedException("NpgsqlDataSource"), s_fired));
-        Assert.True(AnalysisShutdown.IsShutdownAbandon(
+        Assert.True(AnalysisShutdown.IsExpectedAbandon(new OperationCanceledException(), s_fired));
+        Assert.True(AnalysisShutdown.IsExpectedAbandon(new ObjectDisposedException("NpgsqlDataSource"), s_fired));
+        Assert.True(AnalysisShutdown.IsExpectedAbandon(
             new NpgsqlException("wrapper", new ObjectDisposedException("NpgsqlDataSource")), s_fired));
-        Assert.True(AnalysisShutdown.IsShutdownAbandon(SqlState("57P01"), s_fired));
-        Assert.True(AnalysisShutdown.IsShutdownAbandon(SqlState("57P02"), s_fired));
-        Assert.True(AnalysisShutdown.IsShutdownAbandon(SqlState("57P03"), s_fired));
+        Assert.True(AnalysisShutdown.IsExpectedAbandon(SqlState("57P01"), s_fired));
+        Assert.True(AnalysisShutdown.IsExpectedAbandon(SqlState("57P02"), s_fired));
+        Assert.True(AnalysisShutdown.IsExpectedAbandon(SqlState("57P03"), s_fired));
     }
 
     /// <summary>
@@ -66,9 +66,9 @@ public sealed class AnalysisShutdownResidueTests
     [Fact]
     public void TheSameShapesStayErrorsWhileTheServiceIsRunning()
     {
-        Assert.False(AnalysisShutdown.IsShutdownAbandon(new OperationCanceledException(), CancellationToken.None));
-        Assert.False(AnalysisShutdown.IsShutdownAbandon(new ObjectDisposedException("NpgsqlDataSource"), CancellationToken.None));
-        Assert.False(AnalysisShutdown.IsShutdownAbandon(SqlState("57P01"), CancellationToken.None));
+        Assert.False(AnalysisShutdown.IsExpectedAbandon(new OperationCanceledException(), CancellationToken.None));
+        Assert.False(AnalysisShutdown.IsExpectedAbandon(new ObjectDisposedException("NpgsqlDataSource"), CancellationToken.None));
+        Assert.False(AnalysisShutdown.IsExpectedAbandon(SqlState("57P01"), CancellationToken.None));
     }
 
     /// <summary>
@@ -78,20 +78,67 @@ public sealed class AnalysisShutdownResidueTests
     [Fact]
     public void ATimeoutIsNeverRelabelledAsShutdown()
     {
-        Assert.False(AnalysisShutdown.IsShutdownAbandon(new TimeoutException("deadline"), s_fired));
-        Assert.False(AnalysisShutdown.IsShutdownAbandon(
+        Assert.False(AnalysisShutdown.IsExpectedAbandon(new TimeoutException("deadline"), s_fired));
+        Assert.False(AnalysisShutdown.IsExpectedAbandon(
             new NpgsqlException("Exception while reading from stream", new TimeoutException()), s_fired));
-        Assert.False(AnalysisShutdown.IsShutdownAbandon(SqlState("57014"), s_fired));
+        Assert.False(AnalysisShutdown.IsExpectedAbandon(SqlState("57014"), s_fired));
+    }
+
+    /// <summary>
+    /// #2430. Once the pass token is a BUDGET linked from the stopping token, "the token fired" stops
+    /// meaning "we are stopping" — and this is the pin that keeps the two apart. Arming the token
+    /// without this split is what would have made every ordinary overrun on a healthy service report
+    /// itself as "abandoned at shutdown", at Information, on exactly the signal someone would use to
+    /// decide the budget needs raising.
+    /// </summary>
+    [Fact]
+    public void ABudgetExpiryIsATimeoutAndNotAShutdown()
+    {
+        Assert.Equal(
+            AnalysisAbandonKind.Timeout,
+            AnalysisShutdown.Classify(new OperationCanceledException(), CancellationToken.None, s_fired));
+
+        /* And a stop is still a stop, including when it lands on a pass that had already overrun —
+           reporting that as a timeout would invent an incident out of a clean Stop-Service. */
+        Assert.Equal(
+            AnalysisAbandonKind.Shutdown,
+            AnalysisShutdown.Classify(new OperationCanceledException(), s_fired, s_fired));
+        Assert.Equal(
+            AnalysisAbandonKind.Shutdown,
+            AnalysisShutdown.Classify(new ObjectDisposedException("NpgsqlDataSource"), s_fired, s_fired));
+    }
+
+    /// <summary>
+    /// The timeout arm is narrower than the shutdown arm on purpose, and this is why. A disposed data
+    /// source and a 57P0x mean the STORE went away, which a budget expiring on a running service does
+    /// not cause — so during the window after any pass overruns, those must keep the ERROR #2299 gave
+    /// them rather than being relabelled as something we asked for. Widening this arm to the whole
+    /// residue set would erase that bug's only evidence for every server that ever times out.
+    /// </summary>
+    [Fact]
+    public void AStoreThatVanishesIsNeverExcusedByTheBudget()
+    {
+        Assert.Equal(
+            AnalysisAbandonKind.None,
+            AnalysisShutdown.Classify(new ObjectDisposedException("NpgsqlDataSource"), CancellationToken.None, s_fired));
+        Assert.Equal(
+            AnalysisAbandonKind.None,
+            AnalysisShutdown.Classify(SqlState("57P01"), CancellationToken.None, s_fired));
+
+        /* Nothing at all fired: a fault is a fault. */
+        Assert.Equal(
+            AnalysisAbandonKind.None,
+            AnalysisShutdown.Classify(new OperationCanceledException(), CancellationToken.None, CancellationToken.None));
     }
 
     /// <summary>Ordinary faults during a stop are still faults — structural shapes only, never "anything goes".</summary>
     [Fact]
     public void OrdinaryFaultsAreNeverShutdownResidueEvenMidStop()
     {
-        Assert.False(AnalysisShutdown.IsShutdownAbandon(SqlState("42703"), s_fired));
-        Assert.False(AnalysisShutdown.IsShutdownAbandon(
+        Assert.False(AnalysisShutdown.IsExpectedAbandon(SqlState("42703"), s_fired));
+        Assert.False(AnalysisShutdown.IsExpectedAbandon(
             new NpgsqlException("Exception while reading from stream", new IOException("reset")), s_fired));
-        Assert.False(AnalysisShutdown.IsShutdownAbandon(new InvalidOperationException("something else"), s_fired));
+        Assert.False(AnalysisShutdown.IsExpectedAbandon(new InvalidOperationException("something else"), s_fired));
     }
 
     /// <summary>
@@ -103,7 +150,7 @@ public sealed class AnalysisShutdownResidueTests
     [Fact]
     public void EveryErrorLoggingCatchOnTheAnalysisPassClassifiesShutdown()
     {
-        const string contextFilter = "when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))";
+        const string contextFilter = "when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))";
 
         /* The detector: NO bare catch is permitted at all — its nine identical per-detector catches were
            the bulk of the burst, and a tenth detector must arrive classified. Every `catch (Exception ex)`
@@ -113,12 +160,12 @@ public sealed class AnalysisShutdownResidueTests
         Assert.Equal(
             Count(detector, "catch (Exception ex)"),
             Count(detector, "catch (Exception ex) " + contextFilter)
-                + Count(detector, "catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))"));
+                + Count(detector, "catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))"));
         Assert.True(Count(detector, contextFilter) >= 9, "a detector catch lost its shutdown classification");
 
         /* The baseline provider: its single catch produced five of the seven lines. */
         var baseline = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs"));
-        Assert.Equal(1, Count(baseline, "when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))"));
+        Assert.Equal(1, Count(baseline, "when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))"));
 
         /* The finding store: only its two PASS methods run under the worker's token; its read-back
            surfaces serve other lifetimes and are deliberately untouched. */
@@ -133,15 +180,15 @@ public sealed class AnalysisShutdownResidueTests
         /* The service: the ONE Information line a stop is allowed to cost, and the data-span probe must
            not convert shutdown residue into a bogus "0 hours of history" skip. */
         var service = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "DarlingAnalysisService.cs"));
-        Assert.Equal(1, Count(service, "when (AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))"));
-        Assert.Equal(1, Count(service, "when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))"));
+        Assert.Equal(1, Count(service, "AnalysisShutdown.Classify(ex, context.ShutdownToken, context.CancellationToken)"));
+        Assert.Equal(1, Count(service, "when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))"));
         Assert.Contains("Analysis abandoned at shutdown", service, StringComparison.Ordinal);
 
         /* The worker: the pass must RECEIVE the stopping token (an uncancellable pass makes every filter
            above unreachable), and the stop path must hold the sweep open for the unwind grace with the
            already-fired token deliberately not forwarded. */
         var worker = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
-        Assert.Contains("AnalyzeAsync(serverId, storageName, hoursBack: 4, stoppingToken)", worker, StringComparison.Ordinal);
+        Assert.Contains("serverId, storageName, hoursBack: 4, cts.Token, stoppingToken", worker, StringComparison.Ordinal);
         Assert.Contains("WaitAsync(s_analysisShutdownGrace, CancellationToken.None)", worker, StringComparison.Ordinal);
     }
 

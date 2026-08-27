@@ -88,7 +88,14 @@ public sealed class DarlingEmptyEnumerationNoteTests
         var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
 
         Assert.Contains("collectionNote = enumeration.Note;", source);
-        Assert.Contains("return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote);", source);
+
+        /* The success return gained the fan-out rollup at #2472 and this literal moved with it rather than
+           being loosened to a substring. Naming the whole argument list is the point: it is what makes an
+           argument DROPPED from this call — the note included — fail here instead of silently reaching the
+           store as a null. */
+        Assert.Contains(
+            "return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result);",
+            source);
     }
 
     [Fact]
@@ -195,13 +202,16 @@ public sealed class DarlingEmptyEnumerationNoteTests
         /* Darling has THREE Collection Health surfaces, not two: the WPF Viewer grid, the MCP tool, and
            the web dashboard's table, which renders whatever COLLECTOR_COLUMNS lists from that same tool's
            payload. A field added to the tool but not to that list is silently dropped, leaving the
-           browser as the one surface still hiding what #1837 exists to show. */
+           browser as the one surface still hiding what #1837 exists to show.
+
+           The array moved from pages/server.js to pages/server-tabs.js when the web server page grew
+           sub-tabs (#2475) - server.js is the shell now and the tab registry owns every column array. */
         var source = ReadRepoFile(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js"));
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
         /* The DEFINITION, not the earlier `columns: COLLECTOR_COLUMNS` use site. */
         var start = source.IndexOf("const COLLECTOR_COLUMNS", System.StringComparison.Ordinal);
-        Assert.True(start >= 0, "server.js must still define COLLECTOR_COLUMNS");
+        Assert.True(start >= 0, "server-tabs.js must still define COLLECTOR_COLUMNS");
         var columns = source[start..];
         columns = columns[..columns.IndexOf("];", System.StringComparison.Ordinal)];
 

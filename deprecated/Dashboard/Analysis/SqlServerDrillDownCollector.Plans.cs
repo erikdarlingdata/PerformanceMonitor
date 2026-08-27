@@ -61,7 +61,7 @@ ORDER BY collection_time DESC;";
         if (string.IsNullOrEmpty(planHandle)) return;
 
         // Fetch plan XML live from SQL Server
-        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle);
+        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
         if (string.IsNullOrEmpty(planXml)) return;
 
         try

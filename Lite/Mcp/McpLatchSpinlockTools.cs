@@ -20,19 +20,21 @@ public sealed class McpLatchSpinlockTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24)
+        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetLatchStatsSnapshotAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetLatchStatsSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "latch_stats")
+                    ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -64,19 +66,21 @@ public sealed class McpLatchSpinlockTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24)
+        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetSpinlockStatsSnapshotAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetSpinlockStatsSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "spinlock_stats")
+                    ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {

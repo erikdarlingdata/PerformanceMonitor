@@ -19,9 +19,74 @@ public class DuckDbInitializer
     private readonly ILogger<DuckDbInitializer>? _logger;
 
     /// <summary>
-    /// Coordinates UI readers with maintenance writers (CHECKPOINT, archive DELETEs, compaction).
-    /// Read locks allow unlimited concurrent UI queries. Write locks are exclusive and wait
-    /// for all readers to finish before proceeding.
+    /// Coordinates every DuckDB caller in the process against MAINTENANCE — CHECKPOINT, the archive
+    /// export and its DELETEs, compaction, the in-place parquet swap, schema migration — each of which
+    /// reorganizes the database file, or the paths under it, while other statements are running. Read
+    /// locks allow unlimited concurrent holders. Write locks are exclusive and wait for every reader to
+    /// drain first.
+    ///
+    /// <para>ONE lock for the whole process, deliberately: Lite constructs several
+    /// <see cref="DuckDbInitializer"/> instances over the same file (MainWindow,
+    /// DatabaseStateOverridesWindow, DuckDbAlertHistoryStore), and making it per-instance would trade a
+    /// slow test suite for a real data race.</para>
+    ///
+    /// <para><b>WHICH LOCK A CALLER TAKES IS DECIDED BY WHAT IT MUST EXCLUDE, NOT BY WHETHER IT READS OR
+    /// WRITES (#2463).</b> That one sentence is the rule, and it is written here because the answer had
+    /// drifted into looking like two rival conventions: <c>FindingStore</c>'s three write paths take the
+    /// READ lock (#2455/#2464), while <c>DuckDbAlertHistoryStore</c> (6), <c>DuckDbMuteRuleStore</c> (5)
+    /// and the fourteen callers of <c>LocalDataService.OpenWriteConnectionAsync</c> take the WRITE lock —
+    /// twenty-five sites against three, with no note anywhere saying why either was right. They are not
+    /// two answers to one question. They are answers to two questions, and the axis that separates them
+    /// belongs to DuckDB rather than to anything in this file.</para>
+    ///
+    /// <para><b>Take the READ lock when all you need is "the file must not be reorganized under me."</b>
+    /// That covers every ordinary statement, SELECT and INSERT alike. It is shared, so it costs other
+    /// readers nothing, and a held read lock blocks <c>EnterWriteLock</c> — which means holding one IS how
+    /// a write says "not while I am in flight", and is the whole of the exclusion an append needs.</para>
+    ///
+    /// <para><b>Take the WRITE lock when you need one of two stronger things.</b> (1) <b>You ARE the
+    /// maintenance</b> — you reorganize the file or the paths under it. <c>ArchiveService</c>,
+    /// <c>RemoteCollectorService</c>'s post-collection CHECKPOINT, this class's own re-key, and
+    /// <c>QueryStoreSliceRepairService</c>'s hot collapse and file promotion. Never in question. (2)
+    /// <b>Your statement can COLLIDE with another writer of the same rows.</b> DuckDB's concurrency
+    /// control is optimistic: it does not queue the second writer, it FAILS it. An UPDATE, an upsert, or
+    /// a delete-then-reinsert compound can lose that race; an append of new rows cannot. So the write
+    /// lock buys serialization exactly where DuckDB would otherwise hand somebody an exception.</para>
+    ///
+    /// <para>Measured on DuckDB.NET 1.5.5 with the two transactions strictly interleaved — the second
+    /// statement runs while the first transaction is still open and uncommitted, which is the only
+    /// arrangement that measures anything (let the connections merely start together and one commits
+    /// before the other begins, and every case reads as "both committed"):</para>
+    ///
+    /// <list type="table">
+    /// <item><description>two APPENDS of brand-new rows — <b>both commit</b></description></item>
+    /// <item><description>a retention DELETE overlapping a disjoint append — <b>both commit</b></description></item>
+    /// <item><description>two UPDATEs of the same row — second fails, <c>Conflict on update!</c></description></item>
+    /// <item><description>two upserts of the same key — second fails, <c>Conflict on update!</c></description></item>
+    /// <item><description>two delete-all-then-reinsert compounds — second fails, <c>Conflict on tuple deletion!</c></description></item>
+    /// </list>
+    ///
+    /// <para><b>That rule describes the code as it stands, with two known exceptions</b>, both appends
+    /// holding the write lock: <c>DuckDbAlertHistoryStore.RecordAlertAsync</c> (an INSERT into
+    /// <c>config_alert_log</c>) and <c>DuckDbMuteRuleStore.InsertAsync</c> (an INSERT of a fresh rule id).
+    /// Neither can collide, so by clause (2) neither needs exclusivity. They are left alone on purpose:
+    /// each is one method on a store whose siblings genuinely do need it, both are operator- or
+    /// alert-frequency rather than hot, and making two of eleven different would cost more in legibility
+    /// than it recovers in lock time. Recorded as over-locked so the next reader knows it was seen.</para>
+    ///
+    /// <para>It also answers the pair that made the split look like a contradiction.
+    /// <c>DuckDbMuteRuleStore.InsertAsync</c> writing <c>config_mute_rules</c> under a write lock and
+    /// <c>FindingStore.MuteStoryAsync</c> writing <c>analysis_muted</c> under a read lock are NOT the same
+    /// species: nothing but the analysis pass ever writes <c>analysis_muted</c>, while
+    /// <c>config_mute_rules</c> is UPDATEd by an operator and DELETEd by a timer-driven expiry purge that
+    /// can be running at the same moment.</para>
+    ///
+    /// <para><b>The WAIT is a separate question from the lock.</b> <c>AcquireWriteLock()</c> with no
+    /// timeout waits behind an archival for however long the archival takes. Eleven current callers do
+    /// that, and can: they are alert-sweep and mute-CRUD paths whose failures are caught, logged and
+    /// non-fatal. <c>LocalDataService.OpenWriteConnectionAsync</c> is the one that cannot, because it is on
+    /// the path the UI thread awaits, so it passes 5 seconds and #2208's maintenance block treats the
+    /// timeout as "skip this cycle". If you are adding a caller, decide which of those two you are.</para>
     /// </summary>
     private static readonly ReaderWriterLockSlim s_dbLock = new(LockRecursionPolicy.NoRecursion);
 
@@ -31,11 +96,38 @@ public class DuckDbInitializer
     /// If the current thread already owns a read lock (e.g., leaked by an unhandled exception),
     /// returns a no-op disposable to allow the operation to proceed.
     /// </summary>
-    public IDisposable AcquireReadLock()
+    public IDisposable AcquireReadLock() => AcquireReadLock(CancellationToken.None);
+
+    /// <summary>
+    /// The same read lock, abandonable (#2443). <see cref="AcquireWriteLock"/> has taken a timeout
+    /// since it was written and this one took nothing, which left a real hole in the analysis budget:
+    /// every store read on the pass takes this lock BEFORE it opens its connection, so a pass queued
+    /// behind a long archival or a compaction sat in an uninterruptible <c>EnterReadLock()</c> however
+    /// carefully its reads were threaded. Cancellation reached the reads and stopped at the door.
+    ///
+    /// <para>A token rather than a timeout, because a timeout would need a NUMBER and there is no
+    /// honest one to pick — the right budget for waiting on this lock is exactly the caller's remaining
+    /// budget, which the caller already holds. A poll is the only way to say that to
+    /// <see cref="ReaderWriterLockSlim"/>, which has no token-taking overload; the interval is only
+    /// reached under contention, since an uncontended <c>TryEnterReadLock</c> returns immediately.
+    /// <see cref="CancellationToken.None"/> takes the original uninterruptible path, so the fourteen
+    /// callers outside the analysis pass are unchanged rather than quietly re-timed.</para>
+    /// </summary>
+    public IDisposable AcquireReadLock(CancellationToken cancellationToken)
     {
         try
         {
-            s_dbLock.EnterReadLock();
+            if (!cancellationToken.CanBeCanceled)
+            {
+                s_dbLock.EnterReadLock();
+            }
+            else
+            {
+                while (!s_dbLock.TryEnterReadLock(ReadLockPollInterval))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+            }
         }
         catch (LockRecursionException)
         {
@@ -46,6 +138,56 @@ public class DuckDbInitializer
         }
         return new LockReleaser(s_dbLock, write: false);
     }
+
+    /// <summary>
+    /// How long a cancellable read-lock wait blocks before re-checking its token. Only reached under
+    /// contention, so it costs nothing on the normal path; 50 ms keeps the worst-case overshoot far
+    /// below the smallest budget anyone would set while leaving the wait almost entirely in the kernel
+    /// rather than spinning.
+    /// </summary>
+    private static readonly TimeSpan ReadLockPollInterval = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    /// The read lock for a caller that would rather have NO answer than wait for one — returns null if
+    /// the lock is not free within <paramref name="timeout"/>, instead of blocking.
+    ///
+    /// <para>This exists for the status bar (#2594). Every other read here takes the lock and waits,
+    /// which is right when the caller needs the data; the status-bar size figure is cosmetic, refreshed
+    /// on a 30-second UI timer, and runs on the dispatcher thread — so waiting on a lock held by a long
+    /// archival would freeze the window to render a number nobody is reading. The two honest options for
+    /// that caller are "skip the lock" and "skip the read", and skipping the lock is how a connection
+    /// ends up open against a file the reset path deletes.</para>
+    ///
+    /// <para>A timeout rather than a token here, unlike <see cref="AcquireReadLock(CancellationToken)"/>,
+    /// because this caller genuinely has a number to pick: it is bounded by what a UI thread may spend,
+    /// not by a caller's remaining budget.</para>
+    /// </summary>
+    public IDisposable? TryAcquireReadLock(TimeSpan timeout)
+    {
+        try
+        {
+            if (!s_dbLock.TryEnterReadLock(timeout))
+            {
+                return null;
+            }
+        }
+        catch (LockRecursionException)
+        {
+            /* Already held by this thread — same reasoning as AcquireReadLock: we are protected, so
+               hand back a no-op rather than reporting a failure the caller cannot act on. */
+            return NoOpDisposable.Instance;
+        }
+
+        return new LockReleaser(s_dbLock, write: false);
+    }
+
+    /// <summary>
+    /// How long the status bar will wait for the read lock before giving up and reporting no used-size
+    /// figure. Short on purpose: this runs on the dispatcher thread, and the caller already renders the
+    /// file size alone when this returns null, so the degraded answer is a smaller status bar rather
+    /// than a stalled window.
+    /// </summary>
+    private static readonly TimeSpan StatusBarReadLockTimeout = TimeSpan.FromMilliseconds(100);
 
     /// <summary>
     /// Acquires an exclusive write lock on the database. Blocks until all readers finish.
@@ -74,6 +216,35 @@ public class DuckDbInitializer
         public void Dispose() { }
     }
 
+    /// <summary>
+    /// Releases the lock entry its constructor was handed.
+    ///
+    /// <para><b>Thread affinity is a LATENT hazard here, and the obvious mitigation is worse than the
+    /// hazard (#2463).</b> <see cref="ReaderWriterLockSlim"/> is thread-affine: <c>ExitReadLock</c> throws
+    /// <see cref="SynchronizationLockException"/> when called from a thread that did not enter. Every one
+    /// of these locks is held across <c>await</c> — <c>AcquireReadLock</c>, then <c>OpenAsync</c>, then the
+    /// reads — and the analysis pass runs under <c>Task.Run</c> with no <c>SynchronizationContext</c>, so a
+    /// continuation is free to resume on a different pool thread. It does not, and the reason is measured
+    /// rather than lucky: <b>DuckDB.NET 1.5.5's async methods complete synchronously</b>, so no await ever
+    /// yields and the entering thread is always the exiting thread. Thread id across <c>OpenAsync</c>, a
+    /// DDL statement, 200 <c>ExecuteNonQueryAsync</c> calls and a reader drain: <c>4, 4, 4, 4, 4</c>.</para>
+    ///
+    /// <para><b>Do not "harden" this with an <c>IsReadLockHeld</c> guard.</b> It looks like the cheap fix
+    /// and it is a bug amplifier, measured: on a thread that did not enter, <c>IsReadLockHeld</c> is
+    /// <c>false</c>, so the guard SKIPS the exit — and the entry the original thread took is then held
+    /// forever. With it still held, <c>TryEnterWriteLock(400 ms)</c> fails. So the guard would convert a
+    /// loud, attributable <see cref="SynchronizationLockException"/> into a silently leaked reader that
+    /// permanently wedges every maintenance operation in the process: no CHECKPOINT, no archival, no
+    /// compaction, for the life of the app. Throwing is the better failure.</para>
+    ///
+    /// <para>A real fix would have to make the releaser not thread-affine at all — replacing
+    /// <see cref="ReaderWriterLockSlim"/> with something like a <c>SemaphoreSlim</c>, which would also
+    /// retire <see cref="AcquireReadLock(CancellationToken)"/>'s poll — and that is a change to the lock
+    /// primitive, not to this class. It is not worth doing while the premise holds. What would break the
+    /// premise is a DuckDB.NET release whose async genuinely yields, so
+    /// <c>DuckDbLockModelTests.DuckDbAsyncStillCompletesOnTheCallingThread</c> is a tripwire on exactly
+    /// that: if it goes red after a driver bump, this paragraph is where to start.</para>
+    /// </summary>
     private sealed class LockReleaser : IDisposable
     {
         private readonly ReaderWriterLockSlim _lock;
@@ -98,7 +269,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 54;
+    internal const int CurrentSchemaVersion = 56;
 
     private readonly string _archivePath;
 
@@ -1244,6 +1415,65 @@ public class DuckDbInitializer
                 _logger?.LogWarning("Migration to v54 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
+
+        if (fromVersion < 55)
+        {
+            /* v55 (#2472): the per-database fan-out rollup on collection_log, twinning Darling's V80. One
+               collector run that fans out over N databases writes ONE row whose duration_ms is the sum, so
+               "eight databases at 10.1s" and "one at 62s beside seven at 2.7s" are the same number and want
+               opposite fixes. These three carry the ratio that separates them.
+
+               Fresh installs get the columns from GetAllTableStatements(); this is for an existing database
+               and is idempotent. Nothing to backfill and nothing that COULD be: a row written before the
+               upgrade genuinely does not know its fan-out, so NULL is the honest value rather than a zero
+               that would read as "fanned out over nothing".
+
+               Non-fatal, matching the blocks above: without the columns the writer's INSERT would fail and
+               take collection logging with it, so a failed ADD COLUMN must not also break the run — the
+               write path treats a log failure as non-fatal already. */
+            _logger?.LogInformation("Running migration to v55: adding collection_log fan-out rollup columns");
+            try
+            {
+                await ExecuteNonQueryAsync(connection,
+                    "ALTER TABLE collection_log ADD COLUMN IF NOT EXISTS fanout_item_count INTEGER");
+                await ExecuteNonQueryAsync(connection,
+                    "ALTER TABLE collection_log ADD COLUMN IF NOT EXISTS slowest_item VARCHAR");
+                await ExecuteNonQueryAsync(connection,
+                    "ALTER TABLE collection_log ADD COLUMN IF NOT EXISTS slowest_item_ms INTEGER");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v55 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 56)
+        {
+            /* v56 (#2515): tempdb's growth CEILING on tempdb_stats, twinning Darling's V81. Every other
+               column here comes from dm_db_file_space_usage, which reports the data files AS CURRENTLY
+               ALLOCATED — so the tempdb Space alert's percentage measured distance to the next AUTOGROW
+               rather than distance to the point where tempdb cannot grow at all. SUM(max_size) over the
+               ROWS files is the denominator that means the same thing on every engine.
+
+               Fresh installs get the column from GetAllTableStatements(); this is for an existing database
+               and is idempotent. Nothing to backfill: a row collected before the upgrade genuinely does not
+               know the ceiling, and NULL says so — the read maps it to 0, which is the "no ceiling measured"
+               state where the denominator stays the allocation and the reported percentage does not move.
+
+               The v_tempdb_stats view needs no work here: Lite rebuilds every v_ passthrough on start
+               (CreateArchiveViewsAsync, called after this), which is the difference from Darling, where the
+               view's SELECT * column list is frozen at CREATE and the rung has to refresh it. */
+            _logger?.LogInformation("Running migration to v56: adding max_size_mb to tempdb_stats");
+            try
+            {
+                await ExecuteNonQueryAsync(connection,
+                    "ALTER TABLE tempdb_stats ADD COLUMN IF NOT EXISTS max_size_mb DECIMAL(18,2)");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v56 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
     }
 
     /// <summary>
@@ -1508,6 +1738,17 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
     /// </summary>
     public double? GetUsedDataSizeMb()
     {
+        /* Under the read lock (#2594). This was the one periodic connection site that opened without it,
+           on the UI's 30-second timer, which put a live handle on the database file at moments the
+           archival path may be deleting and recreating it. Bounded rather than blocking - see
+           StatusBarReadLockTimeout for why this caller may give up where others may not. */
+        using var readLock = TryAcquireReadLock(StatusBarReadLockTimeout);
+
+        if (readLock is null)
+        {
+            return null;
+        }
+
         try
         {
             using var connection = CreateConnection();

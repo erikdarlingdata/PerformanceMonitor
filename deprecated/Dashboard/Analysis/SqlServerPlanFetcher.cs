@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Analysis;
@@ -21,7 +22,7 @@ public class SqlServerPlanFetcher : IPlanFetcher
         _connectionString = connectionString;
     }
 
-    public async Task<string?> FetchPlanXmlAsync(int serverId, string planHandle)
+    public async Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(planHandle)) return null;
 
@@ -34,7 +35,7 @@ public class SqlServerPlanFetcher : IPlanFetcher
             };
 
             await using var connection = new SqlConnection(builder.ConnectionString);
-            await connection.OpenAsync();
+            await connection.OpenAsync(cancellationToken);
 
             await using var cmd = new SqlCommand(@"
 SET NOCOUNT ON;
@@ -44,7 +45,7 @@ FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1));", connecti
             cmd.CommandTimeout = 15;
             cmd.Parameters.AddWithValue("@plan_handle", planHandle);
 
-            var result = await cmd.ExecuteScalarAsync();
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result == null || result is DBNull) return null;
 
             return result.ToString();

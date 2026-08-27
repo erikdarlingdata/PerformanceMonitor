@@ -29,9 +29,10 @@ public sealed class McpPlanTools
         {
             var xml = await dataService.GetCachedQueryPlanAsync(resolved.ServerId, query_hash);
             if (string.IsNullOrEmpty(xml))
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No plan found for query_hash '{query_hash}'. The query may have been evicted from the plan cache since the last collection.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No plan found for query_hash '{query_hash}'. The query may have been evicted from the plan cache since the last collection.");
 
             return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash);
         }
@@ -58,9 +59,10 @@ public sealed class McpPlanTools
         {
             var xml = await dataService.GetCachedProcedurePlanAsync(resolved.ServerId, plan_handle);
             if (string.IsNullOrEmpty(xml))
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No plan found for plan_handle '{plan_handle}'. The procedure may have been evicted from the plan cache since the last collection.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No plan found for plan_handle '{plan_handle}'. The procedure may have been evicted from the plan cache since the last collection.");
 
             return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle);
         }
@@ -75,6 +77,11 @@ public sealed class McpPlanTools
         "Fetches the plan on-demand from the monitored SQL Server instance. " +
         "Use after get_query_store_top to understand why a query is expensive.")]
     public static async Task<string> AnalyzeQueryStorePlan(
+        /* Injected for the engine-capability miss alone (#2532): unlike its three siblings this tool
+           fetches the plan LIVE from the monitored instance rather than from the store, so the store
+           handle is not otherwise needed here — but the capability question is the same question, and
+           Darling's twin asks it, so the two SKUs must not answer differently. */
+        LocalDataService dataService,
         ServerManager serverManager,
         [Description("The database_name from get_query_store_top.")] string database_name,
         [Description("The plan_id from get_query_store_top.")] long plan_id,
@@ -99,9 +106,10 @@ public sealed class McpPlanTools
             var xml = await LocalDataService.FetchQueryStorePlanAsync(connectionString, database_name, plan_id);
 
             if (string.IsNullOrEmpty(xml))
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No plan found for plan_id {plan_id} in database '{database_name}'. Query Store may not be enabled or the plan may have been purged.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No plan found for plan_id {plan_id} in database '{database_name}'. Query Store may not be enabled or the plan may have been purged.");
 
             return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}");
         }
@@ -148,7 +156,8 @@ public sealed class McpPlanTools
         {
             var xml = await dataService.GetCachedQueryPlanAsync(resolved.ServerId, query_hash);
             if (string.IsNullOrEmpty(xml))
-                return McpHelpers.Status("unavailable", $"No plan found for query_hash '{query_hash}'.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? McpHelpers.Status("unavailable", $"No plan found for query_hash '{query_hash}'.");
 
             return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
         }

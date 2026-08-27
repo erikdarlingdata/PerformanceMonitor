@@ -38,15 +38,15 @@ AND   delta_execution_count > 0";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(QueryStatsSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var totalSpills = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             var highDopQueries = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
@@ -88,7 +88,10 @@ AND   delta_execution_count > 0";
                 });
             }
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string ParameterSensitivitySql = @"
@@ -144,7 +147,7 @@ LIMIT 20";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ParameterSensitivitySql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -158,8 +161,8 @@ LIMIT 20";
             var worstGrantRatio = 0.0;
             var worstSpillDivergence = 0;
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 // Rows arrive ordered by worker_ratio DESC — the first row is the worst offender.
                 if (offenderCount == 0)
@@ -193,8 +196,23 @@ LIMIT 20";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
+
+    /// <summary>The PLAN_REGRESSION comparison window, in days — how far back a query's "best known" plan
+    /// may have been observed.</summary>
+    internal const int PlanRegressionWindowDays = 14;
+
+    /// <summary>
+    /// How far BELOW the comparison window the chunk-exclusion bound sits (#2387). `last_execution_time`
+    /// is the monitored server's clock and `collection_time` is the store's; a monitored server running
+    /// ahead can report an execution time later than the collection that carried it. A day absorbs any
+    /// plausible drift while still excluding all but ~15 days of a store that may hold months.
+    /// </summary>
+    internal const int PlanRegressionSkewMarginDays = 1;
 
     /* PG port: any_value() below is standard SQL:2023, in Postgres since 16 — the product's
        minimum supported PG is 17, so it stays verbatim (DuckDB and PG agree on its semantics:
@@ -235,6 +253,17 @@ WITH deduped AS
     WHERE server_id = $1
     AND   execution_type_desc = 'Regular'
     AND   last_execution_time >= $2
+    -- #2387: the SEMANTIC window is last_execution_time above; this is a REDUNDANT bound on the
+    -- partitioning column so TimescaleDB can exclude chunks. Without it this reads the server's whole
+    -- history every analysis cycle, decompressing whatever is compressed, per server -- cost scaling with
+    -- STORE SIZE rather than with the configured window, which is why no VM size fixes it. Redundant to
+    -- the ANSWER because a row cannot be collected before the execution it reports, so
+    -- last_execution_time >= X already implies collection_time >= X. $3 carries a skew margin below X
+    -- because last_execution_time comes from the MONITORED server's clock and collection_time from the
+    -- store's: a monitored server running fast would otherwise have its newest rows excluded here, which
+    -- would be a silent under-count and a worse bug than the one this fixes. Do not delete as dead
+    -- weight -- it is doing all the pruning.
+    AND   collection_time >= $3
 ),
 plan_agg AS
 (
@@ -350,18 +379,25 @@ LIMIT 20";
     /// cost >= 2x the best plan that query is known to perform well with. Emits one
     /// aggregate PLAN_REGRESSION fact. Sourced from Query Store (v_query_store_stats);
     /// no fact when Query Store is not enabled on the monitored databases.
-    /// Unlike other collectors this windows on last_execution_time (14-day comparison
-    /// window), NOT collection_time — see plan note.
+    /// Windows on last_execution_time (the 14-day comparison window) because a plan regression is about
+    /// when the query last RAN, not when we happened to collect it. It ALSO carries a redundant
+    /// collection_time bound so TimescaleDB can exclude chunks — see the note in the SQL (#2387).
     /// </summary>
     private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PlanRegressionSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-14)));
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays)));
+
+            /* #2387: the chunk-exclusion bound, one CLOCK-SKEW MARGIN below the comparison window. Bound as
+               its own parameter rather than written as "$2 - INTERVAL '1 day'" so the planner compares
+               against a bare parameter, which is the form runtime chunk exclusion handles most reliably. */
+            cmd.Parameters.AddWithValue(AsNaive(
+                context.TimeRangeStart.AddDays(-(PlanRegressionWindowDays + PlanRegressionSkewMarginDays))));
 
             var offenderCount = 0;
             var worstFactor = 0.0;
@@ -372,8 +408,8 @@ LIMIT 20";
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
             {
                 // Rows arrive ordered by regression_factor DESC — the first row is the worst offender.
                 if (offenderCount == 0)
@@ -417,7 +453,10 @@ LIMIT 20";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string ProcedureStatsSql = @"
@@ -440,15 +479,15 @@ AND   delta_execution_count > 0";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ProcedureStatsSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var distinctProcs = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             var totalExecs = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
@@ -475,7 +514,10 @@ AND   delta_execution_count > 0";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string PlanAdvisorySql = @"
@@ -504,15 +546,15 @@ LIMIT 10";
             /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
                before the CPU-only parse; the scoping is kept so the connection closes before
                the parse, even though PG holds no lock. */
-            await using (var connection = await _postgres.OpenConnectionAsync())
+            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
                 using var command = new NpgsqlCommand(PlanAdvisorySql, connection);
                 command.Parameters.AddWithValue(context.ServerId);
                 command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-                using var reader = await command.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
                 {
                     if (!reader.IsDBNull(0))
                         planXmls.Add(reader.GetString(0));
@@ -557,9 +599,10 @@ LIMIT 10";
                 });
             }
         }
-        catch
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             // query_stats / plan parse may be unavailable — skip, the advisory is best-effort.
+            // An abandonment is NOT swallowed here (#2443).
         }
     }
 

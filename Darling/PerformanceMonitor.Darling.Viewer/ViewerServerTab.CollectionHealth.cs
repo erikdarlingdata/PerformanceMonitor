@@ -84,7 +84,9 @@ public partial class ViewerServerTab
         {
             MessageBox.Show(
                 "Purging asks the service to run the retention purge, which it does by running a command — a " +
-                "read-only viewer seat can't enqueue commands. Reconnect with a read-write profile to purge.",
+                "read-only viewer seat can't enqueue commands. The command is queued in the MONITORING STORE, " +
+                "and the purge only ever deletes from the store — never from a monitored server. Reconnect " +
+                "with a read-write store profile to purge.",
                 "Read-Only Viewer", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }

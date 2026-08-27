@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -30,17 +30,24 @@ public static class DarlingObservability
        only enabled servers are in the loop). The ON CONFLICT re-connect deliberately does NOT touch
        is_enabled, so a control-plane disable (config_monitored_servers.is_enabled = FALSE, mirrored onto
        this observed row by SyncServerEnabledStatesAsync) is never clobbered back to TRUE on the next
-       connect. Before Stage 2 this forced is_enabled = TRUE on every connect and nothing ever read it. */
-    private const string UpsertServerSql = @"
-INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date, monthly_cost_usd)
-VALUES ($1, $2, $3, TRUE, $4, $5, $6, $6, $7)
+       connect. Before Stage 2 this forced is_enabled = TRUE on every connect and nothing ever read it.
+
+       engine_kind (V82, #2530) is written on BOTH arms, unlike is_enabled: it is a probed fact about the
+       target rather than an operator decision, so the re-connect arm is exactly where a re-pointed
+       registration (same storage name, different engine) has to correct it. Internal so a pure test can pin
+       the shape without a live store. */
+    internal const string UpsertServerSql = @"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd, postgres_major_version)
+VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8, $9)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name,
     display_name = EXCLUDED.display_name,
     sql_engine_edition = EXCLUDED.sql_engine_edition,
     sql_major_version = EXCLUDED.sql_major_version,
+    engine_kind = EXCLUDED.engine_kind,
     modified_date = EXCLUDED.modified_date,
-    monthly_cost_usd = EXCLUDED.monthly_cost_usd;";
+    monthly_cost_usd = EXCLUDED.monthly_cost_usd,
+    postgres_major_version = EXCLUDED.postgres_major_version;";
 
     /* Mirror the DESIRED config (config.config_monitored_servers) onto the OBSERVED registry
        (collect.servers) for the two fields the viewer/FinOps read straight off collect.servers: is_enabled
@@ -77,8 +84,8 @@ WHERE s.is_enabled
       (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id);";
 
     private const string InsertCollectionLogSql = @"
-INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);";
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);";
 
     /* The fleet-sentinel server_id the daily retention purge writes its run-record under. collection_log's
        server_id is NOT NULL and Collection Health reads per real server_id, but the purge is fleet-wide (per
@@ -128,10 +135,23 @@ ON CONFLICT (server_id) DO UPDATE SET
                just the 5/8 Azure classifications. */
             command.Parameters.AddWithValue(server.EngineEdition);
             command.Parameters.AddWithValue(server.Target.SqlMajorVersion);
+            /* The engine KIND (#2530), derived from the target the connector probed rather than from the
+               configured engine string: Aurora-ness is not configurable — it comes from aurora_version being
+               present in pg_proc — and it is half of what this column exists to carry. */
+            command.Parameters.AddWithValue(MonitoredEngineKind.For(server.Target));
             /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
             command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
             /* Per-server FinOps budget from darling.json (0 = hide cost in the viewer, like Lite). */
             command.Parameters.AddWithValue(server.Config.MonthlyCostUsd);
+            /* The probed PostgreSQL major (V100, #2653), so a READ can explain a column the target's version
+               does not have. DBNull rather than 0 off a PostgreSQL target: the reads treat NULL as "no claim",
+               and a 0 would be a version nobody runs asserted as fact. Guarded on Engine as well as on the
+               value because 0 is also what a PostgreSQL probe that failed before reading server_version_num
+               leaves behind. */
+            command.Parameters.AddWithValue(
+                server.Target.Engine == CollectorTargetEngine.PostgreSql && server.Target.PostgresMajorVersion > 0
+                    ? server.Target.PostgresMajorVersion
+                    : (object)DBNull.Value);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -188,6 +208,13 @@ ON CONFLICT (server_id) DO UPDATE SET
     /// the storage phase; duckdb_duration_ms carries the storage (Postgres) milliseconds under
     /// Lite's column name so analysis SQL can twin.
     /// </summary>
+    /// <param name="fanout">
+    /// The per-database rollup for a run that fanned out, null for one that did not (#2472). REQUIRED rather
+    /// than defaulted on purpose: five collectors fan out and the rest do not, so every call site has to say
+    /// which it is. A default would have let the five failure sites below — which genuinely have no fan-out —
+    /// stand in for a success site that forgot, and the whole point of the columns is that a blended number
+    /// stops being the only thing recorded.
+    /// </param>
     public static async Task LogCollectionAsync(
         NpgsqlDataSource postgres,
         ServerRuntime server,
@@ -197,6 +224,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         long sqlMs,
         long storageMs,
         string? errorMessage,
+        FanoutCost? fanout,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -222,6 +250,12 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.AddWithValue(rowsCollected);
             command.Parameters.AddWithValue((int)sqlMs);
             command.Parameters.AddWithValue((int)storageMs);
+
+            /* All three NULL together or all three set: a slowest item with no count cannot be turned into
+               the dominance ratio the columns exist for, so half an answer is worse than none. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = fanout.HasValue ? fanout.Value.ItemCount : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = fanout.HasValue ? fanout.Value.SlowestItem : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = fanout.HasValue ? fanout.Value.SlowestItemMs : (object)DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -276,6 +310,14 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.AddWithValue(rowsPurged);                                                      // rows_collected
             command.Parameters.AddWithValue(0);                                                               // sql_duration_ms (no SQL-target phase)
             command.Parameters.AddWithValue(elapsed);                                                         // duckdb_duration_ms (storage phase = whole sweep)
+
+            /* The fan-out rollup columns (#2472). The retention sweep is fleet-wide over shared tables, not
+               a per-database fan-out, so it has nothing to attribute and says so with NULL rather than a
+               zero that would read as "fanned out over nothing". These three exist because this INSERT is
+               shared with the collector writer above; the shape is one statement on purpose. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // fanout_item_count
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value });    // slowest_item
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // slowest_item_ms
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

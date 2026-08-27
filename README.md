@@ -92,7 +92,7 @@ All editions include real-time alerts (system tray + email + webhooks), charts a
 
 ## Quick Start — Lite
 
-1. Download **[`PerformanceMonitorLite-win-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** (requires [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/10.0))
+1. Download **[`PerformanceMonitorLite-win-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — a self-contained build, so there is **no .NET runtime to install first**.
 2. Run the installer — it installs to `%LocalAppData%\PerformanceMonitorLite`, adds **Start Menu** and **Desktop** shortcuts, and registers the app under **Apps & Features** so it shows up in Windows search and can be uninstalled normally. Auto-update is wired in. Your data goes in `%LocalAppData%\PerformanceMonitorLite-Data`, a separate folder the installer never touches.
 3. Launch from the Start Menu or Desktop shortcut.
 4. Click **+ Add Server**, enter connection details, test, save.
@@ -100,9 +100,13 @@ All editions include real-time alerts (system tray + email + webhooks), charts a
 
 Data starts flowing within 1–5 minutes. That's it. No installation on your server, no Agent jobs, no sysadmin required.
 
+**Taking the portable ZIP (`PerformanceMonitorLite-<version>.zip`) instead?** It is a self-contained win-x64 build too, so there is **nothing to install first** — unzip it anywhere and run `PerformanceMonitorLite.exe`. A stock Windows Server with no .NET on it at all is fine.
+
+That was not always true: through 3.5.0 the ZIP was a portable build with no runtime of its own, and on a machine without .NET it died on the host’s own `You must install .NET to run this application` before a line of Lite’s code ran. Pinning the ZIP to win-x64 removed the requirement **and halved the download** — the old build shipped ~537&nbsp;MB of `runtimes\` for macOS, Linux, ARM and musl targets Windows can never load, which cost far more than bundling the runtime does. See [`Lite/README.md`](Lite/README.md#prerequisites) for the detail.
+
 **Upgrading from zip?** Click **Import Settings** then **Import Data** in the sidebar and point both at your old Lite folder. Settings imports server connections, alert thresholds, SMTP config, and schedules. Data imports historical DuckDB + Parquet archives. **Auto-update users** (installed via Setup.exe) get updates automatically — no manual import needed.
 
-> **Warning — upgrading an install older than the data-relocation fix:** on those versions Lite kept its data *inside* the install directory, and re-running `Setup.exe` over an existing install deletes that directory before the new build ever runs. It takes the DuckDB store, the Parquet archive, the logs, and `settings.json` with it. Upgrade **in place** instead: **Help > About** downloads and applies the update without touching your data, or extract the portable ZIP over your existing copy. From this release on, data lives outside the install directory and is moved there automatically on first start, so `Setup.exe` is safe again. (Your monitored-server list is unaffected either way — it lives in `%ProgramData%\PerformanceMonitorLite\config` — and so are the passwords in Windows Credential Manager.)
+> **Warning — upgrading an install older than the data-relocation fix:** on those versions Lite kept its data *inside* the install directory, and re-running `Setup.exe` over an existing install deletes that directory before the new build ever runs. It takes the DuckDB store, the Parquet archive, the logs, and `settings.json` with it. Upgrade **in place** instead: the **About** button in the left sidebar downloads and applies the update without touching your data, or extract the portable ZIP over your existing copy. From this release on, data lives outside the install directory and is moved there automatically on first start, so `Setup.exe` is safe again. (Your monitored-server list is unaffected either way — it lives in `%ProgramData%\PerformanceMonitorLite\config` — and so are the passwords in Windows Credential Manager.)
 
 **Always On AG?** Enable **ReadOnlyIntent** in the connection settings to route Lite's monitoring queries to a readable secondary, keeping the primary clear. Enable **MultiSubnetFailover** for multi-subnet failover scenarios.
 
@@ -127,7 +131,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | file_io_stats | 1 min | `sys.dm_io_virtual_file_stats` (deltas) |
 | memory_stats | 1 min | `sys.dm_os_sys_memory` + memory counters |
 | memory_grant_stats | 1 min | `sys.dm_exec_query_memory_grants` |
-| tempdb_stats | 1 min | `sys.dm_db_file_space_usage` |
+| tempdb_stats | 1 min | `sys.dm_db_file_space_usage` + `tempdb.sys.database_files` (the ROWS files' growth ceiling) |
 | perfmon_stats | 1 min | `sys.dm_os_performance_counters` (deltas) |
 | deadlocks | 5 min | dedicated `PerformanceMonitor_Deadlock` XE session (`xml_deadlock_report`; `database_xml_deadlock_report` on Azure SQL DB) |
 | dmv_blocking_snapshot | 1 min | `sys.dm_os_waiting_tasks` + `sys.dm_exec_*` (always-on blocking fallback when the blocked-process-report XE is unavailable) |
@@ -186,9 +190,12 @@ When a second Windows user on the same machine launches Lite, they see the share
 1. Download **`PerformanceMonitorDarling-<version>.zip`** from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest) — the signed service and viewer with the bundled PostgreSQL + TimescaleDB runtime beside the service exe, so a from-zero install needs no database provisioning.
 2. Copy `darling.sample.json` to `darling.json` and add your servers (and optional SMTP / webhook delivery). In managed mode the service unpacks and runs its own PostgreSQL — no external database to set up.
 3. Run the service (console for a trial, or install it as a Windows service). It seeds the store and begins collecting on the same default cadences and retention horizons as a fresh Lite install.
-4. Open the viewer and point it at the store to browse the fleet.
+4. Start the **Darling Viewer**. It is in the same zip, under `viewer\`, and `install-darling.ps1` leaves a Desktop shortcut. On the service host there is nothing to point at anything: it finds the same `darling.json`, derives the store connection, and opens on the fleet. For a seat on another machine, run `--export-viewer-config` on the service host and copy the folder it writes.
+5. Optionally turn on the two off-by-default surfaces: `--enable-web` serves the browser dashboard on port 5153, `--enable-mcp` serves the MCP endpoint on 5152. Both take effect live, no restart.
 
-Configuration is a single JSON file with no schedule knobs. See the **[Darling operator guide](Darling/README.md)** for the full quick start, configuration reference, permissions, and operations.
+**Never done this before?** [**docs/uat-onboarding.md**](docs/uat-onboarding.md) is the ordered path from a downloaded zip to all three surfaces — the WPF viewer, the web dashboard, and MCP — with the log line, HTTP response, or screen that proves each step worked, and the handful of things that reliably catch people out.
+
+Configuration is a single JSON file with no schedule knobs. See the **[Darling operator guide](Darling/README.md)** for the configuration reference, permissions, and operations.
 
 ---
 
@@ -247,7 +254,7 @@ Every edition includes a real-time alert engine that monitors for performance is
 | **Deadlocks** | 1 | Fires when new deadlocks are detected since the last check |
 | **Poison waits** | 100 ms avg | Fires when any poison wait type exceeds the average-ms-per-wait threshold |
 | **Long-running queries** | 5 minutes | Fires when any query exceeds the elapsed-time threshold |
-| **TempDB space** | 80% | Fires when TempDB usage exceeds the percentage threshold |
+| **TempDB space** | 80% | Fires when TempDB usage exceeds the percentage threshold. Measured against tempdb's **growth ceiling** (`SUM(max_size)` over the ROWS files) where there is one, and against the current allocation where the files grow without limit — so the percentage means "distance to the point where tempdb cannot grow further" on every engine |
 | **Long-running agent jobs** | 3× average | Fires when a job's current duration exceeds a multiple of its historical average |
 | **High CPU** | 80% | Fires when total CPU (SQL + other) exceeds the threshold |
 | **Volume free space** | 10% or 5 GB free | Fires when a monitored volume's free space drops below the percentage or absolute threshold (either check can be disabled). Never fires on Azure SQL Database. |
@@ -374,7 +381,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 | Plan Analysis | `analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan`, `analyze_plan_xml`, `get_plan_xml` |
 | Diagnostic Analysis | `analyze_server`, `get_analysis_facts`, `compare_analysis`, `audit_config`, `get_analysis_findings`, `mute_analysis_finding` |
 
-Most tools accept optional `server_name` and `hours_back` parameters. If only one server is configured, `server_name` is auto-resolved. The MCP server binds to `localhost` only and does not accept remote connections. (Darling adds windowed-trend and fleet-overview tools plus agent-driven write tools — Custom Views authoring, alert-settings and mute-rule tuning, and bulk add/remove servers — and supports an opt-in LAN endpoint — see [Darling/README.md](Darling/README.md).)
+Most tools accept optional `server_name` and `hours_back` parameters. If only one server is configured, `server_name` is auto-resolved. Every tool that takes `hours_back` also takes an optional `as_of` — an ISO-8601 UTC instant that moves the END of the window off "now", so a past incident is one call (`as_of` its end, `hours_back` its length) rather than a very wide window filtered by hand. The MCP server binds to `localhost` only and does not accept remote connections. (Darling adds windowed-trend and fleet-overview tools plus agent-driven write tools — Custom Views authoring, alert-settings and mute-rule tuning, and bulk add/remove servers — and supports an opt-in LAN endpoint — see [Darling/README.md](Darling/README.md).)
 
 ---
 

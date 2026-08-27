@@ -60,9 +60,10 @@ public sealed class DarlingMcpPlanTools
             var xml = await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
                 postgres, resolved.ServerId, query_hash, database_name);
             if (string.IsNullOrEmpty(xml))
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No stored plan found for query_hash '{query_hash}'{DbSuffix(database_name)}. The plan collector may not have captured a plan for this query, or the row has aged out of the store.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No stored plan found for query_hash '{query_hash}'{DbSuffix(database_name)}. The plan collector may not have captured a plan for this query, or the row has aged out of the store.");
 
             return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash);
         }
@@ -89,9 +90,10 @@ public sealed class DarlingMcpPlanTools
             var xml = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
                 postgres, resolved.ServerId, sql_handle);
             if (string.IsNullOrEmpty(xml))
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No stored plan found for sql_handle '{sql_handle}'. The plan collector may not have captured a plan for this procedure, or the row has aged out of the store.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No stored plan found for sql_handle '{sql_handle}'. The plan collector may not have captured a plan for this procedure, or the row has aged out of the store.");
 
             return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle);
         }
@@ -120,9 +122,10 @@ public sealed class DarlingMcpPlanTools
             var xml = await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
                 postgres, resolved.ServerId, database_name, query_id, plan_id);
             if (string.IsNullOrEmpty(xml))
-                return McpHelpers.Status(
-                    "unavailable",
-                    $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}. Query Store plan capture may be disabled for this database, or the plan has been purged.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}. Query Store plan capture may be disabled for this database, or the plan has been purged.");
 
             var identifier = plan_id is null ? $"{database_name}:{query_id}" : $"{database_name}:{query_id}:{plan_id}";
             return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", identifier);
@@ -171,7 +174,8 @@ public sealed class DarlingMcpPlanTools
             var xml = await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
                 postgres, resolved.ServerId, query_hash, database_name);
             if (string.IsNullOrEmpty(xml))
-                return McpHelpers.Status("unavailable", $"No stored plan found for query_hash '{query_hash}'{DbSuffix(database_name)}.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? McpHelpers.Status("unavailable", $"No stored plan found for query_hash '{query_hash}'{DbSuffix(database_name)}.");
 
             return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
         }

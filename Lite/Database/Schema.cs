@@ -56,7 +56,10 @@ CREATE TABLE IF NOT EXISTS collection_log (
     error_message VARCHAR,
     rows_collected INTEGER,
     sql_duration_ms INTEGER,
-    duckdb_duration_ms INTEGER
+    duckdb_duration_ms INTEGER,
+    fanout_item_count INTEGER,
+    slowest_item VARCHAR,
+    slowest_item_ms INTEGER
 )";
 
     public const string CreateCollectionLogIndex = @"

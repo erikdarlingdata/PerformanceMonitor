@@ -37,20 +37,23 @@ WHERE rn = 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(DatabaseSizeSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var totalSize = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             if (totalSize > 0)
                 facts.Add(new Fact { Source = "config", Key = "DATABASE_TOTAL_SIZE_MB", Value = totalSize, ServerId = context.ServerId });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string IoLatencySql = @"
@@ -73,15 +76,15 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(IoLatencySql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var totalStallReadMs = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             var totalReads = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
@@ -124,7 +127,10 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
                 });
             }
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string TempDbSql = @"
@@ -134,7 +140,12 @@ SELECT
     MAX(internal_object_reserved_mb) AS max_internal_object_mb,
     MAX(version_store_reserved_mb) AS max_version_store_mb,
     MIN(unallocated_mb) AS min_unallocated_mb,
-    AVG(total_reserved_mb) AS avg_total_reserved_mb
+    AVG(total_reserved_mb) AS avg_total_reserved_mb,
+    /* #2515: the growth ceiling, and MIN is the right aggregate for it twice over. -1 (at least one
+       unlimited data file) sorts below every real cap, so MIN finds the unlimited case anywhere in the
+       window; and where the cap was raised mid-window MIN keeps the more conservative of the two. NULL
+       rows — collected before the V81 rung — are skipped rather than dragging the answer down. */
+    MIN(max_size_mb) AS min_max_size_mb
 FROM v_tempdb_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -148,15 +159,15 @@ AND   collection_time <= $3";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(TempDbSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var maxReserved = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var maxUserObj = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -164,11 +175,18 @@ AND   collection_time <= $3";
             var maxVersionStore = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
             var minUnallocated = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
             var avgReserved = reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5));
+            var maxSizeMb = reader.IsDBNull(6) ? 0.0 : Convert.ToDouble(reader.GetValue(6));
 
             if (maxReserved <= 0) return;
 
-            // TempDB usage as fraction of total space (reserved + unallocated)
-            var totalSpace = maxReserved + minUnallocated;
+            /* #2515: against the CEILING where tempdb has one, against the current allocation where it does
+               not (-1 unlimited, or 0 for a window collected before the ceiling was captured). reserved +
+               unallocated is the files AS ALLOCATED, so on its own this fraction measures distance to the
+               next autogrow — which reads as 96% full on an Azure SQL Database target holding one temp
+               table. TempDbSpaceInfo.CapacityMb is the alert's twin of this, and the two must agree or
+               analyze_server and the pager describe the same server differently. */
+            var allocatedMb = maxReserved + minUnallocated;
+            var totalSpace = maxSizeMb > 0 ? Math.Max(maxSizeMb, allocatedMb) : allocatedMb;
             var usageFraction = totalSpace > 0 ? maxReserved / totalSpace : 0;
 
             facts.Add(new Fact
@@ -185,11 +203,17 @@ AND   collection_time <= $3";
                     ["max_internal_object_mb"] = maxInternalObj,
                     ["max_version_store_mb"] = maxVersionStore,
                     ["min_unallocated_mb"] = minUnallocated,
+                    /* Added, never redefined — the existing keys are a consumer surface (FactAdvice reads
+                       them by name). -1 unlimited, 0 not measured, positive = the ROWS ceiling in MB. */
+                    ["max_size_mb"] = maxSizeMb,
                     ["usage_fraction"] = usageFraction
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string FileAutogrowthSql = @"
@@ -220,13 +244,13 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(FileAutogrowthSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var fileCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
             if (fileCount == 0) return;
@@ -246,7 +270,10 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
     public const string DiskSpaceSql = @"
@@ -273,14 +300,14 @@ FROM latest WHERE rn = 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(DiskSpaceSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var minFreePct = reader.IsDBNull(0) ? 1.0 : Convert.ToDouble(reader.GetValue(0));
             var minFreeMb = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -306,6 +333,9 @@ FROM latest WHERE rn = 1";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 }

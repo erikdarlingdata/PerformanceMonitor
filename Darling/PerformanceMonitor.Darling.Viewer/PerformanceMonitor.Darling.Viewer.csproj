@@ -15,7 +15,7 @@
          hooks go unhandled. It is a harmless no-op for the co-located (non-Velopack) viewer that
          ships inside the service zip. -->
     <StartupObject>PerformanceMonitor.Darling.Viewer.Program</StartupObject>
-    <Version>3.5.0</Version>
+    <Version>3.6.0</Version>
     <!-- #2113: <Version> is the ONE hand-set version. AssemblyVersion / FileVersion /
          InformationalVersion derive from it at build time - the 3.4.0 release bumped only
          <Version> and shipped binaries still STAMPED 3.3.0.0, because four hand-maintained
@@ -60,6 +60,11 @@
     <ProjectReference Include="..\..\PerformanceMonitor.Analysis\PerformanceMonitor.Analysis.csproj" />
     <ProjectReference Include="..\..\PerformanceMonitor.Notifications\PerformanceMonitor.Notifications.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Analysis\PerformanceMonitor.Darling.Analysis.csproj" />
+    <!-- #2530: the engine-kind vocabulary (MonitoredEngineKind), the collector catalog the PostgreSQL tab
+         registry derives from, and CollectorEngineCapability.NotCollectedMessage — the ONE copy of the
+         sentence a panel prints when its collector can never run on this engine. Reachable transitively via
+         .Darling.Storage, referenced explicitly since it is now a direct dependency. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.Collectors\PerformanceMonitor.Collectors.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Storage\PerformanceMonitor.Darling.Storage.csproj" />
   </ItemGroup>
 

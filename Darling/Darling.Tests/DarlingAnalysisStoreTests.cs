@@ -53,6 +53,11 @@ public sealed class DarlingAnalysisStoreTests
     private const int GlobalReaderServerId = -929292;
     private const int GlobalOtherServerId = -939393;
 
+    /* #2448's fixture, kept off every other test's server so the "nothing was persisted" assertion
+       cannot be satisfied by another test's cleanup or broken by its rows. */
+    private const int PartialBatchServerId = -646464;
+    private const string PartialBatchServerName = "analysis-store-partial-batch";
+
     /// <summary>
     /// Every v_&lt;table&gt; view the V4 migration must create: the fourteen the ported fact
     /// collectors read plus the three Lite's drill-down/storage collectors also read
@@ -194,7 +199,13 @@ public sealed class DarlingAnalysisStoreTests
            reads share one column list), with the twins' ordering/window semantics. */
         Assert.Contains("remediation_action_json", PgFindingStore.GetRecentFindingsSql);
         Assert.Contains("ORDER BY analysis_time DESC, severity DESC", PgFindingStore.GetRecentFindingsSql);
-        Assert.Contains("LIMIT $3", PgFindingStore.GetRecentFindingsSql);
+        Assert.Contains("LIMIT $4", PgFindingStore.GetRecentFindingsSql);
+
+        /* #2506: the window is BOUNDED at both ends. Pinned because the read had a start and no end for
+           its whole life, and an as_of anchor over a half-open window is the worst outcome the anchor
+           convention has — validated, advertised, and answering as of now anyway. */
+        Assert.Contains("AND   analysis_time >= $2", PgFindingStore.GetRecentFindingsSql);
+        Assert.Contains("AND   analysis_time <= $3", PgFindingStore.GetRecentFindingsSql);
         Assert.Contains("remediation_action_json", PgFindingStore.GetLatestFindingsSql);
         Assert.Contains("SELECT MAX(analysis_time) FROM analysis_findings WHERE server_id = $1", PgFindingStore.GetLatestFindingsSql);
 
@@ -222,12 +233,12 @@ public sealed class DarlingAnalysisStoreTests
            to null without touching any server (Lite's ServerManager-miss semantics). */
         var resolved = false;
         var fetcher = new PgPlanFetcher(_ => { resolved = true; return null; });
-        Assert.Null(await fetcher.FetchPlanXmlAsync(TestServerId, "0x0600FF00"));
+        Assert.Null(await fetcher.FetchPlanXmlAsync(TestServerId, "0x0600FF00", TestContext.Current.CancellationToken));
         Assert.True(resolved);
 
         /* An empty plan handle short-circuits before the resolver is consulted. */
         resolved = false;
-        Assert.Null(await fetcher.FetchPlanXmlAsync(TestServerId, ""));
+        Assert.Null(await fetcher.FetchPlanXmlAsync(TestServerId, "", TestContext.Current.CancellationToken));
         Assert.False(resolved);
     }
 
@@ -522,6 +533,123 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM analysis_muted WHERE story_path_hash IN ('{GlobalNullHash}', '{LegacyZeroHash}', '{OtherServerHash}', '{GlobalSurvivorHash}');", connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
+    }
+
+    /* ---------------- gated: #2448 — a faulted batch persists nothing ---------------- */
+
+    /// <summary>
+    /// #2448: a finding batch that faults partway through must persist NOTHING, not the rows that
+    /// happened to land first.
+    ///
+    /// <para>The damage this prevents is invisible by construction, which is why it is worth a live
+    /// test rather than a source pin. Every row in a batch shares one <c>analysis_time</c> and
+    /// <see cref="PgFindingStore.GetLatestFindingsSql"/> keys on <c>MAX(analysis_time)</c>, so four
+    /// committed rows of an intended forty do not read as a truncated set — they read as a complete
+    /// analysis that found four problems. The server looks HEALTHIER for the store having failed,
+    /// and nothing anywhere says otherwise.</para>
+    ///
+    /// <para>The fault is induced with a NUL byte in <c>story_text</c>, which PostgreSQL rejects as
+    /// 22021 (<c>invalid byte sequence for encoding "UTF8": 0x00</c>). That is the realistic
+    /// per-row fault on this table — it carries no primary key, no CHECK and no foreign key, and
+    /// every NOT NULL column maps to a non-nullable property with a default — so it is also the
+    /// exact case the old per-row catch was there to survive. It should not survive: publishing the
+    /// other rows as a complete analysis is the wrong answer, and it is the answer this test
+    /// forbids.</para>
+    ///
+    /// <para>Reverted, the batch commits its first two rows and this fails on
+    /// <c>Assert.Empty</c> — the truncated set stated exactly.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFaultedBatch_PersistsNothing_RatherThanATruncatedSetThatReadsAsComplete()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live partial-persist test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeletePartialBatchRowsAsync(connection, TestContext.Current.CancellationToken);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var store = new PgFindingStore(postgres);
+
+        var bodySucceeded = false;
+        try
+        {
+            var windowEnd = TruncateToSeconds(DateTime.UtcNow);
+            var context = new AnalysisContext
+            {
+                ServerId = PartialBatchServerId,
+                ServerName = PartialBatchServerName,
+                TimeRangeStart = windowEnd.AddHours(-4),
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            /* Row 3 of 5 faults, so rows 1-2 are already durable at the moment it does — under
+               autocommit they stay durable, which is the whole defect. */
+            var doomed = await store.FilterMutedFindingsAsync(PartialBatchStories(faultAtRow: 3), context);
+            Assert.Equal(5, doomed.Count);
+
+            /* It THROWS rather than degrading, which is the one place this store departs from its
+               own no-throw discipline and is deliberate: swallowing a total rollback returns the
+               same list a full success returns, so DarlingAnalysisService would set LastAnalysisTime,
+               fire AnalysisCompleted and log "Analysis complete - 5 finding(s)" over a store holding
+               none of them. That is this very defect moved one layer out. */
+            await Assert.ThrowsAsync<PostgresException>(() => store.InsertFindingsAsync(doomed, context));
+
+            /* The assertion #2448 exists for: not "fewer rows", NO rows. A partial set here would
+               be indistinguishable from a healthy server. */
+            Assert.Empty(await store.GetRecentFindingsAsync(PartialBatchServerId));
+
+            /* And the rollback is not the store simply refusing to write: the same batch without
+               the poisoned row commits in full, through the same code path. */
+            var clean = await store.FilterMutedFindingsAsync(PartialBatchStories(faultAtRow: null), context);
+            await store.InsertFindingsAsync(clean, context);
+            Assert.Equal(5, (await store.GetRecentFindingsAsync(PartialBatchServerId)).Count);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeletePartialBatchRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// Five stories a pass would produce, optionally with a NUL byte in the story text of one of
+    /// them — <paramref name="faultAtRow"/> is 1-based, or null for a batch that must commit whole.
+    /// </summary>
+    private static List<AnalysisStory> PartialBatchStories(int? faultAtRow)
+    {
+        var stories = new List<AnalysisStory>();
+
+        for (var row = 1; row <= 5; row++)
+        {
+            stories.Add(new AnalysisStory
+            {
+                Severity = 1.0,
+                Confidence = 0.9,
+                Category = "waits",
+                StoryPath = $"PARTIAL_BATCH_{row}",
+                StoryPathHash = $"an1-partial-batch-{row}",
+                StoryText = row == faultAtRow ? "log flush detail\0truncated here" : $"row {row} of a five-finding pass",
+                RootFactKey = "WRITELOG",
+                RootFactValue = row,
+                FactCount = 1
+            });
+        }
+
+        return stories;
+    }
+
+    private static async Task DeletePartialBatchRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var cleanup = new NpgsqlCommand(
+            $"DELETE FROM analysis_findings WHERE server_id = {PartialBatchServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

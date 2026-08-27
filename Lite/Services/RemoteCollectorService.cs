@@ -139,6 +139,11 @@ public partial class RemoteCollectorService
         public long SqlMs { get; set; }
         public long StorageMs { get; set; }
         public string? Note { get; set; }
+
+        /// <summary>The per-database rollup for a run that fanned out, null for one that did not (#2472).
+        /// Lives beside the fetch/store split for the same reason it does: both are things one run has to
+        /// hand its own collection_log row, and both are meaningless once the next run resets the slot.</summary>
+        public FanoutCost? Fanout { get; set; }
     }
 
     /// <summary>
@@ -352,6 +357,10 @@ public partial class RemoteCollectorService
     /// </summary>
     public async Task RunDueCollectorsAsync(CancellationToken cancellationToken = default)
     {
+        /* Registered for the whole sweep, including the collection_log write at the end of each collector -
+           that final write is the one that failed in the field when a reset landed mid-collection (#2594). */
+        using var collectionScope = await CollectionResetGate.BeginCollectionAsync(cancellationToken);
+
         var enabledServers = _serverManager.GetEnabledServers();
 
         if (enabledServers.Count == 0)
@@ -430,6 +439,11 @@ public partial class RemoteCollectorService
     /// </summary>
     public async Task RunAllCollectorsForServerAsync(ServerConnection server, CancellationToken cancellationToken = default)
     {
+        /* THE path from #2594. MainWindow.ConnectToServer calls this on a bare Task.Run when a server tab is
+           opened, so unlike the scheduled sweep it was sequenced against nothing at all - and it runs EVERY
+           collector for the server, which is how a 55-second index_object_stats came to straddle a reset. */
+        using var collectionScope = await CollectionResetGate.BeginCollectionAsync(cancellationToken);
+
         var enabledSchedules = _scheduleManager.GetSchedulesForServer(server.Id)
             .Where(s => s.Enabled)
             .ToList();
@@ -608,11 +622,31 @@ public partial class RemoteCollectorService
                direct SQL failure so the health indicator stops showing OK (#1086). */
             var sqlError = ex.InnerException;
             errorMessage = ex.Message;
-            status = (sqlError.Number == 229 || sqlError.Number == 297 || sqlError.Number == 300)
+            /* #2512: the shared set. This copy was the narrowest of the four — no 916, no 8189, no 262
+               — for no stated reason beyond having been written before the others grew. The additions
+               are inert or correct here rather than merely tolerable: 8189 is sys.traces and cannot
+               arise from an XE session ensure at all, while 262 and 916 both mean the login was denied
+               where it asked, which is the PERMISSIONS this arm already records for 229/297/300. */
+            status = SqlServerPermissionErrors.IsPermissionDenied(sqlError.Number)
                 ? "PERMISSIONS"
                 : "ERROR";
             xeSessionUnavailable = true;
-            AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+
+            /* Logged at the level the CLASSIFICATION implies, not always Error. A denied XE session is a
+               least-privilege choice a customer is entitled to make (#1823), and the arm above already
+               records it as PERMISSIONS and flags the collector so the scheduler stops retrying it for the
+               session. Logging that at Error made a deliberate posture read as a fault: a field log showed
+               three consecutive Error lines - two from the XE layer, one from here - for a login that was
+               simply not granted ALTER ANY EVENT SESSION, while every other permission denial in this method
+               logs at Warn. Only a genuine ERROR status stays at Error. */
+            if (status == "PERMISSIONS")
+            {
+                AppLogger.Warn("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+            }
+            else
+            {
+                AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+            }
         }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
         {
@@ -631,7 +665,8 @@ public partial class RemoteCollectorService
         {
             status = "ERROR";
             errorMessage = $"SQL Error #{ex.Number}: {ex.Message}"
-                + AzureDmvPermissionHint.For(ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5);
+                + AzureDmvPermissionHint.For(
+                    ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5, ex.Message);
             AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
 
             if (RetryHelper.IsTransient(ex))
@@ -642,11 +677,14 @@ public partial class RemoteCollectorService
             {
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
             }
-            else if (ex.Number == 229 || ex.Number == 297 || ex.Number == 300 || ex.Number == 8189)
+            else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
             {
                 /* 8189 is sys.traces' own denial (ALTER TRACE missing) — a legitimate least-privilege
                    choice (#1823), so default_trace_events degrades as PERMISSIONS like every other
-                   denied collector instead of erroring every cycle. Mirrors Darling's classifier. */
+                   denied collector instead of erroring every cycle. #2512 moved the number set into
+                   SqlServerPermissionErrors so this no longer MIRRORS Darling's classifier by
+                   transcription — it IS Darling's classifier, and 262 (the tempdb denial behind the
+                   collector's old Azure SQL DB gate) reaches both SKUs at once. */
                 status = "PERMISSIONS";
                 AppLogger.Warn("Collector", $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
             }
@@ -680,7 +718,7 @@ public partial class RemoteCollectorService
         RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
 
         // Log the collection attempt
-        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs);
+        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout);
     }
 
     /// <summary>
@@ -720,7 +758,7 @@ WHERE server_id = $3";
     /// <summary>
     /// Logs a collection attempt to the collection_log table.
     /// </summary>
-    private async Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0)
+    private async Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0, FanoutCost? fanout = null)
     {
         try
         {
@@ -731,8 +769,8 @@ WHERE server_id = $3";
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
-                INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
+                INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
             command.Parameters.Add(new DuckDBParameter { Value = GenerateCollectionId() });
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -745,6 +783,14 @@ WHERE server_id = $3";
             command.Parameters.Add(new DuckDBParameter { Value = rowsCollected });
             command.Parameters.Add(new DuckDBParameter { Value = (int)sqlMs });
             command.Parameters.Add(new DuckDBParameter { Value = (int)duckDbMs });
+
+            /* All three NULL together or all three set (#2472): a slowest item with no count cannot be
+               turned into the dominance ratio the columns exist for, so half an answer is worse than none.
+               This INSERT names every column deliberately — it is a plain INSERT rather than the partial
+               INSERT OR REPLACE that resets untouched columns elsewhere in this SKU, and it stays that way. */
+            command.Parameters.Add(new DuckDBParameter { Value = fanout.HasValue ? fanout.Value.ItemCount : (object)DBNull.Value });
+            command.Parameters.Add(new DuckDBParameter { Value = fanout.HasValue ? fanout.Value.SlowestItem : (object)DBNull.Value });
+            command.Parameters.Add(new DuckDBParameter { Value = fanout.HasValue ? fanout.Value.SlowestItemMs : (object)DBNull.Value });
 
             await command.ExecuteNonQueryAsync();
 

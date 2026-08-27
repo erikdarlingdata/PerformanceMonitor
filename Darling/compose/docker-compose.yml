@@ -53,8 +53,13 @@ services:
       - sql_password
       - web_token
       - mcp_token
+      # Uncomment with the `secrets:` entries at the bottom to serve the dashboard over HTTPS (#2562),
+      # then point web.network.tls at these paths in darling.json. Without them the web token and its
+      # session cookie cross the network in the clear.
+      # - web_tls_cert
+      # - web_tls_key
     ports:
-      - "5153:5153"   # web dashboard (token → cookie gate)
+      - "5153:5153"   # web dashboard (token → cookie gate; plain HTTP unless web.network.tls is set)
       - "5152:5152"   # MCP (bearer token)
 
 volumes:
@@ -71,3 +76,8 @@ secrets:
     file: ./secrets/web_token.txt
   mcp_token:
     file: ./secrets/mcp_token.txt
+  # HTTPS for the dashboard (#2562) — uncomment together with the `secrets:` list above.
+  # web_tls_cert:
+  #   file: ./secrets/web_tls_cert.pem
+  # web_tls_key:
+  #   file: ./secrets/web_tls_key.pem

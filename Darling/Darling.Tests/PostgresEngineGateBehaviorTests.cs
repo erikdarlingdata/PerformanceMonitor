@@ -12,6 +12,9 @@ using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -367,6 +370,64 @@ public sealed class PostgresEngineGateBehaviorTests
         StorageName = PgHost,
         ServerId = ServerIdFor(PgHost, "postgres"),
     };
+
+    /// <summary>
+    /// #2579: the within-engine pre-dispatch skip covers EVERY engine, not just PostgreSQL.
+    ///
+    /// <para>It was scoped to PostgreSQL when it landed, deliberately, because dropping it on SQL Server
+    /// changes a shipping SKU's log semantics for the Azure-gated collectors — left as "its own decision".
+    /// This is that decision. What settled it: on an AWS RDS fleet the SQL Server gates are not a handful.
+    /// 84 instances x <c>agent_status</c> and <c>running_jobs</c> x a 5-minute cadence is ~24,000
+    /// <c>collection_log</c> rows a day reporting SUCCESS for collectors that deliberately do not run.</para>
+    ///
+    /// <para>And a gated-off run recorded as SUCCESS is byte-identical to a real one — same status, zero
+    /// rows, no note — so nothing downstream can tell them apart. That is the shape the miss vocabulary
+    /// exists to prevent, and it convincingly read as evidence of working collection: it produced a filed
+    /// issue and an opened PR before the 0ms durations gave it away.</para>
+    ///
+    /// <para>Asserted against the shipped source rather than by running a sweep, because the condition is
+    /// one line inside the dispatch loop and the alternative is standing up a whole worker. The pin is that
+    /// the engine discriminator is GONE from this gate — if it comes back, SQL Server silently resumes
+    /// logging fake successes.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreDispatchGate_AppliesToEveryEngine_NotOnlyPostgres()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        /* THREE dispatch loops carry this gate — the scheduled sweep, the on-load loop that runs on every
+           connect and reconnect, and snapshot_now. The first draft of this pin matched only the scheduled
+           sweep's standalone form and would have passed while the other two still logged fake successes on
+           every reconnect and every operator-triggered snapshot; a reviewer caught that. Counting the gates
+           is what makes the pin cover all of them without naming each site's exact spelling. */
+        var gates = Regex.Matches(source, @"!CollectorCatalog\.AppliesTo\(name, (?:server\.Runtime\.Target|runtime\.Target)\)");
+        Assert.True(gates.Count >= 3, $"expected the pre-dispatch AppliesTo gate at all three dispatch loops, found {gates.Count} (#2579)");
+
+        /* And NONE of them may be conditioned on the engine. This is the regression that matters: the gate
+           existing but scoped back to PostgreSQL is exactly the state this change removed, and it reads as
+           correct at a glance. */
+        Assert.DoesNotMatch(
+            new Regex(@"CollectorTargetEngine\.PostgreSql\s*\r?\n?\s*&&\s*!CollectorCatalog\.AppliesTo"),
+            source);
+
+        /* The wrong-DIALECT drop is a separate gate and must survive at every site. */
+        Assert.True(
+            Regex.Matches(source, @"!CollectorCatalog\.EngineMatches\(name, (?:server\.Runtime\.Target|runtime\.Target)\)").Count >= 3,
+            "the wrong-dialect drop is missing from a dispatch loop — that gate is not what #2579 changed");
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")) && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
+    }
 
     private static void SetField(DarlingWorker worker, string name, object value) =>
         typeof(DarlingWorker)

@@ -129,7 +129,39 @@ public static class HeadlessSelfTest
         }
 
         Print("");
-        var results = await StoreConnectionSelfTest.RunAsync(settings.ConnectionString);
+
+        /* #2578: test the string STARTUP uses, not the raw one. MainWindow builds its ViewerDataService as
+           new ViewerDataService(settings.ConnectionString, appSettings.ConnectionTimeoutSeconds), and that
+           constructor rewrites the string through ApplyConnectionTimeout. This probe used the raw string, so
+           the two diverged the moment a Connection timeout preference existed — which it always does, since
+           ViewerAppSettings defaults it to 5 and clamps it to 5..60.
+
+           A diagnostic that validates a different connection string than the application opens cannot do the
+           job it exists for: it can pass every layer while startup fails, which is precisely the report that
+           found this, and it makes "self-test passes but the Viewer will not connect" look like a
+           contradiction rather than the expected consequence it is. Read the preference the same way
+           MainWindow does, apply the same transform, and say so when it changed anything. */
+        var effectiveConnectionString = settings.ConnectionString;
+        try
+        {
+            var appSettings = new ViewerAppSettingsStore().Load();
+            effectiveConnectionString =
+                ViewerDataService.ApplyConnectionTimeout(settings.ConnectionString, appSettings.ConnectionTimeoutSeconds);
+            if (!string.Equals(effectiveConnectionString, settings.ConnectionString, StringComparison.Ordinal))
+            {
+                Print($"[note ] applied the Viewer's Connection timeout preference ({appSettings.ConnectionTimeoutSeconds}s) — "
+                    + "testing the same connection string startup uses, not the raw darling.json one");
+            }
+        }
+        catch (Exception ex)
+        {
+            /* Unreadable viewer settings must not stop the probe: the raw string is still worth testing, and
+               saying which one was tested keeps the result interpretable. */
+            Print($"[note ] could not read the Viewer's settings ({ex.Message}) — testing darling.json's connection string as-is, "
+                + "which may differ from what startup opens");
+        }
+
+        var results = await StoreConnectionSelfTest.RunAsync(effectiveConnectionString);
         foreach (var line in StoreConnectionSelfTest.FormatReport(results).Split('\n'))
         {
             Print(line.TrimEnd());

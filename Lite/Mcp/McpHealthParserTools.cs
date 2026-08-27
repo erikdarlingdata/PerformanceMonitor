@@ -8,8 +8,9 @@ namespace PerformanceMonitorLite.Mcp;
 
 /// <summary>
 /// The system_health parse-on-read MCP tools — get_health_parser_system_health / _severe_errors /
-/// _io_issues / _scheduler_issues / _memory_conditions / _cpu_tasks / _memory_broker / _memory_node_oom —
-/// served over Lite's DuckDB store. Each wraps the existing System Events reader, which shreds the raw
+/// _io_issues / _scheduler_issues / _memory_conditions / _cpu_tasks / _memory_broker / _memory_node_oom /
+/// _significant_waits — served over Lite's DuckDB store. Each wraps the existing System Events reader,
+/// which shreds the raw
 /// system_health event_xml with the shared PerformanceMonitor.Common.SystemHealthParser and gates it through
 /// SystemHealthSignificance (the SAME significant set the viewer's System Events tab shows). System Health
 /// is the one UNGATED category (its corruption/contention counter series returns every snapshot). STORED
@@ -18,25 +19,35 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpHealthParserTools
 {
+    /// <summary>
+    /// The collector every one of these nine reads is served by. Named once so the #2511 capability probe
+    /// asks about the same collector on every read and on both SKUs; a test scans both MCP trees for the
+    /// names passed to the probe and holds them to <c>CollectorCatalog</c>, because an unknown name would
+    /// answer "supported" and silently restore the old wrong message.
+    /// </summary>
+    private const string SystemHealthCollectorName = "system_health_events";
+
     [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics.")]
     public static async Task<string> GetSystemHealth(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetSystemHealthAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetSystemHealthAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No system health data found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No system health data found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -74,19 +85,21 @@ public sealed class McpHealthParserTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetSevereErrorsAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetSevereErrorsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No severe errors found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No severe errors found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -115,19 +128,21 @@ public sealed class McpHealthParserTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetIoIssuesAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetIoIssuesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No I/O issues found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No I/O issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -156,19 +171,21 @@ public sealed class McpHealthParserTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetSchedulerIssuesAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetSchedulerIssuesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No scheduler issues found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No scheduler issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -199,19 +216,21 @@ public sealed class McpHealthParserTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetMemoryConditionsAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetMemoryConditionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No memory condition events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No memory condition events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -265,19 +284,21 @@ public sealed class McpHealthParserTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetCpuTasksAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetCpuTasksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No CPU task events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No CPU task events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -310,19 +331,21 @@ public sealed class McpHealthParserTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetMemoryBrokerAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetMemoryBrokerAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No memory broker events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No memory broker events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -357,19 +380,21 @@ public sealed class McpHealthParserTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
-        [Description("Maximum number of entries. Default 50.")] int limit = 50)
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var validation = McpHelpers.ValidateHoursBack(hours_back) ?? McpHelpers.ValidateTop(limit);
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetMemoryNodeOomAsync(resolved.ServerId, hours_back);
+            var rows = await dataService.GetMemoryNodeOomAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No memory node OOM events found in the requested time range.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status("empty", "No memory node OOM events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -411,5 +436,87 @@ public sealed class McpHealthParserTools
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_node_oom", ex); }
+    }
+
+    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background - the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text.")]
+    public static async Task<string> GetSignificantWaits(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
+        [Description("Maximum number of entries. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
+            if (validation != null) return validation;
+
+            var (rows, captured) = await dataService.GetSignificantWaitsWithCaptureAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+
+            if (rows.Count == 0)
+            {
+                /*
+                    Three different nothings, and only one of them is good news. Events captured but none
+                    significant is the healthy state and costs no extra query - the reader already counted
+                    them. Nothing captured at all needs the probe to tell a quiet window from a server whose
+                    wait_info has never been collected, because "no significant waits" is exactly what an
+                    operator wants to hear and a caller who believes it stops looking. Darling's twin makes
+                    the same three distinctions in the same words.
+                */
+                if (captured > 0)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"{captured} wait_info event(s) were captured for {resolved.ServerName} in the last {hours_back} hour(s) and none was significant (needs a real session, a non-BACKUP statement, at least {SystemHealthSignificance.SignificantWaitMinDurationMs} ms, and a wait type off the idle list). Events ARE being captured, so this is the healthy answer for this read rather than missing data.");
+                }
+
+                var everCaptured = await dataService.HasAnySystemHealthEventOfTypeAsync(
+                    resolved.ServerId, SystemHealthParser.WaitInfoEvent);
+                if (everCaptured)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No wait_info events were captured for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS captured them before, so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.");
+                }
+
+                /*
+                    #2511 adds a FOURTH nothing, and it is the one that was being mis-explained. On an engine
+                    whose system_health collector is gated off there is no session to start and no collection
+                    to check, so the advice below is advice about something that cannot exist. The engine
+                    answer goes first because it is the stronger claim; the text after it stays exactly right
+                    for every engine that DOES collect this.
+                */
+                return await McpEngineCapability.NotCollectedStatusAsync(
+                        dataService, resolved.ServerId, resolved.ServerName, SystemHealthCollectorName)
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No wait_info events have EVER been captured for {resolved.ServerName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing was waiting.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back,
+                wait_count = rows.Count,
+                shown = Math.Min(rows.Count, limit),
+                waits = rows.Take(limit).Select(r => new
+                {
+                    event_time = r.EventTime?.ToString("o"),
+                    wait_type = r.WaitType,
+                    duration_ms = r.DurationMs,
+                    /* Signal duration is the part spent runnable AFTER the resource was granted, so a
+                       signal close to the total is CPU pressure wearing a wait type's name. */
+                    signal_duration_ms = r.SignalDurationMs,
+                    wait_resource = r.WaitResource,
+                    session_id = r.SessionId,
+                    query_text = r.QueryText
+                })
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_significant_waits", ex); }
     }
 }

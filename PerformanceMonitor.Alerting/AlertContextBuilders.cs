@@ -692,6 +692,17 @@ public static class AlertContextBuilders
             {
                 ("Total Reserved", $"{tempDb.TotalReservedMb:F0} MB"),
                 ("Unallocated", $"{tempDb.UnallocatedMb:F0} MB"),
+                /* #2515: the percentage above is against the CEILING where there is one and against the
+                   current allocation where there is not, and Total Reserved + Unallocated only ever shows
+                   the allocation — so without this the reader cannot tell which denominator produced the
+                   number they are being paged about. Three states, reported as three different words:
+                   a cap, no cap at all, and a snapshot taken before the ceiling was collected. */
+                ("Max Size", tempDb.MaxSizeMb switch
+                {
+                    > 0 => $"{tempDb.MaxSizeMb:F0} MB",
+                    < 0 => "Unlimited",
+                    _ => "Unknown"
+                }),
                 ("User Objects", $"{tempDb.UserObjectReservedMb:F0} MB"),
                 ("Internal Objects", $"{tempDb.InternalObjectReservedMb:F0} MB"),
                 ("Version Store", $"{tempDb.VersionStoreReservedMb:F0} MB"),

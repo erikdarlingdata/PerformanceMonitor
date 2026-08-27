@@ -530,3 +530,57 @@
   min-height: 190px;
   overflow-x: auto;
 }
+
+/* ── starter dashboard templates (#2476) ── */
+
+/* The template menu now carries two groups (dashboards, notebooks), so each needs a heading, and the dashboard
+   items are <button>s rather than links (they POST a view instead of navigating) — which means undoing the
+   browser's button chrome so they sit flush with the notebook links above them. */
+.template-group-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 0.45rem 0.55rem 0.2rem;
+}
+.template-note { font-size: 0.72rem; color: var(--muted); padding: 0.1rem 0.55rem 0.4rem; }
+button.template-item {
+  background: none;
+  border: 0;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+button.template-item:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
+.template-server,
+.starter-server {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  padding: 0.1rem 0.55rem 0.45rem;
+}
+.starter-select {
+  background: var(--card);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.78rem;
+  max-width: 15rem;
+}
+.starter-status:empty { display: none; }
+.starter-status .strip { margin: 0.35rem 0 0; }
+
+/* The hero's starting points became real affordances, so they gain the button reset and a hover that says so —
+   they used to be inert chips, and a chip that now DOES something must not still look like a caption. */
+.views-hero .hero-chip.clickable {
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+}
+.views-hero .hero-chip.clickable:hover { color: var(--fg); border-color: var(--accent); }
+.views-hero .hero-chip.clickable:focus-visible { outline: 2px solid var(--muted); outline-offset: 1px; }
+.views-hero .starter-server { justify-content: center; padding: 0; }

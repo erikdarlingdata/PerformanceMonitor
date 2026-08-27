@@ -645,6 +645,11 @@ table.data td.sev-Healthy { color: var(--ok); }
 .page-head .server-title { display: flex; align-items: center; gap: 0.5rem; }
 .page-head .server-title h2 { margin: 0; }
 .page-head .server-band { display: inline-flex; }
+.page-head .server-engine { display: inline-flex; }
+/* The engine badge names what the server RUNS, and is the answer to "why does this one have six tabs and that
+   one twelve" (#2530). Deliberately neutral rather than band-coloured: an engine is not a health state, and a
+   card whose engine_kind is NULL renders no badge at all rather than one asserting a default. */
+.badge.engine { background: var(--lighter); color: var(--muted); font-weight: 500; }
 
 /* ─────────────────────────── sort control ─────────────────────────── */
 
@@ -670,6 +675,48 @@ table.data td.sev-Healthy { color: var(--ok); }
   width: 11rem;
 }
 .search-input:focus { outline: none; border-color: var(--accent); }
+
+/* ─────────────────────────── needs-attention filter (#2437) ─────────────────────────── */
+
+/* The header toggle, styled as the group-by-tag toggle beside it — it is the same kind of thing, a view
+   control over the same cards, so it should not look like a new concept. */
+.attention-control { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: var(--muted); cursor: pointer; }
+.attention-control input { cursor: pointer; }
+
+/* The "+N more need attention" line and the notice's way back out. Underlined, accented and pointer-cursored
+   because a line that navigates has to look like one: the defect being fixed was an inert muted div, which is
+   the shape of a caption, and every reader treated it as one. The focus ring matches the page's other
+   activatable divs (util.el's onActivate makes them role=button + tabbable). */
+.attention-link {
+  display: inline-block;
+  margin: 0.4rem 0 0.2rem;
+  color: var(--accent);
+  font-size: 0.85rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.attention-link:hover { filter: brightness(1.15); }
+.attention-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The active state, on the grid it shrank. It carries its own colour: the amber arm is a count of servers
+   wanting attention, the green arm is an all-clear, and painting an all-clear amber would be a colour
+   contradicting its own text. */
+.attention-note {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+.attention-note.warn { background: rgba(255, 213, 79, 0.10); border: 1px solid rgba(255, 213, 79, 0.35); color: var(--warn); }
+.attention-note.ok { background: rgba(129, 199, 132, 0.10); border: 1px solid rgba(129, 199, 132, 0.35); color: var(--ok); }
+/* Neither: the search matched nothing, so the filter judged nothing. Green would read as an all-clear the
+   data does not support, amber would claim a problem it never looked for. */
+.attention-note.none { background: var(--bg-dark); border: 1px solid var(--border); color: var(--muted); }
+.attention-note .attention-link { margin: 0; }
 
 /* ─────────────────────────── status bar footer ─────────────────────────── */
 
@@ -865,3 +912,58 @@ pre.code {
   color: var(--dim);
   margin-left: 0.3rem;
 }
+
+/* ─────────────────────────── server page: sub-tabs + range ─────────────────────────── */
+
+/* The web port of ViewerServerTab.xaml's per-server TabControl. Real <a href> links (the tab id rides in the
+   hash), so a tab is bookmarkable and middle-clickable; the strip scrolls horizontally on a narrow window
+   rather than wrapping into a block that pushes the panels off-screen. */
+.subtabs {
+  display: flex;
+  gap: 0.15rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1rem;
+  scrollbar-width: thin;
+}
+.subtab {
+  flex: 0 0 auto;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+.subtab:hover { color: var(--fg); background: rgba(127, 127, 127, 0.08); }
+.subtab.active { color: var(--fg); font-weight: 600; border-bottom-color: var(--accent); }
+.subtab:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
+
+/* The tab's honesty note sits between the tab strip and the panels — it describes what this tab does NOT do,
+   so it belongs above the panels it qualifies rather than buried under them. */
+.subtabs + .strip.notice { margin-bottom: 1rem; }
+
+/* The page-level time-range preset picker (the web twin of the viewer's toolbar window presets). */
+.range-control { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: var(--muted); }
+.range-select-inline {
+  background: var(--card);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.78rem;
+}
+
+/* The in-panel picker row (wait-type / perfmon-counter composites) — the single-select web twin of the desktop
+   viewer's checkbox pickers. Sits between a panel's table and its chart. */
+.picker-row { display: flex; align-items: center; gap: 0.5rem; margin: 0.85rem 0 0.4rem; }
+
+/* The server header's "why": the pre-banded reason sentence (when the fleet ranked this server) over the same
+   metric chips the fleet card carries. A band word with no way to ask why is #2422 on a new surface. */
+.server-why { margin: -0.4rem 0 1rem; }
+.server-reason { font-size: 0.85rem; margin-bottom: 0.5rem; }
+.server-reason.band-Critical { color: var(--err); }
+.server-reason.band-Warning { color: var(--warn); }
+.server-reason.band-Offline { color: var(--err); }
+.server-reason.band-Healthy { color: var(--ok); }
+.server-why .metric-bands { max-width: 900px; }

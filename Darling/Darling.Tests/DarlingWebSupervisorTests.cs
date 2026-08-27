@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.IO;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -124,5 +125,59 @@ public sealed class DarlingWebSupervisorTests
     {
         Assert.Equal(TimeSpan.FromSeconds(5), DarlingWebHostService.SupervisorPollInterval);
         Assert.Equal(TimeSpan.FromSeconds(30), DarlingWebHostService.FailedStartBackoff);
+    }
+
+    /* ================================================================================================
+       #2389: the SOURCE pin. The defect was not in a decision function — it was that the supervisor's
+       `published?.Enabled ?? config.Web.Enabled` silently took a side and had no way to say so, while
+       the web network block beside it stayed file-authoritative. A behavioural test of the old code
+       passes: it resolved the right value, it just could not report it. So pin the CALL SITE, which is what a
+       future "simplification" back to the null-coalesce would break.
+       ================================================================================================ */
+
+    [Fact]
+    public void TheSupervisor_ResolvesThroughTheProvenanceAwareHelper_NotASilentNullCoalesce()
+    {
+        var source = ReadHostSource("DarlingWebHostService.cs");
+
+        /* The silent form, gone from both halves of the resolution. */
+        Assert.DoesNotContain("published?.Enabled ??", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("published?.Port ??", source, StringComparison.Ordinal);
+
+        /* Replaced by the shared resolver, and BOTH of its diagnostics wired up: the override report (the
+           disagreement, at the point of override) and the origin clause (on the start line the operator
+           greps). Either one missing leaves half the confusion in place. */
+        Assert.Contains("DarlingHostBinding.ResolveEndpointToggle(", source, StringComparison.Ordinal);
+        Assert.Contains("DarlingHostBinding.DescribeToggleOverride(", source, StringComparison.Ordinal);
+        Assert.Contains("DarlingHostBinding.DescribeToggleOrigin(", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The disagreement is a WARNING and it is deduplicated, not emitted on every 5s poll tick: the report is
+    /// compared to the last one emitted, and cleared when the planes agree again so a LATER re-divergence is
+    /// still reported. An undeduplicated warning would be 17,280 lines a day and get filtered out, which is the
+    /// same silence in a different costume.
+    /// </summary>
+    [Fact]
+    public void TheOverrideReport_IsWarnedOncePerDistinctState()
+    {
+        var source = ReadHostSource("DarlingWebHostService.cs");
+
+        Assert.Contains("_logger.LogWarning(\"{Report}\", overrideReport);", source, StringComparison.Ordinal);
+        Assert.Contains("!string.Equals(overrideReport, lastOverrideReport, StringComparison.Ordinal)", source, StringComparison.Ordinal);
+        Assert.Contains("lastOverrideReport = overrideReport;", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>Reads the real host source, copied beside the test binary by the csproj (the same fixture the
+    /// Host-header guard pins parse).</summary>
+    private static string ReadHostSource(string fileName)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", fileName);
+        Assert.True(File.Exists(path), $"{fileName} was not copied beside the test binary — check the csproj None/Link item.");
+
+        var source = File.ReadAllText(path);
+        /* Guard the guard: an unrecognizable restructure must fail loudly, not pass vacuously. */
+        Assert.Contains("var published = _state.Read();", source, StringComparison.Ordinal);
+        return source;
     }
 }

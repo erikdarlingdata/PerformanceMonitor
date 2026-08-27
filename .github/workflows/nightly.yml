@@ -52,6 +52,13 @@ jobs:
 
   # Everything below runs only in a workflow_dispatch run — the scheduled re-dispatch or a
   # manual one — which executes from the dispatched ref (dev for the scheduled path).
+  #
+  # Each checkout resolves that ref EXPLICITLY rather than pinning `ref: dev`. Three of these
+  # were pinned, so a manual dispatch onto any other branch published dev's artifacts while
+  # reporting the dispatched ref as the run's head SHA — the run, the API and the release page
+  # all named a branch that was not what got built. That is worse than simply ignoring the
+  # input, because the mismatch is invisible: it surfaced as a release-candidate build stamping
+  # the PREVIOUS version, which is only noticeable if you happen to read the artifact name.
   check:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -61,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
           fetch-depth: 0
 
       - name: Check for new commits in last 24 hours
@@ -91,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
@@ -119,8 +126,25 @@ jobs:
       - name: Run tests
         run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release
 
+      # #2501: -r win-x64 --self-contained, and it makes the portable ZIP SMALLER, not bigger.
+      # The RID-agnostic framework-dependent publish this replaced copied every platform its
+      # packages ship - 537 MB of runtimes\ on a 565 MB tree, of which only the 52 MB win-x64
+      # folder can ever load on Windows (DuckDB.NET.Bindings.Full is most of it, SkiaSharp and
+      # SqlClient behind it). Pinning the RID drops ~485 MB of unloadable native payload, which
+      # is far more than the bundled .NET/WPF/ASP.NET runtime adds back. Measured on the same
+      # commit and SDK: 565 MB tree / 212.7 MB zipped becomes 277 MB / 114.2 MB.
+      #
+      # The size was the secondary reason. The primary one is #2489: a framework-dependent ZIP
+      # unzipped onto a stock Windows Server dies on the .NET host's own "You must install .NET
+      # to run this application" before a line of our code runs, so Lite cannot report it, and
+      # #2499 could only ship a READ-ME-FIRST.txt next to the exe. Self-contained there is
+      # nothing to install and nothing to fail. That matters most for the nightly ZIP, which is
+      # the UAT download and is not offered as a Setup.exe at all.
+      #
+      # Lite/PerformanceMonitorLite.csproj declares RuntimeIdentifiers so the committed lock
+      # file covers this RID; see the comment there before removing either half.
       - name: Publish Lite
-        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -o publish/Lite
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite
 
       - name: Publish Darling Service
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService
@@ -195,7 +219,20 @@ jobs:
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$hash  $($_.Name)"
           }
-          $checksums | Out-File -FilePath releases/SHA256SUMS.txt -Encoding utf8
+          # LF and no BOM, written explicitly (#2383). Out-File on Windows emits CRLF whatever
+          # the encoding, and `shasum -c` on macOS/Linux then takes the trailing \r as part of
+          # the FILENAME - every entry reports "No such file or directory / FAILED open or
+          # read", which is precisely what a tampered download looks like. The hashes were
+          # always right; the file just could not be used by the tool it exists for, on the two
+          # platforms where that tool is the default. A BOM breaks the first line the same way.
+          #
+          # This is the SECOND copy of that step. #2384 fixed the release workflow and left this
+          # one, so every nightly since has published a checksum file nobody outside Windows can
+          # verify - and the nightly is the build most likely to be checked by hand.
+          [IO.File]::WriteAllText(
+            "$PWD/releases/SHA256SUMS.txt",
+            (($checksums -join "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false))
           Write-Host "Checksums:"
           $checksums | ForEach-Object { Write-Host $_ }
 
@@ -331,9 +368,9 @@ jobs:
       # and continuous-aggregate policy jobs, so without them this job tested a configuration no
       # customer runs and made scheduler-racing failures luck-of-the-slot instead of reproducible.
       # Values are the product's own derivation from the live hypertable count
-      # (TimescaleSupport.HypertableCount = the 50-collector catalog + collection_log = 51):
-      #   timescaledb.max_background_workers = HypertableCount + 2  = 53
-      #   max_worker_processes = 3 + (HypertableCount + 2) + 8      = 64
+      # (TimescaleSupport.HypertableCount = the 62-collector catalog + collection_log = 63):
+      #   timescaledb.max_background_workers = HypertableCount + 2  = 71
+      #   max_worker_processes = 3 + (HypertableCount + 2) + 8      = 82
       # Kept honest by CiClusterWorkerSizingTests (parses this file against the formula) and
       # CiClusterWorkerSizingLiveTests (asserts the running cluster serves them). Must configure
       # the cluster identically to build.yml's darling-pg job: that guard parses the appended
@@ -354,8 +391,8 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 53"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 64"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 71"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 82"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
@@ -411,7 +448,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6

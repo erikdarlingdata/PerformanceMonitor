@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -176,6 +177,17 @@ AND   read_only_intent = $3";
     /// viewer-added server appear immediately (before its first collection) and a removed one disappear at
     /// once, instead of waiting for the service's next reconcile. <c>is_enabled</c> and <c>monthly_cost_usd</c>
     /// come from config so a viewer toggle/edit is reflected without a round-trip through the service.
+    ///
+    /// <para><b>The engine discriminator comes from the OBSERVED side (#2530).</b> <c>engine_kind</c> and
+    /// <c>sql_engine_edition</c> are read from <c>collect.servers</c>, not from
+    /// <c>config_monitored_servers.engine</c>, which is the DESIRED configuration and cannot carry
+    /// Aurora-ness at all - that is probed from <c>aurora_version</c> at connect. A server the operator
+    /// added but the service has not connected to yet therefore has NO kind, which is the honest answer:
+    /// it gets the SQL Server tab set by default, exactly as it did before this column existed.</para>
+    ///
+    /// <para>This query, not <c>ServersSql</c>, is what the sidebar uses on any seeded store - i.e. every
+    /// real deployment - so the discriminator has to be on BOTH or the viewer would have kept rendering
+    /// SQL Server tabs at every PostgreSQL target while a unit test over the other query passed.</para>
     /// </summary>
     public const string ManagedServersSql = @"
 SELECT
@@ -184,7 +196,9 @@ SELECT
     COALESCE(s.display_name, c.name) AS display_name,
     c.is_enabled,
     s.sql_major_version,
-    c.monthly_cost_usd
+    c.monthly_cost_usd,
+    s.engine_kind,
+    COALESCE(s.sql_engine_edition, 0) AS sql_engine_edition
 FROM config_monitored_servers c
 LEFT JOIN servers s ON s.server_id = c.server_id
 ORDER BY COALESCE(s.display_name, c.name)";
@@ -215,7 +229,9 @@ ORDER BY COALESCE(s.display_name, c.name)";
                 reader.IsDBNull(2) ? serverName : reader.GetString(2),
                 !reader.IsDBNull(3) && reader.GetBoolean(3),
                 reader.IsDBNull(4) ? null : reader.GetInt32(4),
-                reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))));
+                reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7)));
         }
 
         return servers;

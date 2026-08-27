@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
@@ -262,6 +261,9 @@ public sealed class ViewerAppSettingsStore
 {
     private static readonly JsonSerializerOptions s_jsonOptions = new() { WriteIndented = true };
 
+    /// <summary>The <see cref="ViewerLogger"/> source every diagnostic from this store is filed under.</summary>
+    private const string LogSource = "ViewerAppSettingsStore";
+
     private readonly string _filePath;
 
     /// <param name="filePath">Override the on-disk location (tests pass a temp file); null uses <see cref="DefaultFilePath"/>.</param>
@@ -273,6 +275,28 @@ public sealed class ViewerAppSettingsStore
     /// <summary>The resolved settings file path (surfaced mainly so tests and diagnostics can name it).</summary>
     public string FilePath => _filePath;
 
+    /// <summary>
+    /// What the last <see cref="Load"/> on this instance found: <see cref="SettingsFileState.Absent"/> for
+    /// a first run, <see cref="SettingsFileState.Readable"/> for an ordinary one, and
+    /// <see cref="SettingsFileState.Unreadable"/> when defaults were substituted for a file that is still
+    /// on disk. <see cref="MainWindow"/> reads it to raise ONE startup dialog for the last case; every
+    /// other caller can ignore it, because <see cref="ViewerSettingsFile"/> has already logged.
+    /// </summary>
+    public SettingsFileState LastLoadState { get; private set; } = SettingsFileState.Absent;
+
+    /// <summary>Why the last <see cref="Load"/> could not read the file — the line and position of a parse
+    /// error where there is one — or null when there was nothing wrong with it.</summary>
+    public string? LastLoadProblem { get; private set; }
+
+    /// <summary>
+    /// The settings the last <see cref="Load"/> could not read, by NAME, and empty when there were none
+    /// (#2456). Non-empty means the rest of the file loaded normally and only these reverted to their
+    /// defaults — the distinction <see cref="LastLoadProblem"/> alone cannot make, and the reason the
+    /// startup dialog can now say which settings were lost instead of only where the parse stopped.
+    /// </summary>
+    public IReadOnlyList<SettingsMemberProblem> LastLoadUnreadableMembers { get; private set; } =
+        Array.Empty<SettingsMemberProblem>();
+
     /// <summary>%APPDATA%\PerformanceMonitorDarling\viewer-settings.json.</summary>
     public static string DefaultFilePath()
     {
@@ -283,41 +307,30 @@ public sealed class ViewerAppSettingsStore
     }
 
     /// <summary>
-    /// Reads the settings, returning defaults when the file does not exist yet or cannot be read/parsed —
-    /// the viewer never blocks on a first run or a corrupt file. Loaded values are normalized into range.
+    /// Reads the settings, returning defaults when the file does not exist yet or cannot be read/parsed.
+    /// Loaded values are normalized into range. A file that is present and unreadable is reported to the
+    /// log and left on <see cref="LastLoadState"/> — it is never treated as a first run (#2434).
     /// </summary>
     public ViewerAppSettings Load()
     {
-        try
-        {
-            if (!File.Exists(_filePath))
-            {
-                return new ViewerAppSettings();
-            }
-
-            var json = File.ReadAllText(_filePath);
-            var settings = JsonSerializer.Deserialize<ViewerAppSettings>(json, s_jsonOptions);
-            return (settings ?? new ViewerAppSettings()).Normalize();
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"ViewerAppSettingsStore: failed to load '{_filePath}', using defaults: {ex.Message}");
-            return new ViewerAppSettings();
-        }
+        var read = ViewerSettingsFile.Load<ViewerAppSettings>(_filePath, LogSource, s_jsonOptions);
+        LastLoadState = read.State;
+        LastLoadProblem = read.Problem;
+        LastLoadUnreadableMembers = read.UnreadableMembers ?? Array.Empty<SettingsMemberProblem>();
+        return read.Value!.Normalize();
     }
 
-    /// <summary>Writes the settings as indented JSON, creating the app-data directory on first save.</summary>
-    public void Save(ViewerAppSettings settings)
+    /// <summary>
+    /// Writes the settings as indented JSON, creating the app-data directory on first save, and returns
+    /// whether the write happened. False means nothing reached disk — either the write itself failed, or
+    /// the existing file could not be read AND could not be copied aside, in which case it is deliberately
+    /// left exactly as it is rather than replaced with defaults (#2434).
+    /// </summary>
+    public bool Save(ViewerAppSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
 
-        var directory = Path.GetDirectoryName(_filePath);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        File.WriteAllText(_filePath, JsonSerializer.Serialize(settings, s_jsonOptions));
+        return ViewerSettingsFile.Save(_filePath, settings, LogSource, s_jsonOptions);
     }
 }
 

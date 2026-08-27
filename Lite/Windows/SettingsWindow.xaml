@@ -165,6 +165,14 @@
                 </StackPanel>
                 <CheckBox x:Name="MinimizeToTrayCheckBox" Content="Minimize to system tray" Margin="0,8,0,0"
                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <!-- #2413: five seconds after every launch Lite called github.com looking for a new
+                     version, on by default, and the only way to refuse was to hand-edit a key that
+                     appeared in no window and no sample file. It sits beside Minimize to tray, ABOVE the
+                     Enable notifications master switch, because it is application behavior and not
+                     alerting. Turning alerts off must not gray this out or claim it depends on them. -->
+                <CheckBox x:Name="CheckForUpdatesOnStartupCheckBox" Content="Check GitHub for a new version at startup" Margin="0,8,0,0"
+                          Foreground="{DynamicResource ForegroundBrush}"
+                          ToolTip="Off = Lite never contacts github.com on its own. The sidebar's About button still checks when you open it, and installs in place from there."/>
                 <CheckBox x:Name="AlertsEnabledCheckBox" Content="Enable notifications" Margin="0,8,0,0"
                           Foreground="{DynamicResource ForegroundBrush}" Checked="AlertsEnabledCheckBox_Changed" Unchecked="AlertsEnabledCheckBox_Changed"/>
                 <CheckBox x:Name="NotifyConnectionCheckBox" Content="Connection lost / restored" Margin="20,6,0,0"
@@ -197,6 +205,14 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AgRedoQueueAlertKbBox" Width="95" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="KB (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="36,4,0,0"
+                            ToolTip="0 = off (one alert per outage). Re-alerts use the same 'AG Replica Disconnected' metric name, so webhook automation keyed on it re-triggers.">
+                    <TextBlock Text="Re-alert while a replica is still disconnected every" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AgDisconnectRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="min (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
@@ -293,6 +309,19 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertPvsFloorGbBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="GB (ADR databases only)" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertFileGrowthCheckBox" Content="Database file grew over" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertFileGrowthRiseMbBox" Width="60" Text="10240" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="MB within" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertFileGrowthLookbackMinutesBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="min, or is over" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertFileGrowthVolumePercentBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="% of its volume (0 disables either gate)" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
@@ -399,6 +428,16 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AnalysisNotifySeverityBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
                     <TextBlock Text="(0.0 - 2.0)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
+                <!-- #2393: analysis_notify_cooldown_minutes has been read (and clamped) by App.LoadAlertSettings
+                     since the key existed, and the Darling viewer has offered it since #2107; Lite simply never
+                     drew the box, so the one knob that quiets chatty analysis notifications was hand-edit-only. -->
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Re-notify an unchanged finding after" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AnalysisNotifyCooldownBox" Width="55" TextAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="minutes (30 - 10080)" VerticalAlignment="Center" Margin="4,0,0,0"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."

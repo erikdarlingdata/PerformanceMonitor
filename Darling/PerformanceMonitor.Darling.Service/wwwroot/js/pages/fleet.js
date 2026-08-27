@@ -34,6 +34,15 @@ let fleetFilter = "";
 let lastCards = [];
 let gridNode = null;
 
+/* #2437 (the web twin of #2424): the needs-attention filter over the card grid — the destination the
+   "+N more need attention" line finally has. Deliberately NOT persisted the way the sort and the grouped
+   view are: a sort is a preference, this is a triage action tied to a moment, and a fleet page that opens
+   with 52 of 57 servers already hidden is a support ticket even with the toggle in plain sight.
+   attentionToggle is the header checkbox, held so the "+N more" line can turn it ON rather than filtering
+   behind its back — a grid that silently shrank is the worse version of this defect. */
+let attentionOnly = false;
+let attentionToggle = null;
+
 /* Grouped (tree) view — the web twin of the desktop FleetView: opt-in, and both the toggle and the collapsed
    groups persist client-side (localStorage, guarded so a locked-down browser still renders flat). lastTags is
    the full tag forest /api/fleet returns, so an organisational parent tag with no directly-tagged servers still
@@ -102,6 +111,35 @@ function cardMatches(c, q) {
   );
 }
 
+/* The needs-attention predicate (#2437). It reads the card's PRE-BANDED `band` — the same field
+   BuildRollup counted `additional_problem_count` from (`cards.Where(c => c.Band != FleetHealthBand.Healthy)`)
+   and the same one the Warning / Critical / Offline roll-up tiles are summed from. That is the whole point: a
+   client-side approximation of "needs attention" would eventually disagree with the number that sent the
+   reader here, which is this defect wearing a new hat. R1 still holds — no threshold is re-derived here, a
+   server-computed band is read. */
+function cardNeedsAttention(c) {
+  return c.band !== "Healthy";
+}
+
+/* What the filter did, shown beside the cards it left. Word-for-word the desktop viewer's
+   FleetRollup.AttentionFilterCountText (#2424), because the point of doing all three surfaces at once is
+   that a reader moving between them meets one vocabulary rather than three. The all-clear arms matter as
+   much as the count: a filtered grid holding nothing is otherwise an empty page with no explanation, and an
+   empty FLEET must not be told that zero of its servers are healthy.
+
+   The `narrowed` arms are the one place this surface needs words the viewer does not have, and review found
+   out why: the viewer's Overview has no search box, so "the 1 server monitored is healthy" is simply true
+   there. Here the denominator is what the SEARCH left, so on a 57-server fleet narrowed to one match that
+   sentence claims the fleet holds one server, while 56 others exist and were never looked at. The all-clear
+   has to name the population it is clearing. */
+function attentionCountText(shown, total, narrowed) {
+  if (shown > 0) return "showing " + shown + " of " + total;
+  if (total <= 0) return "no servers to filter";
+  if (narrowed) return total === 1 ? "the 1 matching server is healthy" : "all " + total + " matching servers are healthy";
+  if (total === 1) return "the 1 server monitored is healthy";
+  return "all " + total + " servers are healthy";
+}
+
 /* The server's tags as read-only coloured pills (#2020). Colour is the stored #RRGGBB or, when unset, a
    neutral pill (matching the desktop apps — no palette is resolved here). The hex is format-checked before it
    reaches the style attribute, so only a well-formed colour from the store is ever applied. Nothing renders
@@ -165,7 +203,20 @@ export async function renderFleet(main) {
       })
     );
     if (d.additional_problem_count > 0) {
-      nodes.push(el("div", { class: "muted", style: "margin:0.4rem 0 0.2rem", text: "+ " + d.additional_problem_count + " more need attention" }));
+      /* #2437: the overflow line is the way TO the overflow, not a report that it exists. It was an inert
+         muted div: on a 57-server fleet it read "+52 more need attention" and the reporter's question was
+         literally "where do I find these warnings?". Activating it turns the needs-attention filter on, so
+         the answer is the card grid below, with every metric chip those servers have. onActivate rather than
+         onClick because a line that navigates has to be reachable from the keyboard too — it installs
+         role=button, tabindex and Enter/Space alongside the click. */
+      nodes.push(
+        el("div", {
+          class: "attention-link",
+          text: "+ " + d.additional_problem_count + " more need attention",
+          title: "Show only the servers that need attention",
+          onActivate: () => setAttentionOnly(true),
+        })
+      );
     }
   }
 
@@ -179,22 +230,88 @@ export async function renderFleet(main) {
   mount(main, nodes);
 }
 
-/** Filter the cached cards by the search term, sort by the current choice, and (re)fill the grid — no refetch. */
+/** Filter the cached cards by the search term AND the needs-attention toggle, sort by the current choice, and
+    (re)fill the grid — no refetch. */
 function redrawCards() {
   if (!gridNode) return;
-  const matched = lastCards.filter((c) => cardMatches(c, fleetFilter)).sort(SORTS[fleetSort] || SORTS.severity);
+  /* The two filters compose, and the search's result is the denominator the notice reports against. With a
+     term typed, "showing 4 of 57" invites reading 4 as the fleet's problem count, which it is not — the other
+     53 were not judged healthy, they were never looked at. The label has to mean what the grid holds. */
+  const searched = lastCards.filter((c) => cardMatches(c, fleetFilter));
+  const matched = (attentionOnly ? searched.filter(cardNeedsAttention) : searched)
+    .slice()
+    .sort(SORTS[fleetSort] || SORTS.severity);
+
+  /* The active state rides with the CARDS, not only with the toggle that set it. The desktop viewer can put
+     its count beside the toggle and stop there because its roll-up header is docked and never scrolls; this
+     page head scrolls away, so a reader who has scrolled down to the grid would see a short fleet and nothing
+     saying why. A filtered grid that looks unfiltered is a worse defect than the dead end it replaced, so the
+     notice sits on the grid and carries its own way out. */
+  const notice = attentionOnly ? attentionNotice(matched.length, searched.length) : null;
 
   if (fleetGrouped && lastTags.length) {
-    mount(gridNode, renderGrouped(matched));
+    mount(gridNode, [notice, renderGrouped(matched)]);
     return;
   }
 
-  mount(
-    gridNode,
+  mount(gridNode, [
+    notice,
     matched.length
-      ? [el("div", { class: "grid" }, matched.map(serverCard))]
-      : [el("div", { class: "muted", style: "padding:0.5rem", text: "No servers match “" + fleetFilter.trim() + "”." })]
-  );
+      ? el("div", { class: "grid" }, matched.map(serverCard))
+      /* The notice already explains an empty grid whenever it is showing, in more precise words than this
+         line can manage — so this is the case it does NOT cover: no attention filter, and the search term is
+         the only thing that could have emptied the grid. Two boxes saying the same thing in different words
+         is the one-sentence-per-state goal losing to itself, and the desktop viewer shows only its count. */
+      : notice ? null : el("div", { class: "muted", style: "padding:0.5rem", text: noMatchText() }),
+  ]);
+}
+
+/** Why the grid is short, and how to make it whole again — rendered only while the filter is on.
+
+    The colour follows the SENTENCE, not the filter. Painting an all-clear amber would be a colour
+    contradicting its own text (the #2429 review finding), and there are THREE sentences here, not two: a
+    search term that matched nothing leaves the filter with nothing to judge, and green there would be an
+    all-clear the data does not support — the fleet's problem servers were not found healthy, they were never
+    looked at. That case gets the neutral treatment and says what actually happened.
+
+    role="status" is util.js's noticeStrip idiom for exactly this: a non-fatal notice that appears and
+    re-words itself with no page load, so a screen reader hears the count change instead of the grid silently
+    shrinking. Raised in review. */
+function attentionNotice(shown, total) {
+  const term = fleetFilter.trim();
+  const label = term ? "Needs attention only, matching “" + term + "”" : "Needs attention only";
+  const searchFoundNothing = term !== "" && total === 0;
+  const kind = searchFoundNothing ? "none" : shown > 0 ? "warn" : "ok";
+  const sentence = searchFoundNothing
+    ? label + " — nothing matches that term, so no server was judged."
+    : label + " — " + attentionCountText(shown, total, term !== "") + ".";
+
+  return el("div", { class: "attention-note " + kind, role: "status" }, [
+    el("span", { text: sentence }),
+    el("span", {
+      class: "attention-link",
+      text: "Show all servers",
+      onActivate: () => setAttentionOnly(false),
+    }),
+  ]);
+}
+
+/** The empty-grid line, reached only with the attention filter OFF (see redrawCards) — so the search term is
+    the only thing that can have emptied the grid, and this says so without guessing. The term-less arm is
+    unreachable today (renderFleet takes the empty-fleet path before the grid exists) and is worded honestly
+    rather than left to fall through to a sentence about a term nobody typed. */
+function noMatchText() {
+  const term = fleetFilter.trim();
+  return term ? "No servers match “" + term + "”." : "No servers to show.";
+}
+
+/** Turns the needs-attention filter on or off from either end — the header toggle or the "+N more" line —
+    keeping the checkbox and the grid in step. The checkbox is where the state lives: whichever affordance set
+    it, the reader can see the filter is on and can turn it off in one place. */
+function setAttentionOnly(on) {
+  attentionOnly = on;
+  if (attentionToggle) attentionToggle.checked = on;
+  redrawCards();
 }
 
 /* Renders the grouped (tree) view: DFS group headers each followed by a grid of their cards. Collapsing a
@@ -264,6 +381,7 @@ function pageHead(d) {
     el("h2", { text: "Fleet Overview" }),
     el("div", { class: "spacer" }),
     d && d.total_servers ? searchControl() : null,
+    d && d.total_servers ? attentionControl() : null,
     d && d.tags && d.tags.length ? groupControl() : null,
     d && d.total_servers ? sortControl() : null,
     d ? el("div", { class: "meta", text: "Updated " + localTime(d.generated_at) }) : null,
@@ -285,6 +403,21 @@ function searchControl() {
     redrawCards();
   });
   return el("label", { class: "search-control" }, [el("span", { text: "Search" }), input]);
+}
+
+/** The needs-attention toggle (#2437) — a view control over the same cards, so it sits beside Search and Sort
+    rather than being a mode the "+N more" link switches on invisibly. It re-reads the module-level
+    attentionOnly on every re-render, exactly like the sort and search controls, so the 60s refresh cannot
+    silently drop an active filter. */
+function attentionControl() {
+  const cb = el("input", { type: "checkbox", class: "attention-toggle", "aria-label": "Show only servers that need attention" });
+  cb.checked = attentionOnly;
+  cb.addEventListener("change", () => setAttentionOnly(cb.checked));
+  attentionToggle = cb;
+  return el("label", {
+    class: "attention-control",
+    title: "Show only the cards that are not Healthy — Critical, Warning or Offline. Uncheck to show the whole fleet again.",
+  }, [cb, el("span", { text: "Needs attention only" })]);
 }
 
 /** Client-side card-sort control on the fleet header (M8): severity (default) / name / CPU. */
@@ -365,8 +498,14 @@ function serverCard(c) {
 
 /* Enriched metric chips (M1): each carries a secondary detail line from fields /api/fleet already returns —
    the SQL-vs-total CPU split, threads available/max, memory + buffer-pool GB, blocking max wait, deadlocks
-   last-seen, and collectors healthy/failing. */
-function metricBands(c) {
+   last-seen, and collectors healthy/failing.
+
+   EXPORTED because the server detail page's header renders the same chips under its band badge. `Warning` has
+   three unrelated causes — a real metric breach, awaiting-first-collection, and a collector error — and a badge
+   that says only "Warning" is #2422 rebuilt on a new surface. These chips are the answer, and they are the
+   SERVER's severities read off the card (R1), so the two surfaces cannot drift into different opinions the way
+   a second derivation would. */
+export function metricBands(c) {
   const threadsValue =
     c.threads_severity === "Unknown"
       ? "n/a"

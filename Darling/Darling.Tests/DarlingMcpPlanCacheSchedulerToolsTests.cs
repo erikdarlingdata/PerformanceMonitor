@@ -69,7 +69,7 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
     public void ParamContract_PlanCacheBloat_ServerHours()
     {
         var p = McpParams("get_plan_cache_bloat");
-        Assert.Equal(new[] { "server_name", "hours_back" }, p.Select(x => x.Name).ToArray());
+        Assert.Equal(new[] { "server_name", "hours_back", "as_of" }, p.Select(x => x.Name).ToArray());
         Assert.All(p, x => Assert.True(x.Optional));
     }
 

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.IO;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -35,6 +36,111 @@ namespace Darling.Tests;
 public sealed class DarlingEndpointToggleCliTests
 {
     /* ---------------- pure: the four targeted store-write SQL strings ---------------- */
+
+    /// <summary>
+    /// #2626: on a non-Windows host the refusal must name the path that WORKS, not only the platform it is
+    /// not.
+    ///
+    /// <para>
+    /// "requires Windows (DPAPI + firewall)" is true of the verb and misleading about the situation. Both
+    /// Windows dependencies are MANAGED-mode concerns, and a non-Windows deployment is necessarily
+    /// bring-your-own, where the verb refuses anyway with the message that actually helps. Reading the
+    /// platform sentence on macOS, an operator concludes the DASHBOARD is Windows-only. It is not — one
+    /// UPDATE turns it on, and the service picks it up within a sweep without a restart. I did exactly
+    /// that on a macOS rig, having first been told to go get Windows.
+    /// </para>
+    ///
+    /// <para>
+    /// The SQL is in the message on purpose. This is the one moment the operator is standing in front of a
+    /// dashboard that will not start, and the difference between naming a column and handing over the
+    /// statement is the difference between a fix and a search.
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(false, true, "--enable-web", "web_enabled", "true")]
+    [InlineData(false, false, "--disable-web", "web_enabled", "false")]
+    [InlineData(true, true, "--enable-mcp", "mcp_enabled", "true")]
+    [InlineData(true, false, "--disable-mcp", "mcp_enabled", "false")]
+    public void ThePlatformRefusalNamesTheByoPath_WhenTheStoreIsBringYourOwn(
+        bool isMcp, bool enable, string verb, string column, string expectedValue)
+    {
+        var configPath = WriteTempConfig(managed: false);
+
+        try
+        {
+            using var error = new StringWriter();
+
+            var exitCode = DarlingCliCommands.WriteEndpointVerbPlatformRefusal(isMcp, enable, configPath, error);
+
+            var message = error.ToString();
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains(verb, message, StringComparison.Ordinal);
+            Assert.Contains($"UPDATE config.config_service SET {column} = {expectedValue};", message, StringComparison.Ordinal);
+            Assert.Contains("no restart is needed", message, StringComparison.Ordinal);
+
+            /* The whole point: the sentence that sent me looking for a Windows box is gone. */
+            Assert.DoesNotContain("requires Windows", message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(configPath);
+        }
+    }
+
+    /// <summary>
+    /// A MANAGED store on a non-Windows host keeps the platform sentence: the owner credential really is
+    /// DPAPI-protected and the firewall step really is Windows, so there is nothing else honest to say.
+    /// This combination should not exist - the bundled store is Windows-only - which is exactly why the
+    /// fallback has to be the truthful one rather than the helpful one.
+    /// </summary>
+    [Fact]
+    public void ThePlatformRefusalStaysPlatformFactual_WhenTheStoreIsManaged()
+    {
+        var configPath = WriteTempConfig(managed: true);
+
+        try
+        {
+            using var error = new StringWriter();
+
+            var exitCode = DarlingCliCommands.WriteEndpointVerbPlatformRefusal(
+                isMcp: false, enable: true, configPath, error);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("--enable-web requires Windows (DPAPI + firewall).", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(configPath);
+        }
+    }
+
+    /// <summary>
+    /// An unreadable config gets the platform sentence too. The method exists to CHOOSE a sentence, and a
+    /// config we cannot parse is not grounds to claim we know the deployment is bring-your-own.
+    /// </summary>
+    [Fact]
+    public void AnUnreadableConfigFallsBackToThePlatformSentence()
+    {
+        using var error = new StringWriter();
+
+        var exitCode = DarlingCliCommands.WriteEndpointVerbPlatformRefusal(
+            isMcp: true, enable: true, Path.Combine(Path.GetTempPath(), $"darling-missing-{Guid.NewGuid():N}.json"), error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("requires Windows", error.ToString(), StringComparison.Ordinal);
+    }
+
+    private static string WriteTempConfig(bool managed)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"darling-{Guid.NewGuid():N}.json");
+
+        File.WriteAllText(path, managed
+            ? """{ "postgres": { "managed": true }, "servers": [] }"""
+            : """{ "postgres": { "managed": false, "connectionString": "Host=localhost;Database=darling;Username=darling;Password=x" }, "servers": [] }""");
+
+        return path;
+    }
 
     [Fact]
     public void EnableMcpSql_SetsMcpEnabledTrue_ByCli_OnTheSingleRow_TouchingNothingElse()
@@ -237,6 +343,52 @@ public sealed class DarlingEndpointToggleCliTests
         {
             Assert.DoesNotContain(metacharacter, cidr, StringComparison.Ordinal);
         }
+    }
+
+    /* ---------------- #2414: the toggle write hands back the port the endpoint BINDS ---------------- */
+
+    /// <summary>
+    /// The firewall half of these verbs has to name its rule for the port the endpoint is bound to, which is
+    /// <c>config_service.mcp_port</c>/<c>web_port</c> and not darling.json's first-run seed. Taking it from the
+    /// RETURNING clause of the write these verbs already perform makes the authoritative read free, atomic with
+    /// the toggle, and impossible to skip — and it makes the store-unreachable case impossible too, because a
+    /// store that cannot be written has already failed the verb before any firewall command is built.
+    /// </summary>
+    [Theory]
+    [InlineData("mcp")]
+    [InlineData("web")]
+    public void EveryToggleSql_ReturnsItsOwnEndpointsPort_AndOnlyThatOne(string section)
+    {
+        var (enable, disable) = section == "mcp"
+            ? (DarlingCliCommands.EnableMcpStoreSql, DarlingCliCommands.DisableMcpStoreSql)
+            : (DarlingCliCommands.EnableWebStoreSql, DarlingCliCommands.DisableWebStoreSql);
+
+        var other = section == "mcp" ? "web_port" : "mcp_port";
+
+        foreach (var sql in new[] { enable, disable })
+        {
+            Assert.EndsWith($"RETURNING {section}_port", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain(other, sql, StringComparison.Ordinal);
+
+            /* RETURNING is a read on the row this statement already writes — it must not have turned the
+               targeted single-flag UPDATE into something broader. */
+            Assert.Contains("WHERE id = 1 RETURNING", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("config_version", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The elevated firewall verb's own read is the same two pairs, read-only, on the same single
+    /// row — it has no write to hang a RETURNING off, and it must never acquire one.</summary>
+    [Fact]
+    public void ReadEndpointTogglesSql_IsAReadOnlySingleRowSelectOfBothEndpoints()
+    {
+        var sql = DarlingCliCommands.ReadEndpointTogglesSql;
+
+        Assert.StartsWith("SELECT ", sql, StringComparison.Ordinal);
+        Assert.Contains("mcp_enabled, mcp_port, web_enabled, web_port", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM config.config_service WHERE id = 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UPDATE", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("INSERT", sql, StringComparison.Ordinal);
     }
 
     /* ---------------- pure: the shared scoped firewall rule names (CLI + host reconcile the SAME DisplayName) ---------------- */

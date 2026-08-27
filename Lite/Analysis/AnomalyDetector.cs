@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -78,8 +79,15 @@ public class AnomalyDetector
     {
         var anomalies = new List<Fact>();
 
-        // Check if baseline period has any data at all — if not, skip all anomaly detection.
-        if (!await HasBaselineDataAsync(context.ServerId))
+        /* Check if baseline period has any data at all — if not, skip all anomaly detection.
+
+           #2506: the gate's 30 days are measured back from the WINDOW's end, not from the clock. Every
+           other bound in this class already comes off context.TimeRangeStart/End, and the baseline this
+           gate is guarding is computed at context.TimeRangeStart too — so asking "was anything collected
+           in the 30 days before now" while the baseline reads the 30 days before an anchored window was
+           the one place the two could disagree. Identical for an unanchored pass, whose TimeRangeEnd IS
+           now. */
+        if (!await HasBaselineDataAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken))
             return anomalies;
 
         // Existing detection methods (upgraded to time-bucketed baselines)
@@ -108,9 +116,9 @@ public class AnomalyDetector
     {
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             // Growth: biggest day-over-day table grower (indexes rolled up) over threshold.
             using (var cmd = connection.CreateCommand())
@@ -135,8 +143,8 @@ ORDER BY growth_mb DESC LIMIT 1";
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthMbThreshold });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthPctThreshold });
 
-                using var reader = await cmd.ExecuteReaderAsync();
-                if (await reader.ReadAsync())
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                if (await reader.ReadAsync(context.CancellationToken))
                 {
                     var db = reader.GetString(0);
                     var gSchema = reader.IsDBNull(1) ? null : reader.GetValue(1)?.ToString();
@@ -185,8 +193,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectLockWaitMsDeltaThreshold });
 
-                using var reader = await cmd.ExecuteReaderAsync();
-                if (await reader.ReadAsync())
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                if (await reader.ReadAsync(context.CancellationToken))
                 {
                     var db = reader.GetString(0);
                     var cSchema = reader.IsDBNull(1) ? null : reader.GetValue(1)?.ToString();
@@ -218,7 +226,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Error("AnomalyDetector", $"Object stats anomaly detection failed: {ex.Message}");
         }
@@ -228,13 +236,13 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// Checks if the server has enough historical data for meaningful baselines.
     /// Uses wait_stats as canary — if waits are collected, other data is too.
     /// </summary>
-    private async Task<bool> HasBaselineDataAsync(int serverId)
+    private async Task<bool> HasBaselineDataAsync(int serverId, DateTime windowEnd, CancellationToken cancellationToken)
     {
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(cancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -243,12 +251,18 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
      + (SELECT COUNT(*) FROM v_cpu_utilization_stats
         WHERE server_id = $1 AND collection_time >= $2)";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-30) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd.AddDays(-30) });
 
-            var count = Convert.ToInt64(await cmd.ExecuteScalarAsync() ?? 0);
+            var count = Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken) ?? 0);
             return count > 0;
         }
-        catch { return false; }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
+        {
+            /* No baseline data reads as "skip anomaly detection", which is right — but an
+               abandonment is NOT that answer, and swallowing it here would let the pass go on
+               through nine detectors under a token that had already fired (#2443). */
+            return false;
+        }
     }
 
     /// <summary>
@@ -259,16 +273,16 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Cpu, context.TimeRangeStart);
+                context.ServerId, MetricNames.Cpu, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             // No effectiveStdDev<=0 early return — an untrustworthy/zero-dispersion baseline falls
             // back to the absolute bar (below) rather than going silent.
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -286,8 +300,8 @@ AND   collection_time >= $2 AND collection_time < $3";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var peakCpu = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var avgCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -326,7 +340,7 @@ AND   collection_time >= $2 AND collection_time < $3";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Error("AnomalyDetector", $"CPU anomaly detection failed: {ex.Message}");
         }
@@ -346,11 +360,11 @@ AND   collection_time >= $2 AND collection_time < $3";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart);
+                context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart, context.CancellationToken);
 
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             // Current window: all-types wait ms/sec per collection (interval via LAG, never an assumed
             // cadence — mirrors the WaitMsPerSec baseline), then PEAK across collections (matching the
@@ -378,8 +392,8 @@ FROM per_collection";
                 rateCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 rateCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-                using var rateReader = await rateCmd.ExecuteReaderAsync();
-                if (!await rateReader.ReadAsync()) return;
+                using var rateReader = await rateCmd.ExecuteReaderAsync(context.CancellationToken);
+                if (!await rateReader.ReadAsync(context.CancellationToken)) return;
                 peakRate = rateReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(rateReader.GetValue(0));
                 totalWaitMs = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
                 collectionCount = rateReader.IsDBNull(2) ? 0L : Convert.ToInt64(rateReader.GetValue(2));
@@ -447,8 +461,8 @@ LIMIT 6";
                 contribCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 contribCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-                using var contribReader = await contribCmd.ExecuteReaderAsync();
-                while (await contribReader.ReadAsync())
+                using var contribReader = await contribCmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await contribReader.ReadAsync(context.CancellationToken))
                 {
                     var waitType = contribReader.GetString(0);
                     metadata[$"contrib_{waitType}"] = Convert.ToDouble(contribReader.GetValue(1));
@@ -464,7 +478,7 @@ LIMIT 6";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Error("AnomalyDetector", $"Wait anomaly detection failed: {ex.Message}");
         }
@@ -479,13 +493,13 @@ LIMIT 6";
         try
         {
             var blockingBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Blocking, context.TimeRangeStart);
+                context.ServerId, MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
             var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart);
+                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
 
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             /* current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
@@ -505,8 +519,8 @@ SELECT
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var currentBlocking = Convert.ToInt64(reader.GetValue(0));
             var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
@@ -577,7 +591,7 @@ SELECT
                 });
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Error("AnomalyDetector", $"Blocking anomaly detection failed: {ex.Message}");
         }
@@ -591,14 +605,14 @@ SELECT
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart);
+                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -612,8 +626,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var currentReadLat = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var currentWriteLat = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -678,7 +692,7 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
                 });
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Error("AnomalyDetector", $"I/O anomaly detection failed: {ex.Message}");
         }
@@ -692,14 +706,14 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart);
+                context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -715,8 +729,8 @@ AND   delta_cntr_value >= 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var avgBatch = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakBatch = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -753,7 +767,7 @@ AND   delta_cntr_value >= 0";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Error("AnomalyDetector", $"Batch request anomaly detection failed: {ex.Message}");
         }
@@ -767,14 +781,14 @@ AND   delta_cntr_value >= 0";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.SessionCount, context.TimeRangeStart);
+                context.ServerId, MetricNames.SessionCount, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -794,8 +808,8 @@ FROM per_collection";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var avgConnections = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakConnections = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -832,7 +846,7 @@ FROM per_collection";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Error("AnomalyDetector", $"Session anomaly detection failed: {ex.Message}");
         }
@@ -847,14 +861,14 @@ FROM per_collection";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart);
+                context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -876,8 +890,8 @@ FROM per_collection";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var avgElapsed = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakElapsed = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -914,7 +928,7 @@ FROM per_collection";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Error("AnomalyDetector", $"Query duration anomaly detection failed: {ex.Message}");
         }
@@ -930,14 +944,14 @@ FROM per_collection";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Memory, context.TimeRangeStart);
+                context.ServerId, MetricNames.Memory, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -952,8 +966,8 @@ AND   target_server_memory_mb > 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var avgPressure = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakPressure = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -990,7 +1004,7 @@ AND   target_server_memory_mb > 0";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             AppLogger.Error("AnomalyDetector", $"Memory anomaly detection failed: {ex.Message}");
         }

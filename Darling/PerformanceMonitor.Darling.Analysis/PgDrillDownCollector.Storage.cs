@@ -31,7 +31,7 @@ LIMIT 10";
 
     private async Task CollectFileLatencyBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(FileLatencyBreakdownSql, connection);
         cmd.Parameters.AddWithValue(context.ServerId);
@@ -39,8 +39,8 @@ LIMIT 10";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {
@@ -82,14 +82,14 @@ LIMIT 50";
     /// </summary>
     private async Task CollectAutogrowthPercentFiles(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(AutogrowthPercentFilesSql, connection);
         cmd.Parameters.AddWithValue(context.ServerId);
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             var database = reader.IsDBNull(0) ? "" : reader.GetString(0);
             var fileType = reader.IsDBNull(1) ? "" : reader.GetString(1);
@@ -125,7 +125,7 @@ LIMIT 5";
 
     private async Task CollectTempDbBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(TempDbBreakdownSql, connection);
         cmd.Parameters.AddWithValue(context.ServerId);
@@ -133,8 +133,8 @@ LIMIT 5";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             items.Add(new
             {

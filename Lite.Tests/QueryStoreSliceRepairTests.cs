@@ -344,10 +344,63 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
 
         /* And the REWRITE stays under the read lock: writing a temp sibling nothing can see yet must not take
            the UI's exclusivity for the whole of a large archive rewrite. */
-        Assert.Contains("using (_duckDb.AcquireReadLock())", source, StringComparison.Ordinal);
-        var readLock = source.IndexOf("using (_duckDb.AcquireReadLock())", StringComparison.Ordinal);
+        Assert.Contains("using (_duckDb.AcquireReadLock(cancellationToken))", source, StringComparison.Ordinal);
+        var readLock = source.IndexOf("using (_duckDb.AcquireReadLock(cancellationToken))", StringComparison.Ordinal);
         var copyToTemp = source.IndexOf("COMPRESSION ZSTD)\";", StringComparison.Ordinal);
         Assert.True(copyToTemp > readLock, "the rewrite-to-temp belongs under the read lock, not the write lock");
+    }
+
+    /// <summary>
+    /// Source guard: no lock acquisition in this service is silent about cancellation (#2465).
+    ///
+    /// <para>The sibling test above pins WHICH lock each phase takes. This one pins whether the phase can be
+    /// ABANDONED while it waits for it, which is a separate property and the one CA2016 was pointing at: every
+    /// method here holds a token, and every one of them takes the lock BEFORE it opens its connection, so a
+    /// no-arg <c>AcquireReadLock()</c> leaves the token stopped at the door — abandonable everywhere except
+    /// where the pass is actually stuck, which is the exact defect #2454 closed for the analysis pass.</para>
+    ///
+    /// <para>A source guard rather than a behavioral one because what is being pinned is a DECISION, not a
+    /// behavior: three sites forward the token and two decline it, and on the shipped caller
+    /// (<c>MainWindow</c> fires the repair un-awaited with no token) both spellings run identically today.
+    /// Nothing observable separates them, and that is precisely why they need pinning — a later edit that
+    /// "tidied" the two declines into forwards, or blanket-suppressed the rule, would cost nothing at runtime
+    /// and quietly convert five stated decisions back into an unknown.</para>
+    ///
+    /// <para>The declines are pinned WITH their reason, because a bare <c>CancellationToken.None</c> is the
+    /// oversight the analyzer complained about with an extra token typed in.</para>
+    /// </summary>
+    [Fact]
+    public void EveryLockAcquisition_SaysWhetherItCanBeAbandoned()
+    {
+        var source = File.ReadAllText(SourcePath("Lite", "Services", "QueryStoreSliceRepairService.cs"));
+
+        /* Not one silent acquisition left. This is the assertion that goes red on the pre-#2465 file. */
+        Assert.Empty(Regex.Matches(source, @"_duckDb\.AcquireReadLock\(\)"));
+
+        /* Three FORWARD it: the marker read, the survey, and the archive rewrite-to-temp. Each abandons into
+           a state the next launch reproduces for free, so there is nothing to protect by waiting. */
+        Assert.Equal(3, Regex.Matches(source, @"_duckDb\.AcquireReadLock\(cancellationToken\)").Count);
+
+        /* Two DECLINE it, and both are the marker write — the only thing here that records work already done
+           and irreversible, where abandoning costs the next launch the whole survey to learn nothing. */
+        var declined = Regex.Matches(source, @"_duckDb\.AcquireReadLock\(CancellationToken\.None\)");
+        Assert.Equal(2, declined.Count);
+
+        foreach (Match site in declined)
+        {
+            var reason = source[Math.Max(0, site.Index - 1500)..site.Index];
+            Assert.Contains("#2465", reason, StringComparison.Ordinal);
+            Assert.Contains("marker", reason, StringComparison.Ordinal);
+        }
+
+        /* And each decline is WHOLE. A lock that will not be abandoned in front of a write that will be is
+           worse than either choice made consistently, so the open and both statements decline too. */
+        Assert.Equal(2, Regex.Matches(source, @"await connection\.OpenAsync\(CancellationToken\.None\);").Count);
+        Assert.Equal(2, Regex.Matches(source, @"await MarkRepairedAsync\(connection, [^;]*CancellationToken\.None\);").Count);
+
+        /* The write locks stay out of this: AcquireWriteLock has no token-taking overload, so there is no
+           decision to state at those two. Their timeout question is #2463's, not this test's. */
+        Assert.Equal(2, Regex.Matches(source, @"_duckDb\.AcquireWriteLock\(\)").Count);
     }
 
     /* ─────────────────────────── helpers ─────────────────────────── */

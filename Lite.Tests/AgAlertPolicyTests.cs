@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using PerformanceMonitor.Common;
 using Xunit;
 
@@ -79,6 +80,102 @@ public class AgAlertPolicyTests
     {
         Assert.Equal(AgConnectionDecision.None, AgAlertPolicy.DecideConnection(null, "DISCONNECTED"));
         Assert.Equal(AgConnectionDecision.Reconnected, AgAlertPolicy.DecideConnection("DISCONNECTED", "CONNECTED"));
+    }
+
+    /* ---------------- #2426: the disconnect re-fire ---------------- */
+
+    private static readonly DateTime Noon = new(2026, 8, 20, 12, 0, 0, DateTimeKind.Utc);
+
+    [Theory]
+    [InlineData("CONNECTED", "DISCONNECTED", AgConnectionDecision.Disconnected)]
+    [InlineData("DISCONNECTED", "CONNECTED", AgConnectionDecision.Reconnected)]
+    [InlineData("DISCONNECTED", "DISCONNECTED", AgConnectionDecision.None)]
+    [InlineData("CONNECTED", "CONNECTED", AgConnectionDecision.None)]
+    [InlineData(null, "DISCONNECTED", AgConnectionDecision.None)]
+    [InlineData("CONNECTED", null, AgConnectionDecision.None)]
+    public void DecideConnection_RefireOff_IsTheEdgeOnlyOverloadExactly(
+        string? previous, string? current, AgConnectionDecision expected)
+    {
+        /* The shipped default, and the whole matrix rather than one case: null, zero and a negative all
+           mean OFF, and off has to be byte-for-byte the two-argument behavior or an upgrade would start
+           re-alerting on a knob nobody set. */
+        Assert.Equal(expected, AgAlertPolicy.DecideConnection(previous, current, null, null, Noon));
+        Assert.Equal(expected, AgAlertPolicy.DecideConnection(previous, current, TimeSpan.Zero, null, Noon));
+        Assert.Equal(expected, AgAlertPolicy.DecideConnection(previous, current, TimeSpan.FromMinutes(-5), null, Noon));
+    }
+
+    [Fact]
+    public void DecideConnection_StillDisconnected_WaitsOutTheWindow_ThenSaysItAgain()
+    {
+        var refire = TimeSpan.FromMinutes(10);
+
+        /* Announced at noon: inside the window there is nothing new to say. */
+        Assert.Equal(
+            AgConnectionDecision.None,
+            AgAlertPolicy.DecideConnection("DISCONNECTED", "DISCONNECTED", refire, Noon, Noon.AddMinutes(9)));
+
+        /* At the boundary, and still hours later — the point of the knob is that a week-long outage does
+           not read like a blip. */
+        Assert.Equal(
+            AgConnectionDecision.StillDisconnected,
+            AgAlertPolicy.DecideConnection("DISCONNECTED", "DISCONNECTED", refire, Noon, Noon.AddMinutes(10)));
+        Assert.Equal(
+            AgConnectionDecision.StillDisconnected,
+            AgAlertPolicy.DecideConnection("DISCONNECTED", "DISCONNECTED", refire, Noon, Noon.AddHours(8)));
+    }
+
+    [Fact]
+    public void DecideConnection_ARealEdgeOutranksARefire()
+    {
+        var refire = TimeSpan.FromMinutes(10);
+
+        /* The edge that OPENS the outage announces as Disconnected even though the window is trivially due
+           on it, or the caller would have two reasons to announce the same sweep. */
+        Assert.Equal(
+            AgConnectionDecision.Disconnected,
+            AgAlertPolicy.DecideConnection("CONNECTED", "DISCONNECTED", refire, null, Noon));
+
+        /* And a recovery is a recovery whatever the clock says. */
+        Assert.Equal(
+            AgConnectionDecision.Reconnected,
+            AgAlertPolicy.DecideConnection("DISCONNECTED", "CONNECTED", refire, Noon.AddHours(-9), Noon));
+    }
+
+    [Fact]
+    public void DecideConnection_NoStampIsDueNow_SoARestartMidOutageStillReAnnounces()
+    {
+        var refire = TimeSpan.FromMinutes(10);
+
+        /* Both apps hold this edge state in memory, so a restart during a week-long outage sees a replica
+           already DISCONNECTED with no record of it ever having been announced. Rule 1's silent baseline
+           would make that silence permanent, which is the exact failure the knob exists to prevent — so
+           with re-fire ON, and only then, a first sighting announces. */
+        Assert.Equal(
+            AgConnectionDecision.StillDisconnected,
+            AgAlertPolicy.DecideConnection(null, "DISCONNECTED", refire, null, Noon));
+        Assert.Equal(
+            AgConnectionDecision.StillDisconnected,
+            AgAlertPolicy.DecideConnection("DISCONNECTED", "DISCONNECTED", refire, null, Noon));
+
+        /* With it off, rule 1 governs unchanged. */
+        Assert.Equal(
+            AgConnectionDecision.None,
+            AgAlertPolicy.DecideConnection(null, "DISCONNECTED", null, null, Noon));
+    }
+
+    [Fact]
+    public void DecideConnection_ARefireStillNeedsAnExactDisconnected()
+    {
+        var refire = TimeSpan.FromMinutes(10);
+
+        /* Same rule the edge follows, and it matters more here: a re-fire pages repeatedly, so a state
+           string the product never learned to interpret must not become a standing page. */
+        Assert.Equal(
+            AgConnectionDecision.None,
+            AgAlertPolicy.DecideConnection("SOMETHING_NEW", "SOMETHING_NEW", refire, null, Noon));
+        Assert.Equal(
+            AgConnectionDecision.None,
+            AgAlertPolicy.DecideConnection("CONNECTED", null, refire, null, Noon));
     }
 
     /* ---------------- suspension ---------------- */

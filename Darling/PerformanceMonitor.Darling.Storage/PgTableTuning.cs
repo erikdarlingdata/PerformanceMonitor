@@ -66,15 +66,31 @@ public static class PgTableTuning
         "CREATE INDEX IF NOT EXISTS idx_query_stats_server_hash_time ON collect.query_stats (server_id, query_hash, collection_time DESC)",
         "CREATE INDEX IF NOT EXISTS idx_query_store_stats_query_hash ON collect.query_store_stats (query_hash, collection_time) INCLUDE (database_name, module_name, execution_count, avg_duration_us, max_duration_us, avg_cpu_time_us, max_cpu_time_us)",
         "CREATE INDEX IF NOT EXISTS idx_query_store_stats_server_db_query_plan_time ON collect.query_store_stats (server_id, database_name, query_id, plan_id, collection_time DESC)",
-        "ALTER TABLE collect.procedure_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
-        "ALTER TABLE collect.query_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
-        "ALTER TABLE collect.query_store_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
+        "ALTER TABLE collect.procedure_stats SET (" + InsertTuningOptions + ")",
+        "ALTER TABLE collect.query_stats SET (" + InsertTuningOptions + ")",
+        "ALTER TABLE collect.query_store_stats SET (" + InsertTuningOptions + ")",
         /* pg_statement_stats is query_stats' per-minute PostgreSQL twin — same shape, same cadence, same
            pure-insert hypertable chunks — so the identical reasoning applies: the stock 0.2 scale factor
            leaves the day's hot chunk stale before the TimescaleDB rollover and the Index Only Scan degrades
            to heap fetches. It was simply missed when the PostgreSQL collectors landed, since this list is
            hand-maintained rather than derived from the catalog. */
-        "ALTER TABLE collect.pg_statement_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
+        "ALTER TABLE collect.pg_statement_stats SET (" + InsertTuningOptions + ")",
+        /* #2402: query_plan_dim needs the OTHER knob, and needs it for the opposite reason. Every override
+           above tunes INSERT vacuuming so the visibility map stays current on pure-insert hypertable chunks.
+           This table is not a hypertable and is not insert-only: retention DELETEs from it, so its churn is
+           DEAD TUPLES, which autovacuum_vacuum_insert_* does not govern at all.
+
+           Left at the stock 0.2 it needs 20% of the table dead before autovacuum will look at it — on the
+           dogfood store that is ~2.4 M rows, and it showed: 1,223,777 dead tuples with the last autovacuum
+           two days earlier, while its own TOAST table (which has its own thresholds against 57 M chunks) had
+           been vacuumed 152 times. The parent is the half that matters here, because the dead rows a purge
+           leaves behind are precisely the idx_query_plan_dim_last_seen entries the NEXT purge has to visit
+           and test for visibility before discarding. Untuned, each purge makes the following one slower and
+           then waits days for cleanup.
+
+           0.02 + 10000 sizes the trigger to roughly one purge's worth of deletions rather than to the
+           table's total size, so cleanup follows the work that created it. */
+        "ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)",
     };
 
     /// <summary>
@@ -110,6 +126,103 @@ public static class PgTableTuning
         logger?.LogInformation(
             "Composer performance tuning applied ({Applied}/{Total} covering-index / autovacuum statements)",
             applied, Statements.Count);
+
+        applied += await ApplyHypertableInsertTuningAsync(connection, logger, cancellationToken);
+        return applied;
+    }
+
+    /// <summary>The reloptions every pure-insert hypertable gets. Shared with the literal statements above so
+    /// the two spellings cannot drift apart.</summary>
+    public const string InsertTuningOptions =
+        "autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000";
+
+    /// <summary>
+    /// Every hypertable that does not already carry the insert tuning, resolved from the TimescaleDB catalog.
+    /// The name is built with <c>format('%I.%I')</c> so it comes back correctly quoted.
+    /// </summary>
+    public const string UntunedHypertablesSql = @"
+SELECT format('%I.%I', h.hypertable_schema, h.hypertable_name)
+FROM timescaledb_information.hypertables h
+JOIN pg_class c ON c.relname = h.hypertable_name
+JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = h.hypertable_schema
+WHERE COALESCE(array_to_string(c.reloptions, ','), '') NOT LIKE '%insert_scale_factor%'";
+
+    /// <summary>
+    /// Applies the insert tuning to every hypertable still missing it, DERIVED from the catalog rather than
+    /// from the hand-written list above (#2405).
+    ///
+    /// <para>The literal statements exist because a plain-PostgreSQL store has no TimescaleDB catalog to read,
+    /// and those four tables are the ones whose read paths were measured; this sweep is what makes the property
+    /// hold for the rest. It matters because "pure-insert append-only fact table" describes EVERY collector
+    /// target by construction, while the literal list described whichever four had been the subject of an
+    /// EXPLAIN investigation — 4 of 51 hypertables on the dogfood store, with untuned tables (perfmon_stats at
+    /// 5.3 GB, spinlock_stats at 3.7 GB, wait_stats at 2.8 GB) larger than tuned ones. A list that has to be
+    /// remembered when a collector lands is a list that gets missed, and this one already had been: the file's
+    /// own comment records pg_statement_stats being added late for exactly that reason.</para>
+    ///
+    /// <para>Deliberately scoped to HYPERTABLES, not to everything in <c>collect</c>. Insert-driven autovacuum
+    /// governs the visibility map and freezing on append-only data; a plain table whose churn is DELETEs needs
+    /// <c>autovacuum_vacuum_scale_factor</c> instead, which is a different knob for a different failure and is
+    /// set explicitly where it applies. Sweeping every table here would silently apply the inert one.</para>
+    ///
+    /// <para>The 10,000-row threshold is what keeps this safe on the many small hypertables: the scale factor is
+    /// not consulted until that many inserts have accumulated, so a low-rate table is not pushed into
+    /// constant autovacuum. Per-table failure isolation matches <see cref="ApplyAsync"/>, and a store without
+    /// TimescaleDB simply finds no catalog and no-ops.</para>
+    /// </summary>
+    public static async Task<int> ApplyHypertableInsertTuningAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var targets = new List<string>();
+        try
+        {
+            using var query = new NpgsqlCommand(UntunedHypertablesSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await query.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                targets.Add(reader.GetString(0));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* No TimescaleDB (a plain-PostgreSQL store) or an unreadable catalog — the literal statements above
+               already ran, so this is a no-op rather than a failure. */
+            logger?.LogDebug("Hypertable insert-tuning sweep skipped: {Message}", ex.Message);
+            return 0;
+        }
+
+        if (targets.Count == 0)
+        {
+            return 0;
+        }
+
+        var applied = 0;
+        foreach (var target in targets)
+        {
+            /* Identifier comes from the catalog already quoted by format('%I.%I') — never user input. */
+            var statement = $"ALTER TABLE {target} SET ({InsertTuningOptions})";
+            try
+            {
+                using var command = new NpgsqlCommand(statement, connection) { CommandTimeout = SetupTimeoutSeconds };
+                await command.ExecuteNonQueryAsync(cancellationToken);
+                applied++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Insert-autovacuum tuning failed for {Table} — the store keeps working without it: {Message}",
+                    target, ex.Message);
+            }
+        }
+
+        logger?.LogInformation(
+            "Insert-autovacuum tuning applied to {Applied}/{Total} previously-untuned hypertable(s)",
+            applied, targets.Count);
         return applied;
     }
 }

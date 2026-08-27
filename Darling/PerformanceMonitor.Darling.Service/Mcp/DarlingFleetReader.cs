@@ -14,6 +14,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -60,6 +61,11 @@ internal static class DarlingFleetReader
     /// editions otherwise), the reliable per-server platform signal the composer's D4 auto-greying keys on;
     /// nullable when a server has not yet connected.
     ///
+    /// <para><c>engine_kind</c> (V82, #2530) is the other engine axis, and the one the edition cannot carry:
+    /// a PostgreSQL target has no <c>SERVERPROPERTY</c>, so it lands at edition 0 exactly like a SQL Server
+    /// that has never connected. Riding on the SAME registry row costs no extra round-trip, which is what
+    /// keeps this reader's bounded fan-out bounded.</para>
+    ///
     /// <para>The <c>is_silenced</c> column (#2031) is the SQL mirror of the Viewer's
     /// <c>ViewerDataService.IsWholeServerSilence</c> predicate — an enabled, unexpired mute rule scoped to the
     /// server (matched case-insensitively on the same COALESCE(display, storage) name the card shows, which is
@@ -67,7 +73,7 @@ internal static class DarlingFleetReader
     /// web seat has no silence action; this exists so a dataless-quiet server and a silenced one stop looking
     /// identical on the fleet cards and to <c>get_fleet_overview</c>.</para> $ none.</summary>
     public const string FleetServersSql = @"
-SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.server_name, s.sql_engine_edition,
+SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.server_name, s.sql_engine_edition, s.engine_kind,
        EXISTS
        (
            SELECT 1
@@ -317,23 +323,14 @@ GROUP BY server_id, collector_name";
             FailedCollectorCount = collectors.Failing,
         };
 
-        /* Freshness -> the card's connection state, exactly as the WPF card's ApplyFreshness. */
+        /* Freshness -> the card's collection state, through the SAME mapping the WPF card and the sidebar
+           row use (#2473). It was a hand-written copy of ApplyFreshness that happened to agree; the copy on
+           the sidebar row happened not to, which is the argument for none of them writing it out. */
         var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now);
-        bool? isOnline;
-        bool awaitingFirstCollection;
-        bool hasCollectorErrors;
-        if (freshness == ServerFreshness.NeverCollected)
-        {
-            isOnline = null;
-            awaitingFirstCollection = true;
-            hasCollectorErrors = false;
-        }
-        else
-        {
-            isOnline = freshness != ServerFreshness.Offline;
-            awaitingFirstCollection = false;
-            hasCollectorErrors = freshness == ServerFreshness.Stale;
-        }
+        var flags = ServerCollectionStatusRules.FlagsFor(freshness);
+        var isOnline = flags.IsOnline;
+        var awaitingFirstCollection = flags.AwaitingFirstCollection;
+        var hasCollectorErrors = flags.HasCollectorErrors;
 
         var overall = ServerHealthClassifier.OverallMetricSeverity(metrics);
         var band = ServerHealthClassifier.ClassifyBand(isOnline, awaitingFirstCollection, hasCollectorErrors, overall);
@@ -343,12 +340,19 @@ GROUP BY server_id, collector_name";
            deliberately not surfaced. */
         var (isAzureSqlDb, isAzureManagedInstance) = ClassifyPlatform(server.EngineEdition);
 
+        /* Per-server target ENGINE (#2530), the axis the platform flags above cannot express: they are all
+           derived from a SQL Server SERVERPROPERTY, which a PostgreSQL target does not have. */
+        var (isPostgres, isAurora) = ClassifyEngineKind(server.EngineKind);
+
         return new FleetServerCard
         {
             ServerId = server.ServerId,
             DisplayName = server.DisplayName,
             ServerName = server.ServerName,
             EngineEdition = server.EngineEdition,
+            EngineKind = server.EngineKind,
+            IsPostgres = isPostgres,
+            IsAurora = isAurora,
             IsAzureSqlDb = isAzureSqlDb,
             IsAzureManagedInstance = isAzureManagedInstance,
             IsSilenced = server.IsSilenced,
@@ -478,7 +482,9 @@ GROUP BY server_id, collector_name";
 
         if (c.AwaitingFirstCollection)
         {
-            return "Awaiting first collection";
+            /* The word itself, not a copy of it — this was one of five spellings of the phrase across four
+               files, which is the duplication #2473's pin now forbids. */
+            return ServerCollectionStatus.AwaitingFirstCollection.Word();
         }
 
         var parts = new List<string>();
@@ -523,13 +529,11 @@ GROUP BY server_id, collector_name";
         return parts.Count > 0 ? string.Join(", ", parts) : "Needs attention";
     }
 
-    private static string StatusLabel(bool? isOnline, bool awaitingFirstCollection, bool hasCollectorErrors) => isOnline switch
-    {
-        true when hasCollectorErrors => "Warning",
-        true => "Online",
-        false => "Offline",
-        _ => awaitingFirstCollection ? "Awaiting first collection" : "Unknown",
-    };
+    /// <summary>The card's status word. Delegates to the one ladder every Darling surface renders (#2473):
+    /// this file's own copy agreed with the WPF card, but the WPF sidebar row's copy did not, and three
+    /// agreeing copies plus one that does not is still four places where the answer is decided.</summary>
+    private static string StatusLabel(bool? isOnline, bool awaitingFirstCollection, bool hasCollectorErrors) =>
+        ServerCollectionStatusRules.Classify(isOnline, hasCollectorErrors, awaitingFirstCollection).Word();
 
     /// <summary>
     /// Classifies a server's raw SERVERPROPERTY('EngineEdition') into the RELIABLE per-server platform flags the
@@ -545,6 +549,20 @@ GROUP BY server_id, collector_name";
     internal static (bool IsAzureSqlDb, bool IsAzureManagedInstance) ClassifyPlatform(int? engineEdition) =>
         (engineEdition == 5, engineEdition == 8);
 
+    /// <summary>
+    /// Classifies the stored engine-kind token (V82, #2530) into the two booleans a browser actually branches
+    /// on, so no consumer has to know the vocabulary's spelling. The raw token still rides on the card beside
+    /// them — a UI that wants to LABEL the engine needs the word, and a UI that wants to choose a tab set
+    /// needs the boolean.
+    ///
+    /// <para><c>null</c> — a pre-V82 row, or a server that has not connected since the rung landed — is
+    /// neither, so a card with no signal renders exactly as it did before this column existed rather than
+    /// claiming SQL Server on the strength of an absence. Same discipline as
+    /// <see cref="ClassifyPlatform"/>'s null edition.</para>
+    /// </summary>
+    internal static (bool IsPostgres, bool IsAurora) ClassifyEngineKind(string? engineKind) =>
+        (MonitoredEngineKind.IsPostgres(engineKind), MonitoredEngineKind.IsAurora(engineKind));
+
     /* ─────────────────────────── per-query readers ─────────────────────────── */
 
     private static async Task<List<FleetServerRow>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
@@ -559,7 +577,8 @@ GROUP BY server_id, collector_name";
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? "" : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                !reader.IsDBNull(4) && reader.GetBoolean(4)));
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                !reader.IsDBNull(5) && reader.GetBoolean(5)));
         }
 
         return rows;
@@ -765,7 +784,7 @@ GROUP BY server_id, collector_name";
 
     /* ─────────────────────────── raw-read carriers (internal) ─────────────────────────── */
 
-    private readonly record struct FleetServerRow(int ServerId, string DisplayName, string ServerName, int? EngineEdition, bool IsSilenced);
+    private readonly record struct FleetServerRow(int ServerId, string DisplayName, string ServerName, int? EngineEdition, string? EngineKind, bool IsSilenced);
     private readonly record struct CpuRow(double? SqlCpu, double? OtherCpu);
     private readonly record struct MemoryRow(double? MemoryMb, double? BufferPoolMb);
     private readonly record struct MemoryPressureRow(long WaiterCount, long TimeoutCount, long ForcedCount, double? GrantedMemoryMb);
@@ -790,6 +809,56 @@ public sealed class FleetServerCard
     /// box edition otherwise); null when the server has not yet connected. The reliable per-server platform
     /// signal the composer's D4 measure auto-greying matches a measure's <c>appliesTo</c> against.</summary>
     [JsonPropertyName("engine_edition")] public int? EngineEdition { get; init; }
+
+    /// <summary>The target's engine KIND as the registry recorded it on its last connect (#2530) —
+    /// <c>sqlserver</c>, <c>postgres</c>, or <c>aurora-postgres</c>; null when no connect has stamped it (a
+    /// pre-V82 store, or a server that has never connected).
+    ///
+    /// <para>This is the discriminator <c>engine_edition</c> cannot supply and never could: a PostgreSQL
+    /// target has no <c>SERVERPROPERTY</c>, so it lands with edition 0, which is also what a SQL Server that
+    /// has never connected lands with. Every surface that wants to show PostgreSQL panels to PostgreSQL
+    /// targets and SQL Server tabs to SQL Server targets branches on THIS.</para></summary>
+    [JsonPropertyName("engine_kind")] public string? EngineKind { get; init; }
+
+    /// <summary>How <see cref="EngineKind"/> reads in a sentence — "SQL Server", "PostgreSQL", "Aurora
+    /// PostgreSQL" — or null when the store has made no claim.
+    ///
+    /// <para>On the card because <see cref="MonitoredEngineKind.DescribeEngineKind"/> is deliberately the
+    /// single copy of those words, and a browser mapping three tokens to three strings itself would be a
+    /// second table in a language the first cannot be shared with. The web server page had exactly that for
+    /// the length of one review round.</para>
+    ///
+    /// <para>DERIVED rather than assigned, so it cannot be forgotten: every card is built by an object
+    /// initializer, and a settable field would be null on any card whose builder did not think of it —
+    /// including one added later on a path nobody re-reads.</para>
+    ///
+    /// <para><b>Three answers, and the third is the interesting one.</b> An ABSENT kind is null: a surface has
+    /// nothing to say about a server whose engine was never stamped, and no badge is better than a badge
+    /// describing the store's silence as a property of the server. A RECOGNISED token gets
+    /// <see cref="MonitoredEngineKind.DescribeEngineKind"/>'s words. A token this build has never heard of —
+    /// a store written by a NEWER build — gets the token back verbatim, NOT the describer's
+    /// "an unrecognised engine": that phrase is worded to sit mid-sentence in the capability messages, and as
+    /// a label beside "SQL Server" and "Aurora PostgreSQL" it reads as the wrong part of speech. The raw token
+    /// is also the more useful of the two, being the string an operator would search their own store for. It
+    /// is deliberately not mapped onto a default, which is the whole reason the describer refuses to guess in
+    /// the first place.</para>
+    /// </summary>
+    [JsonPropertyName("engine_description")]
+    public string? EngineDescription =>
+        string.IsNullOrWhiteSpace(EngineKind) ? null
+        : MonitoredEngineKind.IsKnown(EngineKind) ? MonitoredEngineKind.DescribeEngineKind(EngineKind)
+        : EngineKind.Trim();
+
+    /// <summary>True when this server is PostgreSQL (Aurora or stock) — derived from
+    /// <see cref="EngineKind"/>, so a consumer never has to know the token vocabulary. False when the kind is
+    /// unknown: absence of a claim, not a claim of SQL Server.</summary>
+    [JsonPropertyName("is_postgres")] public bool IsPostgres { get; init; }
+
+    /// <summary>True when this server is Amazon Aurora PostgreSQL specifically — derived from
+    /// <see cref="EngineKind"/>. Separate from <see cref="IsPostgres"/> because a large proprietary surface
+    /// (the <c>aurora_stat_*</c> functions) exists only there, so a panel fed by an Aurora-only collector has
+    /// to be able to tell the two apart.</summary>
+    [JsonPropertyName("is_aurora")] public bool IsAurora { get; init; }
 
     /// <summary>True when this server is Azure SQL Database (engine edition 5) — reliable, derived from
     /// <see cref="EngineEdition"/>.</summary>

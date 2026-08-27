@@ -21,12 +21,12 @@ public partial class LocalDataService
     /// applies a view-only DESCENDING-by-duration sort, so the SQL keeps the chronological ORDER BY
     /// (mirrors the blocked-process reader).
     /// </summary>
-    public async Task<List<LongQueryCompletionRow>> GetRecentLongQueryCompletionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<LongQueryCompletionRow>> GetRecentLongQueryCompletionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"

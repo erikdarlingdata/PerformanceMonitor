@@ -55,13 +55,13 @@ public sealed class DarlingPeerDisclosureTests
             {
                 new PeerStoreConfig
                 {
-                    Name = "prod-pos-use2-monitor-01",
+                    Name = "prod-sql-use2-monitor-01",
                     Covers = "the readable replicas of those same 42 primaries, from us-east-2",
                     Matches = { "use2" },
                 },
                 new PeerStoreConfig
                 {
-                    Name = "prod-pos-pg-monitor-01",
+                    Name = "prod-sql-pg-monitor-01",
                     Covers = "the Aurora PostgreSQL clusters",
                     /* No matches: a peer that declares none is still disclosed, just never singled out. */
                 },
@@ -304,7 +304,7 @@ public sealed class DarlingPeerDisclosureTests
            fleet — the one normalization step that is a correctness fix rather than tidiness. */
         Assert.Equal(new[] { "use2" }, peer.Matches);
         Assert.False(peer.CoversServerName("anything-at-all"));
-        Assert.True(peer.CoversServerName("prod-pos-USE2-apex-01"));
+        Assert.True(peer.CoversServerName("prod-sql-USE2-alpha-01"));
     }
 
     [Fact]
@@ -314,18 +314,18 @@ public sealed class DarlingPeerDisclosureTests
         var use2 = snapshot.Peers[0];
         var postgres = snapshot.Peers[1];
 
-        Assert.True(use2.CoversServerName("prod-pos-use2-ayr-01"));
-        Assert.True(use2.CoversServerName("PROD-POS-USE2-AYR-01"));
-        Assert.False(use2.CoversServerName("prod-pos-use1-ayr-01"));
+        Assert.True(use2.CoversServerName("prod-sql-use2-beta-01"));
+        Assert.True(use2.CoversServerName("PROD-SQL-USE2-GAMMA-01"));
+        Assert.False(use2.CoversServerName("prod-sql-use1-beta-01"));
         Assert.False(use2.CoversServerName(null));
         Assert.False(use2.CoversServerName("   "));
 
         /* No declared patterns means "cannot tell", which must never render as "yes". */
         Assert.False(postgres.CoversServerName("anything"));
 
-        Assert.Equal(new[] { "prod-pos-use2-monitor-01" },
-            snapshot.PeersCovering("prod-pos-use2-ayr-01").Select(p => p.Name));
-        Assert.Empty(snapshot.PeersCovering("prod-pos-use1-ayr-01"));
+        Assert.Equal(new[] { "prod-sql-use2-monitor-01" },
+            snapshot.PeersCovering("prod-sql-use2-beta-01").Select(p => p.Name));
+        Assert.Empty(snapshot.PeersCovering("prod-sql-use1-beta-01"));
     }
 
     /* ───────────────────────── the MCP instructions ───────────────────────── */
@@ -343,8 +343,8 @@ public sealed class DarlingPeerDisclosureTests
         var text = DarlingMcpInstructions.Build(TwoPeers());
 
         Assert.Contains(Use1Covers, text, StringComparison.Ordinal);
-        Assert.Contains("prod-pos-use2-monitor-01 — the readable replicas", text, StringComparison.Ordinal);
-        Assert.Contains("prod-pos-pg-monitor-01 — the Aurora PostgreSQL clusters", text, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-use2-monitor-01 — the readable replicas", text, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-pg-monitor-01 — the Aurora PostgreSQL clusters", text, StringComparison.Ordinal);
 
         /* The point of the section is that a peer is NAMED, never contacted — say so where the agent will
            read it, or it will try to route a query at the sibling. */
@@ -382,7 +382,7 @@ public sealed class DarlingPeerDisclosureTests
     {
         var rows = new List<DarlingDataReader.ServerListRow>
         {
-            new(1, "prod-pos-use1-ayr-01", "ayr", 16, new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc)),
+            new(1, "prod-sql-use1-beta-01", "ayr", 16, new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc)),
         };
 
         return JsonDocument
@@ -400,7 +400,7 @@ public sealed class DarlingPeerDisclosureTests
 
         var fleets = root.GetProperty("peer_fleets").EnumerateArray().ToList();
         Assert.Equal(2, fleets.Count);
-        Assert.Equal("prod-pos-use2-monitor-01", fleets[0].GetProperty("name").GetString());
+        Assert.Equal("prod-sql-use2-monitor-01", fleets[0].GetProperty("name").GetString());
         Assert.Equal("the readable replicas of those same 42 primaries, from us-east-2", fleets[0].GetProperty("covers").GetString());
         Assert.Equal(new[] { "use2" }, fleets[0].GetProperty("matches").EnumerateArray().Select(m => m.GetString()).ToArray());
         Assert.Empty(fleets[1].GetProperty("matches").EnumerateArray());
@@ -409,7 +409,7 @@ public sealed class DarlingPeerDisclosureTests
 
         /* The existing payload is untouched — the disclosure is additive here too. */
         var server = Assert.Single(root.GetProperty("servers").EnumerateArray());
-        Assert.Equal("prod-pos-use1-ayr-01", server.GetProperty("server_name").GetString());
+        Assert.Equal("prod-sql-use1-beta-01", server.GetProperty("server_name").GetString());
         Assert.Equal("ayr", server.GetProperty("display_name").GetString());
     }
 
@@ -439,8 +439,8 @@ public sealed class DarlingPeerDisclosureTests
         var disclosure = DarlingPeerDirectory.EmptyRegistryDisclosure(TwoPeers());
 
         Assert.Contains("one of SEVERAL monitoring this fleet", disclosure, StringComparison.Ordinal);
-        Assert.Contains("prod-pos-use2-monitor-01", disclosure, StringComparison.Ordinal);
-        Assert.Contains("prod-pos-pg-monitor-01", disclosure, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-use2-monitor-01", disclosure, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-pg-monitor-01", disclosure, StringComparison.Ordinal);
         Assert.Contains($"This store covers: {Use1Covers}.", disclosure, StringComparison.Ordinal);
 
         /* Unchanged with nothing declared, like every other surface. */
@@ -450,14 +450,14 @@ public sealed class DarlingPeerDisclosureTests
     /* ───────────────────────── the resolution miss ───────────────────────── */
 
     private const string MissWithoutPeers =
-        "Could not resolve server. Available servers:\nprod-pos-use1-ayr-01";
+        "Could not resolve server. Available servers:\nprod-sql-use1-beta-01";
 
     [Fact]
     public void ResolutionMiss_IsByteForByteUnchangedWithNothingDeclared()
     {
         var (resolved, error) = DarlingServerResolver.ResolveOrError(
-            new[] { Registered("prod-pos-use1-ayr-01") },
-            "prod-pos-use2-ayr-01",
+            new[] { Registered("prod-sql-use1-beta-01") },
+            "prod-sql-use2-beta-01",
             DarlingPeerDirectory.Snapshot.Empty);
 
         Assert.Equal(default, resolved);
@@ -468,8 +468,8 @@ public sealed class DarlingPeerDisclosureTests
     public void ResolutionMiss_NamesThePeerWhoseDeclaredCoverageMatches()
     {
         var (resolved, error) = DarlingServerResolver.ResolveOrError(
-            new[] { Registered("prod-pos-use1-ayr-01") },
-            "prod-pos-use2-ayr-01",
+            new[] { Registered("prod-sql-use1-beta-01") },
+            "prod-sql-use2-beta-01",
             TwoPeers());
 
         Assert.Equal(default, resolved);
@@ -479,21 +479,21 @@ public sealed class DarlingPeerDisclosureTests
            the local list is still the right answer to the commonest miss (a typo). */
         Assert.StartsWith(MissWithoutPeers, error, StringComparison.Ordinal);
 
-        Assert.Contains("'prod-pos-use2-ayr-01' is not monitored HERE", error, StringComparison.Ordinal);
-        Assert.Contains("matches the declared coverage of peer store prod-pos-use2-monitor-01", error, StringComparison.Ordinal);
+        Assert.Contains("'prod-sql-use2-beta-01' is not monitored HERE", error, StringComparison.Ordinal);
+        Assert.Contains("matches the declared coverage of peer store prod-sql-use2-monitor-01", error, StringComparison.Ordinal);
         Assert.Contains("That is a SEPARATE Darling store", error, StringComparison.Ordinal);
         Assert.Contains("this server cannot read it", error, StringComparison.Ordinal);
         Assert.Contains($"This store covers: {Use1Covers}.", error, StringComparison.Ordinal);
 
         /* The peer that declared no patterns must not be blamed for a name it never claimed. */
-        Assert.DoesNotContain("prod-pos-pg-monitor-01", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("prod-sql-pg-monitor-01", error, StringComparison.Ordinal);
     }
 
     [Fact]
     public void ResolutionMiss_WithNoMatchingPeer_ListsThemWithoutClaimingUnmonitored()
     {
         var (_, error) = DarlingServerResolver.ResolveOrError(
-            new[] { Registered("prod-pos-use1-ayr-01") },
+            new[] { Registered("prod-sql-use1-beta-01") },
             "some-other-box",
             TwoPeers());
 
@@ -503,8 +503,8 @@ public sealed class DarlingPeerDisclosureTests
 
         /* Both peers are still disclosed: the declarations are prose plus optional patterns, not a live
            registry, so "no pattern matched" is not evidence the server is unmonitored. */
-        Assert.Contains("prod-pos-use2-monitor-01", error, StringComparison.Ordinal);
-        Assert.Contains("prod-pos-pg-monitor-01", error, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-use2-monitor-01", error, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-pg-monitor-01", error, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -517,12 +517,12 @@ public sealed class DarlingPeerDisclosureTests
             Stores =
             {
                 new PeerStoreConfig { Name = "box2", Covers = "the replicas", Matches = { "use2" } },
-                new PeerStoreConfig { Name = "box3", Covers = "the archive replicas", Matches = { "prod-pos" } },
+                new PeerStoreConfig { Name = "box3", Covers = "the archive replicas", Matches = { "prod-sql" } },
             },
         });
 
         var (_, error) = DarlingServerResolver.ResolveOrError(
-            new[] { Registered("prod-pos-use1-ayr-01") }, "prod-pos-use2-ayr-01", overlapping);
+            new[] { Registered("prod-sql-use1-beta-01") }, "prod-sql-use2-beta-01", overlapping);
 
         Assert.NotNull(error);
         Assert.Contains("these peer stores: box2 — the replicas; box3 — the archive replicas", error, StringComparison.Ordinal);
@@ -536,7 +536,7 @@ public sealed class DarlingPeerDisclosureTests
         /* The blank-name miss (several servers, no server_name passed) has no name to match, so the
            disclosure must list rather than accuse. */
         var (_, error) = DarlingServerResolver.ResolveOrError(
-            new[] { Registered("prod-pos-use1-ayr-01"), Registered("prod-pos-use1-apex-01") },
+            new[] { Registered("prod-sql-use1-beta-01"), Registered("prod-sql-use1-alpha-01") },
             "  ",
             TwoPeers());
 
@@ -564,8 +564,8 @@ public sealed class DarlingPeerDisclosureTests
             Assert.Same(published.Snapshot, DarlingPeerDirectory.Current);
 
             var (_, error) = DarlingServerResolver.ResolveOrError(
-                new[] { Registered("prod-pos-use1-ayr-01") },
-                "prod-pos-use2-ayr-01");
+                new[] { Registered("prod-sql-use1-beta-01") },
+                "prod-sql-use2-beta-01");
 
             Assert.Contains("peer store box2 — the replicas", error, StringComparison.Ordinal);
         }
@@ -577,8 +577,8 @@ public sealed class DarlingPeerDisclosureTests
         Assert.True(DarlingPeerDirectory.Current.IsEmpty);
 
         var (_, afterReset) = DarlingServerResolver.ResolveOrError(
-            new[] { Registered("prod-pos-use1-ayr-01") },
-            "prod-pos-use2-ayr-01");
+            new[] { Registered("prod-sql-use1-beta-01") },
+            "prod-sql-use2-beta-01");
 
         Assert.Equal(MissWithoutPeers, afterReset);
     }

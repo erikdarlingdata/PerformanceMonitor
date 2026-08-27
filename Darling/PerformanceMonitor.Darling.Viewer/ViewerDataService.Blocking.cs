@@ -367,8 +367,10 @@ public sealed partial class ViewerDataService
 
         // Always-on DMV blocking snapshot: merge in the fallback rows so the viewer works even when the
         // blocked-process-report XE captured nothing (threshold unset / AWS RDS). Same connection.
+        /* #2443: the viewer passes its own window token — this read serves a person waiting at a
+           grid, not an analysis pass, so there is no budget or service stop for it to abandon under. */
         await PgBlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-            connection.CreateCommand, rows, serverId, startUtc, endUtc);
+            connection.CreateCommand, rows, serverId, startUtc, endUtc, cancellationToken);
 
         return rows;
     }

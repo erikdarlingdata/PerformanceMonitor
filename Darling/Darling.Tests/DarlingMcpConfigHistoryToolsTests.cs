@@ -75,9 +75,9 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_server_config_changes", "server_name,hours_back")]
-    [InlineData("get_database_config_changes", "server_name,hours_back")]
-    [InlineData("get_trace_flag_changes", "server_name,hours_back")]
+    [InlineData("get_server_config_changes", "server_name,hours_back,as_of")]
+    [InlineData("get_database_config_changes", "server_name,hours_back,as_of")]
+    [InlineData("get_trace_flag_changes", "server_name,hours_back,as_of")]
     [InlineData("get_database_scoped_config", "server_name,database_name")]
     [InlineData("get_query_store_health", "server_name,database_name")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)

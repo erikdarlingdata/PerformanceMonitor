@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -78,27 +79,35 @@ public sealed class DarlingMcpPgWraparoundTools
     public static async Task<string> GetPgWraparoundRisk(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to analyze, used for the peak comparison. Default 24.")] int hours_back = 24)
+        [Description("Hours of history to analyze, used for the peak comparison. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingPgWraparoundReader.GetPgWraparoundAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
             if (rows.Count == 0)
             {
-                return McpHelpers.Status(
-                    "unavailable",
-                    "No PostgreSQL freeze-headroom data for this server and window. This collector runs on "
-                    + "any PostgreSQL target, so an empty result means the server is SQL Server, or "
-                    + "pg_wraparound_stats has not collected yet.");
+                /* This collector has no AppliesTo gate at all, so the capability answer above catches
+                   every engine the store can classify (#2532). What is left is a PostgreSQL target that has
+                   not collected yet, or a row whose engine_kind is NULL — naming "the server is SQL Server"
+                   here would repeat a branch that can no longer reach this line. */
+                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_wraparound_stats")
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        "No PostgreSQL freeze-headroom data for this server and window. This collector runs on "
+                        + "any PostgreSQL target, so either pg_wraparound_stats has not collected yet, or the "
+                        + "store has not recorded this server's engine — and a target it cannot classify may "
+                        + "not be a PostgreSQL one at all. Check list_servers.");
             }
 
             var databases = rows

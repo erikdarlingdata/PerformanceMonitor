@@ -67,8 +67,26 @@ public partial class ViewerServerTab : UserControl
 
     /* #1496 Long Queries — the opt-in completion trace surface, appended after the diagnostics tail so no
        existing inner-tab index shifts (drill-down navigation keys on these constants). MUST remain the last
-       <TabItem> in ViewerServerTab.xaml's InnerTabs. */
+       SQL SERVER <TabItem> in ViewerServerTab.xaml's InnerTabs. */
     internal const int LongQueriesInnerTabIndex = 18;
+
+    /* ── The PostgreSQL run (#2530) ───────────────────────────────────────────────────────────────
+       Indices 19-24 CONTINUE the same TabControl rather than living in a second one, and every index
+       above stays exactly where it was. That is the whole reason for the layout: for a PostgreSQL server
+       the nineteen SQL Server TabItems are collapsed and these six are shown, so the two sets never
+       renumber each other and no drill-down that keys on a constant above can be broken by this feature.
+
+       ViewerPostgresTabs is the registry these belong to — headers, panel-to-collector mapping and the
+       framing notes live there, and ViewerPostgresTabsTests holds it to CollectorCatalog in both
+       directions so a tenth PostgreSQL collector cannot ship without a screen. Keep these constants, the
+       registry's InnerTabIndex values and the <TabItem> order in the XAML in step; two pins check it. */
+    internal const int PgOverviewInnerTabIndex = 19;
+    internal const int PgActivityInnerTabIndex = 20;
+    internal const int PgVacuumInnerTabIndex = 21;
+    internal const int PgWaitsInnerTabIndex = 22;
+    internal const int PgIoInnerTabIndex = 23;
+    internal const int PgReplicationInnerTabIndex = 24;
+    internal const int PgStorageInnerTabIndex = 25;
 
     private readonly ViewerDataService _dataService;
     private readonly DarlingServer _server;
@@ -136,6 +154,13 @@ public partial class ViewerServerTab : UserControl
 
         /* CPU Scheduler sub-tab chart (cpu_scheduler_stats parity): pressure trend + latest-snapshot grid. */
         InitializeCpuSchedulerChart();
+
+        /* #2530: a PostgreSQL target gets the PostgreSQL tab set. Done here, once, from the server record
+           the sidebar already loaded — not from an async probe — because the tab strip must be right on the
+           FIRST paint: the web half's review found that moving this decision into an async callback broke
+           the page's render model twice over, and the viewer has an even shorter path to get it right
+           since the engine kind arrives with the server row itself. */
+        ApplyEngineTabSet();
 
         /* Memory inner-tab charts (copied from Lite): same up-front theme + hover for the five Memory
            charts (Overview trend, Clerks, Grant sizing/activity, Pressure events). */
@@ -295,6 +320,14 @@ public partial class ViewerServerTab : UserControl
     /// </summary>
     private async Task UpdatePermissionDeniedBadgeAsync()
     {
+        /* #2530: Collection Health is a SQL Server tab and is collapsed for a PostgreSQL server, which
+           gets the same answer on its own Overview tab instead. Writing a header nobody can see would be
+           harmless; issuing the read every refresh to do it would not. */
+        if (_server.IsPostgres)
+        {
+            return;
+        }
+
         try
         {
             var denied = await _dataService.GetPermissionDeniedCollectorCountAsync(_server.ServerId);
@@ -392,6 +425,34 @@ public partial class ViewerServerTab : UserControl
                 case LongQueriesInnerTabIndex:
                     await LoadLongQueriesAsync();
                     break;
+
+                /* #2530: the PostgreSQL run. Explicit arms, never the default: falling through to
+                   LoadOverviewChartsAsync would point the SQL Server correlated-lane reads (CPU %, wait
+                   ms/sec, buffer pool, file I/O latency — four collectors that cannot run on this engine)
+                   at a PostgreSQL server and paint four permanently empty lanes, which is the exact defect
+                   this issue is about. */
+                case PgOverviewInnerTabIndex:
+                    await LoadPgOverviewAsync();
+                    break;
+                case PgActivityInnerTabIndex:
+                    await LoadPgActivityAsync();
+                    break;
+                case PgVacuumInnerTabIndex:
+                    await LoadPgVacuumAsync();
+                    break;
+                case PgWaitsInnerTabIndex:
+                    await LoadPgWaitsAsync();
+                    break;
+                case PgIoInnerTabIndex:
+                    await LoadPgIoAsync();
+                    break;
+                case PgReplicationInnerTabIndex:
+                    await LoadPgReplicationAsync();
+                    break;
+                case PgStorageInnerTabIndex:
+                    await LoadPgStorageAsync();
+                    break;
+
                 case OverviewInnerTabIndex:
                 default:
                     await LoadOverviewChartsAsync();

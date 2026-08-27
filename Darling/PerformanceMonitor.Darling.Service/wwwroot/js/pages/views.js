@@ -14,6 +14,12 @@
  * renderPanel, each panel's read is checked against the cached catalog and its viz against the VIZ registry, so a
  * stale/unknown read renders a clean "unknown read" strip instead of an opaque 404 inside the panel.
  *
+ * Starter DASHBOARD templates (#2476) sit beside the notebook ones in the "New from template" menu, and are what
+ * the first-run hero now offers: nothing ships seeded, so without them a new user meets an empty page and a blank
+ * canvas over an 82-read catalog. A dashboard template is scoped to ONE server, so the menu carries a server
+ * picker; a notebook template is not, and links straight to the notebook composer as it always did. Creating one
+ * POSTs an ordinary view the user owns and can edit or delete for good — nothing is re-seeded on upgrade.
+ *
  * Edit affordances (New / Edit / Delete / Import) are shown when the session reports can_edit (the server is the
  * authority for every write); RENDER and EXPORT are available to every seat. All user text (names,
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
@@ -24,6 +30,7 @@ import { renderPanel, VIZ } from "../panels.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
+import { DASHBOARD_TEMPLATES } from "../view-templates.js";
 import * as api from "../views-api.js";
 
 /** The time-range choices the rendered view's chrome offers (mirrors the composer's RANGE_OPTIONS). */
@@ -39,23 +46,26 @@ const VIEW_RANGE_OPTIONS = [
 /* ─────────────────────────── list page ─────────────────────────── */
 
 export async function renderViewList(main) {
-  mount(main, [listHead(false), loadingStrip("Loading views…")]);
+  mount(main, [listHead(false, []), loadingStrip("Loading views…")]);
 
-  const [session, res] = await Promise.all([api.getSession(), api.listViews()]);
+  /* The fleet read rides along with the session + list because a DASHBOARD template is scoped to one server
+     and its picker needs the names. A failed fleet read is not fatal here: the notebook templates and every
+     other affordance still work, and the dashboard group says why it cannot offer itself. */
+  const [session, res, servers] = await Promise.all([api.getSession(), api.listViews(), loadServerNames()]);
   const canEdit = !!session.can_edit;
 
   if (res.kind === "error") {
-    mount(main, [listHead(canEdit), errorStrip(res.message)]);
+    mount(main, [listHead(canEdit, servers), errorStrip(res.message)]);
     return;
   }
 
   const views = Array.isArray(res.data) ? res.data : [];
-  const nodes = [listHead(canEdit)];
+  const nodes = [listHead(canEdit, servers)];
 
   /* Empty list -> a real first-run hero that sells the feature (M4), not a bare strip. The hero carries its own
      New view + Import affordances (can_edit only), so the standalone import panel is only shown once views exist. */
   if (!views.length) {
-    nodes.push(firstRunHero(canEdit));
+    nodes.push(firstRunHero(canEdit, servers));
     mount(main, nodes);
     return;
   }
@@ -70,7 +80,7 @@ export async function renderViewList(main) {
 
 /* First-run hero (M4): a centered pitch + a prominent New view + a few starting-point ideas + the (secondary)
    import. A read-only network seat can't compose, so it gets an explanatory variant (no New view / import). */
-function firstRunHero(canEdit) {
+function firstRunHero(canEdit, servers) {
   if (!canEdit) {
     return el("div", { class: "views-hero" }, [
       el("div", { class: "hero-title", text: "No custom views yet" }),
@@ -82,7 +92,6 @@ function firstRunHero(canEdit) {
       }),
     ]);
   }
-  const suggestions = ["Top waits by server", "CPU trend over time", "Slowest procedures by database"];
   return el("div", { class: "views-hero" }, [
     el("div", { class: "hero-title", text: "Compose your own dashboards & notebooks" }),
     el("div", {
@@ -95,39 +104,152 @@ function firstRunHero(canEdit) {
     el("div", { class: "hero-ctas" }, [
       el("a", { class: "btn primary hero-cta", href: "#/view/new", text: "New view" }),
       el("a", { class: "btn hero-cta", href: "#/notebook/new", text: "New notebook" }),
-      templateMenu(),
+      templateMenu(servers),
     ]),
-    el("div", { class: "hero-suggest" }, [
-      el("span", { class: "hero-suggest-label", text: "Popular starting points" }),
-      el("div", { class: "hero-suggest-chips" }, suggestions.map((s) => el("span", { class: "hero-chip", text: s }))),
-    ]),
+    starterRow(servers),
     importPanel(),
   ]);
 }
 
-function listHead(canEdit) {
+/* The hero's starting points, which used to be three inert chips reading "Top waits by server", "CPU trend over
+   time" and "Slowest procedures by database" — a promise with no handler behind it, on the one page a new user
+   arrives at with nothing. They are now the real dashboard templates, and clicking one creates it. The server
+   picker sits beside them because a dashboard is scoped to one server: choosing it here rather than making the
+   reader set it on five panels in the composer is the whole point of a starting point. */
+function starterRow(servers) {
+  const status = el("div", { class: "starter-status" });
+  if (!servers.length) {
+    return el("div", { class: "hero-suggest" }, [
+      el("span", { class: "hero-suggest-label", text: "Starting points" }),
+      el("div", {
+        class: "muted",
+        text: "The ready-made dashboards are scoped to a server, so they appear once the fleet has one.",
+      }),
+    ]);
+  }
+  const select = serverSelect(servers);
+  return el("div", { class: "hero-suggest" }, [
+    el("span", { class: "hero-suggest-label", text: "Ready-made dashboards" }),
+    el("label", { class: "starter-server" }, [el("span", { text: "for" }), select]),
+    el(
+      "div",
+      { class: "hero-suggest-chips" },
+      DASHBOARD_TEMPLATES.map((t) =>
+        el("button", {
+          class: "hero-chip clickable",
+          type: "button",
+          title: t.description,
+          text: t.label,
+          onClick: () => createFromTemplate(t, select.value, status),
+        })
+      )
+    ),
+    status,
+  ]);
+}
+
+function listHead(canEdit, servers) {
   return el("div", { class: "page-head" }, [
     el("h2", { text: "Custom Views" }),
     el("div", { class: "spacer" }),
-    canEdit ? templateMenu() : null,
+    canEdit ? templateMenu(servers) : null,
     canEdit ? el("a", { class: "btn", href: "#/notebook/new", text: "New notebook" }) : null,
     canEdit ? el("a", { class: "btn primary", href: "#/view/new", text: "New view" }) : null,
   ]);
 }
 
-/* The "New from template" menu (#1563 D7): a <details> dropdown of the seed notebooks, each linking to the
-   notebook composer pre-filled from that template. Built with el()/textContent like everything else. */
-function templateMenu() {
-  const items = NOTEBOOK_TEMPLATES.map((t) =>
-    el("a", { class: "template-item", href: "#/notebook/new/" + encodeURIComponent(t.key), title: t.description }, [
-      el("span", { class: "template-label", text: t.label }),
-      el("span", { class: "template-desc", text: t.description }),
-    ])
-  );
+/* The "New from template" menu: a <details> dropdown of the seed DASHBOARDS (#2476) and the seed NOTEBOOKS
+   (#1563 D7). The two groups behave differently on purpose — a notebook template links to the composer
+   pre-filled, because its composed panels re-scope live from the notebook's own server control, while a dashboard
+   template is v1 read panels whose `server` param is static, so it is created against the server picked here.
+   Built with el()/textContent like everything else. */
+function templateMenu(servers) {
+  const list = [];
+  const status = el("div", { class: "starter-status" });
+
+  list.push(el("div", { class: "template-group-label", text: "Dashboards" }));
+  if (!(servers || []).length) {
+    list.push(
+      el("div", {
+        class: "template-note",
+        text: "Scoped to a server — available once the fleet has one.",
+      })
+    );
+  } else {
+    const select = serverSelect(servers);
+    list.push(el("label", { class: "template-server" }, [el("span", { text: "Server" }), select]));
+    for (const t of DASHBOARD_TEMPLATES) {
+      list.push(
+        el("button", { class: "template-item", type: "button", title: t.description, onClick: () => createFromTemplate(t, select.value, status) }, [
+          el("span", { class: "template-label", text: t.label }),
+          el("span", { class: "template-desc", text: t.description }),
+        ])
+      );
+    }
+    list.push(status);
+  }
+
+  list.push(el("div", { class: "template-group-label", text: "Notebooks" }));
+  for (const t of NOTEBOOK_TEMPLATES) {
+    list.push(
+      el("a", { class: "template-item", href: "#/notebook/new/" + encodeURIComponent(t.key), title: t.description }, [
+        el("span", { class: "template-label", text: t.label }),
+        el("span", { class: "template-desc", text: t.description }),
+      ])
+    );
+  }
+
   return el("details", { class: "template-menu" }, [
     el("summary", { class: "btn template-summary", text: "New from template ▾" }),
-    el("div", { class: "template-list" }, items),
+    el("div", { class: "template-list" }, list),
   ]);
+}
+
+/* The server <select> both template affordances share. Value is the stored server_name (what a read resolves
+   against); label is the display name. */
+function serverSelect(servers) {
+  const sel = el(
+    "select",
+    { class: "starter-select", "aria-label": "Server for the new dashboard" },
+    servers.map((s) => el("option", { value: s.value, text: s.label }))
+  );
+  sel.value = servers[0].value;
+  return sel;
+}
+
+/* Create a template as an ORDINARY view and open it. The backend re-validates the definition as the authority, so
+   a template that ever named a removed read is refused with its own message rather than saved broken — which is
+   why the failure is surfaced verbatim here instead of being flattened to "could not create". A 409 means the name
+   is taken, which on a second click of the same template is the likely case, so it gets its own sentence. */
+async function createFromTemplate(template, server, status) {
+  if (!server) {
+    mount(status, errorStrip("Pick a server first."));
+    return;
+  }
+  mount(status, loadingStrip("Creating “" + template.label + "”…"));
+  const res = await api.createView(template.make(server));
+  if (res.kind === "data" && res.data && res.data.id != null) {
+    location.hash = "#/view/" + encodeURIComponent(res.data.id);
+    return;
+  }
+  const message =
+    res.status === 409
+      ? "A view named “" + template.make(server).name + "” already exists — open it from the list, or rename it first."
+      : res.message || "Could not create this dashboard.";
+  mount(status, errorStrip(message));
+}
+
+/* The fleet's server names for the template picker. Deliberately its own tiny read rather than importing the
+   composer's loadFleetOptions: that helper also enriches each option with the D4 platform fields the composed
+   measure picker greys on, none of which a v1 read template uses, and importing it would couple this page to the
+   editor module for a name and a label. Returns [] on any failure; every caller handles an empty fleet. */
+async function loadServerNames() {
+  const res = await apiGet("/api/fleet");
+  if (res.kind !== "data" || !res.data) return [];
+  return [...(res.data.cards || [])]
+    .map((c) => ({ value: c.server_name || c.display_name, label: c.display_name || c.server_name }))
+    .filter((o) => o.value)
+    .sort((a, b) => a.label.localeCompare(b.label));
 }
 
 function viewCard(v) {

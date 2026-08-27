@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -49,23 +50,25 @@ public sealed class DarlingMcpBlockingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows. Default 30.")] int limit = 30,
-        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null)
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No blocking events found in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report")
+                    ?? McpHelpers.Status("empty", "No blocking events found in the specified time range.");
 
             /* #2159: fingerprint the WHOLE window, then filter, then cap. Capping first would let `limit`
                discard the very incident the key names — the caller asked for one specific incident, not for
@@ -151,23 +154,30 @@ public sealed class DarlingMcpBlockingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows. Default 20.")] int limit = 20,
-        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null)
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
+                    /* #2546: capability first (permanent), then the runtime precondition (fixable), then the
+                       read's own miss. A deadlock capture whose XE session is gone records SESSION_MISSING
+                       and then returns zero rows forever, which is byte-identical to a server that simply
+                       did not deadlock — the one answer nobody should be given without being told. */
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
+                    ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
 
             /* #2159: see get_blocking — fingerprint the window, filter, then cap. */
             var examined = rows.Count;
@@ -218,19 +228,20 @@ public sealed class DarlingMcpBlockingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum deadlocks to return. Default 5.")] int limit = 5,
-        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null)
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
@@ -239,7 +250,8 @@ public sealed class DarlingMcpBlockingTools
                consume one of the `limit` slots the caller wanted spent on real graphs. */
             var candidates = rows.Where(r => r.HasDeadlockXml).ToList();
             if (candidates.Count == 0)
-                return McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks")
+                    ?? McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
 
             var examined = candidates.Count;
             var keys = DarlingIncidentFingerprint.DeadlockKeys(
@@ -287,24 +299,29 @@ public sealed class DarlingMcpBlockingTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum reports to return. Default 5.")] int limit = 5)
+        [Description("Maximum reports to return. Default 5.")] int limit = 5,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
             if (withXml.Count == 0)
-                return McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report")
+                    /* #2546: same order and same reason as get_deadlocks — a blocked-process capture whose
+                       session is gone is indistinguishable here from a server that never blocked. */
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report")
+                    ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
 
             var result = withXml.Select(r => new
             {
@@ -333,19 +350,44 @@ public sealed class DarlingMcpBlockingTools
     public static async Task<string> GetBlockingTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
+            var start = now.AddHours(-hours_back);
             var points = await DarlingBlockingTrendReader.GetBlockingTrendAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, start, now);
+
+            if (points.Count == 0)
+            {
+                /*
+                    An empty trend is two facts, and the WRONG one is the reassuring one. "No blocking"
+                    reads as an all-clear and a caller who believes it stops looking; "nothing collected"
+                    means nothing at all is known about the window. The stored tables cannot tell them
+                    apart -- both are an absence of rows in an EDGE table -- so the denominator has to come
+                    from collection_log, which records a SUCCESS with zero rows for a collector that ran
+                    and saw nothing. Probed only here, on the path that already found nothing.
+                */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
+                var captures = await DarlingBlockingTrendReader.GetBlockingCaptureCountsAsync(
+                    postgres, resolved.ServerId, start, now);
+                return await EmptyTrend(
+                    "blocking", resolved.ServerName, hours_back, captures,
+                    () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId));
+            }
 
             return JsonSerializer.Serialize(new
             {
@@ -364,19 +406,40 @@ public sealed class DarlingMcpBlockingTools
     public static async Task<string> GetDeadlockTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24)
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
+            var start = now.AddHours(-hours_back);
             var points = await DarlingBlockingTrendReader.GetDeadlockTrendAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, start, now);
+
+            if (points.Count == 0)
+            {
+                /* Same two facts as the blocking trend above, same denominator, same reason. */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
+                var captures = await DarlingBlockingTrendReader.GetDeadlockCaptureCountsAsync(
+                    postgres, resolved.ServerId, start, now);
+                return await EmptyTrend(
+                    /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
+                       was recorded" is not a sentence. It also reads correctly in the other two,
+                       where it modifies the collector rather than the event. */
+                    "deadlock", resolved.ServerName, hours_back, captures,
+                    () => DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId));
+            }
 
             return JsonSerializer.Serialize(new
             {
@@ -389,5 +452,132 @@ public sealed class DarlingMcpBlockingTools
         {
             return McpHelpers.FormatError("get_deadlock_trend", ex);
         }
+    }
+
+    [McpServerTool(Name = "get_lock_wait_trend"), Description("Gets the AGGREGATE lock-wait rate over time for a server: every LCK% wait type's wait milliseconds per second at each collection, the viewer's Blocking Trends lock-wait chart. get_wait_trend charts ONE named wait type and get_blocking_trend counts incidents; this is the whole lock family at once, as a rate rather than a count. Use it to see whether a server's lock pressure is rising when no single wait type dominates, to tell a few long blocks from constant low-grade contention, and to pick which LCK type to hand to get_wait_trend next. The rate is delta wait time divided by the seconds since the previous collection, so it is comparable across servers collecting on different cadences.")]
+    public static async Task<string> GetLockWaitTrend(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        if (validation != null) return validation;
+
+        try
+        {
+            var end = windowEnd;
+            var start = end.AddHours(-hours_back);
+            var points = await DarlingBlockingTrendReader.GetLockWaitTrendAsync(
+                postgres, resolved.ServerId, start, end);
+
+            if (points.Count == 0)
+            {
+                /*
+                    The denominator here is the DATA, not collection_log — the opposite of the two trends
+                    above, and deliberately so. Those read EDGE tables, where a row exists only because
+                    something went wrong, so a healthy server has none and a data probe would report it as
+                    uncollected. wait_stats is PERIODIC: the collector writes a row every cycle for every
+                    wait type it observes, whatever the server is doing, so the presence of ANY wait sample
+                    is proof somebody looked. Probing v_wait_stats — the SAME relation this read walks, so it
+                    can never report "collected" for rows the read cannot see — is both cheaper and more
+                    precise than asking collection_log which collector ran.
+
+                    The LCK% filter is deliberately NOT applied to the probe. A server that has collected
+                    wait stats for months and never taken a lock wait is the all-clear this branch is for,
+                    and filtering the probe the same way would call that server uncollected.
+                */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
+                return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId)
+                    ? McpHelpers.Status(
+                        "empty",
+                        $"No lock waits recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                    : McpHelpers.Status(
+                        "unavailable",
+                        $"No wait stats have EVER been recorded for {resolved.ServerName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back,
+                /*
+                    Rows, not a pre-pivoted series per wait type. The caller decides whether to sum the
+                    family or chart the members, and a pivot here would have to pick a top-N and silently
+                    drop the rest — on a read whose premise is that no single LCK type dominates.
+                */
+                trend = points.Select(p => new
+                {
+                    collection_time = p.CollectionTime.ToString("o"),
+                    wait_type = p.WaitType,
+                    wait_time_ms_per_second = Math.Round(p.WaitTimeMsPerSecond, 3),
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_lock_wait_trend", ex);
+        }
+    }
+
+    /// <summary>
+    /// The empty answer both per-minute trends give, and the whole point of #2485: <c>trend: []</c> is the
+    /// same bytes on a server that had no blocking and on one that collected nothing, and an agent holding
+    /// only the JSON cannot tell a clean bill of health from a hole in coverage.
+    ///
+    /// <para>Two statuses, picked by the denominator rather than by the edge rows. <c>empty</c> means captures
+    /// ran in this window and none of them saw the event -- a real all-clear, bounded by the sampling
+    /// interval. <c>unavailable</c> means no capture ran, so the window says nothing either way; the
+    /// existence probe then separates a server that has never collected this at all from one with a GAP,
+    /// because "check that collection is running" and "widen the window" are different next moves.</para>
+    ///
+    /// <para><paramref name="hints"/> carries the per-collector run counts. A count of three events means
+    /// something different in a window of 60 captures than in a window of 4, and the caller cannot supply
+    /// that number itself. Lite's twin returns the SAME sentences word for word.</para>
+    /// </summary>
+    private static async Task<string> EmptyTrend(
+        /* SINGULAR ("blocking", "deadlock"): it is the subject of "No {subject} was recorded". */
+        string subject,
+        string serverName,
+        int hoursBack,
+        List<DarlingBlockingTrendReader.CaptureCount> captures,
+        Func<Task<bool>> hasEverCapturedAsync)
+    {
+        var captureCount = captures.Sum(c => c.Runs);
+        var hints = new
+        {
+            server = serverName,
+            hours_back = hoursBack,
+            capture_count = captureCount,
+            captures = captures.Select(c => new
+            {
+                collector = c.CollectorName,
+                runs = c.Runs,
+                first_run_at = c.FirstRunAt?.ToString("o"),
+                last_run_at = c.LastRunAt?.ToString("o"),
+            }),
+        };
+
+        if (captureCount > 0)
+            return McpHelpers.Status(
+                "empty",
+                $"No {subject} was recorded for {serverName} in the last {hoursBack} hour(s). {captureCount} collector run(s) DID execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
+                hints);
+
+        var everCaptured = await hasEverCapturedAsync();
+        return McpHelpers.Status(
+            "unavailable",
+            everCaptured
+                ? $"No {subject} collector runs are recorded for {serverName} in the last {hoursBack} hour(s), so this is NOT an all-clear — nothing was captured and the window says nothing either way. Collection HAS run for this server outside the window, so this is a gap rather than a dead collector: widen hours_back, or use get_collection_health to find where it stopped."
+                : $"No {subject} collector runs have EVER been recorded for {serverName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.",
+            hints);
     }
 }

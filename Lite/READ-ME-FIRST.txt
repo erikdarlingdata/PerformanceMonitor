@@ -1,0 +1,57 @@
+Performance Monitor Lite - .NET runtime prerequisites
+=====================================================
+
+There are none. Both builds carry their own .NET runtime.
+
+  * PerformanceMonitorLite-win-Setup.exe
+
+    Self-contained. Nothing to install first, and it auto-updates.
+
+  * PerformanceMonitorLite-<version>.zip
+
+    Self-contained as well, as of the release after 3.5.0. Unzip it
+    anywhere and run PerformanceMonitorLite.exe. A stock Windows Server
+    with no .NET on it at all is fine.
+
+This file used to be a list of runtimes to go and install. It is kept
+because both READMEs promise it is here, and because "nothing" is the
+answer people came looking for.
+
+
+IF LITE WILL NOT START
+----------------------
+
+If what you got was the .NET host's own message, with no product branding
+on it:
+
+    You must install .NET to run this application.
+    Framework: 'Microsoft.WindowsDesktop.App', version '10.0.0'
+
+...then you are running a ZIP from 3.5.0 or earlier. That build had no
+runtime of its own and needed two installed, and it could not tell you so
+itself: the host resolves frameworks before a single line of Lite's code
+runs, which is why the error carries no instructions. Download the current
+release and the problem does not exist.
+
+Anything else - a message with our name on it, or a window that opens and
+then misbehaves - is not this. The log under
+%LOCALAPPDATA%\PerformanceMonitorLite-Data\logs is the place to look.
+
+
+WHY THE ZIP GOT SMALLER, NOT BIGGER
+-----------------------------------
+
+Bundling a runtime normally grows a download. This one roughly halved,
+because the old build targeted no particular platform and so carried the
+native libraries for ALL of them: 537 MB of runtimes\ on a 565 MB tree
+covering macOS, Linux, ARM64, musl, loongarch and riscv64, of which only
+the 52 MB win-x64 folder could ever load on Windows. Pinning the build to
+win-x64 drops all of that, which is worth far more than the bundled .NET,
+WPF and ASP.NET Core add back.
+
+    portable, no bundled runtime   565 MB tree   212.7 MB zipped
+    self-contained win-x64         277 MB tree   114.2 MB zipped
+
+
+Full detail: Lite/README.md in the source repository,
+https://github.com/erikdarlingdata/PerformanceMonitor

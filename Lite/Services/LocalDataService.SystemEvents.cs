@@ -179,6 +179,8 @@ public sealed class MemoryNodeOomRow(MemoryNodeOomRecord record)
 public sealed class SignificantWaitRow(SignificantWaitRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp) for the MCP layer's ISO output.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? WaitType => record.WaitType;
     public long? DurationMs => record.DurationMs;
     public long? SignalDurationMs => record.SignalDurationMs;
@@ -327,10 +329,10 @@ ORDER BY event_time DESC";
     // ── Scheduler Issues ──
 
     /// <summary>Significant scheduler-monitor warnings (WARNING status) for the window, newest first.</summary>
-    public async Task<List<SchedulerIssueRow>> GetSchedulerIssuesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<SchedulerIssueRow>> GetSchedulerIssuesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSchedulerIssuesAsync", "v_system_health_events scheduler_monitor shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SchedulerMonitorEvent);
 
         var rows = new List<SchedulerIssueRow>();
@@ -351,10 +353,10 @@ ORDER BY event_time DESC";
     /// errors have no database_name column (the DB is resolved in C# from the event's database_id via the
     /// collected id -> name map), so the global database filter is applied client-side on the resolved name.
     /// </summary>
-    public async Task<List<SevereErrorRow>> GetSevereErrorsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<SevereErrorRow>> GetSevereErrorsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSevereErrorsAsync", "v_system_health_events error_reported shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var map = await GetDatabaseNameMapAsync(serverId);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.ErrorReportedEvent);
 
@@ -377,10 +379,10 @@ ORDER BY event_time DESC";
     // ── Memory Conditions ──
 
     /// <summary>Significant memory-conditions snapshots (RESOURCE_MEMPHYSICAL_LOW) for the window, newest first.</summary>
-    public async Task<List<MemoryConditionsRow>> GetMemoryConditionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<MemoryConditionsRow>> GetMemoryConditionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryConditionsAsync", "v_system_health_events sp_server_diagnostics RESOURCE shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var rows = new List<MemoryConditionsRow>();
@@ -397,10 +399,10 @@ ORDER BY event_time DESC";
     // ── Memory Broker ──
 
     /// <summary>Significant memory-broker ratio changes (RESOURCE_MEMPHYSICAL_LOW) for the window, newest first.</summary>
-    public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryBrokerAsync", "v_system_health_events memory_broker shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryBrokerEvent);
 
         var rows = new List<MemoryBrokerRow>();
@@ -416,10 +418,10 @@ ORDER BY event_time DESC";
     // ── Memory Node OOM ──
 
     /// <summary>Every memory-node OOM for the window, newest first (this category is never filtered).</summary>
-    public async Task<List<MemoryNodeOomRow>> GetMemoryNodeOomAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<MemoryNodeOomRow>> GetMemoryNodeOomAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryNodeOomAsync", "v_system_health_events memory_node_oom shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryNodeOomEvent);
 
         var rows = new List<MemoryNodeOomRow>();
@@ -438,10 +440,22 @@ ORDER BY event_time DESC";
     /// Significant individual waits (real session, non-BACKUP statement, duration &gt;= 500 ms, wait type not
     /// on the idle-wait ignore list) for the window, newest first.
     /// </summary>
-    public async Task<List<SignificantWaitRow>> GetSignificantWaitsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<SignificantWaitRow>> GetSignificantWaitsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null) =>
+        (await GetSignificantWaitsWithCaptureAsync(serverId, hoursBack, fromDate, toDate)).Rows;
+
+    /// <summary>
+    /// The same shred as <see cref="GetSignificantWaitsAsync"/>, plus the number of wait_info events that
+    /// were CAPTURED in the window before the significance gate ran.
+    /// <para>The count is what lets an empty answer say which nothing it is. Zero significant waits out of a
+    /// hundred captured events is a healthy server; zero out of zero is a blind one, and the surviving rows
+    /// alone cannot tell them apart. Returned from the one read rather than recovered by a second COUNT, so
+    /// the two numbers can never describe different windows. Darling gets the same count for free from its
+    /// own reader.</para>
+    /// </summary>
+    public async Task<(List<SignificantWaitRow> Rows, int CapturedCount)> GetSignificantWaitsWithCaptureAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSignificantWaitsAsync", "v_system_health_events wait_info shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.WaitInfoEvent);
 
         var rows = new List<SignificantWaitRow>();
@@ -451,7 +465,35 @@ ORDER BY event_time DESC";
             if (record != null && SystemHealthSignificance.IsSignificant(record))
                 rows.Add(new SignificantWaitRow(record));
         }
-        return rows;
+        return (rows, xmls.Count);
+    }
+
+    /// <summary>
+    /// Whether this server has EVER captured a system_health event of one type, ignoring any window.
+    /// <para>Separates a quiet window from a blind one on the empty path. Reads
+    /// <c>v_system_health_events</c> - the SAME source <see cref="ReadSystemHealthEventXmlAsync"/> uses, so
+    /// it cannot report a server as captured for rows the read itself can never see - and is scoped to the
+    /// event_type, because a server capturing sp_server_diagnostics but no wait_info has not been sampled
+    /// for waits whatever its other categories hold. Darling twin:
+    /// <c>DarlingSystemHealthReader.HasAnyEventOfTypeAsync</c>; the two must stay in step so a user moving
+    /// between the SKUs is not told a different story about the same state.</para>
+    /// </summary>
+    public async Task<bool> HasAnySystemHealthEventOfTypeAsync(int serverId, string eventType)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_system_health_events
+WHERE server_id = $1
+AND   event_type = $2
+AND   event_xml IS NOT NULL
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = eventType });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
 
     // ── CPU Tasks ──
@@ -461,10 +503,10 @@ ORDER BY event_time DESC";
     /// window, newest first. Reads the same sp_server_diagnostics feed as Memory Conditions / I/O Issues;
     /// only the QUERY_PROCESSING component yields a record.
     /// </summary>
-    public async Task<List<CpuTasksRow>> GetCpuTasksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<CpuTasksRow>> GetCpuTasksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetCpuTasksAsync", "v_system_health_events sp_server_diagnostics QUERY_PROCESSING shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var rows = new List<CpuTasksRow>();
@@ -485,10 +527,10 @@ ORDER BY event_time DESC";
     /// can carry several pending-request files, so the shred fans out to one row per file (durations summed);
     /// only the IO_SUBSYSTEM component yields records.
     /// </summary>
-    public async Task<List<IoIssuesRow>> GetIoIssuesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<IoIssuesRow>> GetIoIssuesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetIoIssuesAsync", "v_system_health_events sp_server_diagnostics IO_SUBSYSTEM shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var rows = new List<IoIssuesRow>();
@@ -514,10 +556,10 @@ ORDER BY event_time DESC";
     /// time, so this returns them all (records with no event time can't sit on a time axis and are dropped).
     /// Both chart sub-tabs read this one list and select their own columns.
     /// </summary>
-    public async Task<List<SystemHealthRecord>> GetSystemHealthAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<SystemHealthRecord>> GetSystemHealthAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSystemHealthAsync", "v_system_health_events sp_server_diagnostics SYSTEM shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var records = new List<SystemHealthRecord>();
@@ -594,7 +636,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
     /// global database filter is pushed into SQL on <c>database_name</c>. The ErrorLog severity gate is
     /// applied on read via the shared <see cref="DefaultTraceEventSignificance"/>.
     /// </summary>
-    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetDefaultTraceEventsAsync", "v_default_trace_events significant-set read");
         using var connection = await OpenConnectionAsync();
@@ -602,7 +644,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
 
         /* Default Trace event_time is server-LOCAL, so window on server-local bounds (the same helper the
            CPU/sample_time reads use). Bind db filter params immediately after the 3 fixed params ($4+). */
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"

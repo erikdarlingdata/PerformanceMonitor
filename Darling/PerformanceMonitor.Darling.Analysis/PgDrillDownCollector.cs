@@ -192,7 +192,7 @@ public sealed partial class PgDrillDownCollector
                 if (finding.DrillDown.Count == 0)
                     finding.DrillDown = null;
             }
-            catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+            catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
             {
                 _logger?.LogError("[PgDrillDownCollector] Drill-down failed for {StoryPath}: {ExceptionType}: {Message}",
                     finding.StoryPath, ex.GetType().Name, ex.Message);

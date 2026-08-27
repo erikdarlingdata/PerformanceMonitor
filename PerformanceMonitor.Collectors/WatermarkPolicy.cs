@@ -51,6 +51,15 @@ public static class WatermarkPolicy
     /// <see cref="QueryStoreBackfillState.MaxSliceSpan"/> so no path ever windows wider than the
     /// steady state the fleet proves (#2102). Everything older is the backfill worker's job.
     /// Exposed so a test pins the boundary.
+    ///
+    /// <para><b>This is the only place the horizon's number is written down, and that is now asserted</b>
+    /// (<c>TheCatchUpHorizon_IsWrittenDownInExactlyOnePlace</c>). #2102 moved it from 24 hours to one, and
+    /// every runner that applies the clamp carried a comment calling it "the 24h catch-up clamp". None of
+    /// them moved with it. Nothing misbehaved and nothing went red, because the operator-facing WARNINGs
+    /// interpolate <see cref="MaxCatchup"/> rather than restating it — so the stale prose was invisible to
+    /// every instrument the repo has, and it survived long enough for #2468 to be filed against a 24-hour
+    /// lever that had not existed for months. Those comments now name the concept and leave the number
+    /// here; the assertion is what stops the next move from doing this again.</para>
     /// </summary>
     public static readonly TimeSpan MaxCatchup = TimeSpan.FromHours(1);
 

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Numerics;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -101,8 +102,15 @@ AND blocking_spid <> 0";
     /// fragments as the blocked-process-report queries, against v_dmv_blocking_snapshots, so <see cref="Read"/>
     /// maps it unchanged. Takes a command factory so the caller's connection (a LockedConnection in the viewer,
     /// a raw DuckDBConnection in the collectors) runs it on the read lock it already holds.
+    ///
+    /// <para>#2443: the token is required, not defaulted. Three callers share this fetch and two of
+    /// them are on the analysis pass; a default would have let either keep passing nothing while the
+    /// signature claimed the read was abandonable. The viewer's call is the one that legitimately has
+    /// no pass to abandon, and it says so at its own call site rather than here.</para>
     /// </summary>
-    internal static async Task AppendDmvSnapshotRowsAsync(Func<DuckDBCommand> createCommand, List<BlockingPairRow> rows, int serverId, DateTime start, DateTime end)
+    internal static async Task AppendDmvSnapshotRowsAsync(
+        Func<DuckDBCommand> createCommand, List<BlockingPairRow> rows, int serverId, DateTime start, DateTime end,
+        CancellationToken cancellationToken)
     {
         var dmv = new List<BlockingPairRow>();
         using (var cmd = createCommand())
@@ -123,8 +131,8 @@ LIMIT 5000";
             cmd.Parameters.Add(new DuckDBParameter { Value = start });
             cmd.Parameters.Add(new DuckDBParameter { Value = end });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
                 dmv.Add(Read(reader));
         }
 

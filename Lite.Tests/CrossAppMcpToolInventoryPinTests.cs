@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -55,14 +55,35 @@ public sealed class CrossAppMcpToolInventoryPinTests
     // system_health parser tools). A NEW Darling-only tool must be either ported to Lite or added here.
     private static readonly HashSet<string> KnownLiteMissingMcpTools = new(StringComparer.Ordinal)
     {
-        /* The eight PostgreSQL reads. Darling-ONLY by architecture, not "not ported yet", so these are the
+        /* The PostgreSQL reads. Darling-ONLY by architecture, not "not ported yet", so these are the
            same kind of entry as get_store_metrics rather than a to-do: Lite has no PostgreSQL target and
            cannot acquire one (the engine gate never dispatches a PostgreSQL definition there), and Lite does
            not even create the tables — DuckDbSchemaGenerator.StoredCollectors filters them out, so there is
            nothing for a Lite twin to read. If Lite ever gains a PostgreSQL target, port these and delete
            them from here; the ratchet only shrinks. */
         "get_pg_wait_stats",
+        /* #2629: the stock-PostgreSQL counterparts. Same entry, same reason — Lite has no PostgreSQL
+           target at all, so these are a SKU boundary rather than a porting to-do. */
+        "get_pg_wait_sampling",
+        "get_pg_kernel_stats",
+        "get_pg_predicate_stats",
+        "get_pg_index_bloat",
+        "get_pg_column_stats",
+        "get_pg_buffer_usage",
+        "get_pg_extensions",
+        "get_pg_lock_stats",
+        "get_pg_write_stats",
+        "get_pg_server_config",
+        "get_pg_deadlocks",
+        "get_pg_wait_trend",
+        "get_pg_query_duration_trend",
+        "get_pg_io_trend",
+        "get_pg_database_trend",
+        "get_pg_deadlock_detail",
+        "get_pg_server_config_changes",
+        "get_pg_replication_stats",
         "get_pg_top_queries",
+        "get_pg_plans",
         "get_pg_wraparound_risk",
         "get_pg_xmin_horizon",
         "get_pg_replication_slots",
@@ -73,6 +94,38 @@ public sealed class CrossAppMcpToolInventoryPinTests
            reads an engine-recorded event with a graph, this reads periodic samples of an edge list. Porting
            this to Lite would require a PostgreSQL target Lite cannot have, so it belongs here with the rest. */
         "get_pg_blocking",
+
+        /* get_pg_database_stats (#2539) — the pg_stat_database counters. Same architectural reason as the
+           eight above: Lite has no PostgreSQL target and cannot acquire one, and DuckDbSchemaGenerator
+           filters the table out, so there is nothing for a Lite twin to read. */
+        "get_pg_database_stats",
+
+        /* get_pg_index_usage (#2541) and get_pg_table_bloat (#2542) - per-index usage and the per-table
+           bloat estimate. Same architectural reason as the nine above rather than a porting backlog: Lite
+           has no PostgreSQL target and cannot acquire one, DuckDbSchemaGenerator.StoredCollectors filters
+           both tables out of every generation loop, and Lite passes engineKind: null explicitly - so there
+           is no Lite twin for these to be missing FROM.
+
+           Worth being explicit about get_pg_index_usage in particular, because Lite DOES ship
+           get_index_usage over index_object_stats and the two look like twins. They are not: that one reads
+           SQL Server DMVs and reports seeks/scans/lookups with lock and latch waits, this one reads
+           pg_stat_user_indexes and reports the constraint, replica-identity and validity facts that decide
+           whether a PostgreSQL index can be dropped at all. Conflating them would put T-SQL on a
+           PostgreSQL path, which is the #2213 class of defect. */
+        "get_pg_index_usage",
+        "get_pg_table_bloat",
+
+        /* get_pg_session_states (#2540) - which sessions are holding a transaction open and which of them
+           actually pins the xmin horizon. Same architectural reason as every entry above: Lite has no
+           PostgreSQL target, so there is no Lite twin for this to be missing from.
+
+           Worth naming the near-twin explicitly, because Lite ships get_active_queries and the two sound
+           alike. They are not the same read. That one is a SQL Server DMV snapshot of what is EXECUTING;
+           this one is a stored history of what is NOT executing but has a transaction open, which is the
+           condition SQL Server has no equivalent of - no SQL Server session pins a cluster-wide cleanup
+           horizon by sitting idle inside a transaction. Porting the name across would put T-SQL on a
+           PostgreSQL path, which is the #2213 class of defect. */
+        "get_pg_session_states",
 
         /* #2068: the store self-metrics read (get_store_metrics) over collect.store_metrics — the central
            Postgres store measuring ITSELF (hypertable sizes/compression, payload dims, whole-store growth)

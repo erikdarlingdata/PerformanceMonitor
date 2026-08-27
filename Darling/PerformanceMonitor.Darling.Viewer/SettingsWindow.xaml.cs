@@ -748,6 +748,10 @@ public partial class SettingsWindow : Window
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
+        AlertFileGrowthCheckBox.IsChecked = r.FileGrowthEnabled;
+        AlertFileGrowthRiseMbBox.Text = r.FileGrowthRiseMb.ToString(CultureInfo.InvariantCulture);
+        AlertFileGrowthVolumePercentBox.Text = r.FileGrowthVolumePercent.ToString(CultureInfo.InvariantCulture);
+        AlertFileGrowthLookbackMinutesBox.Text = r.FileGrowthLookbackMinutes.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningJobCheckBox.IsChecked = r.LongRunningJobEnabled;
         AlertLongRunningJobMultiplierBox.Text = r.LongRunningJobMultiplier.ToString(CultureInfo.InvariantCulture);
         AlertFailedJobCheckBox.IsChecked = r.FailedJobEnabled;
@@ -802,6 +806,7 @@ public partial class SettingsWindow : Window
             TempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true,
             LowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true,
             PvsEnabled = AlertPvsCheckBox.IsChecked == true,
+            FileGrowthEnabled = AlertFileGrowthCheckBox.IsChecked == true,
             LongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true,
             FailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true,
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
@@ -855,6 +860,13 @@ public partial class SettingsWindow : Window
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
             row.PvsFloorGb = pvsFloor;
+        /* #2391: validated to the same ranges DarlingAlertSettings clamps. */
+        if (int.TryParse(AlertFileGrowthRiseMbBox.Text, out var growthRise) && growthRise >= 0)
+            row.FileGrowthRiseMb = growthRise;
+        if (int.TryParse(AlertFileGrowthVolumePercentBox.Text, out var growthPct) && growthPct is >= 0 and <= 100)
+            row.FileGrowthVolumePercent = growthPct;
+        if (int.TryParse(AlertFileGrowthLookbackMinutesBox.Text, out var growthLookback) && growthLookback is >= 5 and <= 1440)
+            row.FileGrowthLookbackMinutes = growthLookback;
         if (int.TryParse(AlertLongRunningJobMultiplierBox.Text, out var jobMult) && jobMult is >= 2 and <= 20)
             row.LongRunningJobMultiplier = jobMult;
         if (int.TryParse(AlertFailedJobLookbackBox.Text, out var failedJobLookback) && failedJobLookback is >= 1 and <= 1440)
@@ -932,6 +944,9 @@ public partial class SettingsWindow : Window
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
+        AlertFileGrowthRiseMbBox.Text = "10240";
+        AlertFileGrowthVolumePercentBox.Text = "60";
+        AlertFileGrowthLookbackMinutesBox.Text = "60";
         AlertLongRunningJobMultiplierBox.Text = "3";
         AlertFailedJobLookbackBox.Text = "60";
         AlertCooldownBox.Text = "5";
@@ -984,6 +999,8 @@ public partial class SettingsWindow : Window
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
         if (AlertPvsCheckBox.IsChecked == true)
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
+        if (AlertFileGrowthCheckBox.IsChecked == true)
+            parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text}MB/{AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
         if (AlertFailedJobCheckBox.IsChecked == true)
@@ -1038,6 +1055,10 @@ public partial class SettingsWindow : Window
         AlertCollectionStaleMinutesBox.IsEnabled = enabled;
         AlertCollectionFailureThresholdBox.IsEnabled = enabled;
         AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;
+        AlertFileGrowthCheckBox.IsEnabled = enabled;
+        AlertFileGrowthRiseMbBox.IsEnabled = enabled;
+        AlertFileGrowthVolumePercentBox.IsEnabled = enabled;
+        AlertFileGrowthLookbackMinutesBox.IsEnabled = enabled;
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
         AlertFailedJobCheckBox.IsEnabled = enabled;
@@ -1485,7 +1506,22 @@ public partial class SettingsWindow : Window
         SaveCsvSeparator();
         SaveTimeDisplayMode();
         SaveColorTheme();
-        _appSettingsStore.Save(_appSettings);
+
+        /* #2434: a whole-object replace that did not happen must not pass for one that did. Said here,
+           at the point it happens, rather than folded into the validation list below — that list's
+           sentence is about values the window rejected, which is a different thing from a file it could
+           not write. The operator config further down goes to the Darling store and reports separately,
+           so a failure here does not stop it. */
+        if (!_appSettingsStore.Save(_appSettings))
+        {
+            MessageBox.Show(
+                "The viewer's own settings could not be written to "
+                + $"'{System.IO.Path.GetFileName(_appSettingsStore.FilePath)}', so the viewer-local "
+                + "preferences on this page (theme, CSV separator, timestamp display, tray options) will be "
+                + "back to their previous values on the next launch. The viewer log says why.",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
         Result = BuildViewerPreferences();
 
         if (errors.Count > 0)

@@ -184,7 +184,8 @@ public sealed class DarlingConfig
     /// from the MCP server (they gate different blast radii). Default OFF: a headless service should not open a
     /// port unless the operator asks. Loopback-only by default; an opt-in <see cref="WebConfig.Network"/> block
     /// exposes it on the LAN behind a required token (once) → an HMAC session cookie + an in-app CIDR check
-    /// (managed-mode only). Loopback stays tokenless even while LAN-exposed (the web surface is read-only).
+    /// (managed-mode only), optionally over TLS (<see cref="WebTlsConfig"/>, #2562). While LAN-exposed EVERY
+    /// request authenticates, loopback included — loopback is exempt from the CIDR test only (#1649).
     /// Optional — omit the section entirely.
     /// </summary>
     [JsonPropertyName("web")]
@@ -721,10 +722,17 @@ public sealed class SmtpConfig
 /// </summary>
 public sealed class McpConfig
 {
-    /// <summary>Default OFF — the headless twin of both apps' mcp_enabled=false default.</summary>
+    /// <summary>Default OFF — the headless twin of both apps' mcp_enabled=false default.
+    /// <para>A first-run SEED only (#2389): once the store is seeded, <c>config.config_service.mcp_enabled</c>
+    /// is authoritative and this value is never read again except before the worker's first publish. Editing it
+    /// on a seeded box changes nothing — use <c>--enable-mcp</c>/<c>--disable-mcp</c> or the Viewer's Settings.
+    /// <see cref="Network"/>, sitting right beside it, is the OPPOSITE: file-only with no store equivalent.
+    /// The supervisor reports the disagreement when the two planes differ.</para></summary>
     [JsonPropertyName("enabled")]
     public bool Enabled { get; set; }
 
+    /// <summary>A first-run SEED only, like <see cref="Enabled"/> — <c>config.config_service.mcp_port</c> wins
+    /// on a seeded store.</summary>
     [JsonPropertyName("port")]
     public int Port { get; set; } = 5152;
 
@@ -913,10 +921,16 @@ public sealed class WebConfig
 /// Omit the whole <c>network</c> object for the secure default = loopback-only HTTP. When present with a
 /// non-loopback <see cref="Listen"/> AND managed mode AND a token AND a valid <see cref="AllowFrom"/>, the web
 /// host binds the network interface behind an in-app CIDR check and a token gate: a browser presents the token
-/// once via <c>?token=</c>, which is exchanged for an HMAC-signed session cookie. Loopback requests stay
-/// TOKENLESS even while exposed (the dashboard is read-only). Any missing precondition keeps the dashboard
-/// loopback-only + LogCritical (fail-closed, enforced in the web host). No TLS on the dashboard (the same
-/// reverse-proxy story as MCP); the token/cookie travels cleartext on-segment.
+/// once via <c>?token=</c>, which is exchanged for an HMAC-signed session cookie. While exposed EVERY request
+/// authenticates, loopback included — loopback is exempt from the CIDR test only, never from the credential
+/// (#1649). Any missing precondition keeps the dashboard loopback-only + LogCritical (fail-closed, enforced in
+/// the web host).
+///
+/// <para><b>TLS is opt-in via <see cref="Tls"/> (#2562).</b> Without it the network listener is plain HTTP and
+/// the token and session cookie cross the segment in the clear — the web host warns about exactly that at
+/// every exposed start. MCP still has no TLS of its own on the older rationale that a self-signed certificate
+/// breaks real MCP clients; that argument is about MCP clients rather than about the wire, and it does not
+/// carry to a surface whose only client is a browser.</para>
 /// </summary>
 public sealed class WebNetworkConfig
 {
@@ -942,11 +956,20 @@ public sealed class WebNetworkConfig
     public string? EncryptedToken { get; set; }
 
     /// <summary>
-    /// Plaintext access token — dev convenience only; the caller warns when it is used. Prefer
-    /// <see cref="EncryptedToken"/>.
+    /// The access token as a literal (dev convenience only; the caller warns) or an <c>env:</c>/<c>file:</c>
+    /// reference (#1804 — <see cref="DarlingSecretSource"/>, which does not count as plaintext-in-config, and
+    /// is how the compose distribution mounts it). Prefer <see cref="EncryptedToken"/> on Windows.
     /// </summary>
     [JsonPropertyName("token")]
     public string? Token { get; set; }
+
+    /// <summary>
+    /// Opt-in TLS for the network listener (#2562). Omit for plain HTTP, which is the zero-config default and
+    /// the right answer on loopback; supply a certificate before exposing the dashboard on a segment where the
+    /// access token crossing in the clear matters. See <see cref="WebTlsConfig"/>.
+    /// </summary>
+    [JsonPropertyName("tls")]
+    public WebTlsConfig? Tls { get; set; }
 
     /// <summary>
     /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
@@ -957,7 +980,8 @@ public sealed class WebNetworkConfig
         !string.IsNullOrWhiteSpace(Listen)
         || !string.IsNullOrWhiteSpace(AllowFrom)
         || !string.IsNullOrWhiteSpace(EncryptedToken)
-        || !string.IsNullOrWhiteSpace(Token);
+        || !string.IsNullOrWhiteSpace(Token)
+        || (Tls?.IsConfigured ?? false);
 
     /// <summary>
     /// The access token, preferring <see cref="EncryptedToken"/> (DPAPI-decrypted; Windows-only) over the
@@ -987,6 +1011,113 @@ public sealed class WebNetworkConfig
             /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
             usedPlaintext = !DarlingSecretSource.IsReference(Token);
             return DarlingSecretSource.Resolve(Token, "web.network.token");
+        }
+
+        return null;
+    }
+}
+
+/// <summary>
+/// Opt-in TLS for the web dashboard's network listener (#2562). Omit the whole <c>tls</c> object for plain
+/// HTTP — the zero-config default, and the correct one for a loopback-only dashboard, which has nothing to
+/// encrypt. Supply a certificate to close the gap the exposure block otherwise leaves open: the access token
+/// and the HMAC session cookie it is exchanged for both cross the segment in the clear over HTTP, and the
+/// in-app CIDR check bounds who can ROUTE to the port, never what an on-path attacker can read off the wire.
+///
+/// <para><b>Two forms, exactly one at a time.</b> A PKCS#12 bundle (<see cref="PfxPath"/>, with the password
+/// in whichever of the three slots suits the platform) or a PEM pair (<see cref="CertPath"/> +
+/// <see cref="KeyPath"/>, which is what a container mounts). Configuring both is refused rather than resolved
+/// by precedence — see <see cref="Hosting.DarlingWebTls.Describe"/>.</para>
+///
+/// <para><b>The product consumes a certificate; it does not manage a PKI.</b> No issuance, no ACME, no
+/// self-signed fallback: a certificate the product minted itself would buy encryption without authentication
+/// and train the operator to click through a browser warning, which is a worse habit than the plain HTTP it
+/// replaces. An internal CA is the normal answer on the LAN this feature is for.</para>
+///
+/// <para><b>Fail-closed, like every other exposure precondition.</b> A missing, unreadable, mismatched or
+/// EXPIRED certificate keeps the dashboard loopback-only and logs Critical. It never falls back to serving
+/// the LAN over HTTP: an operator who configured TLS and silently got cleartext would be in precisely the
+/// state this block exists to prevent.</para>
+/// </summary>
+public sealed class WebTlsConfig
+{
+    /// <summary>
+    /// Path to a PKCS#12 (<c>.pfx</c>/<c>.p12</c>) bundle holding the certificate AND its private key.
+    /// Mutually exclusive with <see cref="CertPath"/>/<see cref="KeyPath"/>.
+    /// </summary>
+    [JsonPropertyName("pfxPath")]
+    public string? PfxPath { get; set; }
+
+    /// <summary>
+    /// DPAPI-LocalMachine-protected password for <see cref="PfxPath"/>, base64 — produced by
+    /// <c>--encrypt-password</c>, and the preferred slot on Windows. Read via
+    /// <see cref="ResolvePfxPassword"/>.
+    /// </summary>
+    [JsonPropertyName("encryptedPfxPassword")]
+    public string? EncryptedPfxPassword { get; set; }
+
+    /// <summary>
+    /// The PKCS#12 password as a literal (dev convenience only; the caller warns) or an
+    /// <c>env:</c>/<c>file:</c> reference (#1804 — <see cref="DarlingSecretSource"/>, which does not count as
+    /// plaintext-in-config). Omit entirely for a bundle that has no password.
+    /// </summary>
+    [JsonPropertyName("pfxPassword")]
+    public string? PfxPassword { get; set; }
+
+    /// <summary>
+    /// Path to a PEM-encoded certificate (the leaf first; a chain may follow). Requires
+    /// <see cref="KeyPath"/>, and is mutually exclusive with <see cref="PfxPath"/>.
+    /// </summary>
+    [JsonPropertyName("certPath")]
+    public string? CertPath { get; set; }
+
+    /// <summary>
+    /// Path to the PEM-encoded PRIVATE KEY for <see cref="CertPath"/>. A separate file rather than a combined
+    /// PEM because that is how both Docker secrets and every certificate tool in this space emit them, and
+    /// because the two want different file permissions.
+    /// </summary>
+    [JsonPropertyName("keyPath")]
+    public string? KeyPath { get; set; }
+
+    /// <summary>True when any field is set. Drives the "this block is configured" half of the decision — a
+    /// block set but unusable must FAIL rather than read as "TLS was never asked for".</summary>
+    [JsonIgnore]
+    public bool IsConfigured =>
+        !string.IsNullOrWhiteSpace(PfxPath)
+        || !string.IsNullOrWhiteSpace(EncryptedPfxPassword)
+        || !string.IsNullOrWhiteSpace(PfxPassword)
+        || !string.IsNullOrWhiteSpace(CertPath)
+        || !string.IsNullOrWhiteSpace(KeyPath);
+
+    /// <summary>
+    /// The PKCS#12 password, preferring <see cref="EncryptedPfxPassword"/> (DPAPI-decrypted; Windows-only)
+    /// over <see cref="PfxPassword"/> — the same shape as <see cref="WebNetworkConfig.ResolveToken"/>.
+    /// Returns null when neither is set, which is correct for a bundle with no password rather than an error.
+    /// </summary>
+    public string? ResolvePfxPassword(out bool usedPlaintext)
+    {
+        usedPlaintext = false;
+
+        if (!string.IsNullOrWhiteSpace(EncryptedPfxPassword))
+        {
+            /* DarlingSecrets.Unprotect is DPAPI (Windows-only). Unlike the token slots this one is reachable
+               from the container path too (exposure is honored in a container since #1804), so the guard is a
+               real branch here, not just analyzer bookkeeping: say which slot to use instead. */
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    "web.network.tls.encryptedPfxPassword requires Windows (DPAPI); use \"pfxPassword\" with a "
+                    + "file:/env: reference on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(EncryptedPfxPassword);
+        }
+
+        if (!string.IsNullOrWhiteSpace(PfxPassword))
+        {
+            /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
+            usedPlaintext = !DarlingSecretSource.IsReference(PfxPassword);
+            return DarlingSecretSource.Resolve(PfxPassword, "web.network.tls.pfxPassword");
         }
 
         return null;
@@ -1037,19 +1168,90 @@ public static class DarlingNetwork
     /// default <c>viewer</c> (read-only remote, D7); <c>viewer</c>/<c>admin</c> pass through
     /// (case-insensitively); anything else ⇒ null (invalid — the store degrades to loopback). NEVER
     /// returns <c>darling</c> (the superuser/owner is service-only).
+    ///
+    /// <para>Kept for the callers that ask a yes/no question about the exposure — "is this store reachable
+    /// as admin" (see <c>DarlingWorker</c>'s startup warning). Where BOTH roles are admitted it answers
+    /// <c>admin</c>, because the question those callers are really asking is whether write-capable access
+    /// is reachable from the network, and it is.</para>
     /// </summary>
     public static string? NormalizeNetworkRole(string? role)
+    {
+        var roles = NormalizeNetworkRoles(role);
+
+        /* Count == 0 cannot happen today — the plural returns null or a non-empty list — but this is the one
+           caller that would INDEX the result, and a future "return the ones we understood" would turn that
+           invariant into an IndexOutOfRangeException at service startup rather than a degrade. Checked here
+           because every other caller already checks it. */
+        if (roles is null || roles.Count == 0)
+        {
+            return null;
+        }
+
+        return roles.Contains("admin", StringComparer.Ordinal) ? "admin" : roles[0];
+    }
+
+    /// <summary>
+    /// Every pg_hba login role <c>postgres.network.role</c> admits, in a stable order (#2665). One rule is
+    /// written per role, so a team can reach the same store with an <c>admin</c> Viewer and a set of
+    /// read-only <c>viewer</c> ones — which the roles have always supported and the single generated
+    /// <c>hostssl</c> line did not.
+    ///
+    /// <para>Accepts <c>"admin"</c>, <c>"viewer"</c>, or both in one string separated by a comma, a plus or
+    /// whitespace (<c>"admin,viewer"</c>, <c>"admin+viewer"</c>). A JSON array would be the tidier surface
+    /// and is not worth a breaking change to a field that has shipped: everything already written stays
+    /// valid, and a list is expressible without it.</para>
+    ///
+    /// <para><b>Absent/blank still means <c>viewer</c> alone.</b> A field learning to take a list must not
+    /// become a way for an existing configuration to quietly gain admin-capable network access.</para>
+    ///
+    /// <para>Returns null when ANY element is unrecognised, rather than silently keeping the ones it
+    /// understood — the store then degrades to loopback with the reason named. A typo in one of two roles
+    /// should not open the store with the other and leave somebody believing both are reachable.</para>
+    /// </summary>
+    public static IReadOnlyList<string>? NormalizeNetworkRoles(string? role)
     {
         /* Literals rather than DarlingManagedPostgres.ViewerRoleName/AdminRoleName: that type is
            [SupportedOSPlatform("windows")] and this classifier is platform-neutral, so referencing its
            consts would raise CA1416 here. The names mirror those consts (pinned equal by test). */
         if (string.IsNullOrWhiteSpace(role))
         {
-            return "viewer";
+            return new[] { "viewer" };
         }
 
-        var normalized = role.Trim().ToLowerInvariant();
-        return normalized is "viewer" or "admin" ? normalized : null;
+        var parts = role.Split(
+            new[] { ',', '+', ' ', '\t', '\r', '\n' },
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        /* Separators and nothing else (",", "+") is NOT the blank case: the operator wrote a value and none
+           of it names a role, so it takes the same fail-closed path as a typo rather than being read as the
+           viewer default. Guessing here would expose a store off the back of a malformed field. */
+        if (parts.Length == 0)
+        {
+            return null;
+        }
+
+        var seen = new List<string>();
+
+        foreach (var part in parts)
+        {
+            var normalized = part.ToLowerInvariant();
+
+            if (normalized is not ("viewer" or "admin"))
+            {
+                return null;
+            }
+
+            if (!seen.Contains(normalized, StringComparer.Ordinal))
+            {
+                seen.Add(normalized);
+            }
+        }
+
+        /* Stable order regardless of how it was written, so the generated pg_hba block is identical for
+           "admin,viewer" and "viewer,admin" — otherwise the reconciler rewrites the file and reloads the
+           server every time somebody reorders the field. */
+        seen.Sort(StringComparer.Ordinal);
+        return seen;
     }
 }
 

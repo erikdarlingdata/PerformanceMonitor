@@ -179,7 +179,8 @@ public static class ViewerActualPlanFlow
     private static void ShowReadOnly(Window owner)
         => MessageBox.Show(owner,
             "Capturing an actual plan asks the service to re-execute the query, which it does by running a " +
-            "command — a read-only viewer seat can't enqueue commands. Reconnect with a read-write profile to " +
-            "capture actual plans.",
+            "command — a read-only viewer seat can't enqueue commands. The command is queued in the MONITORING " +
+            "STORE, not on the monitored server. Reconnect with a read-write store profile to capture actual " +
+            "plans.",
             "Read-Only Viewer", MessageBoxButton.OK, MessageBoxImage.Information);
 }

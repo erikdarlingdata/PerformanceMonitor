@@ -565,6 +565,233 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         await cmd.ExecuteNonQueryAsync();
     }
 
+    /// <summary>
+    /// #2448: a finding batch that faults partway through must persist NOTHING, not the rows that
+    /// happened to land first.
+    ///
+    /// <para>The damage this prevents is invisible by construction, which is why it is worth a
+    /// behavioural test against a real DuckDB rather than a source pin. Every row in a batch shares
+    /// one <c>analysis_time</c> and <see cref="FindingStore.GetLatestFindingsAsync"/> reads the
+    /// newest <c>analysis_time</c>, so two committed rows of an intended five do not read as a
+    /// truncated set — they read as a complete analysis that found two problems. The server looks
+    /// HEALTHIER for the store having failed, and nothing anywhere says otherwise.</para>
+    ///
+    /// <para>The fault is a duplicate <c>finding_id</c>, which is the reachable per-row fault on
+    /// this table (<c>finding_id BIGINT PRIMARY KEY</c>) and not a contrivance: the ids come from
+    /// <c>_nextId++</c> seeded off <c>DateTime.UtcNow.Ticks</c>, so two stores in one process can
+    /// genuinely produce one — see #2455.</para>
+    ///
+    /// <para>Reverted, rows 1 and 2 commit before row 3 throws and this fails on
+    /// <c>Assert.Single</c> with three rows present — the truncated set stated exactly.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFaultedBatch_PersistsNothing_RatherThanATruncatedSetThatReadsAsComplete()
+    {
+        const int serverId = -646464;
+        const long earlierPassId = 5_646_464L;
+
+        var store = new FindingStore(_duckDb);
+        var context = new AnalysisContext
+        {
+            ServerId = serverId,
+            ServerName = "partial-batch",
+            TimeRangeStart = DateTime.UtcNow.AddHours(-4),
+            TimeRangeEnd = DateTime.UtcNow
+        };
+
+        /* An earlier pass's row, and the id the doomed batch collides with. */
+        await store.InsertFindingsAsync(
+            [PartialBatchFinding(earlierPassId, serverId, "an earlier pass")], context);
+
+        /* Row 3 of 5 collides, so rows 1-2 have already run by the time it fails. */
+        var doomed = new List<AnalysisFinding>
+        {
+            PartialBatchFinding(earlierPassId + 1, serverId, "row 1"),
+            PartialBatchFinding(earlierPassId + 2, serverId, "row 2"),
+            PartialBatchFinding(earlierPassId, serverId, "row 3 - collides"),
+            PartialBatchFinding(earlierPassId + 3, serverId, "row 4"),
+            PartialBatchFinding(earlierPassId + 4, serverId, "row 5")
+        };
+
+        await Assert.ThrowsAsync<DuckDBException>(() => store.InsertFindingsAsync(doomed, context));
+
+        /* The assertion #2448 exists for: not "fewer rows", NO rows from the doomed batch. Only the
+           earlier pass survives, and it is still stamped with its own analysis_time — stale and
+           saying so, rather than fresh and understating the server. */
+        var persisted = await store.GetRecentFindingsAsync(serverId);
+        Assert.Equal(earlierPassId, Assert.Single(persisted).FindingId);
+
+        /* And the rollback is not the store simply refusing to write: the same five rows without
+           the collision commit in full, through the same code path. */
+        var clean = new List<AnalysisFinding>
+        {
+            PartialBatchFinding(earlierPassId + 10, serverId, "row 1"),
+            PartialBatchFinding(earlierPassId + 11, serverId, "row 2"),
+            PartialBatchFinding(earlierPassId + 12, serverId, "row 3"),
+            PartialBatchFinding(earlierPassId + 13, serverId, "row 4"),
+            PartialBatchFinding(earlierPassId + 14, serverId, "row 5")
+        };
+
+        await store.InsertFindingsAsync(clean, context);
+        Assert.Equal(6, (await store.GetRecentFindingsAsync(serverId)).Count);
+    }
+
+    private static AnalysisFinding PartialBatchFinding(long findingId, int serverId, string storyText) =>
+        new()
+        {
+            FindingId = findingId,
+            AnalysisTime = DateTime.UtcNow,
+            ServerId = serverId,
+            ServerName = "partial-batch",
+            Severity = 1.0,
+            Confidence = 0.9,
+            Category = "waits",
+            StoryPath = "WRITELOG",
+            StoryPathHash = "an1-partial-batch",
+            StoryText = storyText,
+            RootFactKey = "WRITELOG",
+            FactCount = 1
+        };
+
+    /// #2455: two FindingStore instances must never issue the same id.
+    ///
+    /// <para>The filed defect was that <c>_nextId++</c> ran under a lock that admits concurrent
+    /// holders, and it was real. The bigger half is that <c>Interlocked.Increment</c> on that field
+    /// would not have fixed anything, because there is no shared field to make atomic: Lite builds
+    /// TWO stores — <c>AnalysisService</c> and <c>RecommendationsTab</c> — each seeding its own
+    /// counter from <c>DateTime.UtcNow.Ticks</c> at construction. Two built in the same timer tick
+    /// start from the same value and then walk the same range independently.</para>
+    ///
+    /// <para><c>finding_id</c> and <c>mute_id</c> are both PRIMARY KEY in DuckDB, so a collision is a
+    /// hard INSERT failure, and since #2448 made the batch atomic it costs the entire analysis rather
+    /// than one row.</para>
+    ///
+    /// <para>The two stores are constructed on adjacent lines and each issues 1,000 ids, so the old
+    /// per-instance seeds would have to differ by more than 1,000 ticks (100 microseconds) to avoid
+    /// overlapping — orders of magnitude more clock than two adjacent constructor calls consume. On
+    /// Windows, where this suite runs, the seeds are simply identical: the interrupt-timer granularity
+    /// behind <c>DateTime.UtcNow</c> is ~15.6 ms, which is ~156,000 ticks.</para>
+    /// </summary>
+    [Fact]
+    public async Task TwoFindingStoresNeverIssueTheSameId()
+    {
+        /* Adjacent on purpose: this is the case the old seeding could not survive. */
+        var analysisPass = new FindingStore(_duckDb);
+        var recommendationsTab = new FindingStore(_duckDb);
+
+        var context = TestDataSeeder.CreateTestContext();
+        var stories = ManyStories(1000);
+
+        var fromPass = await analysisPass.FilterMutedFindingsAsync(stories, context);
+        var fromTab = await recommendationsTab.FilterMutedFindingsAsync(stories, context);
+
+        Assert.Equal(1000, fromPass.Count);
+        Assert.Equal(1000, fromTab.Count);
+
+        var ids = new HashSet<long>();
+        foreach (var finding in fromPass)
+            Assert.True(ids.Add(finding.FindingId), $"the analysis pass reissued {finding.FindingId}");
+        foreach (var finding in fromTab)
+            Assert.True(ids.Add(finding.FindingId), $"the second store reissued {finding.FindingId}");
+
+        Assert.Equal(2000, ids.Count);
+    }
+
+    /// <summary>
+    /// #2455: the read lock around the three WRITE paths is deliberate, and the reason has to stay
+    /// written down.
+    ///
+    /// <para>An unexplained read-lock-to-write reads as a bug on every inspection, and the obvious
+    /// "fix" — swapping in <c>AcquireWriteLock</c> — is the one change that would actually cost
+    /// something: it serializes every finding batch against every UI read for the length of the batch,
+    /// and #2443 had just made the read-lock WAIT abandonable precisely so the analysis pass could
+    /// yield to a long archival rather than become the thing archival waits on.</para>
+    ///
+    /// <para>The lock coordinates everyone against MAINTENANCE (CHECKPOINT, archive DELETEs,
+    /// compaction), which takes the exclusive write lock; a held read lock blocks
+    /// <c>EnterWriteLock</c>, so holding one is how a write says "not while I am in flight". That is
+    /// the only exclusion these paths need — concurrency between writers is DuckDB's own job. So this
+    /// pins the choice AND its explanation together: changing the lock should be a decision someone
+    /// makes against the stated reason, not a tidy-up.</para>
+    /// </summary>
+    [Fact]
+    public void TheWritePathsTakeAReadLockOnPurpose_AndSayWhy()
+    {
+        var source = File.ReadAllText(FindingStoreSourcePath()).Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        /* The choice. The write lock is not banned outright — it is banned from these three without a
+           reason, which is what a failing test forces someone to supply. */
+        Assert.DoesNotContain("AcquireWriteLock", source, StringComparison.Ordinal);
+        Assert.Equal(6, CountOf(source, "_duckDb.AcquireReadLock("));
+
+        /* The explanation, at the class and at each write site — whichever one a reader lands on. */
+        Assert.Contains("The read lock around the WRITES is deliberate (#2455)", source, StringComparison.Ordinal);
+        Assert.Contains("A READ lock", Between(source, "public async Task<List<AnalysisFinding>> InsertFindingsAsync(", "public async Task<List<AnalysisFinding>> SaveFindingsAsync("), StringComparison.Ordinal);
+        Assert.Contains("see the class note (#2455)", Between(source, "public async Task MuteStoryAsync(", "await cmd.ExecuteNonQueryAsync();"), StringComparison.Ordinal);
+        Assert.Contains("see the class note (#2455)", Between(source, "public async Task CleanupOldFindingsAsync(", "await cmd.ExecuteNonQueryAsync();"), StringComparison.Ordinal);
+
+        /* And the reason the shared lock is SUFFICIENT: no read-modify-write is left under it. */
+        Assert.DoesNotContain("private long _nextId", source, StringComparison.Ordinal);
+        Assert.Contains("FindingId = NextId(),", source, StringComparison.Ordinal);
+        Assert.Contains("Value = NextId() }", source, StringComparison.Ordinal);
+        Assert.Contains("CollectionIdGenerator.Next()", source, StringComparison.Ordinal);
+    }
+
+    private static string FindingStoreSourcePath()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Lite", "Analysis", "FindingStore.cs")))
+            dir = dir.Parent;
+
+        Assert.NotNull(dir);
+        return Path.Combine(dir!.FullName, "Lite", "Analysis", "FindingStore.cs");
+    }
+
+    private static string Between(string source, string start, string end)
+    {
+        var from = source.IndexOf(start, StringComparison.Ordinal);
+        Assert.True(from >= 0, $"anchor not found: {start}");
+        var to = source.IndexOf(end, from, StringComparison.Ordinal);
+        Assert.True(to > from, $"anchor not found after {start}: {end}");
+        return source[from..to];
+    }
+
+    private static int CountOf(string source, string needle)
+    {
+        var count = 0;
+        var at = 0;
+        while ((at = source.IndexOf(needle, at, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            at += needle.Length;
+        }
+
+        return count;
+    }
+
+    private static System.Collections.Generic.List<AnalysisStory> ManyStories(int count)
+    {
+        var stories = new System.Collections.Generic.List<AnalysisStory>(count);
+
+        for (var i = 0; i < count; i++)
+        {
+            stories.Add(new AnalysisStory
+            {
+                RootFactKey = "WRITELOG",
+                RootFactValue = i,
+                Severity = 1.0,
+                Confidence = 1.0,
+                Category = "waits",
+                StoryPath = $"WRITELOG_{i}",
+                StoryPathHash = $"id-collision-{i}",
+                StoryText = $"story {i}",
+                FactCount = 1
+            });
+        }
+
+        return stories;
+    }
+
     private static System.Collections.Generic.List<AnalysisStory> CreateTestStories()
     {
         return

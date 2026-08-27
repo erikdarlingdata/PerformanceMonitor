@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -191,6 +192,56 @@ public sealed class CollectionHealthLatestNoteTests : IClassFixture<SharedDuckDb
         Assert.Equal("zzz a different collector's note", health.Single(h => h.CollectorName == "wait_stats").LastNote);
     }
 
+    /// <summary>
+    /// #2460, Lite half: the two duration statistics, against a REAL DuckDB, on the population that
+    /// motivated them. A source pin cannot tell PERCENTILE_DISC from AVG — both are valid SQL returning
+    /// one number — and the whole finding is that one of those numbers describes no run that ever ran.
+    ///
+    /// <para>The fixture is prod-sql-use2-multi-49's query_store at 1/11.55 scale, same 83/17 shape: 83
+    /// runs carrying the empty-enumeration note at the 36 ms prod-sql-use2-alpha-01 measurably pays for it,
+    /// and 17 productive runs at the ~80,933 ms the store's own numbers force. The assertion that matters
+    /// is the last pair: the MEAN sits comfortably inside a 60,000 ms sweep budget while a heavy run costs
+    /// more than the whole budget by itself, which is the sentence the mean alone could never produce.
+    /// Darling.Tests pins the identical fixture against live Postgres — two engines, one answer.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheDurationStatistics_SplitABimodalCollectorTheMeanBlendsAway()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        for (var i = 0; i < 83; i++)
+        {
+            await SeedDurationAsync("query_store", MinutesAgo(600 - i), 36,
+                EnumeratedCollectorDriver.EmptyEnumerationMessage);
+        }
+
+        for (var i = 0; i < 17; i++)
+        {
+            await SeedDurationAsync("query_store", MinutesAgo(400 - i), 80_933, null);
+        }
+
+        /* A failed run with no duration recorded: the new aggregates must ignore it exactly as AVG
+           already does, or a collector that errors occasionally reports a NULL p95 and silently falls
+           back to its mean. Verified here rather than assumed, because the two engines had to agree. */
+        await SeedDurationAsync("query_store", MinutesAgo(300), null, null, "ERROR");
+
+        var row = await ReadAsync(service, "query_store");
+
+        Assert.Equal(101, row.TotalRuns);
+        Assert.Equal(83, row.NoteCount);
+
+        Assert.Equal(13_788.49, row.AvgDurationMs, 2);
+        Assert.Equal(80_933, row.MaxDurationMs, 3);
+        Assert.Equal(80_933, row.P95DurationMs, 3);
+
+        /* The finding, as an assertion: one number says this collector fits a body four times over, the
+           other says one run of it does not fit at all, and both are honest about the same 101 runs. */
+        Assert.True(row.AvgDurationMs < SweepPressureClassifier.SweepBudgetMs,
+            $"the mean was {row.AvgDurationMs} ms");
+        Assert.True(row.P95DurationMs > SweepPressureClassifier.SweepBudgetMs,
+            $"a heavy run was {row.P95DurationMs} ms");
+    }
+
     /* ── helpers ── */
 
     private async Task<CollectorHealthRow> ReadAsync(LocalDataService service, string collector) =>
@@ -213,7 +264,12 @@ public sealed class CollectionHealthLatestNoteTests : IClassFixture<SharedDuckDb
         return _seedConn;
     }
 
-    private async Task SeedAsync(string collector, DateTime collectionTimeUtc, string status, string? message)
+    private Task SeedAsync(string collector, DateTime collectionTimeUtc, string status, string? message) =>
+        SeedDurationAsync(collector, collectionTimeUtc, 100, message, status);
+
+    /// <summary>#2460: the same seed with the run's own duration_ms spelled out, null included.</summary>
+    private async Task SeedDurationAsync(
+        string collector, DateTime collectionTimeUtc, int? durationMs, string? message, string status = "SUCCESS")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -228,7 +284,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         cmd.Parameters.Add(new DuckDBParameter { Value = "TestSrv" });
         cmd.Parameters.Add(new DuckDBParameter { Value = collector });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTimeUtc });
-        cmd.Parameters.Add(new DuckDBParameter { Value = 100 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)durationMs ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = status });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)message ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = 10 });

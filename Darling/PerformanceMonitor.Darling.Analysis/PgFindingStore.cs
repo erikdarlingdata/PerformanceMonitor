@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -63,9 +64,16 @@ public sealed record MutedStory(
 /// </para>
 ///
 /// <para>
-/// Error discipline mirrors the Dashboard twin: no public method throws — writes log and
-/// degrade, reads log and return empty. The mute-hash read fails OPEN (an unreadable mute
-/// registry lets findings through rather than suppressing them), exactly like both twins.
+/// Error discipline mirrors the Dashboard twin: reads log and return empty, and the mute-hash read
+/// fails OPEN (an unreadable mute registry lets findings through rather than suppressing them),
+/// exactly like both twins. <see cref="InsertFindingsAsync"/> is the ONE exception, and #2448 is
+/// why: "log and degrade" needs something to degrade TO, and once the batch became all-or-nothing
+/// there is nothing between "all persisted" and "none persisted". Swallowing the second would let
+/// <c>DarlingAnalysisService</c> set LastAnalysisTime, fire AnalysisCompleted and log "Analysis
+/// complete — N finding(s)" over a store holding none of them, which is #2448's own misreading
+/// moved one layer out and made louder. So it logs the detail only it can know and rethrows, and
+/// the pass reports itself failed — which is what the Lite twin has always done, by never catching
+/// at all.
 /// </para>
 /// </summary>
 public sealed class PgFindingStore
@@ -91,6 +99,16 @@ INSERT INTO analysis_findings
      incident_id, remediation_action_json, drill_down_json)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)";
 
+    /*
+        #2506 added the UPPER bound ($3). Without it the read had a start and no end, so an as_of
+        anchor could only ever move the window's start EARLIER and every anchored read would still
+        return everything up to now — the anchor validated, the caller told the window had moved, and
+        the answer unchanged. That is the exact defect this convention exists to prevent, so the bound
+        is part of the read rather than something the caller filters afterwards.
+
+        It binds ONLY when the caller anchored; unanchored, $3 is NoUpperBound and the read is the
+        half-open window it has always been. See that field for why "now" is the wrong default.
+    */
     public const string GetRecentFindingsSql = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
@@ -100,8 +118,9 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time >= $2
+AND   analysis_time <= $3
 ORDER BY analysis_time DESC, severity DESC
-LIMIT $3";
+LIMIT $4";
 
     public const string GetLatestFindingsSql = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
@@ -167,7 +186,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-            var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId);
+            var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId, context.CancellationToken);
 
             foreach (var story in stories)
             {
@@ -208,7 +227,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                 });
             }
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgFindingStore] FilterMutedFindingsAsync failed: {Message}", ex.Message);
         }
@@ -218,11 +237,52 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
     /// <summary>
     /// Inserts the (already mute-filtered, enriched, and action-attached) findings in one
-    /// batched pass on a single connection. Each row persists its BUILT
+    /// batched pass on a single connection, inside ONE transaction. Each row persists its BUILT
     /// <see cref="AnalysisFinding.Remediation"/> as <c>remediation_action_json</c> via the
     /// shared <see cref="AlertContextSerializer"/>, so a Darling finding's persisted action
     /// round-trips byte-identically to a Dashboard one. Returns the same list for caller
     /// convenience; the in-memory findings are unchanged.
+    ///
+    /// <para>#2448: the transaction is what makes this method's promise true, and it is the whole
+    /// reason for the shape. A finding set is one indivisible statement about a server: every row
+    /// shares one <c>analysis_time</c>, and <see cref="PgFindingStore.GetLatestFindingsSql"/> keys
+    /// on <c>MAX(analysis_time)</c>. So a batch that lands four of forty rows before the store
+    /// faults does NOT read as truncated — it reads as a complete analysis that found four
+    /// problems, and the server looks HEALTHIER for the store having failed. Rolling the batch back
+    /// instead leaves the PREVIOUS pass as the newest complete set: stale, stamped with its own
+    /// older <c>analysis_time</c>, and incapable of misleading anyone.</para>
+    ///
+    /// <para>This replaces per-row failure isolation, which was deliberate and is deliberately gone.
+    /// It could not have survived the transaction on both SKUs anyway — PostgreSQL refuses every
+    /// later statement in a transaction once one fails (25P02) and only <c>SAVEPOINT</c> escapes
+    /// that, which DuckDB 1.5.5 does not parse, so keeping it here alone would be exactly the
+    /// Lite/Darling drift this store has spent its life removing. It also should not survive on its
+    /// own merits: a batch that silently drops row 5 and commits the other 39 is this same defect at
+    /// row granularity, a set claiming 39 problems when the analysis found 40. One failure now ends
+    /// the batch and costs ONE log line naming the count — #2299's shape — instead of a line per
+    /// remaining row and a set nothing marks as partial.</para>
+    ///
+    /// <para>Measured rather than assumed, because "the batch is small" is the load-bearing claim: a
+    /// busy production server persists ~10 rows per pass, as small INSERTs against the LOCAL managed
+    /// store on loopback. Worth knowing when reading the loop below: <c>CommitAsync</c> on an
+    /// already-aborted transaction RETURNS NORMALLY on both Npgsql and DuckDB.NET while committing
+    /// nothing, so reaching the commit is not evidence that anything was written. That is the other
+    /// reason the row write must not swallow.</para>
+    ///
+    /// <para>It is also the one write here that THROWS, against the class's own no-throw discipline,
+    /// and that follows from the transaction rather than sitting beside it. A swallowed rollback returns
+    /// the same list a full success returns, so the caller cannot tell them apart and announces a
+    /// complete analysis for a set the store does not have. Before the transaction that line was only a
+    /// little wrong — most rows had landed — and now it would be entirely wrong, which is the same
+    /// defect this method exists to remove, one layer further out. The single ERROR line below carries
+    /// the part only this method knows (which row, or that it was the commit); the pass adds its own
+    /// outcome line and reports itself failed.</para>
+    ///
+    /// <para>#2443: the connection open is still the LAST cancellation point on this pass, unchanged
+    /// by the above. Past it the batch runs to completion, and cancelling before the first row costs
+    /// this cycle's findings and says so in the line the pass already logs. This is the same call
+    /// <c>DarlingAnalysisService</c> made one layer up in #2299 — "the post-enrichment tail carries
+    /// no check" — restated at the write it protects.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> InsertFindingsAsync(
         List<AnalysisFinding> findings, AnalysisContext context)
@@ -237,18 +297,56 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             return findings;
         }
 
+        var row = 0;
+        var everyRowAccepted = false;
+
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
+            /* #2448: one transaction for the whole set — the batch commits complete or not at all.
+               No token check between rows: see the note above. */
+            await using var transaction = await connection.BeginTransactionAsync();
+
             foreach (var finding in findings)
             {
-                await InsertFindingAsync(connection, finding);
+                row++;
+                await InsertFindingAsync(connection, transaction, finding);
             }
+
+            everyRowAccepted = true;
+            await transaction.CommitAsync();
         }
-        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgFindingStore] InsertFindingsAsync failed: {Message}", ex.Message);
+            /* The ONE line the batch is allowed to cost, and it states the loss rather than the
+               mechanism: nothing was persisted, and that is the deliberate outcome. Naming the row
+               is what turns "how often does this actually happen" into something the log can
+               answer — #2448 asked for that measurement and this is where it comes from.
+
+               Which is exactly why the commit gets its OWN line rather than sharing this one. After
+               the loop `row` sits at findings.Count, so a fault in CommitAsync — a blip, a
+               deadlock at commit, the store out of disk — would report "failed at row N of N" and
+               name the last finding as the bad one when every row had in fact been accepted and
+               only the commit failed. A diagnostic that exists to be counted must not miscount the
+               one case it cannot see from the row number. */
+            if (everyRowAccepted)
+            {
+                _logger?.LogError(
+                    "[PgFindingStore] InsertFindingsAsync had all {Count} row(s) accepted and then failed to COMMIT them, so the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
+                    findings.Count, ex.Message);
+            }
+            else
+            {
+                _logger?.LogError(
+                    "[PgFindingStore] InsertFindingsAsync failed at row {Row} of {Count} and the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
+                    row, findings.Count, ex.Message);
+            }
+
+            /* And it must not be swallowed: see the note above. The caller announces a completed
+               analysis on the strength of this returning, so eating a total rollback would move the
+               #2448 misreading up a layer instead of removing it. */
+            throw;
         }
 
         return findings;
@@ -274,18 +372,30 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// <summary>
     /// Returns the most recent findings for a server within the given time range, newest and
     /// most severe first, including each finding's persisted remediation action.
+    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
-        int serverId, int hoursBack = 24, int limit = 100)
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
     {
         var findings = new List<AnalysisFinding>();
 
         try
         {
+            /* #2506: the window's END, from which the START is measured. Null is "now" — the pre-#2506
+               read exactly. Made naive-UTC like every other bound here, because analysis_time is a
+               naive-UTC column and a Kind=Utc parameter would be inferred as timestamptz and silently
+               zone-shifted. */
+            var windowEnd = DateTime.SpecifyKind(asOfUtc ?? DateTime.UtcNow, DateTimeKind.Unspecified);
+
             await using var connection = await _postgres.OpenConnectionAsync();
             using var command = new NpgsqlCommand(GetRecentFindingsSql, connection);
             command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(NaiveUtcNow().AddHours(-hoursBack));
+            command.Parameters.AddWithValue(windowEnd.AddHours(-hoursBack));
+            command.Parameters.AddWithValue(asOfUtc is null ? NoUpperBound : windowEnd);
             command.Parameters.AddWithValue(limit);
 
             using var reader = await command.ExecuteReaderAsync();
@@ -306,6 +416,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// Returns the latest analysis run's findings for a server (most recent analysis_time),
     /// most severe first. Unlike the Dashboard twin this read also returns
     /// remediation_action_json — both reads share one column list and one reader.
+    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetLatestFindingsAsync(int serverId)
     {
@@ -333,6 +448,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
     /// <summary>
     /// Mutes a story pattern so it won't appear in future analysis runs.
+    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task MuteStoryAsync(int serverId, string storyPathHash, string storyPath, string? reason = null)
     {
@@ -359,6 +479,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
     /// <summary>
     /// Unmutes a story pattern (Dashboard-twin surface).
+    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task UnmuteStoryAsync(long muteId)
     {
@@ -385,6 +510,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// too (<see cref="GetMutedStoriesSql"/> filters both), so an all-servers mute is visible to every
     /// server. A NULL/0 (global) row here is flagged muted but left un-unmutable from the per-server
     /// viewer, since deleting it would unmute the pattern everywhere.
+    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task<List<MutedStory>> GetMutedStoriesAsync(int serverId)
     {
@@ -418,6 +548,11 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
     /// <summary>
     /// Cleans up old findings beyond the retention period.
+    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
+    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
+    /// its store calls take no pass token. Threading one here would mean inventing a caller that
+    /// does not exist.</para>
     /// </summary>
     public async Task CleanupOldFindingsAsync(int retentionDays = 30)
     {
@@ -440,7 +575,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// twins: an unreadable mute registry returns the hashes read so far (usually empty) and
     /// findings flow through unfiltered rather than being suppressed.
     /// </summary>
-    private async Task<HashSet<string>> GetMutedHashesAsync(NpgsqlConnection connection, int serverId)
+    private async Task<HashSet<string>> GetMutedHashesAsync(
+        NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
     {
         var hashes = new HashSet<string>();
 
@@ -449,14 +585,18 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             using var command = new NpgsqlCommand(GetMutedHashesSql, connection);
             command.Parameters.AddWithValue(serverId);
 
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
                 hashes.Add(reader.GetString(0));
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
+            /* #2443: fail-open is right for an unreadable registry, but NOT for an abandonment —
+               "the mutes could not be read" and "we stopped reading" are different answers, and
+               swallowing the second would let the pass go on to enrich and persist an unfiltered
+               finding set under a token that has already fired. */
             _logger?.LogError("[PgFindingStore] GetMutedHashesAsync failed: {Message}", ex.Message);
         }
 
@@ -464,59 +604,70 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     }
 
     /// <summary>
-    /// Inserts one finding on an already-open connection (the caller owns it, so a batch
-    /// shares a single connection). Per-row failure isolation like the Dashboard twin: one
-    /// bad row logs and the batch continues.
+    /// Inserts one finding on an already-open connection, enlisted in the batch's transaction (the
+    /// caller owns both, so a batch shares a single connection and a single transaction).
+    ///
+    /// <para>#2448: this throws rather than logging and continuing, which is the reverse of the
+    /// Dashboard twin's per-row isolation and is the point. Once one row has failed, PostgreSQL
+    /// refuses every later statement in the transaction (25P02), so "continue" would mean N-k more
+    /// ERROR lines for one event and a <c>CommitAsync</c> that returns normally having written
+    /// nothing. Letting it out gives <see cref="InsertFindingsAsync"/> the single line and the
+    /// rollback. The isolation is barely reachable here in any case — the table carries no primary
+    /// key, no CHECK and no foreign key, and every NOT NULL column maps to a non-nullable property
+    /// with a default — which leaves data-shape failures such as a NUL byte in a text column
+    /// (22021) as the realistic per-row fault, and one of those in a batch of ten is exactly the
+    /// case where publishing the other nine as a complete analysis is the wrong answer.</para>
+    ///
+    /// <para>#2443 exempt: this write deliberately takes no token. Cancelling inside a single-row
+    /// INSERT buys nothing — the row is milliseconds of work on loopback — and costs the one thing
+    /// worth having: a definite answer about whether it committed. Npgsql's cancel is a request to
+    /// the server, so a cancelled <c>ExecuteNonQueryAsync</c> can leave a row that did land.
+    /// <see cref="InsertFindingsAsync"/> carries the full reasoning and the abandonment point that
+    /// replaces this one.</para>
     /// </summary>
-    private async Task InsertFindingAsync(NpgsqlConnection connection, AnalysisFinding finding)
+    private async Task InsertFindingAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, AnalysisFinding finding)
     {
-        try
+        using var command = new NpgsqlCommand(InsertFindingSql, connection, transaction);
+        command.Parameters.AddWithValue(finding.FindingId);
+        command.Parameters.AddWithValue(AsNaive(finding.AnalysisTime));
+        command.Parameters.AddWithValue(finding.ServerId);
+        command.Parameters.AddWithValue(finding.ServerName);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)finding.DatabaseName ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = finding.TimeRangeStart is { } rangeStart ? AsNaive(rangeStart) : (object)DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = finding.TimeRangeEnd is { } rangeEnd ? AsNaive(rangeEnd) : (object)DBNull.Value });
+        command.Parameters.AddWithValue(finding.Severity);
+        command.Parameters.AddWithValue(finding.Confidence);
+        command.Parameters.AddWithValue(finding.Category);
+        command.Parameters.AddWithValue(finding.StoryPath);
+        command.Parameters.AddWithValue(finding.StoryPathHash);
+        command.Parameters.AddWithValue(finding.StoryText);
+        command.Parameters.AddWithValue(finding.RootFactKey);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = (object?)finding.RootFactValue ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)finding.LeafFactKey ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = (object?)finding.LeafFactValue ?? DBNull.Value });
+        command.Parameters.AddWithValue(finding.FactCount);
+        command.Parameters.Add(new NpgsqlParameter
         {
-            using var command = new NpgsqlCommand(InsertFindingSql, connection);
-            command.Parameters.AddWithValue(finding.FindingId);
-            command.Parameters.AddWithValue(AsNaive(finding.AnalysisTime));
-            command.Parameters.AddWithValue(finding.ServerId);
-            command.Parameters.AddWithValue(finding.ServerName);
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)finding.DatabaseName ?? DBNull.Value });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = finding.TimeRangeStart is { } rangeStart ? AsNaive(rangeStart) : (object)DBNull.Value });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = finding.TimeRangeEnd is { } rangeEnd ? AsNaive(rangeEnd) : (object)DBNull.Value });
-            command.Parameters.AddWithValue(finding.Severity);
-            command.Parameters.AddWithValue(finding.Confidence);
-            command.Parameters.AddWithValue(finding.Category);
-            command.Parameters.AddWithValue(finding.StoryPath);
-            command.Parameters.AddWithValue(finding.StoryPathHash);
-            command.Parameters.AddWithValue(finding.StoryText);
-            command.Parameters.AddWithValue(finding.RootFactKey);
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = (object?)finding.RootFactValue ?? DBNull.Value });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)finding.LeafFactKey ?? DBNull.Value });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = (object?)finding.LeafFactValue ?? DBNull.Value });
-            command.Parameters.AddWithValue(finding.FactCount);
-            command.Parameters.Add(new NpgsqlParameter
-            {
-                NpgsqlDbType = NpgsqlDbType.Text,
-                Value = string.IsNullOrEmpty(finding.IncidentId) ? (object)DBNull.Value : finding.IncidentId
-            });
-            /* D2: persist the BUILT action (mirrors the alert path's ContextJson) so the
-               Recommendations reader can drive Apply + consent from a stored finding. */
-            command.Parameters.Add(new NpgsqlParameter
-            {
-                NpgsqlDbType = NpgsqlDbType.Text,
-                Value = (object?)AlertContextSerializer.SerializeAction(finding.Remediation) ?? DBNull.Value
-            });
-            /* #2060: persist the CAPPED drill-down beside the built action — same D2 rationale
-               (the evidence rows exist only on the write path), same degrade-to-NULL discipline. */
-            command.Parameters.Add(new NpgsqlParameter
-            {
-                NpgsqlDbType = NpgsqlDbType.Text,
-                Value = (object?)DrillDownSerializer.Serialize(finding.DrillDown) ?? DBNull.Value
-            });
+            NpgsqlDbType = NpgsqlDbType.Text,
+            Value = string.IsNullOrEmpty(finding.IncidentId) ? (object)DBNull.Value : finding.IncidentId
+        });
+        /* D2: persist the BUILT action (mirrors the alert path's ContextJson) so the
+           Recommendations reader can drive Apply + consent from a stored finding. */
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Text,
+            Value = (object?)AlertContextSerializer.SerializeAction(finding.Remediation) ?? DBNull.Value
+        });
+        /* #2060: persist the CAPPED drill-down beside the built action — same D2 rationale
+           (the evidence rows exist only on the write path), same degrade-to-NULL discipline. */
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Text,
+            Value = (object?)DrillDownSerializer.Serialize(finding.DrillDown) ?? DBNull.Value
+        });
 
-            await command.ExecuteNonQueryAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError("[PgFindingStore] InsertFindingAsync failed: {Message}", ex.Message);
-        }
+        await command.ExecuteNonQueryAsync();
     }
 
     /// <summary>
@@ -559,6 +710,21 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>
     private static DateTime NaiveUtcNow() =>
         DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// What <see cref="GetRecentFindingsSql"/>'s upper bound is when the caller did NOT anchor: an
+    /// instant no row can reach, i.e. no bound at all.
+    ///
+    /// <para><b>Why not "now".</b> Two reasons, and the second is the one that would have hurt. First,
+    /// #2495's promise is that a caller sending only <c>hours_back</c> gets byte-for-byte the window it
+    /// always got, and this read has been half-open for its whole life. Second, <c>analysis_time</c> is
+    /// stamped by the WRITER's clock and would be filtered by the READER's; those are the same host
+    /// today, and the day they are not, a bounded default read would intermittently drop the newest run
+    /// — a findings read that "sometimes misses the analysis that just finished", with nothing in it to
+    /// point at a clock. An anchored read has a caller-supplied end and neither problem.</para>
+    /// </summary>
+    private static readonly DateTime NoUpperBound =
+        new(9999, 12, 31, 23, 59, 59, DateTimeKind.Unspecified);
 
     /// <summary>Kind-Unspecified for writes — Npgsql 6+ rejects Kind-Utc against <c>timestamp</c>.</summary>
     private static DateTime AsNaive(DateTime value) =>

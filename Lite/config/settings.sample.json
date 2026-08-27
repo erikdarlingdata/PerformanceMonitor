@@ -1,0 +1,199 @@
+// Performance Monitor Lite — settings.json reference
+//
+// THIS FILE IS DOCUMENTATION, NOT A DROP-IN. Do not copy it over your settings.json.
+// Copy the individual keys you want and leave the rest out: every key Lite reads has a
+// working default, and a key you omit keeps that default. A key you paste is a value you
+// have now pinned.
+//
+// The live file is:
+//     %LOCALAPPDATA%\PerformanceMonitorLite-Data\config\settings.json
+//
+// Lite writes that file itself whenever you change something in Settings, and it rewrites
+// the whole document — so the // comments below would not survive one Save even if the
+// loader accepted them, which it does not. Read here, edit there.
+//
+// If the loader cannot parse settings.json it falls back to defaults for EVERY key
+// silently, so a stray trailing comma costs you all of your settings at once, not one.
+//
+// If your settings.json carries "theme", delete it. An older copy of this file listed it
+// and Lite has never read it; the key is "color_theme", below. That is the drift this
+// reference now exists to stop: SettingsSampleTests derives the key list straight out of
+// App.xaml.cs and Mcp\McpSettings.cs and fails the build if this file and the loaders
+// disagree in either direction.
+//
+// Values shown are the built-in defaults. Ranges marked "clamped" are enforced on READ:
+// an out-of-range number is pulled to the nearest legal value rather than rejected, so a
+// hand-edit cannot drive a nonsense threshold. Keys marked "no UI" have no control in the
+// Settings window and can only be set here — they are the reason this file is kept.
+
+{
+  // ---- Alerting: master switch and connection notifications -------------------------
+  "alerts_enabled": true,
+  "notify_connection_changes": true,
+  "notify_connection_down_at_startup": false, // re-announce servers already down at launch
+  "connection_refire_minutes": 0,             // 0 = never re-fire; clamped 0-1440
+
+  // ---- Availability groups (#1696) ---------------------------------------------------
+  // Clamped on read to the same ranges Darling clamps, so one hand-edited file cannot
+  // drive a nonsense threshold in one app and a sane one in the other.
+  "notify_ag_health": true,
+  "ag_lag_alert_seconds": 300,          // clamped 0-86400
+  "ag_redo_queue_alert_kb": 0,          // 0 = off; clamped 0-1073741824
+  // 0 = one alert per outage. Above 0, a replica that is STILL disconnected is re-announced
+  // this often, under the same "AG Replica Disconnected" metric name, so webhook automation
+  // keyed on it re-triggers instead of hearing about a week-long outage exactly once.
+  "ag_disconnect_refire_minutes": 0,    // 0 = off; clamped 0-1440
+
+  // ---- CPU ---------------------------------------------------------------------------
+  "alert_cpu_enabled": true,
+  "alert_cpu_threshold": 80,            // percent
+  "alert_cpu_mode": "Total",            // "Total" (SQL + other processes) or "SqlOnly"
+
+  // ---- Blocking ----------------------------------------------------------------------
+  "alert_blocking_enabled": true,
+  "alert_blocking_threshold": 1,                    // blocked sessions
+  "alert_blocking_wait_seconds_threshold": 0,       // 0 = any wait duration qualifies
+
+  // ---- Deadlocks ---------------------------------------------------------------------
+  "alert_deadlock_enabled": true,
+  "alert_deadlock_threshold": 1,
+
+  // ---- Poison waits ------------------------------------------------------------------
+  "alert_poison_wait_enabled": true,
+  "alert_poison_wait_threshold_ms": 500,
+
+  // ---- Long-running queries ----------------------------------------------------------
+  // The five exclude_* switches suppress the queries that are long-running by design and
+  // would otherwise be the only thing this alert ever reports.
+  "alert_long_running_query_enabled": true,
+  "alert_long_running_query_threshold_minutes": 30,
+  "alert_long_running_query_max_results": 5,        // clamped 1-1000
+  "alert_long_running_query_exclude_sp_server_diagnostics": true,
+  "alert_long_running_query_exclude_waitfor": true,
+  "alert_long_running_query_exclude_backups": true,
+  "alert_long_running_query_exclude_misc_waits": true,
+  "alert_long_running_query_exclude_cdc": true,
+
+  // ---- Database exclusions ------------------------------------------------------------
+  // Applies to every alert type. Names only; anything blank is dropped on read.
+  "alert_excluded_databases": [],
+
+  // ---- tempdb ---------------------------------------------------------------------------
+  "alert_tempdb_space_enabled": true,
+  "alert_tempdb_space_threshold_percent": 80,
+
+  // ---- Disk: WARNING tier, then the CRITICAL floors (#2107) ----------------------------
+  // Both tiers are OR'd within themselves: whichever of percent/GB trips first wins, which
+  // is what keeps the thresholds sane across a 200 GB volume and a 20 TB one.
+  "alert_low_disk_enabled": true,
+  "alert_low_disk_threshold_percent": 10,   // clamped 0-100
+  "alert_low_disk_threshold_gb": 5,         // clamped to >= 0
+  "alert_disk_critical_free_percent": 3,    // clamped 0-100
+  "alert_disk_critical_free_gb": 2,         // clamped to >= 0
+
+  // ---- Persistent Version Store ---------------------------------------------------------
+  "alert_pvs_enabled": true,
+  "alert_pvs_threshold_percent": 40,    // PVS as a share of the database; clamped 0-100
+  "alert_pvs_floor_gb": 1,              // ignore small PVS regardless of percent
+
+  // ---- Database file growth (#2349) — OFF by default -------------------------------------
+  "alert_file_growth_enabled": false,
+  "alert_file_growth_rise_mb": 10240,        // clamped to >= 0
+  "alert_file_growth_volume_percent": 60,    // growth as a share of the volume; clamped 0-100
+  "alert_file_growth_lookback_minutes": 60,  // clamped 5-1440
+
+  // ---- Agent jobs -------------------------------------------------------------------------
+  "alert_long_running_job_enabled": true,
+  "alert_long_running_job_multiplier": 3,     // x the job's own average runtime
+  "alert_failed_job_enabled": true,
+  "alert_failed_job_lookback_minutes": 60,    // clamped 1-1440
+
+  // ---- Database state ---------------------------------------------------------------------
+  "alert_database_state_enabled": true,
+
+  // ---- Delivery: cooldowns, mode, per-cycle budget ------------------------------------------
+  "alert_cooldown_minutes": 5,          // clamped 1-120
+  "email_cooldown_minutes": 15,         // clamped 1-120
+  "alert_delivery_mode": "Summary",     // "Summary" (one digest) or "PerEvent"
+  "alert_per_event_max_per_cycle": 10,  // PerEvent only; clamped 1-100
+
+  // ---- Mute rules and dismissals -------------------------------------------------------------
+  // Anything other than the four listed strings is ignored and the default kept.
+  "mute_rule_default_expiration": "24 hours", // "1 hour" | "24 hours" | "7 days" | "Never"
+  "log_alert_dismissals": true,
+
+  // ---- Connections ------------------------------------------------------------------------------
+  // Out of range is IGNORED here rather than clamped: the value is kept only if 5-60.
+  "connection_timeout_seconds": 5,
+
+  // ---- CSV export --------------------------------------------------------------------------------
+  // "," | ";" | "\t". Anything else is ignored. The default follows the machine's locale, so
+  // it is "," on en-US and ";" where the list separator is a semicolon.
+  "csv_separator": ",",
+
+  // ---- Window, tray, time and theme -----------------------------------------------------------------
+  "minimize_to_tray": true,
+  "time_display_mode": "ServerTime",   // "ServerTime" | "LocalTime" | "UTC"
+  "color_theme": "Dark",               // "Dark" | "Light" | "CoolBreeze"
+  "default_time_range_hours": 4,       // initial range on every chart
+
+  // ---- Overview and sidebar state -----------------------------------------------------------------
+  // Written by the app as you use it, not settings you would normally hand-edit.
+  "overview_sort_mode": "Cpu",         // "Cpu" | "Name"; unrecognised -> "Cpu"
+  "collapsed_fleet_groups": [],        // tag-group headers left collapsed in the sidebar
+
+  // ---- Update check ------------------------------------------------------------------------------
+  // NO UI. Off = Lite never contacts github.com on its own; the sidebar's About button
+  // still checks when you open it, and installs in place from there.
+  "check_for_updates_on_startup": true,
+
+  // ---- Teams / Slack / generic / PagerDuty webhooks --------------------------------------------------
+  // The URLs, the generic headers JSON and the PagerDuty routing key are SECRETS and live in
+  // Windows Credential Manager, never in this file. Only these plain prefs are stored here.
+  "teams_webhook_enabled": false,
+  "teams_proxy_address": "",
+  "slack_webhook_enabled": false,
+  "slack_proxy_address": "",
+  "generic_webhook_enabled": false,
+  "generic_proxy_address": "",
+  "generic_body_template": "",
+  "pagerduty_webhook_enabled": false,
+  "pagerduty_use_eu_region": false,
+  "pagerduty_proxy_address": "",
+
+  // ---- Legacy plaintext webhook URLs (#1506) — read once, then migrated ---------------------------------
+  // DO NOT ADD THESE. They are here because settings.json files written before #1506 have
+  // them, and the loader still reads them so nobody loses a webhook on upgrade: a non-blank
+  // value is moved into Credential Manager on the next start and wins over what was already
+  // stored. Nothing ever writes them back, so a migrated file simply keeps a stale copy of
+  // its own secret in plaintext. Deleting the two lines by hand after upgrading is the point.
+  "teams_webhook_url": "",
+  "slack_webhook_url": "",
+
+  // ---- SMTP -----------------------------------------------------------------------------------------------
+  // The password is a secret and lives in Windows Credential Manager, not here.
+  "smtp_enabled": false,
+  "smtp_server": "",
+  "smtp_port": 587,
+  "smtp_use_ssl": true,
+  "smtp_username": "",
+  "smtp_from_address": "",
+  "smtp_recipients": "",          // comma-separated
+
+  // ---- Analysis -------------------------------------------------------------------------------------------
+  "analysis_enabled": true,
+  "query_store_backfill_enabled": true,
+  "analysis_notifications_enabled": false,
+  "analysis_interval_minutes": 30,        // clamped 5-360
+  "analysis_notify_severity": 1.5,        // minimum severity to notify on; clamped 0.0-2.0
+  "analysis_notify_cooldown_minutes": 360, // clamped 30-10080
+  // NO UI. The per-server budget for one analysis pass. Raise it on a server whose analysis
+  // keeps timing out; the pass is bounded so one slow server cannot stall the rest.
+  "analysis_timeout_seconds": 120,        // clamped 30-600
+
+  // ---- MCP endpoint ----------------------------------------------------------------------------------------
+  // Read by Mcp\McpSettings, not by the alert-settings loader. Enabling it from the Settings
+  // window is the supported route: that path also opens the firewall and restarts the host.
+  "mcp_enabled": false,
+  "mcp_port": 5151
+}

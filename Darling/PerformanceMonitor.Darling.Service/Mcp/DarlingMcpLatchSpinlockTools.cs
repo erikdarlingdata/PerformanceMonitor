@@ -42,23 +42,25 @@ public sealed class DarlingMcpLatchSpinlockTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of data to analyze. Default 24.")] int hours_back = 24,
-        [Description("Number of top latch classes to return. Default 10.")] int top = 10)
+        [Description("Number of top latch classes to return. Default 10.")] int top = 10,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingLatchSpinlockReader.GetLatchStatsTopNAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, top);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "latch_stats")
+                    ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
 
             var latches = rows.Select(r => new
             {
@@ -95,23 +97,25 @@ public sealed class DarlingMcpLatchSpinlockTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of data to analyze. Default 24.")] int hours_back = 24,
-        [Description("Number of top spinlocks to return. Default 10.")] int top = 10)
+        [Description("Number of top spinlocks to return. Default 10.")] int top = 10,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingLatchSpinlockReader.GetSpinlockStatsTopNAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, top);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "spinlock_stats")
+                    ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
 
             var spinlocks = rows.Select(r => new
             {

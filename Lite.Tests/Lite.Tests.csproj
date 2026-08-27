@@ -37,5 +37,13 @@
     <None Include="..\Lite\Services\DataImportService.cs" Link="Fixtures\DataImportService.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\Services\ArchiveService.cs" Link="Fixtures\ArchiveService.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\Services\ParquetCompaction.cs" Link="Fixtures\ParquetCompaction.cs" CopyToOutputDirectory="PreserveNewest" />
+
+    <!-- #2418: the settings.json reference and the two files that read settings.json, so
+         SettingsSampleTests can derive the key list from the shipped loaders rather than a copy of
+         it. A hand-maintained key list here would be a third thing to keep in sync, and would rot
+         exactly the way the sample it guards did. -->
+    <None Include="..\Lite\config\settings.sample.json" Link="Fixtures\settings.sample.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Lite\App.xaml.cs" Link="Fixtures\App.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Lite\Mcp\McpSettings.cs" Link="Fixtures\McpSettings.cs" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

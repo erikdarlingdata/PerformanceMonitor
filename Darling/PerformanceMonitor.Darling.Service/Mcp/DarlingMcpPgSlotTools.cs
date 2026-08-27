@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -47,17 +48,18 @@ public sealed class DarlingMcpPgSlotTools
     public static async Task<string> GetPgReplicationSlots(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to analyze, used for the WAL growth comparison. Default 24.")] int hours_back = 24)
+        [Description("Hours of history to analyze, used for the WAL growth comparison. Default 24.")] int hours_back = 24,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingPgSlotReader.GetPgSlotsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
@@ -68,6 +70,16 @@ public sealed class DarlingMcpPgSlotTools
                a cluster-wide all-clear would be drawing the one conclusion this result cannot support. */
             if (rows.Count == 0)
             {
+                /* The engine question comes first (#2532): "this instance has no replication slots" is a
+                   real finding on a PostgreSQL target and a false one on a SQL Server target, where the
+                   collector has never run and never will. */
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_slots");
+                if (gated != null)
+                {
+                    return gated;
+                }
+
                 return JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,

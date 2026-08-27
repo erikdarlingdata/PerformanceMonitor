@@ -49,7 +49,8 @@ public sealed class DarlingMcpSessionTools
         {
             var rows = await DarlingSessionReader.GetLatestSessionStatsAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "session_stats")
+                    ?? McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
             var totalConnections = rows.Sum(r => r.ConnectionCount);
             var totalRunning = rows.Sum(r => r.RunningCount);
@@ -93,23 +94,25 @@ public sealed class DarlingMcpSessionTools
         [Description("Hours of data to retrieve. Default 1.")] int hours_back = 1,
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description("Show only queries involved in blocking (blocking_session_id > 0 or is a head blocker).")] bool blocking_only = false,
-        [Description("Maximum number of rows to return. Default 50.")] int limit = 50)
+        [Description("Maximum number of rows to return. Default 50.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingSessionReader.GetActiveQueriesAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots")
+                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
             IEnumerable<DarlingSessionReader.ActiveQueryRow> filtered = rows;
 
@@ -166,23 +169,25 @@ public sealed class DarlingMcpSessionTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1.")] int hours_back = 1,
-        [Description("Maximum rows. Default 30.")] int limit = 30)
+        [Description("Maximum rows. Default 30.")] int limit = 30,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
         {
-            var now = DateTime.UtcNow;
+            var now = windowEnd;
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks")
+                    ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
 
             var result = rows.Take(limit).Select(r => new
             {

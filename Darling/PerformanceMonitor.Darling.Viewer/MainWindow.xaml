@@ -339,6 +339,24 @@
                                 <TextBlock Text="Manage Servers" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
+                        <!-- #2595: tag management had NO discoverable entry point here. Its only door was
+                             the group-header context menu, which means right-clicking a row labelled
+                             "Untagged" — and that row only renders when at least one server is untagged, so
+                             on a viewer with no servers yet tag management was unreachable entirely. Lite has
+                             carried a visible Manage Tags button in this same footer all along, so this is a
+                             parity gap rather than a new surface. ManageTags_Click already carries its own
+                             read-only backstop (#2008), so the button needs no gating of its own. -->
+                        <Button Click="ManageTags_Click"
+                                Style="{StaticResource DarkButton}"
+                                Padding="8,5"
+                                Margin="0,8,0,0"
+                                ToolTip="Create, rename, nest, and assign tags across the fleet">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE8EC;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="Manage Tags" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
                         <Button Click="OpenPlanViewerButton_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
@@ -518,11 +536,27 @@
                                     </Grid.RowDefinitions>
 
                                     <!-- Status dot (collection freshness) + the muted-bell silence indicator
-                                         (#2031: a silenced server must not look healthy-quiet). -->
+                                         (#2031: a silenced server must not look healthy-quiet).
+
+                                         #2473: the dot renders the same ServerCollectionStatus the Overview
+                                         card does, and carries the same first line the card's tooltip opens
+                                         on. It had triggers for three of the five states, so a registered-
+                                         but-never-collected server fell through to the muted default and
+                                         went grey "Unknown" while the card said amber "Awaiting first
+                                         collection" about that same server, one panel over.
+
+                                         There is deliberately still NO trigger for "Unknown": grey is the
+                                         honest paint for a server whose freshness was never classified, and
+                                         it is the muted default precisely so it needs no arm. Every OTHER
+                                         member of the enum must have one, which is asserted rather than
+                                         commented (ViewerSidebarDotRendersTheCardStatusTests) — a missing
+                                         trigger paints a wrong colour and fails nothing, which is exactly
+                                         how this defect survived. -->
                                     <StackPanel Grid.Column="0" Grid.RowSpan="2"
                                                 Orientation="Horizontal" VerticalAlignment="Center">
                                         <Ellipse Width="10" Height="10"
                                                  Margin="0,0,8,0"
+                                                 ToolTip="{Binding Server.DotTooltip}"
                                                  VerticalAlignment="Center">
                                             <Ellipse.Style>
                                                 <Style TargetType="Ellipse">
@@ -535,6 +569,14 @@
                                                             <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
                                                         </DataTrigger>
                                                         <DataTrigger Binding="{Binding Server.DotStatus}" Value="Warning">
+                                                            <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
+                                                        </DataTrigger>
+                                                        <!-- Amber, the colour the card already chose for this state and wrote
+                                                             down why: a queued server is not a dead one. Grey would have been
+                                                             the smaller change and is arguably honest ("no information yet"),
+                                                             but it is a SECOND answer to a question the card has already
+                                                             answered on the same screen, which is the whole defect. -->
+                                                        <DataTrigger Binding="{Binding Server.DotStatus}" Value="Awaiting first collection">
                                                             <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
                                                         </DataTrigger>
                                                     </Style.Triggers>
@@ -741,6 +783,20 @@
                                 <!-- Header -->
                                 <DockPanel Margin="0,0,0,10">
                                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <!-- #2424: the needs-attention filter over the card grid below. It sits
+                                             beside Sort because it is the same kind of thing — a view control over
+                                             the same cards — and it lives in the roll-up header, which is docked and
+                                             never scrolls away, so an active filter can never be off screen while the
+                                             grid it shrank is on it. The count beside it (set in ApplyOverviewCardFilter)
+                                             is what stops a filtered grid reading as an unfiltered one. -->
+                                        <CheckBox x:Name="OverviewAttentionOnlyCheck" Content="Needs attention only"
+                                                  FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                  ToolTip="Show only the cards that are not Healthy — Critical, Warning, Offline, or awaiting a first collection. Uncheck to show the whole fleet again."
+                                                  Checked="OverviewAttentionOnlyCheck_Changed"
+                                                  Unchecked="OverviewAttentionOnlyCheck_Changed"/>
+                                        <TextBlock x:Name="OverviewAttentionCountText" FontSize="11" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource WarningBrush}" Margin="0,0,14,0"
+                                                   Visibility="Collapsed"/>
                                         <TextBlock Text="Sort:" FontSize="11" VerticalAlignment="Center"
                                                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
                                         <ComboBox x:Name="OverviewSortSelector" Width="120" VerticalAlignment="Center"
@@ -859,9 +915,34 @@
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
-                                <TextBlock x:Name="FleetAdditionalProblemsText" Text="{Binding AdditionalProblemText}"
-                                           FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           Margin="17,2,0,0" Visibility="Collapsed"/>
+                                <!-- #2424: the overflow line is the way TO the overflow, not a report that it
+                                     exists. It was a bare TextBlock: on a 57-server fleet it read "+52 more need
+                                     attention" and the reporter's question was literally "where do I find these?".
+                                     Clicking it turns on the needs-attention card filter, so the answer is the grid
+                                     immediately below, with every metric row those 52 servers have. Underlined and
+                                     Cursor=Hand because a line that navigates has to look like one. -->
+                                <Border x:Name="FleetAdditionalProblems" HorizontalAlignment="Left"
+                                        Cursor="Hand" Padding="2,1" CornerRadius="3"
+                                        Margin="15,2,0,0" Visibility="Collapsed"
+                                        ToolTip="Show only the servers that need attention"
+                                        MouseLeftButtonUp="FleetAdditionalProblems_Click">
+                                    <!-- The hover idiom is the Needs Attention row's, a few lines up: a
+                                         transparent Border that lights on IsMouseOver. Same gesture, same
+                                         feedback, so the overflow line reads as one more thing you can click. -->
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Background" Value="Transparent"/>
+                                            <Style.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Background" Value="{DynamicResource ViewerHoverBrush}"/>
+                                                </Trigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <TextBlock x:Name="FleetAdditionalProblemsText" Text="{Binding AdditionalProblemText}"
+                                               FontSize="11" TextDecorations="Underline"
+                                               Foreground="{DynamicResource AccentBrush}"/>
+                                </Border>
                                 <TextBlock x:Name="FleetAllHealthyText" Text="{Binding AllHealthyText}"
                                            FontSize="12" Foreground="{DynamicResource SuccessBrush}" Margin="0,0,0,2" Visibility="Collapsed"/>
                             </StackPanel>
@@ -889,9 +970,17 @@
                                                     <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
                                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                                     <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
+                                                             ToolTip="{Binding StatusTooltip}"
                                                              HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                                 </DockPanel>
+                                                <!-- #2422: the status line carries the reason it is that colour. The
+                                                     card already computed the sentence (FleetRollup.BuildReason, from
+                                                     these very metric rows) and spent it only on the Needs Attention
+                                                     ranking. Background=Transparent is load-bearing: a TextBlock with a
+                                                     null Background hit-tests on its glyphs alone, so the tooltip would
+                                                     appear over the letters and nowhere between them. -->
                                                 <TextBlock Text="{Binding StatusDisplay}" Foreground="{Binding StatusBrush}"
+                                                           Background="Transparent" ToolTip="{Binding StatusTooltip}"
                                                            FontSize="11" Margin="0,0,0,10"/>
                                                 <!-- Tag pills (#2008 2a): each server's tags as coloured chips.
                                                      Collapsed when the server carries no tags so untagged cards
@@ -1330,8 +1419,14 @@
         </Border>
 
         <!-- Multi-field status bar (ported from Lite, adapted to what the viewer knows): general status,
-             collector health across all servers (from collection freshness), store database size, overall
-             collection status, and server count. -->
+             which SEAT this viewer holds, collector health across all servers (from collection freshness),
+             store database size, overall collection status, and server count.
+
+             SeatText sits first among the fixed fields, immediately right of the message area, because it
+             is the only one that describes THIS CONNECTION rather than the fleet, and #2479 exists because
+             the answer was previously discoverable only by tripping a refusal. Its text, colour and tooltip
+             are all set from ViewerSeatIndicator in the connect flow; the XAML holds only the not-probed-yet
+             state, which is what an operator sees if the window opens before OnLoaded finishes. -->
         <Grid Grid.Row="1" Margin="0,8,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -1339,12 +1434,14 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="1" x:Name="CollectorHealthText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="2" x:Name="DatabaseSizeText" Text="Database: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="3" x:Name="CollectionStatusText" Text="Collection: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="4" x:Name="ServerCountText" Text="Servers: 0" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="1" x:Name="SeatText" Text="Seat: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="2" x:Name="CollectorHealthText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="4" x:Name="CollectionStatusText" Text="Collection: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="5" x:Name="ServerCountText" Text="Servers: 0" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
         </Grid>
     </Grid>
 </Window>

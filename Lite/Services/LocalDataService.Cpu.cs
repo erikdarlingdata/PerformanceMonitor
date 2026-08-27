@@ -19,13 +19,13 @@ public partial class LocalDataService
     /// Gets CPU utilization data for charting.
     /// Note: sample_time is stored in server local time (from SYSDATETIME()), not UTC.
     /// </summary>
-    public async Task<List<CpuUtilizationRow>> GetCpuUtilizationAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<CpuUtilizationRow>> GetCpuUtilizationAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         /* sample_time is in server local time, not UTC */
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT

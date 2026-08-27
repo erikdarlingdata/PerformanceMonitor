@@ -73,12 +73,12 @@ GROUP BY collection_time";
     /// <summary>
     /// Gets recent deadlock events for a server.
     /// </summary>
-    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -173,13 +173,13 @@ ORDER BY bucket";
     /// <summary>
     /// Gets query snapshots (currently running queries) for a server.
     /// </summary>
-    public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetLatestQuerySnapshotsAsync", "v_query_snapshots latest");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -313,12 +313,12 @@ SELECT
     /// <summary>
     /// Gets recent blocked process reports from the XE-based collector.
     /// </summary>
-    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -539,8 +539,12 @@ LIMIT 5000";
 
         // Always-on DMV blocking snapshot: merge in the fallback rows so the viewer works even when the
         // blocked-process-report XE captured nothing (threshold unset / AWS RDS). Same connection/lock.
+        /* #2443: CancellationToken.None because the viewer genuinely has no pass to abandon — this
+           read serves a person waiting at a grid, not an analysis pass with a budget or a service
+           stop. Stated here rather than defaulted in the shared method, so the exception belongs to
+           the caller that actually has it. */
         await PerformanceMonitorLite.Analysis.BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-            connection.CreateCommand, rows, serverId, start, end);
+            connection.CreateCommand, rows, serverId, start, end, System.Threading.CancellationToken.None);
 
         return rows;
     }
@@ -661,12 +665,12 @@ ORDER BY bucket";
     /// Uses blocked_process_reports from Extended Events for more reliable detection.
     /// Falls back to blocking_snapshots if no XE data available.
     /// </summary>
-    public async Task<List<TrendPoint>> GetBlockingTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<TrendPoint>> GetBlockingTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* Use blocked_process_reports from XE session - more reliable than point-in-time snapshots
@@ -713,12 +717,12 @@ ORDER BY bucket";
     /// <summary>
     /// Gets deadlock trend (count of deadlocks per minute bucket).
     /// </summary>
-    public async Task<List<TrendPoint>> GetDeadlockTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<TrendPoint>> GetDeadlockTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -752,16 +756,142 @@ ORDER BY bucket";
         }
         return items;
     }
+
+    /* ───────────────── the denominator an empty trend needs (#2485) ───────────────── */
+
     /// <summary>
-    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
-    /// Returns per-second rates grouped by wait type.
+    /// Successful runs per blocking collector inside the window, with the first and last of them.
+    /// <para>The blocking trend reads EDGE tables — rows exist only where an event happened — so an
+    /// absence of rows is a capture that found nothing and a capture that never ran, wearing the same
+    /// face. <c>collection_log</c> can tell them apart, because a collector that ran and stored nothing
+    /// still records a SUCCESS with zero rows.</para>
+    /// <para>BOTH capture paths are counted, deliberately: <see cref="GetBlockingTrendAsync"/> unions
+    /// <c>v_blocked_process_reports</c> with <c>v_dmv_blocking_snapshots</c>, so counting one of them
+    /// would report "never captured" for a server capturing perfectly well through the other. Only
+    /// SUCCESS counts as having looked — a PERMISSIONS or ERROR row is a collector that did not see the
+    /// window either. Darling's twin is <c>DarlingBlockingTrendReader.BlockingCaptureCountsSql</c>; the
+    /// two must stay in step so a user moving between the SKUs is not told a different story about the
+    /// same state.</para>
     /// </summary>
-    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public Task<List<CollectorCaptureCount>> GetBlockingCaptureCountsAsync(
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')", fromDate, toDate, asOfUtc);
+
+    /// <summary>
+    /// Successful runs of the deadlock collector inside the window. One capture path here, not two —
+    /// deadlocks come only from the <c>deadlocks</c> collector's system_health read, and there is no DMV
+    /// fallback to count.
+    /// </summary>
+    public Task<List<CollectorCaptureCount>> GetDeadlockCaptureCountsAsync(
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null) =>
+        GetCaptureCountsAsync(serverId, hoursBack, "collector_name = 'deadlocks'", fromDate, toDate, asOfUtc);
+
+    /// <summary>
+    /// Whether either blocking collector has EVER run successfully for this server, ignoring any window.
+    /// <para>Asked ONLY when the window count came back zero, and only to pick which sentence is true: a
+    /// server whose collectors have run before has a GAP in this window, while one that has never run
+    /// them is not collecting blocking at all. Both are "not an all-clear" and they want different next
+    /// moves. LIMIT 1, so it stops at the first row.</para>
+    /// <para>NOT the same question as the neighbouring <c>HasAnyBlockingCaptureAsync</c> in
+    /// <c>LocalDataService.BlockingStats.cs</c>, which asks whether an EVENT was ever captured. That one is
+    /// right for get_blocking_stats, whose verdict is about severity; it is wrong here, because a server
+    /// collected perfectly for months that simply never blocked has no event rows and would be reported as
+    /// never captured — the reassuring-answer failure this read exists to prevent, inverted. Hence
+    /// "collector run", not "capture": the denominator is whether we LOOKED, not whether we found
+    /// something. Darling's twin is <c>DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync</c>.</para>
+    /// </summary>
+    public Task<bool> HasAnyBlockingCollectorRunAsync(int serverId) =>
+        HasAnyCaptureAsync(serverId, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')");
+
+    /// <summary>Whether the deadlock collector has EVER run successfully for this server. See
+    /// <see cref="HasAnyBlockingCollectorRunAsync"/> for why the question is asked at all.</summary>
+    public Task<bool> HasAnyDeadlockCollectorRunAsync(int serverId) =>
+        HasAnyCaptureAsync(serverId, "collector_name = 'deadlocks'");
+
+    /// <summary>
+    /// The shared body behind the two capture-count reads. The collector predicate is a COMPILE-TIME
+    /// literal from the two call sites above — never caller input — so it is concatenated rather than
+    /// bound; the server id and window still bind as parameters.
+    /// </summary>
+    /* fromDate/toDate let a CALLER pin one instant across the trend read and this one. Resolving now
+       independently in each means the two can straddle a row that arrives between them, and the whole
+       point of asking both is that their answers are compared. Darling's twin takes explicit bounds
+       for the same reason. */
+    private async Task<List<CollectorCaptureCount>> GetCaptureCountsAsync(
+        int serverId, int hoursBack, string collectorPredicate, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        command.CommandText = @"
+SELECT
+    collector_name,
+    COUNT(*),
+    MIN(collection_time),
+    MAX(collection_time)
+FROM v_collection_log
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   status = 'SUCCESS'
+AND   " + collectorPredicate + @"
+GROUP BY collector_name
+ORDER BY collector_name";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<CollectorCaptureCount>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CollectorCaptureCount(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+                reader.IsDBNull(3) ? null : reader.GetDateTime(3)));
+        }
+        return items;
+    }
+
+    /// <summary>The shared body behind the two existence probes. Same literal-predicate contract as
+    /// <see cref="GetCaptureCountsAsync"/>.</summary>
+    private async Task<bool> HasAnyCaptureAsync(int serverId, string collectorPredicate)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_collection_log
+WHERE server_id = $1
+AND   status = 'SUCCESS'
+AND   " + collectorPredicate + @"
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>
+    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
+    /// Returns per-second rates grouped by wait type.
+    ///
+    /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
+    /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
+    /// are SERVER-LOCAL and converted back to UTC inside GetTimeRange — handing them an instant already in
+    /// UTC would shift the window by the monitored server's offset. collection_time is stored in UTC, so
+    /// this read windows on the UTC bounds.</para>
+    /// </summary>
+    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH raw AS
@@ -803,6 +933,13 @@ ORDER BY collection_time, wait_type";
         return items;
     }
 }
+
+/// <summary>
+/// One collector's SUCCESSFUL run count inside a window, with the first and last of those runs — the
+/// denominator an empty blocking or deadlock trend needs to be interpretable (#2485). Darling's twin is
+/// <c>DarlingBlockingTrendReader.CaptureCount</c>.
+/// </summary>
+public sealed record CollectorCaptureCount(string CollectorName, long Runs, DateTime? FirstRunAt, DateTime? LastRunAt);
 
 public class LockWaitTrendPoint
 {

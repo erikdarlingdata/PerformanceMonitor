@@ -37,15 +37,15 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// </summary>
     private async Task CollectWaitStatsFactsAsync(AnalysisContext context, List<Fact> facts)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var command = new NpgsqlCommand(WaitStatsSql, connection);
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
         {
             var waitType = reader.GetString(0);
             var waitingTasks = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
@@ -95,15 +95,15 @@ AND   collection_time <= $3";
     /// </summary>
     private async Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var command = new NpgsqlCommand(BlockingSql, connection);
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-        using var reader = await command.ExecuteReaderAsync();
-        if (!await reader.ReadAsync()) return;
+        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+        if (!await reader.ReadAsync(context.CancellationToken)) return;
 
         var eventCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
         if (eventCount <= 0) return;
@@ -149,15 +149,15 @@ AND   collection_time <= $3";
     /// </summary>
     private async Task CollectDeadlockFactsAsync(AnalysisContext context, List<Fact> facts)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var command = new NpgsqlCommand(DeadlocksSql, connection);
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-        using var reader = await command.ExecuteReaderAsync();
-        if (!await reader.ReadAsync()) return;
+        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+        if (!await reader.ReadAsync(context.CancellationToken)) return;
 
         var deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
         if (deadlockCount <= 0) return;
@@ -211,7 +211,7 @@ LIMIT 5000";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var command = new NpgsqlCommand(BlockingChainSql, connection);
             command.Parameters.AddWithValue(context.ServerId);
@@ -219,16 +219,17 @@ LIMIT 5000";
             command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
             var rows = new List<BlockingPairRow>();
-            using (var reader = await command.ExecuteReaderAsync())
+            using (var reader = await command.ExecuteReaderAsync(context.CancellationToken))
             {
-                while (await reader.ReadAsync())
+                while (await reader.ReadAsync(context.CancellationToken))
                     rows.Add(PgBlockingPairRowQuery.Read(reader));
             }
 
             // Always-on DMV blocking snapshot fallback (works when the blocked-process-report XE is empty,
             // e.g. AWS RDS). Merge BEFORE the empty check so DMV-only blocking still produces facts.
             await PgBlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-                connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd);
+                connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                context.CancellationToken);
 
             if (rows.Count == 0) return;
 
@@ -259,7 +260,10 @@ LIMIT 5000";
                 }
             });
         }
-        catch { /* Table may not exist or have no data */ }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+        }
     }
 
 }

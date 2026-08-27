@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -116,14 +117,14 @@ public class BaselineProvider
     /// Returns the most specific bucket available, collapsing as needed.
     /// </summary>
     public async Task<BaselineBucket> GetBaselineAsync(
-        int serverId, string metricName, DateTime analysisTime)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken = default)
     {
         WarnIfRetentionUndercutsBaselineWindow(metricName);
 
         var hourOfDay = analysisTime.Hour;
         var dayOfWeek = (int)analysisTime.DayOfWeek; // Sunday=0
 
-        var baselines = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime);
+        var baselines = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
         if (baselines == null || baselines.Count == 0)
             return BaselineBucket.Empty;
 
@@ -142,7 +143,7 @@ public class BaselineProvider
     public void ClearCache() => _cache.Clear();
 
     private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> GetOrComputeBaselinesAsync(
-        int serverId, string metricName, DateTime analysisTime)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var cacheKey = $"{serverId}:{metricName}";
         var roundedHour = new DateTime(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
@@ -154,7 +155,7 @@ public class BaselineProvider
             return cached.Buckets;
         }
 
-        var buckets = await ComputeBaselinesAsync(serverId, metricName, analysisTime);
+        var buckets = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
 
         _cache[cacheKey] = new CachedBaseline
         {
@@ -167,7 +168,7 @@ public class BaselineProvider
     }
 
     private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBaselinesAsync(
-        int serverId, string metricName, DateTime analysisTime)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var query = GetBaselineQuery(metricName);
         if (query == null) return null;
@@ -177,9 +178,9 @@ public class BaselineProvider
 
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(cancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = query;
@@ -189,13 +190,13 @@ public class BaselineProvider
 
             var buckets = new Dictionary<(int, int), BaselineBucket>();
 
-            using var reader = await cmd.ExecuteReaderAsync();
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             /* #1743: the robust-scaffold metrics return eight columns (…, median_val, mad_val)
                and carry sentinel tier rows — every Lite arm except the two event-family ones,
                which keep the six-column classical shape (detected by column count) and whose
                buckets read Median=0/Mad=0, degrading the robust path to the classical one. */
             var hasRobustColumns = reader.FieldCount >= 8;
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(cancellationToken))
             {
                 var hour = Convert.ToInt32(reader.GetValue(0));
                 var dow = Convert.ToInt32(reader.GetValue(1));
@@ -230,8 +231,12 @@ public class BaselineProvider
 
             return buckets;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {
+            /* #2443: a baseline that could not be computed leaves its metric with no anomaly
+               detection, which is worth an ERROR. An abandoned one is not that — it is the pass we
+               called off, and five of the seven lines #2299 was filed about came from exactly this
+               catch on the Darling twin. */
             AppLogger.Error("BaselineProvider", $"Failed to compute baselines for {metricName}: {ex.Message}");
             return null;
         }

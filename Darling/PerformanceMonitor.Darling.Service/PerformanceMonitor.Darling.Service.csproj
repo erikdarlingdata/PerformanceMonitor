@@ -5,7 +5,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <RootNamespace>PerformanceMonitor.Darling.Service</RootNamespace>
     <AssemblyName>PerformanceMonitor.Darling.Service</AssemblyName>
-    <Version>3.5.0</Version>
+    <Version>3.6.0</Version>
     <!-- #2113: <Version> is the ONE hand-set version. AssemblyVersion / FileVersion /
          InformationalVersion derive from it at build time - the 3.4.0 release bumped only
          <Version> and shipped binaries still STAMPED 3.3.0.0, because four hand-maintained
@@ -21,6 +21,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="AWSSDK.RDS" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
@@ -33,6 +34,7 @@
     <!-- AN4: the analysis MCP tools over Streamable HTTP — Lite's exact MCP stack/version.
          The AspNetCore package brings the Microsoft.AspNetCore.App framework reference
          (Kestrel/WebApplication) transitively, same as it does for Lite. -->
+    <PackageReference Include="BlackwellSystems.Gcf" />
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" />
   </ItemGroup>
@@ -56,11 +58,16 @@
     <!-- #1562: the web dashboard's static assets (Builder 3 owns wwwroot/). Copied beside the binary so the
          web host's content/web root (pinned to AppContext.BaseDirectory) finds them under a Windows service. -->
     <Content Include="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" />
-    <!-- The install/uninstall scripts ride the publish output to the ZIP ROOT (beside the exe), so both
-         the release and nightly zips carry them with no packaging-workflow changes - same delivery
-         mechanism as darling.sample.json. -->
+    <!-- The install/uninstall/upgrade scripts ride the publish output to the ZIP ROOT (beside the exe), so
+         both the release and nightly zips carry them with no packaging-workflow changes - same delivery
+         mechanism as darling.sample.json.
+         upgrade-darling.ps1 has to be here for a second reason (#2525): the service's install-directory
+         report tells operators to prune rollback backups with `upgrade-darling.ps1 -PruneOnly`, and advice
+         naming a file that is not on the box is worse than no advice. DarlingDeployRollbackRetentionTests
+         pins this line for exactly that. -->
     <None Include="..\tools\install-darling.ps1" Link="install-darling.ps1" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\tools\uninstall-darling.ps1" Link="uninstall-darling.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\tools\upgrade-darling.ps1" Link="upgrade-darling.ps1" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

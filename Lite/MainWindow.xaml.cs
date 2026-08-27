@@ -350,7 +350,7 @@ public partial class MainWindow : Window
                 {
                     Dispatcher.Invoke(() =>
                     {
-                        Title = $"Performance Monitor Lite — Update v{newVersion.TargetFullRelease.Version} available (Help > About)";
+                        Title = $"Performance Monitor Lite — Update v{newVersion.TargetFullRelease.Version} available (About in the sidebar)";
                         AnnounceUpdate($"v{newVersion.TargetFullRelease.Version}");
                     });
                     return;
@@ -367,7 +367,7 @@ public partial class MainWindow : Window
             {
                 Dispatcher.Invoke(() =>
                 {
-                    Title = $"Performance Monitor Lite — Update {result.LatestVersion} available (Help > About)";
+                    Title = $"Performance Monitor Lite — Update {result.LatestVersion} available (About in the sidebar)";
                     AnnounceUpdate(result.LatestVersion);
                 });
             }
@@ -381,15 +381,21 @@ public partial class MainWindow : Window
     /// <summary>
     /// One tray balloon per session when an update is found. The title-bar suffix was the only signal,
     /// and a title bar nobody reads is how installs stayed on old builds — or got upgraded by re-running
-    /// Setup.exe, which used to delete the data directory (#1832). Help &gt; About does it safely and in
-    /// place. The update check itself runs once per launch, so no extra suppression is needed.
+    /// Setup.exe, which used to delete the data directory (#1832). The About button in the sidebar does
+    /// it safely and in place. The update check itself runs once per launch, so no extra suppression is
+    /// needed.
+    /// <para>This balloon and the two title-bar suffixes name the BUTTON, not a path to it (#2416).
+    /// They used to say "Help &gt; About"; Lite has never had a menu bar, so the one instruction given
+    /// to a user who has just been told an update exists pointed at nothing, and a user who fails to
+    /// find it falls back to re-running Setup.exe — the exact outcome this balloon was written to
+    /// prevent. A label survives the button being moved; a path does not.</para>
     /// </summary>
     private void AnnounceUpdate(string? version)
     {
         _trayService?.ShowNotification(
             "Update Available",
-            $"Performance Monitor Lite {version} is available. Open Help > About to install it — that updates in "
-                + "place and keeps your data.",
+            $"Performance Monitor Lite {version} is available. Click About in the left sidebar to install it — "
+                + "that updates in place and keeps your data.",
             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
     }
 
@@ -494,6 +500,23 @@ public partial class MainWindow : Window
     private async Task StartMcpServerAsync()
     {
         var mcpSettings = McpSettings.Load(App.ConfigDirectory);
+
+        if (mcpSettings.DisabledByUnreadableSettings)
+        {
+            /* #2431. This is the only moment Lite ever knows the endpoint went away, and the person it
+               matters to is not at this keyboard: they are on another machine watching a connection be
+               refused by an app whose own window says everything is fine. So the line names the lost
+               CAPABILITY, not the lost settings -- "every setting is at its default" is true and
+               useless to someone who is not looking at the app. */
+            AppLogger.Error("MCP",
+                $"The MCP server is DISABLED because settings.json in {App.ConfigDirectory} could not be read " +
+                $"({mcpSettings.Problem}). Nothing is listening on any port. If mcp_enabled was true in that file, " +
+                "this endpoint was revoked by a file that could not be parsed and not by anyone's decision, and a " +
+                "client connecting to it -- usually from another machine -- sees only a refused connection. The file " +
+                "has NOT been changed: fix it and restart Lite to get the endpoint back.");
+            return;
+        }
+
         if (!mcpSettings.Enabled) return;
 
         try

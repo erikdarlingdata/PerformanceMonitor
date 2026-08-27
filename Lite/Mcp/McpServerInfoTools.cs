@@ -22,7 +22,8 @@ public sealed class McpServerInfoTools
         {
             var row = await dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             if (row == null)
-                return McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_properties")
+                    ?? McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
@@ -63,7 +64,8 @@ public sealed class McpServerInfoTools
         {
             var rows = await dataService.GetLatestDatabaseSizeStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_size_stats")
+                    ?? McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {

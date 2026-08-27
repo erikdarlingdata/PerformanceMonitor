@@ -85,9 +85,57 @@ public sealed class AlertSettingsControlWiringTests
             .ToHashSet(StringComparer.Ordinal);
     }
 
+    /// <summary>
+    /// Lite's other half of the same "adding a knob is more than one edit" problem, and the half the test
+    /// above cannot see. Lite persists to settings.json rather than a store, and <c>SaveAlertSettings</c>
+    /// does both jobs in one method: it copies each control into an <c>App.Alert*</c> static, then writes
+    /// those statics into the <c>root[...]</c> JSON document. Forgetting the second line is silent and
+    /// survives every manual test — the setting takes effect immediately and only reverts on the NEXT
+    /// launch, by which point nobody connects the two. #2391 added four file-growth controls to this
+    /// method; this pins that all four (and every sibling) actually reach disk.
+    ///
+    /// <para>Note this does NOT mean loader/writer key symmetry: the writer parses the existing
+    /// settings.json into <c>root</c> and mutates it, so hand-edited keys it never touches are preserved
+    /// on save. The invariant is narrower — whatever the UI can CHANGE, the UI must WRITE.</para>
+    /// </summary>
+    [Fact]
+    public void LiteSaveAlertSettings_PersistsEveryStaticItAssigns()
+    {
+        var source = File.ReadAllText(FindRepoFile(Path.Combine("Lite", "Windows", "SettingsWindow.xaml.cs")));
+        var body = MethodBody(source, "SaveAlertSettings", "Lite");
+
+        /* "App.Foo =" but not "App.Foo ==" — the assignments the Save button makes. */
+        var assigned = Regex.Matches(body, @"App\.(\w+)\s*=(?!=)")
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+        var persisted = Regex.Matches(body, @"root\[""[^""]+""\]\s*=\s*App\.(\w+)")
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.NotEmpty(assigned);
+
+        /* AlertExcludedDatabases is the one legitimate exception: it is a collection, so it reaches the
+           document as a JsonArray built a few lines earlier rather than as a bare "= App.X" assignment. */
+        var unpersisted = assigned.Except(persisted)
+            .Except(new[] { "AlertExcludedDatabases" })
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(unpersisted.Count == 0,
+            "Lite: SaveAlertSettings copies these controls into App statics but never writes them to " +
+            "settings.json, so the setting applies for this session and silently reverts on next launch: " +
+            string.Join(", ", unpersisted));
+    }
+
     private static string MethodBody(string source, string methodName, string app)
     {
+        /* Not every anchor returns void — SaveAlertSettings returns bool to report whether it succeeded. */
         var signature = source.IndexOf("void " + methodName, StringComparison.Ordinal);
+        if (signature < 0)
+        {
+            signature = source.IndexOf("bool " + methodName, StringComparison.Ordinal);
+        }
+
         Assert.True(signature >= 0, $"{app}: no method named {methodName} — this guard's anchor moved and it is testing nothing.");
 
         var open = source.IndexOf('{', signature);

@@ -2,13 +2,23 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- #2501: the portable ZIP is now published for win-x64 as a self-contained app, so the
+         win-x64 restore graph has to be part of the COMMITTED lock file. Without this line the
+         lock file carries only the RID-agnostic target, and the moment a RID restore rewrites
+         it the two CI restores that run BEFORE the publish (build.yml, nightly.yml, both in
+         locked mode) fail NU1004: "project's runtime identifiers: <empty>, lock file's runtime
+         identifiers win-x64". Declaring the RID here makes the project itself ask for that
+         graph, so the RID-less locked-mode restore and the RID publish agree on one lock file.
+         RuntimeIdentifiers (plural) only widens what restore resolves; it sets no RID on the
+         build, so a plain dotnet build stays RID-agnostic and Lite.Tests is untouched. -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
     <StartupObject>PerformanceMonitorLite.Program</StartupObject>
     <AssemblyName>PerformanceMonitorLite</AssemblyName>
     <RootNamespace>PerformanceMonitorLite</RootNamespace>
     <Product>SQL Server Performance Monitor Lite</Product>
-    <Version>3.5.0</Version>
+    <Version>3.6.0</Version>
     <!-- #2113: <Version> is the ONE hand-set version. AssemblyVersion / FileVersion /
          InformationalVersion derive from it at build time - the 3.4.0 release bumped only
          <Version> and shipped binaries still STAMPED 3.3.0.0, because four hand-maintained
@@ -86,8 +96,29 @@
   </ItemGroup>
 
   <ItemGroup>
-<None Update="config\settings.json">
-      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    <!-- #2489/#2501: the .NET runtime prerequisites, shipped beside the exe. As of #2501 there
+         are none: BOTH Lite publishes are pinned to win-x64 and self-contained, so the file now
+         says "nothing to install" rather than listing downloads. It still ships, for two reasons.
+         Both READMEs promise it is in the ZIP, and it is the one surface of ours a reader who
+         went looking for a prerequisite can actually reach - the failure it used to answer was
+         the .NET host's own "You must install .NET to run this application", raised before any
+         of our code runs, which is why Lite could never gate on it the way Darling's
+         install-darling.ps1 does: there is no install script, only a double-clicked exe. Anyone
+         still hitting that error is on a 3.5.0-or-earlier ZIP, and the file says so. It costs
+         2 KB in a 277 MB tree. LiteRuntimePrerequisiteDocsTests keeps its content honest against
+         the built runtimeconfig AND against the publish shape in build.yml / nightly.yml, in
+         both directions: go back to a framework-dependent publish and the downloads have to
+         come back here and in both READMEs, or the suite stays red. -->
+    <None Update="READ-ME-FIRST.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- The commented settings.json reference (#2418). It SHIPS beside the exe, because the whole
+         point is that someone hand-editing an install can find what settings.json may contain,
+         including the knobs with no Settings-window control. It is deliberately absent from
+         ConfigSeeder's seed list: documentation to read, not a file to drop in, and the .sample.
+         name keeps it from being mistaken for the live one. SettingsSampleTests holds it honest. -->
+    <None Update="config\settings.sample.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="config\collection_schedule.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

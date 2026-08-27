@@ -64,6 +64,19 @@ public sealed class DarlingMcpAgTools
 
             if (result.AvailabilityGroupCount == 0)
             {
+                /* #2511: only when the caller SCOPED to one server, because engine edition is per server and
+                   the fleet-wide read has no single engine to speak for. A fleet-wide miss keeps the general
+                   sentence below, which already says the AG collectors do not run on Azure SQL Database. */
+                if (serverIdFilter is int scopedServerId && resolvedName is not null)
+                {
+                    var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                        postgres, scopedServerId, resolvedName, "ag_replica_states");
+                    if (gated != null)
+                    {
+                        return gated;
+                    }
+                }
+
                 /* The message names the RESOLVED storage name, not the caller's spelling — one condition, and a
                    partial or differently-cased argument reads back as the server it actually matched. */
                 return McpHelpers.Status(

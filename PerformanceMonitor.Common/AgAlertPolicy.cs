@@ -66,6 +66,12 @@ public enum AgConnectionDecision
 
     /// <summary>Came back to CONNECTED from a known-disconnected state.</summary>
     Reconnected,
+
+    /// <summary>A standing disconnect re-announcement (#1696, opt-in): the replica is still
+    /// DISCONNECTED and the re-fire interval has elapsed since the last disconnect alert. Callers deliver
+    /// this under the SAME metric name as <see cref="Disconnected"/> — webhook automation matches on the
+    /// metric name, and re-triggering it is the entire point of a re-fire.</summary>
+    StillDisconnected,
 }
 
 /// <summary>What one <c>is_suspended</c> observation should announce, if anything.</summary>
@@ -238,6 +244,55 @@ public static class AgAlertPolicy
         }
 
         return !now && was ? AgConnectionDecision.Reconnected : AgConnectionDecision.None;
+    }
+
+    /// <summary>
+    /// The same connection decision with the #1696 re-fire folded in: an "AG Replica Disconnected" that
+    /// nothing clears is otherwise a PURE EDGE, so a replica down for a week announces itself exactly once
+    /// and a week-long outage reads identically to a momentary blip in the alert history.
+    ///
+    /// <para>Both apps call THIS overload rather than each pairing the edge decision with its own
+    /// still-disconnected test — the combination is the part with the sharp corners (a re-fire must not
+    /// double up with the edge that just fired, and an unrecognized state string must not count as down),
+    /// and it is exactly the kind of condition that drifts when it is written twice.</para>
+    ///
+    /// <para><b>Where this deliberately departs from rule 1.</b> With re-fire ON, a FIRST sighting of an
+    /// already-disconnected replica returns <see cref="AgConnectionDecision.StillDisconnected"/> rather than
+    /// the silent baseline rule 1 otherwise mandates. That is on purpose and it is what the knob is for: both
+    /// apps hold this edge state in memory, so every restart re-baselines, and under rule 1 alone a restart
+    /// in the middle of a week-long outage would silence it permanently — the opt-in would fail precisely in
+    /// the case it exists for. It is the AG family's equivalent of
+    /// <see cref="ConnectionAlertDecision.AlreadyDownAtFirstSight"/>, folded into the one knob instead of
+    /// given a second one, because a re-fire interval already IS the operator saying "keep telling me".
+    /// Rule 1 still governs the pure edge: at the shipped default of off, a first sighting is silent.</para>
+    /// </summary>
+    /// <param name="refireInterval">How often to re-announce a still-disconnected replica. Null or
+    /// non-positive = off, which is byte-for-byte the two-argument overload's edge-only behavior.</param>
+    /// <param name="lastDisconnectAlertUtc">When this replica's disconnect was last ANNOUNCED, or null if it
+    /// never has been. Callers stamp it on every Disconnected / StillDisconnected they DELIVER — never on the
+    /// decision, or an alert a master switch suppressed would consume a window it was never announced in —
+    /// and clear it on Reconnected so a later outage starts a fresh episode instead of re-firing late.</param>
+    /// <param name="nowUtc">The caller's clock, injected so the decision pins under test.</param>
+    public static AgConnectionDecision DecideConnection(
+        string? previousStateDesc,
+        string? currentStateDesc,
+        TimeSpan? refireInterval,
+        DateTime? lastDisconnectAlertUtc,
+        DateTime nowUtc)
+    {
+        var edge = DecideConnection(previousStateDesc, currentStateDesc);
+
+        /* A real transition wins outright: the Disconnected edge already announces, and a Reconnected one
+           means there is nothing left to re-announce. Only the quiet cases can become a re-fire, and only
+           when the current reading is one this product recognizes as down. */
+        if (edge != AgConnectionDecision.None || !IsDisconnected(currentStateDesc))
+        {
+            return edge;
+        }
+
+        return AlertRefireWindow.IsDue(refireInterval, lastDisconnectAlertUtc, nowUtc)
+            ? AgConnectionDecision.StillDisconnected
+            : AgConnectionDecision.None;
     }
 
     /// <summary>

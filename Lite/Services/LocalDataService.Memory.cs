@@ -67,12 +67,12 @@ LIMIT 1";
     /// <summary>
     /// Gets memory stats trend for charting.
     /// </summary>
-    public async Task<List<MemoryTrendPoint>> GetMemoryTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<MemoryTrendPoint>> GetMemoryTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -106,6 +106,31 @@ ORDER BY collection_time";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Whether this server has EVER recorded a memory sample, ignoring any window.
+    /// <para>Lets an empty memory trend say WHICH kind of nothing it found. "No memory trend data" is true
+    /// both of a quiet window and of a server the collector has never touched, and those want opposite
+    /// responses — widen the window, versus go find out why collection is not running. Reads
+    /// <c>v_memory_stats</c>, the same source <see cref="GetMemoryTrendAsync"/> reads, so it can never
+    /// report "collected" for rows the trend cannot see. Darling's twin is
+    /// <c>DarlingTrendReader.HasAnyMemoryStatAsync</c>; the two must stay in step so a user moving between
+    /// the SKUs is not told a different story about the same state.</para>
+    /// </summary>
+    public async Task<bool> HasAnyMemoryStatAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT 1
+FROM v_memory_stats
+WHERE server_id = $1
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
 
     /// <summary>
@@ -197,12 +222,12 @@ ORDER BY clerk_type, collection_time";
     /// <summary>
     /// Gets memory pressure events (from RING_BUFFER_RESOURCE_MONITOR) for charting.
     /// </summary>
-    public async Task<List<MemoryPressureEventRow>> GetMemoryPressureEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<MemoryPressureEventRow>> GetMemoryPressureEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT

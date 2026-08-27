@@ -465,9 +465,24 @@ public static class DarlingRetention
                        is ~40 MB against the plan dim's 127 GB — shortening it buys nothing and would quietly
                        break "text stays analyzable for the facts' full retention", which is half the knob's
                        own justification. The router is pure so the scoping is pinned by tests. */
+                    /* #2386: the plan dim is capped by ROWS, every other dim keeps the one-day slice.
+                       Only this table carries multi-kilobyte TOAST payloads, so only this one has a day
+                       that cannot be deleted inside the command timeout — query_text_dim is ~40 MB
+                       total and drains in a single slice. Scoped rather than global so a table that is
+                       fine keeps the compressed-chunk-safe shape it needs. */
+                    var isPlanDim = string.Equals(
+                        dimTable, PayloadDimensions.QueryPlanDimTable, StringComparison.Ordinal);
+
                     var dimDeleted = await PurgeOneAsync(
-                        postgres, dimTable, TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
-                        ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff), logger, cancellationToken);
+                        postgres,
+                        dimTable,
+                        isPlanDim
+                            ? RowCappedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn, PlanDimDeleteRowCap)
+                            : TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
+                        ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff),
+                        logger,
+                        cancellationToken,
+                        batchSize: isPlanDim ? PlanDimDeleteRowCap : 1);
                     if (dimDeleted is not null)
                     {
                         tablesPurged++;
@@ -662,6 +677,46 @@ public static class DarlingRetention
              + $" AND {timeColumn} >= (SELECT min({timeColumn}) FROM {table} WHERE {expired})"
              + $" AND {timeColumn} < (SELECT min({timeColumn}) FROM {table} WHERE {expired}) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
     }
+
+    /// <summary>
+    /// Rows per statement for the plan dimension's purge (#2386). Measured on the use2 store, whose
+    /// <c>query_plan_dim</c> is 133 GB over 12.4 M rows: deletes run at <b>~1,000 rows/sec</b>, linear
+    /// from 10 k to 50 k, worst observed 834 rows/sec. 50 k therefore costs ~50 s against
+    /// <see cref="DeleteTimeoutSeconds"/>'s 300 s — about 5x margin, which is the point: a loaded box is
+    /// slower than the idle one this was measured on, and 100 k (~97 s nominal) would sit at ~291 s under
+    /// a 3x slowdown, i.e. against the wall.
+    /// </summary>
+    internal const int PlanDimDeleteRowCap = 50_000;
+
+    /// <summary>
+    /// The plan dimension's purge statement: capped by ROW COUNT rather than by a time slice (#2386).
+    ///
+    /// <para><b>Why the time slice cannot work here.</b> <see cref="TimeSlicedDeleteSql"/> bounds work at
+    /// one day, justified as "exactly what a steady-state daily purge deletes in total". True, and that is
+    /// the problem for this table: a day is ~755 k rows whose gzipped plan XML averages ~9.5 KB, so one
+    /// statement must remove <b>~7 GB of TOAST</b>. Measured, that needs ~755 s against a 300 s command
+    /// timeout — 2.5x over, not borderline. It times out, the statement rolls back, nothing is deleted,
+    /// and the next sweep retries the identical doomed slice. Retention on the largest table in the store
+    /// stops permanently, and the table only grows. No choice of horizon avoids it: the slice width is set
+    /// by the data at the old end, not by where the cutoff sits, so stepping the horizon down one day at a
+    /// time meets the same full day at the first step.</para>
+    ///
+    /// <para><b>Why a row cap is available here specifically.</b> The <c>ctid</c> row-cap idiom was
+    /// abandoned in #1564 because reading the <c>ctid</c> system column through TimescaleDB's transparent
+    /// decompression is unsupported, so it errored the moment any in-range chunk was compressed.
+    /// <c>query_plan_dim</c> is a PLAIN table, never a hypertable — that constraint has never applied to
+    /// it, and the fact tables that do need the compressed-safe shape keep
+    /// <see cref="TimeSlicedDeleteSql"/>.</para>
+    ///
+    /// <para><c>ORDER BY {timeColumn}</c> keeps the delete oldest-first, which the index on that column
+    /// serves directly (measured: the planner takes an index-only scan, and the sibling <c>min()</c> probe
+    /// costs 0.364 ms — the scan was never the expense). Oldest-first matters because progress has to be
+    /// monotonic: an unordered cap would nibble arbitrary rows and leave the floor where it was.</para>
+    /// </summary>
+    internal static string RowCappedDeleteSql(string table, string timeColumn, int cap) =>
+        $"DELETE FROM {table} WHERE ctid IN ("
+      + $"SELECT ctid FROM {table} WHERE {timeColumn} < $1 "
+      + $"ORDER BY {timeColumn} LIMIT {cap})";
 
     /// <summary>
     /// The dimension GC's cutoff (#1795): the ASSUMED horizon (widest dim-feeding fact retention +
@@ -882,8 +937,17 @@ public static class DarlingRetention
         string deleteSql,
         DateTime cutoff,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int batchSize = 1)
     {
+        /* Accumulated OUTSIDE the try so the catch can report progress (#2386). Each statement
+           autocommits, so a timeout on the fifth batch does not undo the first four — but the old
+           catch returned null and threw the running total away, and the sweep's summary then said
+           "0 row(s) deleted, 1 failed" for a purge that had removed 755k rows. That reads as total
+           paralysis, which is what made this bug look worse than it was and hid that progress was
+           being made one slice per sweep. */
+        var deleted = 0;
+
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -902,14 +966,52 @@ public static class DarlingRetention
             using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
             command.Parameters.AddWithValue(cutoff);
 
-            /* batchSize 1: the time-sliced statement has no row cap, so "fewer than the cap" degenerates
-               to "deleted zero rows" — a slice that clears anything means older slices may remain. */
-            return await DrainBatchesAsync(ct => command.ExecuteNonQueryAsync(ct), batchSize: 1, cancellationToken);
+            /* batchSize 1 for the TIME-SLICED statement: it has no row cap, so "fewer than the cap"
+               degenerates to "deleted zero rows" — a slice that clears anything means older slices may
+               remain. A ROW-capped caller passes its cap instead, which restores the drain loop's real
+               contract (a full-cap batch means there may be more). */
+            var batches = 0;
+            var drained = await DrainBatchesAsync(
+                async ct =>
+                {
+                    batches++;
+                    var rows = await command.ExecuteNonQueryAsync(ct);
+                    deleted += rows;
+                    return rows;
+                },
+                batchSize,
+                cancellationToken);
+
+            /* A row-capped drain reports the two facts the sweep summary cannot carry, because both are
+               per-table and the summary is fleet-wide.
+
+               The CUTOFF, because it is not the retention knob and reading it as the knob is a live trap:
+               ComputeDimensionCutoff subtracts the configured days PLUS a one-day margin for the hourly
+               last_seen refresh, so counting rows older than the knob value overstates what is eligible by
+               a full day of ingest — on this table that is hundreds of thousands of rows, which reads as a
+               backlog retention is failing to clear when it is simply not due yet.
+
+               And the BATCH COUNT, because rows-deleted alone cannot distinguish a drain from a peel. That
+               is the #2386 failure mode exactly: a purge that removed one bounded slice and reported
+               success looked identical in the log to one that cleared everything expired. One batch means
+               the table was already inside its horizon; many means there was a backlog and it is gone. */
+            if (batchSize > 1)
+            {
+                logger?.LogInformation(
+                    "Retention purge drained {Rows} row(s) from {Table} in {Batches} batch(es) (cap {Cap}), cutoff {Cutoff:yyyy-MM-dd HH:mm}Z",
+                    drained, tableName, batches, batchSize, cutoff);
+            }
+
+            return drained;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* Failure-isolated per table — one stuck DELETE must not stop the sweep. */
-            logger?.LogWarning("Retention purge failed for {Table}: {Message}", tableName, ex.Message);
+            /* Failure-isolated per table — one stuck DELETE must not stop the sweep. Reports what DID
+               land, because those batches are committed and saying otherwise sends an operator looking
+               for a stall that is really a throughput limit. */
+            logger?.LogWarning(
+                "Retention purge failed for {Table} after removing {Rows} row(s): {Message}",
+                tableName, deleted, ex.Message);
             return null;
         }
     }

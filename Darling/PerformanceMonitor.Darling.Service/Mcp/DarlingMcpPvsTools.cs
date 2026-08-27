@@ -51,9 +51,10 @@ public sealed class DarlingMcpPvsTools
             var rows = await DarlingPvsReader.GetPvsStatsLatestAsync(postgres, resolved.ServerId);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("empty",
-                    "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
-                    "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.");
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "pvs_stats")
+                    ?? McpHelpers.Status("empty",
+                        "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
+                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.");
             }
 
             var databases = rows.Select(r => new

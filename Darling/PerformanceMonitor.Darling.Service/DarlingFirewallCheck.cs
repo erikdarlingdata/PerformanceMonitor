@@ -115,6 +115,13 @@ internal static class DarlingFirewallCheck
     /// stores one per profile) and a single match would otherwise have no <c>.Count</c>.</item>
     /// </list>
     /// The name goes through the same single-quoted-literal escaping as the write builders.
+    /// <para>Takes either ONE rule's exact DisplayName — what <see cref="CheckAsync"/> asks, because the service
+    /// verifies the specific rule its own config wants — or a <see cref="SurfaceRuleWildcard"/>, which is what
+    /// <c>--configure-firewall</c>'s not-elevated branch asks (#2445): there the question is whether the sweep
+    /// it is about to hand over would remove anything, so the probe has to cover exactly what the sweep would
+    /// delete. Single quoting is literal to the SHELL and not to the cmdlet, so a <c>*</c> reaches
+    /// <c>-DisplayName</c> as the wildcard it is — the same way it does for the sweep's
+    /// <c>Remove-NetFirewallRule -DisplayName</c>, which is where that behaviour is already load-bearing.</para>
     /// </summary>
     internal static string BuildProbeCommand(string ruleName) =>
         $"$c = @(Get-NetFirewallRule -DisplayName {DarlingManagedPostgres.SingleQuotedPowerShell(ruleName)} " +

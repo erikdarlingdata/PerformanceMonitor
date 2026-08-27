@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -136,6 +136,31 @@ public static class PgMigrations
         new Migration(77, "activity-driven-plan-fetch", V77Sql),
         new Migration(78, "compose-statement-timeout", V78Sql),
         new Migration(79, "file-growth-alert", V79Sql),
+        new Migration(80, "collection-log-fanout-rollup", V80Sql),
+        new Migration(81, "tempdb-max-size", V81Sql),
+        new Migration(82, "server-engine-kind", V82Sql),
+        new Migration(83, "pg-database-stats", V83Sql),
+        new Migration(84, "pg-index-usage-stats", V84Sql),
+        new Migration(85, "pg-table-bloat-stats", V85Sql),
+        new Migration(86, "pg-session-states", V86Sql),
+        new Migration(87, "pg-plan-capture-readiness", V87Sql),
+        new Migration(88, "pg-write-stats", V88Sql),
+        new Migration(89, "pg-extension-availability", V89Sql),
+        new Migration(90, "pg-lock-stats", V90Sql),
+        new Migration(91, "pg-column-stats", V91Sql),
+        new Migration(92, "pg-replication-stats", V92Sql),
+        new Migration(93, "pg-buffer-usage", V93Sql),
+        new Migration(94, "pg-index-bloat", V94Sql),
+        new Migration(95, "pg-per-database-attribution", V95Sql),
+        new Migration(96, "pg-wait-sampling", V96Sql),
+        new Migration(97, "pg-kernel-stats", V97Sql),
+        new Migration(98, "pg-predicate-stats", V98Sql),
+        new Migration(99, "pg-plan-capture", V99Sql),
+        new Migration(100, "pg-major-version", V100Sql),
+        new Migration(101, "pg18-io-bytes", V101Sql),
+        new Migration(102, "pg-server-config", V102Sql),
+        new Migration(103, "pg-deadlocks", V103Sql),
+        new Migration(104, "pg-deadlock-identity-index", V104Sql),
     };
 
     /// <summary>
@@ -1566,7 +1591,10 @@ CREATE TABLE IF NOT EXISTS collect.pg_io_stats (
     reuses bigint,
     fsyncs bigint,
     fsync_time_ms double precision,
-    stats_reset timestamp
+    stats_reset timestamp,
+    read_bytes numeric(28,0),
+    write_bytes numeric(28,0),
+    extend_bytes numeric(28,0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_io_stats_time
@@ -1693,6 +1721,1114 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
 );
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
+
+    /// <summary>
+    /// V82 — the target-engine discriminator on the <c>collect.servers</c> registry (#2530). The registry
+    /// recorded <c>sql_engine_edition</c> and <c>sql_major_version</c> and nothing that says a target is
+    /// PostgreSQL, so a PostgreSQL server landed with edition <c>0</c> — byte-identical to a SQL Server that
+    /// has never completed a connect. That is not a fact that can be inferred, and everything the
+    /// PostgreSQL-parity work needs sits on top of being able to state it: the fleet card, both UIs' tab
+    /// choice, and the engine-KIND half of the #2511 capability answer.
+    ///
+    /// <para><b>A token, not a boolean.</b> <c>is_postgres</c> loses the Aurora distinction, which the
+    /// collectors already gate on (<c>aurora_stat_system_waits()</c> and the rest of the proprietary surface
+    /// core PostgreSQL has in no version), and a boolean cannot grow a third value without a second column
+    /// that means something only in combination with the first. The vocabulary lives in C#
+    /// (<c>MonitoredEngineKind</c>) rather than in a CHECK constraint on purpose: a constraint would make
+    /// every new token its own migration rung, and a store written by a NEWER service would then fail to
+    /// insert rather than merely being described conservatively by an older reader.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> — like V80 and V81, and here the reason is semantic as
+    /// well as operational. Defaulting to <c>'sqlserver'</c> would have every PostgreSQL target assert it is
+    /// SQL Server for the window between the migration and its next connect, which is precisely the wrong
+    /// claim to make by default; NULL says "no connect has stamped this yet", and the readers treat it as no
+    /// claim. The registry upsert runs on every successful connect, so the column populates itself within one
+    /// collection cycle for every live server without a backfill statement.</para>
+    ///
+    /// <para>No view refresh: <c>collect.servers</c> is a registry, not a hypertable, and has no
+    /// <c>v_</c> passthrough for a <c>SELECT *</c> column list to be frozen in.</para>
+    /// </summary>
+    private const string V82Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS engine_kind text;";
+
+    /// <summary>
+    /// V83 — <c>collect.pg_database_stats</c>, the <c>pg_stat_database</c> counters (#2539): temp-file
+    /// spills, the buffer-cache hit ratio, deadlocks, and the commit/rollback split. Four questions nothing
+    /// collected, off one cluster-wide view that needs no extension and nothing configured on the target.
+    ///
+    /// <para><b>Per-database rows, and the grain is the point.</b> <c>stats_reset</c> is per database
+    /// (<c>pg_stat_reset()</c> resets the database it is connected to), so an aggregate would have to pick
+    /// one reset timestamp for a set of rows that legitimately disagree — and a single database's reset
+    /// would then corrupt the cluster's delta with nothing left in the data to say so. The full argument is
+    /// on <c>PgDatabaseStatsCollector</c>.</para>
+    ///
+    /// <para><b>Every counter column is NULLABLE</b>, matching V69's reasoning: these are cumulative
+    /// counters that get differenced at read time, and a NOT NULL 0 default would turn "not reported" into
+    /// a measurement. <c>database_name</c> is nullable because PostgreSQL genuinely emits a NULL-named row
+    /// for shared relations, and <c>stats_reset</c> is nullable because it is NULL until the first reset —
+    /// the common case, and it means exactly "never reset".</para>
+    ///
+    /// <para>Additive and view-less exactly like V63-V69 and V71: a fresh store gets the table from V1's
+    /// generated schema, and this rung is what an already-existing store gets. A store monitoring no
+    /// PostgreSQL target carries one more empty table and nothing else changes.</para>
+    /// </summary>
+    private const string V83Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_database_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    xact_commit bigint,
+    xact_rollback bigint,
+    blks_read bigint,
+    blks_hit bigint,
+    temp_files bigint,
+    temp_bytes bigint,
+    deadlocks bigint,
+    stats_reset timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_database_stats_time
+    ON collect.pg_database_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V84 — <c>collect.pg_index_usage_stats</c> (#2541), the per-index scan counts, sizes and
+    /// droppability facts behind <c>get_pg_index_usage</c>.
+    ///
+    /// <para>Most of the width is the second half of the question. <c>index_scans</c> answers "does anything
+    /// use this"; <c>is_unique</c>, <c>is_primary_key</c>, <c>supports_constraint</c>,
+    /// <c>is_replica_identity</c>, <c>is_partial</c>, <c>is_expression</c>, <c>is_valid</c> and
+    /// <c>index_definition</c> answer "and can it therefore go", which is a different question with a much
+    /// worse failure mode. They are stored rather than looked up on demand because the MCP has no ad-hoc
+    /// path back to a monitored server: whatever is not captured here cannot be recovered later.</para>
+    ///
+    /// <para><c>last_scan</c> is nullable and NOT defaulted, because NULL is a real answer with two
+    /// meanings the read distinguishes — PostgreSQL 15 and below do not record it at all, and on 16+ it is
+    /// NULL for an index never scanned since the counters were reset. <c>stats_reset</c> is nullable for the
+    /// ordinary reason: it is NULL until a database's statistics are first reset, which is the common state
+    /// and means the counters run back to the beginning rather than that the value is unknown.</para>
+    /// </summary>
+    private const string V84Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_index_usage_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    index_name text,
+    index_scans bigint,
+    tuples_read bigint,
+    tuples_fetched bigint,
+    blocks_read bigint,
+    blocks_hit bigint,
+    index_bytes bigint,
+    table_bytes bigint,
+    is_unique boolean,
+    is_primary_key boolean,
+    is_valid boolean,
+    is_ready boolean,
+    is_replica_identity boolean,
+    is_partial boolean,
+    is_expression boolean,
+    supports_constraint boolean,
+    index_method text,
+    column_count integer,
+    index_definition text,
+    last_scan timestamp,
+    stats_reset timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_index_usage_stats_time
+    ON collect.pg_index_usage_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V85 — <c>collect.pg_table_bloat_stats</c> (#2542), the statistics-based per-table bloat estimate and
+    /// the counter-based dead-tuple pair beside it.
+    ///
+    /// <para><b>Three tiers of certainty share this table, and the column names carry the difference</b>
+    /// rather than leaving it to a doc. <c>heap_bytes</c> / <c>toast_bytes</c> / <c>index_bytes</c> are
+    /// MEASURED — <c>pg_relation_size</c> asks the filesystem. <c>live_tuples</c> / <c>dead_tuples</c> are
+    /// the server's own maintained counters. <c>bloat_bytes_estimate</c> and <c>bloat_pct_estimate</c> are
+    /// ARITHMETIC over column-width statistics, and are suffixed <c>_estimate</c> in the store so the
+    /// qualifier cannot be lost between here and a screen.</para>
+    ///
+    /// <para><b><c>estimate_unavailable</c> is load-bearing, not advisory.</b> It is TRUE when the estimate
+    /// has no basis — most commonly because the monitoring login lacks SELECT on the table, so
+    /// <c>pg_stats</c> filtered every row out. Measured against a <c>pg_monitor</c>-only role on a live
+    /// target, the estimator did not fail in that state: it reported 88.59% bloat for a table whose true
+    /// figure is 0.50%. A reader that renders the percentage while ignoring this flag ships an argument for
+    /// rewriting every table on the instance.</para>
+    ///
+    /// <para><c>estimated_tuple_bytes</c>, <c>estimated_heap_pages</c>, <c>fillfactor</c>,
+    /// <c>alignment_bytes</c> and <c>mods_since_analyze</c> are the estimator's own inputs, stored so the
+    /// number can be argued with rather than only believed — and <c>mods_since_analyze</c> specifically
+    /// because stale width statistics are the failure that produced an 81-percentage-point error in
+    /// testing, and modifications are the only way those statistics can go stale.</para>
+    /// </summary>
+    private const string V85Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_table_bloat_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    heap_bytes bigint,
+    heap_pages bigint,
+    toast_bytes bigint,
+    index_bytes bigint,
+    live_tuples bigint,
+    dead_tuples bigint,
+    mods_since_analyze bigint,
+    last_analyzed timestamp,
+    estimated_tuple_bytes double precision,
+    estimated_heap_pages bigint,
+    fillfactor integer,
+    bloat_bytes_estimate bigint,
+    bloat_pct_estimate numeric(5,2),
+    estimate_unavailable boolean,
+    alignment_bytes integer,
+    pgstattuple_available boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_table_bloat_stats_time
+    ON collect.pg_table_bloat_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V86 — <c>collect.pg_session_states</c> (#2540), the session side of the xmin horizon: which sessions
+    /// are holding a transaction open, for how long, and whether that transaction is what is pinning it.
+    ///
+    /// <para><b><c>horizon_age</c> is the column this table exists for.</b> <c>pg_xmin_horizon</c> already
+    /// names the CLASS of holder; this names the session and, crucially, is able to say that a session is
+    /// NOT one. Measured on a live PostgreSQL 16.15 instance, two of four idle-in-transaction shapes pin
+    /// nothing at all — a READ COMMITTED transaction that only read, and one whose UPDATE matched zero rows,
+    /// both report NULL for <c>backend_xmin</c> and <c>backend_xid</c>. <c>horizon_age</c> is <c>-1</c>
+    /// there, not <c>0</c>: 0 would read as "holding the newest possible xid", which is the opposite
+    /// finding, and confusing the two is how a read ends up telling someone to kill a session that is
+    /// costing them nothing.</para>
+    ///
+    /// <para><b>No query text column, deliberately</b>, and the absence is the design rather than an
+    /// oversight. <c>pg_stat_activity.query</c> carries literal parameter values inline — verified on the
+    /// live rig. <c>pg_blocking_edges</c> stores it because blocking is exceptional and the text IS the
+    /// finding; this table fills on a duration floor an ordinary application can cross, so the same column
+    /// would mean routinely accumulating user data to answer a question that does not need it.
+    /// <c>query_id</c> is PostgreSQL's own normalised fingerprint and joins to
+    /// <c>pg_statement_stats</c>, whose text is already normalised to <c>$1</c> placeholders;
+    /// <c>command_tag</c> is a whitelisted SQL keyword. It is nullable for three separate reasons the read
+    /// must keep apart — PostgreSQL 13 has no such column, 14+ reports NULL when <c>compute_query_id</c> is
+    /// off, and a redacted row reports NULL along with everything else privileged.</para>
+    ///
+    /// <para><b><c>state_is_redacted</c> exists because this feature fails silently without
+    /// <c>pg_monitor</c>.</b> Measured against a least-privileged role: PostgreSQL does not refuse the read,
+    /// it returns every row for every backend the login does not own with all but SIX columns NULL. What
+    /// survives is <c>pid</c>, <c>application_name</c>, <c>datname</c>, <c>usename</c>, <c>backend_xid</c>
+    /// and <c>backend_xmin</c>; <c>state</c>, <c>state_change</c>, <c>xact_start</c>, <c>query_start</c>,
+    /// <c>backend_start</c>, <c>wait_event_type</c>, <c>wait_event</c>, <c>backend_type</c>,
+    /// <c>client_addr</c>, <c>leader_pid</c> and <c>query_id</c> do not, and the query text is replaced by
+    /// an insufficient-privilege literal — leaving <c>backend_xmin</c> and <c>backend_xid</c> visible. So the horizon still reads as pinned and
+    /// every column that could explain it is gone. On the same live capture the privileged role saw four
+    /// idle-in-transaction sessions and the unprivileged one saw zero, out of the same nine backends. The
+    /// flag is derived from the privilege literal rather than from a NULL state because background workers
+    /// legitimately report NULL state under full privilege.</para>
+    ///
+    /// <para><c>total_sessions</c>, <c>active_sessions</c>, <c>idle_in_transaction_sessions</c> and
+    /// <c>reportable_sessions</c> repeat per row on purpose: a read that filters to the idle-in-transaction
+    /// rows still owes the reader "out of how many", and <c>reportable_sessions</c> above the stored row
+    /// count is what a capture truncated by the collector's row cap looks like.</para>
+    /// </summary>
+    private const string V86Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_session_states (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    backend_id bigint,
+    pid integer,
+    database_name text,
+    username text,
+    application_name text,
+    client_addr text,
+    backend_type text,
+    state text,
+    wait_event_type text,
+    wait_event text,
+    command_tag text,
+    query_id bigint,
+    state_duration_ms bigint,
+    xact_duration_ms bigint,
+    query_duration_ms bigint,
+    backend_duration_ms bigint,
+    xmin_age bigint,
+    xid_age bigint,
+    horizon_age bigint,
+    is_idle_in_transaction boolean,
+    is_horizon_holder boolean,
+    state_is_redacted boolean,
+    total_sessions integer,
+    active_sessions integer,
+    idle_in_transaction_sessions integer,
+    reportable_sessions integer
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_session_states_time
+    ON collect.pg_session_states(server_id, collection_time);";
+
+    /// <summary>
+    /// V87 — <c>collect.pg_plan_capture_readiness</c> (#2564): whether a PostgreSQL target could capture
+    /// execution plans at all, and if not, which step is missing.
+    ///
+    /// <para>One row PER FACET rather than one wide row per capture, because each facet has a different
+    /// remedy and the whole point is to say WHICH one is missing. A wide row would collapse "the library was
+    /// never loaded" and "the library is loaded and its threshold is -1" into the same shape, and those are a
+    /// parameter-group change plus a reboot versus a single setting.</para>
+    ///
+    /// <para><c>observed</c> is TEXT and stores what the server answered verbatim, not a parsed value. GUCs
+    /// render with their units on some settings and not others, and a store column typed to a number is how a
+    /// collector starts failing on one major version and not another — the raw answer keeps the row honest
+    /// and lets interpretation change without a migration.</para>
+    ///
+    /// <para><c>detail</c> is stored rather than derived on read for the same reason the collector frames it:
+    /// the remedy is specific to the facet AND to the platform, and a read that reconstructed it would drift
+    /// from what the collector actually observed.</para>
+    /// </summary>
+    private const string V87Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_plan_capture_readiness (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    facet text,
+    is_satisfied boolean,
+    observed text,
+    detail text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_plan_capture_readiness_time
+    ON collect.pg_plan_capture_readiness(server_id, collection_time);";
+
+    /// <summary>
+    /// V88 — <c>collect.pg_write_stats</c> (#2544): the write side of the cluster — checkpoints, background
+    /// writing and WAL, from <c>pg_stat_checkpointer</c>, <c>pg_stat_bgwriter</c> and <c>pg_stat_wal</c>.
+    ///
+    /// <para>ONE wide row, unlike every other recent PostgreSQL table here, because all three source views
+    /// are cluster-wide singletons — a snapshot is genuinely one row, and splitting three views that answer
+    /// one question would put the numerator and denominator of every useful ratio in different tables.</para>
+    ///
+    /// <para><b>The column set is the UNION across majors, and that is the point.</b> The source shape moves
+    /// twice: 17 took seven of <c>pg_stat_bgwriter</c>'s eleven columns (five renamed into the new
+    /// <c>pg_stat_checkpointer</c>, and <c>buffers_backend</c>/<c>buffers_backend_fsync</c> into
+    /// <c>pg_stat_io</c> instead), and 18 removed the four WAL timing columns while adding
+    /// <c>num_done</c>/<c>slru_written</c>. Every column is therefore NULLABLE and a major that does not
+    /// supply one stores NULL, so a store holding a 16 and an 18 target means the same thing in both rows.
+    /// The fleet this was written for is an even 26/26 split across the 16→17 break, so there is no majority
+    /// version to write against and fix up later.</para>
+    ///
+    /// <para><c>wal_bytes</c> is <c>numeric(38,0)</c> and not <c>bigint</c>: upstream types it
+    /// <c>numeric</c> precisely because cumulative WAL volume is allowed to exceed 2^63 over a long
+    /// uptime.</para>
+    ///
+    /// <para>All THREE <c>stats_reset</c> stamps are stored. <c>pg_stat_reset_shared</c> takes a target, so
+    /// they can be reset independently — a read differencing across a reset it could not see would report a
+    /// negative interval as an enormous positive one.</para>
+    /// </summary>
+    private const string V88Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_write_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    num_timed bigint,
+    num_requested bigint,
+    num_done bigint,
+    restartpoints_timed bigint,
+    restartpoints_req bigint,
+    restartpoints_done bigint,
+    checkpoint_write_time_ms double precision,
+    checkpoint_sync_time_ms double precision,
+    buffers_written_checkpoint bigint,
+    slru_written bigint,
+    checkpointer_stats_reset timestamp,
+    buffers_clean bigint,
+    maxwritten_clean bigint,
+    buffers_alloc bigint,
+    buffers_backend bigint,
+    buffers_backend_fsync bigint,
+    bgwriter_stats_reset timestamp,
+    wal_records bigint,
+    wal_fpi bigint,
+    wal_bytes numeric(38,0),
+    wal_buffers_full bigint,
+    wal_write bigint,
+    wal_sync bigint,
+    wal_write_time_ms double precision,
+    wal_sync_time_ms double precision,
+    wal_stats_reset timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_write_stats_time
+    ON collect.pg_write_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V89 — <c>collect.pg_extension_availability</c> (#2545): which extensions this target has, could
+    /// have, or cannot have — the third capability axis after engine kind and engine edition, and the only
+    /// one whose answer a customer can act on.
+    ///
+    /// <para>Four states rather than a boolean: <c>installed</c>, <c>outdated</c> (a newer
+    /// <c>default_version</c> exists, which matters because a stale extension can be missing columns a
+    /// collector reads), <c>available</c> (one <c>CREATE EXTENSION</c> away — the actionable one), and
+    /// <c>absent</c> (the server does not offer it at all).</para>
+    ///
+    /// <para><b>Scope warning carried in the column names.</b> <c>installed_version</c> is a claim about the
+    /// CONNECTED DATABASE only — <c>pg_extension</c> is per-database while <c>pg_available_extensions</c> is
+    /// cluster-wide, measured on one cluster reporting an extension installed in one database and not in
+    /// another. <c>default_version</c> is the cluster-wide half. A read that treats the two as the same
+    /// scope will report "not installed" about an extension living in the application database.</para>
+    ///
+    /// <para>Both version columns are TEXT and are compared for equality only, never ordered: extension
+    /// versions are free-form strings and deciding that 1.10 is newer than 1.9 needs a parser this has no
+    /// business carrying, when the server already names the default.</para>
+    /// </summary>
+    private const string V89Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_extension_availability (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    extension_name text,
+    state text,
+    installed_version text,
+    default_version text,
+    is_monitoring_relevant boolean,
+    comment text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_extension_availability_time
+    ON collect.pg_extension_availability(server_id, collection_time);";
+
+    /// <summary>
+    /// V90 — <c>collect.pg_lock_stats</c> (#2544, the locks slice): lock state by mode, type and relation.
+    ///
+    /// <para>Does NOT duplicate <c>pg_blocking_edges</c>, which reads <c>pg_blocking_pids()</c> and stores
+    /// blocked/blocker PAIRS. That answers "who is stuck behind whom" and cannot answer "what lock, in what
+    /// mode, on which relation" — which is the half that decides the remedy. An ungranted
+    /// <c>AccessExclusiveLock</c> is a DDL queue; <c>RowExclusiveLock</c> contention is ordinary write
+    /// traffic; the pair shape is identical and the advice is opposite.</para>
+    ///
+    /// <para>Aggregated by <c>(database, locktype, mode, granted, relation)</c> rather than one row per
+    /// lock, so the row count is bounded by CONTENTION rather than by concurrency — a busy server holds
+    /// thousands of lock rows and that is not the grain anyone reasons at.</para>
+    ///
+    /// <para><b>Both relation columns exist because of a scope mismatch.</b> <c>pg_locks</c> is cluster-wide
+    /// while <c>pg_class</c> is per-database, so a lock on a relation in another database resolves to an OID
+    /// with no name. <c>relation_oid</c> is stored regardless and <c>relation_name</c> is left NULL, because
+    /// dropping the row would hide real contention and naming it from the connected database's catalog would
+    /// name the wrong table. <c>relation_oid</c> is <c>bigint</c>, not <c>integer</c>: OIDs are unsigned
+    /// 32-bit and one past 2^31 lands negative in a signed int.</para>
+    ///
+    /// <para><c>oldest_wait_ms</c> is NULL on granted rows rather than 0 — zero would read as "granted
+    /// instantly", which is a measurement, where NULL is the absence of one.</para>
+    /// </summary>
+    private const string V90Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_lock_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    lock_type text,
+    mode text,
+    granted boolean,
+    relation_oid bigint,
+    relation_name text,
+    backend_count bigint,
+    oldest_wait_ms double precision
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_lock_stats_time
+    ON collect.pg_lock_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V91 — <c>collect.pg_column_stats</c> (#2543): the per-column planner statistics that explain WHY a
+    /// plan was chosen, as opposed to what it did.
+    ///
+    /// <para><b>The value-bearing columns are deliberately absent.</b> <c>most_common_vals</c> and
+    /// <c>histogram_bounds</c> hold raw column values — measured on a realistic table, they returned
+    /// customer names, an identifier fragment and live email addresses. Collecting them would copy customer
+    /// data into the monitoring store under our retention, the same exposure as the <c>auto_explain</c>
+    /// literals on #2538. Only <c>most_common_freqs[1]</c> survives, as
+    /// <c>top_value_frequency</c>: frequency carries the entire parameter-sensitivity signal (a top value at
+    /// 0.60 means one value covers 60% of the table) and carries no value itself.
+    /// <c>histogram_bounds</c> was also the largest column by bytes, so dropping both is cheaper as well as
+    /// safer.</para>
+    ///
+    /// <para><c>n_distinct</c> is <c>double precision</c> and NOT an integer count: negatives are a RATIO of
+    /// the row count, so <c>-1</c> means "distinct ≈ every row". An integer column would let a read render
+    /// "-1 distinct values".</para>
+    ///
+    /// <para>Per-database, because <c>pg_stats</c> describes the connected database only — and its rows are
+    /// filtered by <c>has_column_privilege</c>, so a monitoring role without SELECT sees nothing for a table
+    /// that exists. Zero rows therefore has two causes and the read must not report either as an absence of
+    /// problems.</para>
+    /// </summary>
+    private const string V91Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_column_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    column_name text,
+    n_distinct double precision,
+    null_frac double precision,
+    avg_width integer,
+    correlation double precision,
+    top_value_frequency double precision,
+    common_value_count integer
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_column_stats_time
+    ON collect.pg_column_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V92 — <c>collect.pg_replication_stats</c> (#2544, the replication slice): connected standbys and how
+    /// far behind each one is.
+    ///
+    /// <para>Distinct from <c>pg_replication_slots</c>, which records a promise to RETAIN WAL that exists
+    /// whether or not anybody is attached. This is the live connection. A server can have a slot with no
+    /// standby, a standby with no slot, or both.</para>
+    ///
+    /// <para><b>Four byte distances AND three time lags, because they answer differently.</b> Measured
+    /// against a real standby holding <c>pg_wal_replay_pause()</c>: <c>sent</c>, <c>write</c> and
+    /// <c>flush</c> were all ZERO while <c>replay</c> was <b>33.7 MB</b> behind — so the WAL had been
+    /// shipped, written and fsynced and the fault was purely apply, which no single column would have shown.
+    /// Meanwhile <c>state</c> still read <c>streaming</c>. The time lag moved to only 2.8 seconds for that
+    /// same 33.7 MB, because it times the round-trip of the most recently replayed record rather than
+    /// measuring the backlog; the byte distance is the proportionate one and the one to alert on.</para>
+    ///
+    /// <para>Every distance is measured from <c>pg_current_wal_lsn()</c> rather than from <c>sent_lsn</c>,
+    /// so a sender that has itself fallen behind is visible instead of being used as the baseline.</para>
+    /// </summary>
+    private const string V92Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_replication_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    application_name text,
+    client_addr text,
+    state text,
+    sync_state text,
+    sync_priority integer,
+    sent_bytes_behind bigint,
+    write_bytes_behind bigint,
+    flush_bytes_behind bigint,
+    replay_bytes_behind bigint,
+    write_lag_ms double precision,
+    flush_lag_ms double precision,
+    replay_lag_ms double precision,
+    backend_start timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_replication_stats_time
+    ON collect.pg_replication_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V93 — <c>collect.pg_buffer_usage</c> (#2544, the buffers slice): what is resident in shared buffers,
+    /// by relation. A hit ratio says how often the pool worked; this says what is IN it.
+    ///
+    /// <para>Needs the <c>pg_buffercache</c> extension, so a server without it records an
+    /// <c>ObjectMissing</c> outcome — now actionable, because <c>pg_extension_availability</c> (#2545)
+    /// reports whether it is one <c>CREATE EXTENSION</c> away.</para>
+    ///
+    /// <para><b><c>relation_name</c> is NULL for two different reasons and both are honest.</b> A buffer
+    /// belonging to ANOTHER database cannot be named from here — the pool is cluster-wide while
+    /// <c>pg_class</c> is per-database, and a filenode from elsewhere can collide with a local OID and
+    /// resolve to the WRONG name, measured. Those rows keep their database name and a NULL relation rather
+    /// than being dropped, because dropping them would understate how full the pool is. Shared catalogs have
+    /// no database at all, so both columns are NULL there.</para>
+    ///
+    /// <para>The collector joins on <c>pg_relation_filenode(oid)</c> and never on <c>oid</c> or the raw
+    /// <c>relfilenode</c> column: measured, after one <c>VACUUM FULL</c> the naive OID join reported ZERO
+    /// buffers for a table holding 6,667, and mapped catalogs carry <c>relfilenode = 0</c>.</para>
+    ///
+    /// <para><c>pool_buffers_total</c> and <c>pool_buffers_used</c> repeat on every row so a share is
+    /// computable without a second read against a pool that has since moved.</para>
+    /// </summary>
+    private const string V93Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    relation_name text,
+    relation_kind text,
+    buffers bigint,
+    dirty_buffers bigint,
+    avg_usage_count double precision,
+    pool_buffers_total bigint,
+    pool_buffers_used bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
+    ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V104 — the lookup index for <c>collect.pg_deadlocks</c> (#2661), and a SEPARATE rung on purpose.
+    ///
+    /// <para><c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c> requires a
+    /// collector's rung to be column-for-column and index-for-index what <c>PgSchemaGenerator</c> emits, and
+    /// the generator emits exactly one index per collector. An extra index inside V103 is not a drafting
+    /// error the pin should tolerate — it is the pin working, because a fresh store builds from the
+    /// generated schema and would silently not have it. Putting it in its own rung gives BOTH populations
+    /// the index, which is what was actually wanted.</para>
+    ///
+    /// <para><b>Why the index earns its place.</b> The collector re-reads an OVERLAPPING tail of the server
+    /// log every cycle, deliberately, so a report cut in half at one edge is whole in the next. Every read
+    /// therefore groups or filters on <c>deadlock_hash</c> to answer once per deadlock rather than once per
+    /// sighting, and the detail read looks a report up by hash directly.</para>
+    ///
+    /// <para><b>Not UNIQUE.</b> Two servers legitimately produce identical graph text — the same query pair
+    /// deadlocking with the same process ids on two hosts is not impossible — and a unique constraint would
+    /// also let a partial write during a crash block the next cycle's insert. Deduplication is a READ
+    /// concern here, and the reads already do it.</para>
+    /// </summary>
+    private const string V104Sql = @"
+CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_identity
+    ON collect.pg_deadlocks(server_id, deadlock_hash);";
+
+    /// <summary>
+    /// V103 — <c>collect.pg_deadlocks</c>, the deadlock reports PostgreSQL writes to its server log (#2661).
+    /// We collected the COUNT (<c>pg_stat_database.deadlocks</c>) and nothing else: a number that goes up.
+    /// This is which sessions, holding what, running what SQL.
+    ///
+    /// <para><b>The identity column is the point.</b> Both transports read a bounded TAIL of the log on a
+    /// schedule and the window OVERLAPS deliberately — a report cut in half at the edge of one read is whole
+    /// in the next — so without <c>deadlock_hash</c> the same deadlock is stored once per cycle for as long
+    /// as it stays inside the window. The hash is over the graph text rather than over
+    /// (timestamp, victim_pid): two reports in the same millisecond with the same victim pid are
+    /// vanishingly unlikely, but the graph is what actually distinguishes them, and hashing the thing
+    /// itself needs no argument about how unlikely a collision is.</para>
+    ///
+    /// <para><b><c>graph_text</c> is stored whole, beside the parsed columns.</b> The parsed fields are an
+    /// interpretation of a format that varies with the lock type — <c>transaction N</c>,
+    /// <c>relation N of database N</c>, <c>tuple (b,o) of relation N</c>, advisory locks — and the raw block
+    /// is the evidence. A shape the parser does not recognise today still arrives readable by a person
+    /// rather than as a row of NULLs.</para>
+    ///
+    /// <para><b>All value columns nullable</b>, matching the generated schema this must be identical to
+    /// (<c>PgSchemaGeneratorTests</c>). <c>occurred_at</c> is nullable for the same reason the others are:
+    /// it comes from parsing a log line, and the store's job is to record what was found rather than to
+    /// assert it was always found.</para>
+    /// </summary>
+    private const string V103Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_deadlocks (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    occurred_at timestamp,
+    victim_pid integer,
+    participant_count integer,
+    deadlock_hash text,
+    lock_modes text,
+    resources text,
+    victim_statement text,
+    graph_text text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_time
+    ON collect.pg_deadlocks(server_id, collection_time);";
+
+    /// <summary>
+    /// V102 — <c>collect.pg_server_config</c>, the server's own configuration from <c>pg_settings</c>
+    /// (#2658). SQL Server answers this three ways and PostgreSQL had no answer at all: nothing stored a
+    /// setting, so both "what is <c>work_mem</c> here" and "what changed last Tuesday" were unanswerable
+    /// after the fact — the second permanently, because no other part of the stack can reconstruct a
+    /// configuration history that was never recorded.
+    ///
+    /// <para><b>Every column is stored and nothing is filtered at collection.</b> <c>pg_settings</c> is a
+    /// per-BACKEND view, so <c>source</c> ranges from <c>default</c> through <c>configuration file</c> to
+    /// <c>client</c> — and a <c>client</c> row is the collector's own session, not the server. Dropping
+    /// those here would make them unrecoverable and would still leave the read guessing; keeping
+    /// <c>source</c> lets the read state which rows are server configuration and which are not. The rule
+    /// lives at the read, where it can be enforced and explained.</para>
+    ///
+    /// <para><b>It IS a hypertable, like every collector table</b> — <c>TimescaleSupport.HypertableTables</c>
+    /// is <c>CollectorCatalog.All</c>, so membership follows from being a collector and is not a per-table
+    /// choice. Worth stating because the shape argues the other way: this is a snapshot of something a
+    /// person changes, not a series of measurements, and the rows are wide-ish text that is nearly
+    /// identical from one hour to the next. Chunking and compression still earn their place on exactly that
+    /// data — a year of hourly near-duplicates is what compresses best — and the alternative would be a
+    /// special case in the one place that currently has none. It does mean CI's worker sizing moves:
+    /// <c>CiClusterWorkerSizingTests</c> derives the cluster's worker counts from the catalog count, so
+    /// adding a collector is also a workflow edit.</para>
+    ///
+    /// <para><b>All value columns nullable</b>, including <c>name</c>, because the generated schema is what
+    /// a fresh store builds from and it declares them that way — see
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>, which requires this
+    /// text to be column-for-column identical to what the generator walks out of
+    /// <c>PgServerConfigCollector.PayloadColumns</c>. A NOT NULL added by hand here and not there is the
+    /// permanent, invisible divergence that test exists to catch.</para>
+    /// </summary>
+    private const string V102Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_server_config (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    name text,
+    setting text,
+    unit text,
+    category text,
+    context text,
+    vartype text,
+    source text,
+    boot_val text,
+    reset_val text,
+    sourcefile text,
+    sourceline integer,
+    pending_restart boolean,
+    short_desc text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_server_config_time
+    ON collect.pg_server_config(server_id, collection_time);";
+
+    /// <summary>
+    /// V101 — the measured I/O byte totals PostgreSQL 18 gave <c>pg_stat_io</c> (#2655).
+    ///
+    /// <para><b>Why this is an upgrade and not a workaround.</b> 18 removed <c>op_bytes</c>, and
+    /// <see cref="PgIoStatsCollector"/> substituted NULL for it so a collection would not fail outright. That
+    /// kept the store readable and lost the answer: both byte figures the read serves are derived from
+    /// <c>op_bytes</c>, so on 18 they came back NULL with nothing saying why. The three columns 18 replaced it
+    /// with are strictly better than what was lost — <c>op_bytes</c> was the per-operation BLOCK SIZE, which
+    /// the read multiplied by a count to ESTIMATE volume; these are measured byte totals.
+    ///
+    /// <para><b>The estimate is not merely less precise on 18, it is wrong.</b> 18 also introduced vectored
+    /// reads, so one entry in <c>reads</c> can cover several blocks and <c>reads * block_size</c> undercounts.
+    /// Measured on a real 18.6: 479 reads against 4,440,064 read bytes — 542 blocks, not 479. That is the
+    /// reason the column was removed rather than merely renamed, and the reason these are stored separately
+    /// instead of being back-filled into <c>op_bytes</c>: they are a different quantity and a reader must be
+    /// able to tell which one it has.</para>
+    ///
+    /// <para><b><c>numeric</c>, not <c>bigint</c></b>, because that is what PostgreSQL declares them
+    /// (verified on 18.6 — <c>reads</c> is <c>bigint</c> while <c>read_bytes</c> is <c>numeric</c>). Storing
+    /// them as bigint would be a narrowing the catalog never promised; a byte total across a long uptime is
+    /// exactly the quantity that outgrows the assumption.
+    ///
+    /// <para>The <c>(28,0)</c> is not decoration and is not free to differ from the collector's declared
+    /// precision: <c>PgSchemaGeneratorTests</c> renders the schema from <c>PayloadColumns</c> and requires
+    /// every rung to match it exactly, so a bare <c>numeric</c> here and a <c>Decimal(28, 0)</c> there is a
+    /// build failure, correctly. Scale 0 because these are whole bytes; 28 rather than the 38 a DECIMAL can
+    /// hold because C# <c>decimal</c> tops out near 29 significant digits, and a declared width the runtime
+    /// type cannot carry is a promise broken at the reader rather than at the store.</para></para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> — as V69 and every counter rung since. These are
+    /// cumulative counters differenced at read time, and PostgreSQL itself uses NULL for "this counter does
+    /// not apply to this combination" (WAL rows report no <c>extend_bytes</c>, verified on 18.6). A NOT NULL
+    /// 0 would turn "not reported" into a measurement, which is the one thing the I/O read works hardest not
+    /// to do. Below 18 they stay NULL forever and <c>op_bytes</c> remains the answer.</para>
+    ///
+    /// <para><b>The columns are added in TWO places and both are required.</b> A store's tables come from
+    /// one of two texts depending on when it was created: a fresh store builds them from V1's generated
+    /// schema, walked from the collector catalog, while an existing store has whatever its rungs built. So
+    /// the <c>pg_io_stats</c> CREATE TABLE rung gains the three columns for the fresh population — that is
+    /// what <c>PgSchemaGeneratorTests</c> enforces, column for column — and THIS rung's ALTER carries the
+    /// existing one. Neither is redundant: the CREATE is <c>IF NOT EXISTS</c> and never re-runs on a store
+    /// that already has the table, and the ALTER is <c>ADD COLUMN IF NOT EXISTS</c> and is a no-op on the
+    /// fresh store that just created them. Dropping either leaves one population permanently without the
+    /// columns, which is exactly the invisible divergence that test exists to prevent.</para>
+    ///
+    /// <para>No view refresh: <c>collect.pg_io_stats</c> has no <c>v_</c> passthrough freezing a column
+    /// list.</para>
+    /// </summary>
+    private const string V101Sql = @"
+ALTER TABLE collect.pg_io_stats
+    ADD COLUMN IF NOT EXISTS read_bytes numeric(28,0),
+    ADD COLUMN IF NOT EXISTS write_bytes numeric(28,0),
+    ADD COLUMN IF NOT EXISTS extend_bytes numeric(28,0);";
+
+    /// <summary>
+    /// V100 — the PostgreSQL major version on the <c>collect.servers</c> registry (#2653). V82 gave the
+    /// registry <c>engine_kind</c>, which answers <i>which engine</i>; this answers <i>which version of
+    /// it</i>, and without it the read layer cannot explain its own NULLs.
+    ///
+    /// <para><b>The gap this closes.</b> Seven PostgreSQL collectors branch on
+    /// <c>postgresMajorVersion</c> and emit <c>NULL::bigint</c> for columns the target's version does not
+    /// have — <c>PgWriteStatsCollector</c> alone has nine, because 17 removed <c>buffers_backend</c> and
+    /// <c>buffers_backend_fsync</c> from <c>pg_stat_bgwriter</c> with no successor there. The collectors get
+    /// the version from the live probe and are correct. The READS have no connection and no column to read
+    /// it from, so a structurally-absent column arrives as a naked NULL and is indistinguishable from a
+    /// measurement that did not happen — the failure #2511 and #2623 exist to prevent, on the version
+    /// axis.</para>
+    ///
+    /// <para><b>Not inferable from the data.</b> Deriving "17 or later" from
+    /// <c>buffers_backend IS NULL</c> would work for that one column and is the wrong fix twice over: it
+    /// makes every read re-derive a fact the connector already held, and for any column where absent-on-this
+    /// -version and genuinely-NULL are both possible it cannot tell them apart.</para>
+    ///
+    /// <para><b>Integer, not the version string.</b> The major is what every gate in the collectors compares
+    /// against (<c>&gt;= 17</c>, <c>&gt;= 16</c>, <c>&gt;= 14</c>); <c>server_version_num</c> and the full
+    /// text are diagnostic detail that would have to be re-parsed at every use. <c>sql_major_version</c> next
+    /// door is the same choice for the same reason, which also settles why this is a second column rather
+    /// than a reuse of that one: a reader joining the two engines' versions in one integer has no way to
+    /// know which vocabulary a given number belongs to, and 17 is a real major in both.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> — as V82. NULL says "no connect has stamped this yet"
+    /// and the readers treat it as no claim rather than as a version. The registry upsert runs on every
+    /// successful connect, so the column populates itself within one collection cycle for every live server.
+    /// It stays NULL forever on a SQL Server target, which is correct: it is not a fact about that server.
+    /// </para>
+    ///
+    /// <para>No view refresh: <c>collect.servers</c> is a registry, not a hypertable, and has no
+    /// <c>v_</c> passthrough freezing a <c>SELECT *</c> column list.</para>
+    /// </summary>
+    private const string V100Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS postgres_major_version integer;";
+
+    /// <summary>
+    /// V99 — <c>collect.pg_plan_capture</c> (#2566, part of #2538): execution plans captured by
+    /// <c>auto_explain</c> and read out of the server log.
+    ///
+    /// <para><b>Its own table, NOT <c>query_plan_dim</c>.</b> That table holds SQL Server plan XML and
+    /// <c>plan_xml_compression = none</c> is a documented contract with direct-SQL consumers who read the
+    /// column as XML. Introducing JSON rows into it would break those readers silently — no schema change to
+    /// notice, no error, no version to key off. The compression codec and
+    /// <c>plan_content_retention_days</c> machinery is shared; the table is not.</para>
+    ///
+    /// <para><b>No query text and no literals, and that is the load-bearing part.</b> <c>auto_explain</c>
+    /// emits <c>Query Text</c> verbatim, and <c>auto_explain.log_parameter_max_length = 0</c> does NOT
+    /// suppress it — that setting covers bind parameters only (measured, #2565). Literals also sit inside the
+    /// plan tree in <c>Filter</c> and its relatives. So the text is dropped — statement identity is
+    /// <c>query_id</c>, whose normalised text already lives in <c>pg_statement_stats</c> — and every
+    /// remaining string is redacted before storage. Verified against 25 captured plans: zero literals
+    /// survived, while a relation genuinely named <c>transactionitems1</c> kept its name.</para>
+    ///
+    /// <para><b><c>plan_hash</c> is of the REDACTED plan</b>, so the same plan shape recurs to the same hash
+    /// whatever values it ran with. Hashing the raw text would defeat dedup exactly where it matters most.</para>
+    ///
+    /// <para>Self-hosted only in practice: reading the log needs <c>pg_read_server_files</c> AND an explicit
+    /// <c>GRANT EXECUTE ON FUNCTION pg_read_file</c> (the role alone does not carry it — measured). Aurora and
+    /// RDS have no filesystem and require the RDS API instead, which is a different integration (#2538).</para>
+    /// </summary>
+    private const string V99Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_plan_capture (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    query_id bigint,
+    plan_hash text,
+    duration_ms double precision,
+    node_count integer,
+    top_node_type text,
+    plan_json text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_plan_capture_time
+    ON collect.pg_plan_capture(server_id, collection_time);";
+
+    /// <summary>
+    /// V98 — <c>collect.pg_predicate_stats</c> (#2603): which columns are filtered on, how selectively, and
+    /// where the planner's estimate was wrong, from <c>pg_qualstats</c>.
+    ///
+    /// <para><c>pg_index_usage_stats</c> records indexes that were USED. This records predicates that were
+    /// EVALUATED, including the ones with no index behind them — which is the index-candidate signal, and is
+    /// invisible to everything else here because nothing records a scan that had no index to record.</para>
+    ///
+    /// <para><b><c>sample_rate</c> is stored per row and is usually not 1.</b> The extension defaults to
+    /// <c>1/max_connections</c> — 0.01 on the rig, where <c>pg_qualstats()</c> returned ZERO rows on a server
+    /// that had just run the queries it was meant to record. Counts read as complete are the failure this
+    /// column prevents.</para>
+    ///
+    /// <para><b><c>worst_estimate_error_ratio</c> is the reason to look</b> — measured at 57.9x on one
+    /// predicate beside 1.04x on another. Selectivity says an index might help; the error ratio says the
+    /// planner does not understand the column.</para>
+    ///
+    /// <para>Per database, because <c>lrelid</c>/<c>lattnum</c> are OIDs meaningful only inside their own
+    /// database while <c>pg_class</c> and <c>pg_attribute</c> are per-database catalogs. Unscoped, the join
+    /// either silently drops other databases' rows or resolves them against whatever local object shares the
+    /// OID and reports a confident wrong column name.</para>
+    /// </summary>
+    private const string V98Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_predicate_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    column_name text,
+    operator text,
+    query_id bigint,
+    sample_count bigint,
+    rows_evaluated bigint,
+    rows_filtered bigint,
+    worst_estimate_error_ratio double precision,
+    sample_rate double precision
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_predicate_stats_time
+    ON collect.pg_predicate_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V97 — <c>collect.pg_kernel_stats</c> (#2603): operating-system CPU and disk per query, from
+    /// <c>pg_stat_kcache</c>.
+    ///
+    /// <para><c>pg_stat_statements</c> reports elapsed time, which cannot separate a query that was WAITING
+    /// from one that was burning processor. These are the kernel's own numbers for the same
+    /// <c>queryid</c>, so the two compose.</para>
+    ///
+    /// <para><b><c>exec_read_bytes = 0</c> does not mean nothing was read.</b> The counters come from
+    /// <c>getrusage</c> and measure I/O that reached the DEVICE, so a read served by the OS page cache is
+    /// genuinely zero — measured that way across every row on the rig while writes were not zero. It is not
+    /// comparable to a logical-read figure and the column name says bytes for that reason.</para>
+    ///
+    /// <para>Only top-level statements. With <c>pg_stat_statements.track = 'all'</c> a nested statement
+    /// appears both on its own row and inside its caller's, and summing them double-counts every function
+    /// body on the server.</para>
+    ///
+    /// <para>Cumulative, differenced by the read. <c>stats_since</c> is stored so a reset is a recorded fact
+    /// rather than something inferred from a counter that went backwards.</para>
+    /// </summary>
+    private const string V97Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_kernel_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    query_id bigint,
+    exec_user_time_ms double precision,
+    exec_system_time_ms double precision,
+    plan_cpu_time_ms double precision,
+    exec_read_bytes bigint,
+    exec_write_bytes bigint,
+    minor_faults bigint,
+    major_faults bigint,
+    stats_since timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_kernel_stats_time
+    ON collect.pg_kernel_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V96 — <c>collect.pg_wait_sampling</c> (#2603): wait events attributed to the query that waited.
+    ///
+    /// <para>Wait analysis existed ONLY on Aurora before this. <c>PgWaitStatsCollector</c> reads
+    /// <c>aurora_stat_system_waits()</c>, so every self-hosted, on-prem and plain-RDS target had no wait
+    /// data at all — backwards, because self-hosted is where the extension story is richest.</para>
+    ///
+    /// <para><b><c>sample_count</c> is a tally of observations, not a duration</b>, and
+    /// <c>profile_period_ms</c> travels beside it because the count is uninterpretable alone. Storing a
+    /// derived millisecond figure would bake today's sampling period into history that outlives it.</para>
+    ///
+    /// <para><b>Cumulative, like <c>pg_statement_stats</c>.</b> A counter that goes backwards is a reset —
+    /// <c>pg_wait_sampling_reset_profile()</c> or a restart — rather than a negative wait, and the read owns
+    /// that subtraction so it can recognise the difference.</para>
+    ///
+    /// <para><b>No <c>database_name</c>, deliberately.</b> The profile is cluster-wide and version 1.1
+    /// exposes no database column, so attributing these rows to a database would be exactly the scope error
+    /// V95 removed from three other tables.</para>
+    ///
+    /// <para><c>event_type = 'Activity'</c> never reaches this table: those are background processes idling,
+    /// and they dominate a raw profile permanently BECAUSE nothing is happening. A backend that was not
+    /// waiting is stored as <c>CPU</c>/<c>Running</c> rather than as a blank row.</para>
+    /// </summary>
+    private const string V96Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_wait_sampling (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    event_type text,
+    event text,
+    query_id bigint,
+    sample_count bigint,
+    profile_period_ms integer,
+    backend_count integer
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_wait_sampling_time
+    ON collect.pg_wait_sampling(server_id, collection_time);";
+
+    /// <summary>
+    /// V95 — <c>database_name</c> on the three per-database PostgreSQL tables (#2599).
+    ///
+    /// <para>Three collectors ran once per database and wrote rows that could not be attributed to one.
+    /// <c>pg_column_stats</c> and <c>pg_index_bloat</c> both declared <c>RunsPerDatabase</c> and no
+    /// <c>database_name</c>, so on any cluster carrying the same schema in two databases — the ordinary
+    /// multi-tenant shape — their rows collided on (server, schema, object) with nothing to separate them.
+    /// <c>pg_extension_availability</c> had the inverse problem: it ran ONCE and reported
+    /// <c>installed</c>/<c>outdated</c>, which are per-database facts read from <c>pg_extension</c>, so its
+    /// answer depended on which database the target was configured for.</para>
+    ///
+    /// <para><b>How it surfaced.</b> On a live Aurora target two of our own collectors read
+    /// <c>pg_extension</c> for <c>pgstattuple</c> in the same cycle and disagreed:
+    /// <c>pg_table_bloat_stats</c> (already per-database) saw it installed, <c>pg_extension_availability</c>
+    /// reported it merely available. Both were right about their own database and neither row said which
+    /// database that was.</para>
+    ///
+    /// <para>Nullable with no DEFAULT and no backfill: it is a catalog-only change in PostgreSQL, so it
+    /// stays instant on a compressed hypertable, and rows collected before this rung genuinely do not know
+    /// which database they came from. NULL is the honest value for them rather than a guess at the
+    /// target's default database, which would be wrong for every row the sweep collected elsewhere.</para>
+    ///
+    /// <para><b>The column is ALSO added to the V89, V91 and V94 CREATE statements, and that is deliberate
+    /// rather than redundant.</b> Those rungs are hand-written literals held identical to the schema
+    /// generator's output by <c>EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>, and the generator now
+    /// emits the column — so leaving them alone would fail that assertion. The two paths converge either
+    /// way: a store new enough to create the tables here gets the column from the CREATE and this rung's
+    /// <c>ADD COLUMN IF NOT EXISTS</c> no-ops, while a store that already ran V89/V91/V94 without it gets it
+    /// from this rung. Neither path can reference a column before something establishes it, which is the
+    /// #2119 hazard these rungs are pinned against.</para>
+    /// </summary>
+    private const string V95Sql = @"
+ALTER TABLE collect.pg_column_stats
+    ADD COLUMN IF NOT EXISTS database_name text;
+
+ALTER TABLE collect.pg_index_bloat
+    ADD COLUMN IF NOT EXISTS database_name text;
+
+ALTER TABLE collect.pg_extension_availability
+    ADD COLUMN IF NOT EXISTS database_name text;";
+
+    /// <summary>
+    /// V94 — <c>collect.pg_index_bloat</c> (#2561): b-tree index bloat, MEASURED via <c>pgstatindex</c>
+    /// rather than estimated from column statistics.
+    ///
+    /// <para>The issue proposed porting the ioguix estimator. Measured, that route is unusable for the role
+    /// this product runs as: <c>pg_stats</c> returns ZERO rows to a <c>pg_monitor</c>-only login because the
+    /// view filters on <c>has_column_privilege</c> — the same trap behind #2542's 88.59% reported against a
+    /// true 0.50%. <c>pgstatindex</c> DOES run for <c>pg_monitor</c>, because pgstattuple grants EXECUTE to
+    /// <c>pg_stat_scan_tables</c>. Under our permissions the exact function works and the estimator is
+    /// blind.</para>
+    ///
+    /// <para><b><c>avg_leaf_density</c> is stored RAW and is not a bloat percentage.</b> Measured across
+    /// seven freshly-built indexes it sits between 89.98 and 91.48, and between 87.07 and 90.81 after
+    /// <c>REINDEX</c> — so <c>100 - density</c> invents roughly ten points of bloat on a perfect index, and
+    /// there is no constant to subtract because the healthy value varies per index. The server's own numbers
+    /// are kept and interpretation is left to the read.</para>
+    ///
+    /// <para><c>skipped_reason</c> exists so a size cap can never masquerade as an absence of bloat: the
+    /// function reads every page of an index, so very large ones are recorded with NULL measurements and a
+    /// stated reason rather than being dropped from the result.</para>
+    ///
+    /// <para>Only b-tree indexes are collected. <c>pgstatindex</c> RAISES on anything else — verified on
+    /// GIN, BRIN and hash — so one GIN index would otherwise take the whole collection down every cycle.
+    /// </para>
+    /// </summary>
+    private const string V94Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_index_bloat (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    index_name text,
+    index_bytes bigint,
+    tree_level integer,
+    internal_pages bigint,
+    leaf_pages bigint,
+    empty_pages bigint,
+    deleted_pages bigint,
+    avg_leaf_density double precision,
+    leaf_fragmentation double precision,
+    skipped_reason text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_index_bloat_time
+    ON collect.pg_index_bloat(server_id, collection_time);";
+
+    /// <summary>
+    /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is
+    /// where every other column in this table comes from, describes the data files AS CURRENTLY ALLOCATED. So
+    /// <c>total_reserved</c> ÷ (<c>total_reserved</c> + <c>unallocated</c>) — the <c>tempdb Space</c> alert's
+    /// percentage — is distance to the next AUTOGROW, and it only looks like real headroom on a pre-sized
+    /// on-prem box because such a tempdb has already grown to its cap.
+    ///
+    /// <para><b>What made this a bug rather than a tuning question.</b> Measured on <c>GP_S_Gen5_2</c>: four
+    /// tempdb data files of 16 MB each, 62.44 MB allocated, and <c>max_size</c> of 2,097,152 pages on every one
+    /// of them — a 65,536 MB ceiling. One ~57 MB <c>#temp</c> table reads 95.7% full against the allocation and
+    /// 0.09% against the cap, so enabling Azure collection (#2512) would have armed an alert that fires on the
+    /// first busy minute of every Azure target at the shipped 80% default.</para>
+    ///
+    /// <para><b>Why a column and not a derivation.</b> The obvious alternative is to read the cap out of
+    /// <c>database_size_stats</c>, which already carries <c>max_size_mb</c> per file — and on Azure SQL
+    /// Database that collector reads only the CONNECTED database's <c>sys.database_files</c>, so tempdb never
+    /// appears in it. The one platform this exists for is the one where the derivation has nothing to read.</para>
+    ///
+    /// <para>Nullable with no DEFAULT and no backfill, like V80 and for the same reasons: it is a catalog-only
+    /// change in PostgreSQL and stays instant on a compressed hypertable, and a row collected before this rung
+    /// genuinely does not know the ceiling. NULL reads as 0 in the adapter, which is the "no ceiling measured"
+    /// state — history keeps reporting the percentage it always did rather than dividing by a zero cap.</para>
+    /// </summary>
+    private const string V81Sql = @"
+ALTER TABLE collect.tempdb_stats
+    ADD COLUMN IF NOT EXISTS max_size_mb numeric(18,2);
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the V4 passthrough the analysis fact
+   collector reads would keep serving the twelve columns it had forever — the V14 lesson, restated by V80.
+   Appending is the one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN
+   produces. */
+CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;";
+
+    /// <summary>
+    /// V80 — the fan-out rollup on <c>collection_log</c> (#2472). A collector that runs once per DATABASE
+    /// writes ONE row whose <c>duration_ms</c> is the sum across every database, so an 80.8-second run is
+    /// indistinguishable between "eight databases at 10.1s each" and "one at 61.9s and seven at 2.7s" — two
+    /// shapes that want opposite fixes, which is why #2468 could not be decided. (#2472 writes the second as
+    /// 62s and rounds both to 80.9; they do not balance, and the claim under test is that the two are
+    /// indistinguishable, so the figures here are its shapes made exact.)
+    ///
+    /// <para><b>Which collectors, and it is two mechanisms rather than one.</b> Five drive the fan-out from
+    /// an ENUMERATION on any SQL Server target — <c>query_store</c>, <c>plan_correction</c>,
+    /// <c>query_store_health</c>, <c>index_object_stats</c>, <c>database_scoped_config</c>. Separately,
+    /// <c>RunsPerDatabase</c> puts eight on a per-database CONNECTION loop when the target is Azure SQL DB,
+    /// and <c>pg_autovacuum_stats</c> on one always. Both mechanisms feed the same accumulator, which is the
+    /// point: <c>query_store</c> uses the first on-prem and the second on Azure, so a rollup wired to only
+    /// one of them would report a different notion of a slow database depending on where it ran.</para>
+    ///
+    /// <para><b>Why three columns and not a table.</b> The per-database costs already exist; the runner logs
+    /// them and throws them away. A <c>collector_item_timings</c> hypertable would keep the whole
+    /// distribution and cost roughly a tenth of <c>collection_log</c>'s own row volume forever. These three
+    /// columns cost ZERO rows and are NULL on ~98% of them (only a productive fan-out run writes any), which
+    /// on a hypertable compressed and segmented by <c>server_id</c> is very nearly free. They answer the
+    /// specific question all three of #2468's live shapes need, and no more than that.</para>
+    ///
+    /// <para><b>The arithmetic they buy.</b> <c>slowest_item_ms * fanout_item_count / duration_ms</c> is the
+    /// dominance ratio: 1.0 is a perfectly even fan-out, and the worked example above gives 1.0 against 6.1.
+    /// <c>max_duration_ms</c> and <c>p95_duration_ms</c> (#2460) cannot separate those two — both runs are
+    /// 80,800 ms — which is why the tail statistics, real as they are, do not close this.</para>
+    ///
+    /// <para>Nullable with no DEFAULT on purpose: that is a catalog-only change in PostgreSQL and stays
+    /// instant on a large compressed hypertable, where adding a column WITH a default is the shape
+    /// TimescaleDB has historically refused. Backfill is deliberately absent — a historical row genuinely
+    /// does not know its fan-out, and NULL says so rather than inventing a zero.</para>
+    /// </summary>
+    private const string V80Sql = @"
+ALTER TABLE collect.collection_log
+    ADD COLUMN IF NOT EXISTS fanout_item_count integer,
+    ADD COLUMN IF NOT EXISTS slowest_item text,
+    ADD COLUMN IF NOT EXISTS slowest_item_ms integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough every read goes through
+   would keep serving eleven columns forever — the V14 lesson, and the reason it exists. Appending is the
+   one alteration CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
 
     /// <summary>
     /// V79 — the database file-growth alert (#2349). Between <c>tempdb Space</c> and <c>Volume Free Space</c>

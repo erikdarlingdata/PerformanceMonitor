@@ -37,9 +37,9 @@ public partial class DrillDownCollector
         string? planHandle = null;
         try
         {
-            using var readLock = _duckDb.AcquireReadLock();
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+            await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -54,16 +54,21 @@ LIMIT 1";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (await reader.ReadAsync() && !reader.IsDBNull(0))
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
                 planHandle = reader.GetString(0);
         }
-        catch { return; }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
+            /* No plan_handle for this hash — the fetch below has nothing to ask for. An abandonment
+               is NOT swallowed here (#2443). */
+            return;
+        }
 
         if (string.IsNullOrEmpty(planHandle)) return;
 
         // Fetch plan XML live from SQL Server
-        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle);
+        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
         if (string.IsNullOrEmpty(planXml)) return;
 
         try
@@ -128,10 +133,10 @@ LIMIT 1";
         {
             var planXmls = new List<string>();
 
-            using (var readLock = _duckDb.AcquireReadLock())
+            using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
             using (var connection = _duckDb.CreateConnection())
             {
-                await connection.OpenAsync();
+                await connection.OpenAsync(context.CancellationToken);
 
                 using var cmd = connection.CreateCommand();
                 cmd.CommandText = @"
@@ -147,8 +152,8 @@ LIMIT 10";
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-                using var reader = await cmd.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
                 {
                     if (!reader.IsDBNull(0))
                         planXmls.Add(reader.GetString(0));
@@ -188,9 +193,10 @@ LIMIT 10";
                     .ToList();
             }
         }
-        catch
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             // Plan read/parse can fail on malformed XML — skip, the detail is best-effort.
+            // An abandonment is NOT swallowed here (#2443).
         }
     }
 }

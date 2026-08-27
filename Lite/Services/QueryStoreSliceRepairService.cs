@@ -41,6 +41,22 @@ namespace PerformanceMonitorLite.Services;
 /// #1832's data-root move already established. A button was considered and rejected: a repair gated behind UI
 /// discovery leaves the users least equipped to find it holding wrong numbers permanently. See
 /// <see cref="RepairOnStartupAsync"/> for the once-only marker and the retry-on-partial behavior.</para>
+///
+/// <para><b>What cancellation means here (#2465).</b> Every entry point takes a token, and every one of them
+/// takes the DATABASE LOCK BEFORE it opens its connection — so a token that does not reach
+/// <c>AcquireReadLock</c> stops at the door, which is the hole #2454 found on the analysis pass and the one
+/// the analyzer surfaced here the moment that overload existed. The five acquisitions are split by what
+/// abandoning COSTS, not by whether the site reads or writes. The marker read, the survey and the archive
+/// rewrite-to-temp FORWARD it: each abandons into a state the next launch reproduces for free — a question
+/// re-asked, a survey re-run, an original file left untouched by construction. The two marker WRITES take
+/// <see cref="CancellationToken.None"/>: they record work that is already done and cannot be undone, and
+/// dropping the record does not undo it either — it only makes the next launch pay the whole survey again to
+/// rediscover there is nothing left to do. Every site states its own choice at the site.</para>
+///
+/// <para>The two <c>AcquireWriteLock</c> acquisitions are deliberately untouched by that, and not merely
+/// because CA2016 cannot see them (there is no token-taking overload). They are the genuinely
+/// maintenance-shaped acquisitions — the hot-table mutation with its CHECKPOINT, and the instant a live
+/// path's bytes are replaced — which is the one category #2463 does not put in question.</para>
 /// </summary>
 public sealed class QueryStoreSliceRepairService
 {
@@ -186,10 +202,17 @@ public sealed class QueryStoreSliceRepairService
     /// </summary>
     internal const string MarkerTable = "query_store_slice_repair";
 
-    /// <summary>True when a completed repair has already been recorded for this store.</summary>
+    /// <summary>
+    /// True when a completed repair has already been recorded for this store.
+    ///
+    /// <para>#2465 forwards the token to the LOCK as well as to the reads. This method asks a question and
+    /// writes nothing, so abandoning it costs nothing at all — the next launch asks it again — and there is
+    /// no reason for a caller holding a fired token to sit in an uninterruptible <c>EnterReadLock()</c>
+    /// behind an archival to learn an answer it has stopped wanting.</para>
+    /// </summary>
     public async Task<bool> AlreadyRepairedAsync(CancellationToken cancellationToken = default)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(cancellationToken);
 
@@ -246,11 +269,21 @@ public sealed class QueryStoreSliceRepairService
             if (!survey.HasWork && survey.Unreadable.Count == 0)
             {
                 /* Nothing to do — a fresh store, or one that only ever ran fixed builds. Record it so the
-                   survey does not run on every launch forever. */
-                using var readLock = _duckDb.AcquireReadLock();
+                   survey does not run on every launch forever.
+
+                   #2465: CancellationToken.None, and all the way through — the lock, the open and both
+                   statements. The survey immediately above ran under the token and RETURNED, so the token is
+                   known unfired a moment ago and forwarding here would buy an abandonment window microseconds
+                   wide. What that window would cost is the sentence directly above it: drop the marker and the
+                   survey runs again on the next launch, and the survey is the expensive thing this service has
+                   — a full GROUP BY over the hot table plus a read_parquet of every monthly archive file.
+                   None reaches the statements too rather than stopping at the lock, because "this write
+                   completes once started" contradicted three lines later would be worse than either choice
+                   made whole. */
+                using var readLock = _duckDb.AcquireReadLock(CancellationToken.None);
                 using var connection = _duckDb.CreateConnection();
-                await connection.OpenAsync(cancellationToken);
-                await MarkRepairedAsync(connection, 0, cancellationToken);
+                await connection.OpenAsync(CancellationToken.None);
+                await MarkRepairedAsync(connection, 0, CancellationToken.None);
                 return;
             }
 
@@ -265,10 +298,17 @@ public sealed class QueryStoreSliceRepairService
 
             if (result.FullyRepaired)
             {
-                using var readLock = _duckDb.AcquireReadLock();
+                /* #2465: CancellationToken.None, for the reason above and one more that is only true here.
+                   The repair is DONE — the hot table is collapsed and committed, every affected archive file
+                   has been rewritten and swapped — and none of that is undone by abandoning its record.
+                   Dropping the marker does not stop a repair; it only makes the next launch pay the full
+                   survey to rediscover that there is nothing left to repair. That makes this the one place in
+                   the file where abandoning loses something the next launch does not get back for free, and
+                   what it is protecting is two statements and one row. */
+                using var readLock = _duckDb.AcquireReadLock(CancellationToken.None);
                 using var connection = _duckDb.CreateConnection();
-                await connection.OpenAsync(cancellationToken);
-                await MarkRepairedAsync(connection, result.RowsRemoved, cancellationToken);
+                await connection.OpenAsync(CancellationToken.None);
+                await MarkRepairedAsync(connection, result.RowsRemoved, CancellationToken.None);
 
                 _logger?.LogInformation("#1912 one-time Query Store repair complete: {Rows} row(s) collapsed", result.RowsRemoved);
             }
@@ -289,9 +329,18 @@ public sealed class QueryStoreSliceRepairService
         }
     }
 
+    /// <summary>
+    /// Counts the split slices waiting in the hot table and in every archive file. Reads only; writes nothing.
+    ///
+    /// <para>#2465 forwards the token to the LOCK. This is the longest read the service has — a full GROUP BY
+    /// over <c>query_store_stats</c> and then a <c>read_parquet</c> of every monthly archive file — and the
+    /// lock is taken before any of it starts, so a survey queued behind an archival is precisely the pass that
+    /// is "abandonable everywhere except where it is actually stuck". Abandoning costs the survey and nothing
+    /// else: the marker is withheld, and the next launch redoes it.</para>
+    /// </summary>
     public async Task<Survey> SurveyAsync(CancellationToken cancellationToken = default)
     {
-        using var readLock = _duckDb.AcquireReadLock();
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(cancellationToken);
 
@@ -489,8 +538,15 @@ HAVING COUNT(*) > 1";
         long rewrittenExecutions;
 
         /* READ LOCK: everything up to and including verification. The original is only read; the only thing
-           written is the temp sibling, which nothing else knows about yet. */
-        using (_duckDb.AcquireReadLock())
+           written is the temp sibling, which nothing else knows about yet.
+
+           #2465 forwards the token, to the lock as well as to the reads. This phase is the expensive one — a
+           COPY across a whole monthly parquet — and abandoning it lands in a state the design already
+           handles rather than a new one: the original is untouched by construction, the marker is withheld,
+           and the next launch retries a repair the pre-fix signature makes idempotent. A cancelled COPY
+           strands the same temp sibling a FAILED one does, and the retry's COPY overwrites it; the archive
+           glob does not match the .repair-tmp suffix, so a stranded one is never read as an archive file. */
+        using (_duckDb.AcquireReadLock(cancellationToken))
         {
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);

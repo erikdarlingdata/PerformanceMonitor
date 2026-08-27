@@ -87,9 +87,11 @@ public static class ConnectionAlertPolicy
             return ConnectionAlertDecision.Restored;
         }
 
+        /* #2426: the window predicate is AlertRefireWindow's, not a fourth line of this method — the
+           AG re-fire needs the identical "non-positive is off, no stamp is due now" rules, and a second
+           hand-written copy of them is how the two would eventually disagree. */
         if (previousOnline == false && !online
-            && refireInterval is TimeSpan interval && interval > TimeSpan.Zero
-            && (lastDownAlertUtc is not DateTime last || nowUtc - last >= interval))
+            && AlertRefireWindow.IsDue(refireInterval, lastDownAlertUtc, nowUtc))
         {
             return ConnectionAlertDecision.StillDown;
         }

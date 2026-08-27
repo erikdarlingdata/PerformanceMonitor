@@ -15,7 +15,11 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The V79 rung (#2349) — the database file-growth alert's settings, and the top of the ladder.
+/// The V79 rung (#2349) — the database file-growth alert's settings. No longer the top of the ladder:
+/// V80 (#2472) took that, and the assertions that belong to whichever rung is newest moved with it to
+/// <see cref="CollectionLogFanoutRollupStoreTests"/>. What stays here is everything that is true of THIS
+/// rung forever — that it is registered, that its DDL is what it was, and that a store migrated to exactly
+/// 79 still maps to 79 rather than falling through a newer arm.
 /// </summary>
 public class FileGrowthAlertStoreTests
 {
@@ -25,8 +29,11 @@ public class FileGrowthAlertStoreTests
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("file-growth-alert", PgMigrations.Scripts.Single(s => s.Version == 79).Name);
-        Assert.Equal(79, versions.Max());
-        Assert.Equal(79, StorageVersion.SchemaVersion);
+
+        /* Demoted at V80 (#2472): "79 is the maximum" was true of the LADDER while this was its top rung,
+           not of this rung, and leaving it here is how a demotion turns into a red build on the next one.
+           The density and ordering checks below stay — those are properties of the whole ladder that every
+           rung's test may assert. */
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
@@ -51,26 +58,23 @@ public class FileGrowthAlertStoreTests
     }
 
     [Fact]
-    public void TheProbeAsksForTheColumn_AndTheThreePlacesAgree()
+    public void TheProbeAsksForTheColumn_AndTheReaderStillFetchesItsOrdinal()
     {
         Assert.Contains(
             "table_name = 'config_alert_settings' AND column_name = 'file_growth_enabled'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        var mapParameters = typeof(ViewerDataService)
-            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .GetParameters().Length;
-
-        var viewerSource = ReadViewerSource();
-
-        Assert.Contains($"reader.GetBoolean({mapParameters - 1})", viewerSource, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({mapParameters})", viewerSource, StringComparison.Ordinal);
+        /* Demoted at V81 (#2515), and it should have been at V80. This read `mapParameters - 1`, which is
+           the NEWEST sentinel's ordinal — correct only while V79 was the top rung, and from V80 onwards it
+           was quietly asserting a later rung's wiring while reading as though it still guarded this one.
+           Pinned at 54, this rung's own ordinal, which cannot slide. The "and no more than that" half
+           belongs to whichever rung is newest and lives there. */
+        Assert.Contains("reader.GetBoolean(54)", ReadViewerSource(), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreTo79()
+    public void TheProbeMapsAStoreAtExactly79To79()
     {
-        Assert.Equal(79, StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService)
@@ -80,7 +84,8 @@ public class FileGrowthAlertStoreTests
         /* 54 positional sentinels, then this rung's own, then FALSE for anything a later rung appends. The
            leading count is FIXED at this rung's ordinal deliberately: deriving it from arity (`arity - 1`)
            reads identically while this is the top rung, then slides the flag one place right per new rung —
-           the assertion keeps passing while quietly testing a newer arm. */
+           the assertion keeps passing while quietly testing a newer arm. V80 has since been appended and
+           this test needed no edit, which is the fixed count doing exactly what it was written for. */
         var all = Enumerable.Repeat(true, 54).Cast<object>().ToArray();
         object[] Args(bool ownFlag) => all
             .Concat(new object[] { ownFlag })

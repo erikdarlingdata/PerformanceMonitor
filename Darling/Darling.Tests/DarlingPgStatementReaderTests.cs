@@ -8,6 +8,7 @@
 
 using System;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -94,7 +95,7 @@ public class DarlingPgStatementReaderTests
 
         /* Rolled up to the coarser grain a "top queries" answer wants, AFTER the differencing. */
         var windowAt = Sql.IndexOf("WINDOW series AS", StringComparison.Ordinal);
-        var groupAt = Sql.IndexOf("GROUP BY queryid, database_id", StringComparison.Ordinal);
+        var groupAt = Sql.IndexOf("GROUP BY differenced.queryid, database_id", StringComparison.Ordinal);
         Assert.True(windowAt < groupAt);
     }
 
@@ -130,7 +131,11 @@ public class DarlingPgStatementReaderTests
     [Fact]
     public void GroupsByQueryIdentityNotQueryIdAlone()
     {
-        Assert.Contains("GROUP BY queryid, database_id", Sql, StringComparison.Ordinal);
+        /* #2554: QUALIFIED. The LEFT JOIN put t.queryid in scope, so a bare `queryid` here was ambiguous
+           (42702) and the read threw on every call, on every engine. Pinned in the qualified form
+           deliberately — reverting to the bare one restores a query that cannot parse, so this assertion
+           says WHICH form is correct rather than merely that a GROUP BY exists. */
+        Assert.Contains("GROUP BY differenced.queryid, database_id", Sql, StringComparison.Ordinal);
     }
 
     /// <summary>Total time is the currency: heaviest first, and bounded.</summary>

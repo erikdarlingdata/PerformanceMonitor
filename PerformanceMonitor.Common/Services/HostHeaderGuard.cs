@@ -34,7 +34,9 @@ public static class HostHeaderGuard
     /// Is this request's <c>Host</c> header one this server actually binds? Allowed: an absent/empty Host
     /// (HTTP/1.0 and some health probes), the name <c>localhost</c>, any loopback IP literal
     /// (<c>127.0.0.1</c>, <c>::1</c>, and the IPv4-mapped-IPv6 form), and — only when LAN-exposed — the
-    /// configured listen IP in <paramref name="networkListenIp"/>. Everything else is rejected, which is
+    /// configured listen IP in <paramref name="networkListenIp"/> — or, when that listen is a WILDCARD
+    /// (<c>0.0.0.0</c> / <c>::</c>), any IP literal, because a wildcard names no single address to compare
+    /// against (#2569). Everything else is rejected, which is
     /// exactly the rebound foreign hostname resolving to 127.0.0.1. Pass <c>null</c> for
     /// <paramref name="networkListenIp"/> in loopback-only mode (Lite always; Darling until an operator opts
     /// into LAN exposure), where only the loopback Hosts pass.
@@ -61,7 +63,35 @@ public static class HostHeaderGuard
                 return true;
             }
 
-            if (networkListenIp is not null && ip.Equals(networkListenIp))
+            if (networkListenIp is null)
+            {
+                return false;
+            }
+
+            if (ip.Equals(networkListenIp))
+            {
+                return true;
+            }
+
+            /* A WILDCARD listen (#2569). Comparing the Host against 0.0.0.0 can only ever match the literal
+               string "0.0.0.0", which no client sends — so every real LAN request was refused with a 400, and
+               that is precisely what the compose distribution ships for both surfaces. Measured through a real
+               pipeline before this arm existed: `Host: 192.168.1.205` -> HTTP 400, `Host: localhost` -> 200.
+
+               "Any IP literal" is the rule here, and the reason is that with a wildcard bind THERE IS NO
+               single correct address to compare against. The obvious alternative — enumerate this machine's
+               own interfaces at bind time — is worse than it looks and would not have fixed the case that
+               motivated this: inside a container the local interfaces are the container's (172.18.0.3), while
+               the address the browser used is the host's published one, which the container cannot see. NAT,
+               port forwarding and multi-homing break it the same way, and it fails SILENTLY, as a 400.
+
+               THE REBINDING DEFENCE IS UNCHANGED, which is what makes this safe rather than a loosening. A DNS
+               rebind necessarily arrives with a HOSTNAME in the Host header — that is the whole mechanism: the
+               victim's browser loaded http://evil.com, so it sends `Host: evil.com` and considers the response
+               same-origin. A hostname still never reaches this line. What is admitted is an IP literal, which
+               a rebind cannot produce, and which in any case still has to pass the surface's CIDR check and
+               its token before it reaches anything. */
+            if (networkListenIp.Equals(IPAddress.Any) || networkListenIp.Equals(IPAddress.IPv6Any))
             {
                 return true;
             }

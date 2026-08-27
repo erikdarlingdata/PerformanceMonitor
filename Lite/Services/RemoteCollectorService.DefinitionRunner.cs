@@ -43,6 +43,12 @@ public partial class RemoteCollectorService
         telemetry.SqlMs = 0;
         telemetry.StorageMs = 0;
         telemetry.Note = null;
+        telemetry.Fanout = null;
+
+        /* The per-database rollup (#2472), fed by both fan-out shapes — the Azure per-database connection
+           loop and the enumeration driver's onItemComplete hook — through the same shared accumulator the
+           Darling runner uses, so the two SKUs cannot come to disagree about what a slow database is. */
+        var fanout = new FanoutCostAccumulator();
 
         var status = _serverManager.GetConnectionStatus(server.Id);
         var target = new CollectorTargetInfo
@@ -195,6 +201,11 @@ public partial class RemoteCollectorService
             var failed = 0;
             Exception? firstFailure = null;
 
+            /* #2623: the names, not just the count. A partial loss composes a note naming which databases
+               were skipped, because the count alone does not tell an operator whether the ONE database
+               that matters is in the collected set or the skipped one. Mirrors Darling. */
+            var failedDatabases = new List<string>();
+
             /* #1875: this path reads the trailing probe-failure set once PER DATABASE, so the note and the
                log cap are decided for the cycle after the loop rather than inside it — see
                CycleProbeFailures for why neither generalizes from the single-read plain path. */
@@ -236,7 +247,7 @@ public partial class RemoteCollectorService
                            documented first-run window, per database. No clamp is applied HERE because
                            this branch also serves the XE ring-buffer collectors (deadlocks / BPR),
                            where flooring a stale watermark would WRONGLY truncate legitimate catch-up
-                           — those sources roll past 24h on their own. query_store also reaches this
+                           — those sources roll past the catch-up horizon on their own. query_store also
                            branch on Azure SQL DB (#1836) and does need the bound, so it applies
                            WatermarkPolicy.ClampCatchup inside its own cutoff computation: the clamp
                            travels with the collector that needs it instead of with the path. */
@@ -354,15 +365,26 @@ public partial class RemoteCollectorService
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
-                    sqlMs += sqlSlice.ElapsedMilliseconds;
+                    /* Read ONCE: the stopwatch is still running, so a second read a few statements later
+                       returns a larger number and the per-item total would exceed the blended total it is
+                       a ratio against (#2472). */
+                    var dbSqlMs = sqlSlice.ElapsedMilliseconds;
+                    sqlMs += dbSqlMs;
 
                     /* Flush this database before reading the next — peak memory is one database's rows. */
+                    long dbStorageMs = 0;
                     if (batch.Count > 0)
                     {
                         var storageSlice = Stopwatch.StartNew();
                         rowsWritten += WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context);
-                        storageMs += storageSlice.ElapsedMilliseconds;
+                        dbStorageMs = storageSlice.ElapsedMilliseconds;
+                        storageMs += dbStorageMs;
                     }
+
+                    /* #2472: this database's slice, counted even when its batch was empty — an empty batch
+                       still paid for its read, and that read is in the blended total the rollup is a ratio
+                       against. */
+                    fanout.Observe(databaseName, dbSqlMs + dbStorageMs);
 
                     /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete. Reachable here since #1836 put query_store — the only collector
@@ -417,6 +439,7 @@ public partial class RemoteCollectorService
                     var budgetFailure = EnumeratedCollectorDriver.ItemBudgetException(
                         definition.PerItemWallClockBudget!.Value);
                     failed++;
+                    failedDatabases.Add(databaseName);
                     firstFailure ??= budgetFailure;
 
                     /* Same #2111 stamp the generic arm makes, and it MATTERS more here: this is what turns
@@ -439,6 +462,7 @@ public partial class RemoteCollectorService
                     /* OOM is filtered OUT of this per-database skip and propagates: it is fatal, not a
                        routine one-database miss. */
                     failed++;
+                    failedDatabases.Add(databaseName);
                     firstFailure ??= ex;
 
                     /* #2111: the yield-to-live stamp + adaptive-shrink count for the Azure SQL DB
@@ -460,7 +484,10 @@ public partial class RemoteCollectorService
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
                which is exactly what this path carried before. */
-            telemetry.Note = cycleProbeFailures.Note;
+            telemetry.Note = EnumeratedCollectorDriver.MergeNotes(
+                cycleProbeFailures.Note,
+                EnumeratedCollectorDriver.BuildPartialFailureNote(
+                    failed, attempted, failedDatabases, firstFailure?.Message));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
@@ -556,7 +583,7 @@ public partial class RemoteCollectorService
 
                 var driverResult = await EnumeratedCollectorDriver.RunAsync<TRow>(
                     items,
-                    /* Per-database watermark refresh + the 24h catch-up clamp, computed INSIDE the loop —
+                    /* Per-database watermark refresh + the catch-up clamp, computed INSIDE the loop —
                        this is the per-item cutoff site the plan's LOUD FLAG requires the clamp to live at.
                        Only query_store (the sole enumeration collector with a per-database timestamp
                        watermark) reaches this; the two snapshot collectors are watermark-less. */
@@ -654,6 +681,11 @@ public partial class RemoteCollectorService
                     writeBatch: (batch, ct) => Task.FromResult(WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context)),
                     onItemComplete: (item, batchCount, itemSqlMs, itemStorageMs) =>
                     {
+                        /* #2472: the per-database cost the blended collection_log row cannot carry.
+                           Counted for every completed item, including the quiet ones the log line below
+                           skips — their read time is in the blended total too. */
+                        fanout.Observe(item, itemSqlMs + itemStorageMs);
+
                         /* #2111: a completed item resets the adaptive-shrink count — recovery returns
                            the member to the full catch-up width on its next cycle. */
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
@@ -805,6 +837,7 @@ public partial class RemoteCollectorService
 
         telemetry.SqlMs = sqlMs;
         telemetry.StorageMs = storageMs;
+        telemetry.Fanout = fanout.Result;
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'", rowsWritten, definition.Name, server.DisplayName);
         return rowsWritten;

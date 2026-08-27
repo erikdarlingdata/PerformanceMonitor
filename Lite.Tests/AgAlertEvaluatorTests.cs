@@ -101,6 +101,137 @@ public class AgAlertEvaluatorTests
         Assert.True(back.IsResolution);
     }
 
+    /* ---------------- #2426: the disconnect re-fire ---------------- */
+
+    private static readonly DateTime Noon = new(2026, 8, 20, 12, 0, 0, DateTimeKind.Utc);
+    private static readonly TimeSpan Refire = TimeSpan.FromMinutes(10);
+
+    [Fact]
+    public void DisconnectRefire_ReAnnouncesUnderTheSameMetricName_AndSaysThatItIsStill()
+    {
+        var now = Noon;
+        var e = new AgAlertEvaluator(() => now);
+
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire);
+
+        var lost = Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        Assert.Equal(AgAlertPolicy.ReplicaDisconnectedMetric, lost.MetricName);
+        Assert.DoesNotContain("STILL", lost.DetailText, StringComparison.Ordinal);
+        e.NoteDelivered(lost);
+
+        /* Inside the window there is nothing new to say. */
+        now = now.AddMinutes(5);
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+
+        /* Past it: the SAME metric name, because webhook automation keyed on it is what a re-fire exists to
+           re-trigger — and a detail that tells an operator reading the history this is hour two, not a
+           second outage. */
+        now = now.AddMinutes(6);
+        var again = Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        Assert.Equal(AgAlertPolicy.ReplicaDisconnectedMetric, again.MetricName);
+        Assert.False(again.IsResolution);
+        Assert.Contains("STILL DISCONNECTED", again.DetailText, StringComparison.Ordinal);
+        Assert.Contains("re-alerting every 10 min", again.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DisconnectRefire_TheWindowOpensOnDeliveryOnly_NotOnTheDecision()
+    {
+        var now = Noon;
+        var e = new AgAlertEvaluator(() => now);
+
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire);
+
+        /* Evaluated and NOT delivered — exactly what MainWindow does every sweep while a server is
+           acknowledged or silenced. */
+        Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+
+        /* So nothing consumed the window, and the next sweep still has something to say. Stamping on the
+           decision instead would spend window after window on alerts nobody received, and the operator
+           would come back from an acknowledgement to silence. */
+        now = now.AddMinutes(1);
+        var again = Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        Assert.Contains("STILL DISCONNECTED", again.DetailText, StringComparison.Ordinal);
+
+        /* Delivered this time, so the clock finally starts. */
+        e.NoteDelivered(again);
+        now = now.AddMinutes(1);
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+    }
+
+    [Fact]
+    public void DisconnectRefire_ReconnectClearsTheClock_SoTheNextOutageIsNotHeldQuietByTheLastOnes()
+    {
+        var now = Noon;
+        var e = new AgAlertEvaluator(() => now);
+
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire);
+        e.NoteDelivered(Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire)));
+
+        now = now.AddMinutes(1);
+        Assert.True(Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire)).IsResolution);
+
+        /* A second outage a minute later whose opening edge is suppressed. With the clock cleared the next
+           sweep re-announces; with the first episode's stamp still on it, this replica would sit silent for
+           the remaining eight minutes of a window that belongs to an outage already over. */
+        now = now.AddMinutes(1);
+        Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+
+        now = now.AddMinutes(1);
+        var again = Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        Assert.Contains("STILL DISCONNECTED", again.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DisconnectRefire_EachReplicaKeepsItsOwnClock()
+    {
+        var now = Noon;
+        var e = new AgAlertEvaluator(() => now);
+
+        e.EvaluateReplicas(ServerId, new[]
+        {
+            Replica(connected: "CONNECTED", replica: "NODE2"),
+            Replica(connected: "CONNECTED", replica: "NODE3"),
+        }, Refire);
+
+        var lost = e.EvaluateReplicas(ServerId, new[]
+        {
+            Replica(connected: "DISCONNECTED", replica: "NODE2"),
+            Replica(connected: "DISCONNECTED", replica: "NODE3"),
+        }, Refire);
+        Assert.Equal(2, lost.Count);
+
+        /* Only NODE2's alert was delivered; NODE3's window is still open. */
+        Assert.Contains("NODE2", lost[0].DetailText, StringComparison.Ordinal);
+        e.NoteDelivered(lost[0]);
+
+        now = now.AddMinutes(1);
+        var again = Assert.Single(e.EvaluateReplicas(ServerId, new[]
+        {
+            Replica(connected: "DISCONNECTED", replica: "NODE2"),
+            Replica(connected: "DISCONNECTED", replica: "NODE3"),
+        }, Refire));
+        Assert.Contains("NODE3", again.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DisconnectRefire_Forget_DropsTheClockWithTheRestOfTheState()
+    {
+        var now = Noon;
+        var e = new AgAlertEvaluator(() => now);
+
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire);
+        e.NoteDelivered(Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire)));
+
+        e.Forget(ServerId);
+
+        /* Re-added a minute later: a first sighting again, and with re-fire on that announces rather than
+           baselining silently. A clock that survived Forget would hold it quiet for nine more minutes. */
+        now = now.AddMinutes(1);
+        var again = Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        Assert.Contains("STILL DISCONNECTED", again.DetailText, StringComparison.Ordinal);
+    }
+
     /* ---------------- suspended ---------------- */
 
     [Fact]

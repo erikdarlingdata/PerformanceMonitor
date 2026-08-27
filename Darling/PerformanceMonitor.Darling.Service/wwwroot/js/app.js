@@ -11,7 +11,8 @@
  * refresh loop. Routes:
  *   #/fleet             — Fleet Overview (default)
  *   #/ag                — Availability Group topology (#991; nav entry revealed only when the store has AG data)
- *   #/server/{name}     — one server's detail
+ *   #/server/{name}     — one server's detail (Overview)
+ *   #/server/{name}/{tab} — one server's detail, opened on a named sub-tab (pages/server-tabs.js)
  *   #/alerts            — fleet-wide Alert History
  *   #/views             — Custom Views list (#1563)
  *   #/view/{id}         — a saved custom view, rendered (#1563)
@@ -48,7 +49,7 @@ const statusbar = document.getElementById("statusbar");
 
 function currentRoute() {
   const h = location.hash || "#/fleet";
-  if (h.startsWith("#/server/")) return { name: "server", param: decodeURIComponent(h.slice("#/server/".length)) };
+  if (h.startsWith("#/server/")) return serverRoute(h.slice("#/server/".length));
   if (h === "#/ag" || h === "#/ag/") return { name: "ag" };
   if (h.startsWith("#/alerts")) return { name: "alerts" };
   /* #/views (list) is checked before the #/view/ forms; and the /edit form is tested before the bare /view/. */
@@ -70,10 +71,25 @@ function currentRoute() {
   return { name: "fleet" };
 }
 
+/* #/server/{name} and #/server/{name}/{tab} — the sub-tab id rides in the hash so a tab is deep-linkable and
+   survives the 60s refresh (which re-renders the whole route). The name is always encodeURIComponent'd by
+   navigateServer, so a '/' inside a server name arrives as %2F and this split is unambiguous; a hand-typed hash
+   carrying a RAW '/' in the name was already ambiguous before the tab segment existed. An unknown tab id is not
+   an error — findServerTab falls back to Overview — so every pre-existing #/server/{name} link still works. */
+function serverRoute(rest) {
+  const slash = rest.indexOf("/");
+  if (slash < 0) return { name: "server", param: decodeURIComponent(rest) };
+  return {
+    name: "server",
+    param: decodeURIComponent(rest.slice(0, slash)),
+    tab: decodeURIComponent(rest.slice(slash + 1)),
+  };
+}
+
 function route() {
   const r = currentRoute();
   setActiveNav(r);
-  if (r.name === "server") renderServer(main, r.param);
+  if (r.name === "server") renderServer(main, r.param, r.tab);
   else if (r.name === "ag") renderAg(main);
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "views") renderViewList(main);
