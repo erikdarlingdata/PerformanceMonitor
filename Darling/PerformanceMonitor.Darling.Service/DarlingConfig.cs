@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -1168,19 +1168,83 @@ public static class DarlingNetwork
     /// default <c>viewer</c> (read-only remote, D7); <c>viewer</c>/<c>admin</c> pass through
     /// (case-insensitively); anything else ⇒ null (invalid — the store degrades to loopback). NEVER
     /// returns <c>darling</c> (the superuser/owner is service-only).
+    ///
+    /// <para>Kept for the callers that ask a yes/no question about the exposure — "is this store reachable
+    /// as admin" (see <c>DarlingWorker</c>'s startup warning). Where BOTH roles are admitted it answers
+    /// <c>admin</c>, because the question those callers are really asking is whether write-capable access
+    /// is reachable from the network, and it is.</para>
     /// </summary>
     public static string? NormalizeNetworkRole(string? role)
+    {
+        var roles = NormalizeNetworkRoles(role);
+
+        if (roles is null)
+        {
+            return null;
+        }
+
+        return roles.Contains("admin", StringComparer.Ordinal) ? "admin" : roles[0];
+    }
+
+    /// <summary>
+    /// Every pg_hba login role <c>postgres.network.role</c> admits, in a stable order (#2665). One rule is
+    /// written per role, so a team can reach the same store with an <c>admin</c> Viewer and a set of
+    /// read-only <c>viewer</c> ones — which the roles have always supported and the single generated
+    /// <c>hostssl</c> line did not.
+    ///
+    /// <para>Accepts <c>"admin"</c>, <c>"viewer"</c>, or both in one string separated by a comma, a plus or
+    /// whitespace (<c>"admin,viewer"</c>, <c>"admin+viewer"</c>). A JSON array would be the tidier surface
+    /// and is not worth a breaking change to a field that has shipped: everything already written stays
+    /// valid, and a list is expressible without it.</para>
+    ///
+    /// <para><b>Absent/blank still means <c>viewer</c> alone.</b> A field learning to take a list must not
+    /// become a way for an existing configuration to quietly gain admin-capable network access.</para>
+    ///
+    /// <para>Returns null when ANY element is unrecognised, rather than silently keeping the ones it
+    /// understood — the store then degrades to loopback with the reason named. A typo in one of two roles
+    /// should not open the store with the other and leave somebody believing both are reachable.</para>
+    /// </summary>
+    public static IReadOnlyList<string>? NormalizeNetworkRoles(string? role)
     {
         /* Literals rather than DarlingManagedPostgres.ViewerRoleName/AdminRoleName: that type is
            [SupportedOSPlatform("windows")] and this classifier is platform-neutral, so referencing its
            consts would raise CA1416 here. The names mirror those consts (pinned equal by test). */
         if (string.IsNullOrWhiteSpace(role))
         {
-            return "viewer";
+            return new[] { "viewer" };
         }
 
-        var normalized = role.Trim().ToLowerInvariant();
-        return normalized is "viewer" or "admin" ? normalized : null;
+        var parts = role.Split(
+            new[] { ',', '+', ' ', '\t' },
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (parts.Length == 0)
+        {
+            return new[] { "viewer" };
+        }
+
+        var seen = new List<string>();
+
+        foreach (var part in parts)
+        {
+            var normalized = part.ToLowerInvariant();
+
+            if (normalized is not ("viewer" or "admin"))
+            {
+                return null;
+            }
+
+            if (!seen.Contains(normalized, StringComparer.Ordinal))
+            {
+                seen.Add(normalized);
+            }
+        }
+
+        /* Stable order regardless of how it was written, so the generated pg_hba block is identical for
+           "admin,viewer" and "viewer,admin" — otherwise the reconciler rewrites the file and reloads the
+           server every time somebody reorders the field. */
+        seen.Sort(StringComparer.Ordinal);
+        return seen;
     }
 }
 

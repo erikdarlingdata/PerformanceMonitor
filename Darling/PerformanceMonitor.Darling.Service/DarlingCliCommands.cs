@@ -1547,7 +1547,8 @@ public static class DarlingCliCommands
 
         output.WriteLine("Current exposure:");
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
-            "Store", storeNow.Exposed, storeNow.ListenIp, storeNow.Cidr, storeNow.Role, storeNow.DegradeReason));
+            "Store", storeNow.Exposed, storeNow.ListenIp, storeNow.Cidr,
+            storeNow.Roles is null ? null : string.Join(", ", storeNow.Roles), storeNow.DegradeReason));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "MCP  ", mcpNowExposed, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom, null, mcpNowDegrade));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
@@ -1997,7 +1998,7 @@ public static class DarlingCliCommands
             {
                 /* Write the resolver's canonical values (parsed IP, host-bits-zeroed CIDR, normalized role)
                    so the file matches what the service would compute. */
-                return (decision.ListenIp!, decision.Cidr!, decision.Role!);
+                return (decision.ListenIp!, decision.Cidr!, string.Join(",", decision.Roles!));
             }
 
             var reason = decision.DegradeReason ?? "the store resolver rejected these values";
