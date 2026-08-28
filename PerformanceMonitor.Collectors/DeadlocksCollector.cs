@@ -119,7 +119,7 @@ UNION ALL
 SELECT
     deadlock_time = tel.evt.value('(/event/@timestamp)[1]', 'datetime2'),
     victim_process_id = tel.evt.value('(/event/data[@name=""xml_report""]/value/deadlock/victim-list/victimProcess/@id)[1]', 'varchar(50)'),
-    deadlock_graph_xml = CONVERT(nvarchar(max), tel.evt.query('/event/data[@name=""xml_report""]/value/deadlock'))/*DL_PLAN_SELECT*/,
+    deadlock_graph_xml = CONVERT(nvarchar(max), tel.evt.query('/event/data[@name=""xml_report""]/value/deadlock'))/*DL_PLAN_SELECT_NULL*/,
     source_database_name = tel.evt.value('(/event/data[@name=""database_name""]/value)[1]', 'nvarchar(128)')
 FROM
 (
@@ -191,6 +191,19 @@ OPTION(RECOMPILE);";
     private const string PlanSelectFragment = @",
     victim_query_plan_xml = vqp.query_plan";
 
+    /* #2681: the telemetry-blob branch of AzureQueryText projects the plan column at the SAME ordinal as
+       the ring-buffer branch (so the UNION ALL lines up under the one shared reader), but it can NEVER
+       resolve a real plan and must not reference vqp. That branch is MASTER-scoped and captures USER
+       databases' deadlocks; the victim's plan lives in the USER database's cache, which a master
+       connection cannot read (dm_exec_query_stats is database-scoped on Azure SQL DB). It also carries no
+       DL_PLAN_APPLY marker, so vqp is undefined there — sharing the DL_PLAN_SELECT marker spliced
+       vqp.query_plan into a block with no vqp alias and failed at parse ("could not be bound"), breaking
+       the whole deadlocks collector for every Azure SQL DB target whenever CapturePlanXml was on. Gated on
+       the same flag so the column appears exactly when the ring-buffer branch's does; off = both empty and
+       byte-identical to the no-plan form. */
+    private const string PlanSelectNullFragment = @",
+    victim_query_plan_xml = CONVERT(nvarchar(max), NULL)";
+
     private const string PlanApplyFragment = @"
 OUTER APPLY
 (
@@ -259,6 +272,7 @@ OUTER APPLY
         /* Splice (Darling) or erase (Lite, flag off — byte-identical) the victim plan capture. */
         text = text
             .Replace("/*DL_PLAN_SELECT*/", context.CapturePlanXml ? PlanSelectFragment : "", StringComparison.Ordinal)
+            .Replace("/*DL_PLAN_SELECT_NULL*/", context.CapturePlanXml ? PlanSelectNullFragment : "", StringComparison.Ordinal)
             .Replace("/*DL_PLAN_APPLY*/", context.CapturePlanXml ? PlanApplyFragment : "", StringComparison.Ordinal);
 
         /* Use the most recent timestamp from the host store as the cutoff, or fall back to a
