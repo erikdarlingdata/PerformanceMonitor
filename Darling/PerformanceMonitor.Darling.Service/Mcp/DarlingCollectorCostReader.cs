@@ -118,4 +118,70 @@ ORDER BY day";
 
         return rows;
     }
+    /// <summary>A collector whose most-recent day's target-side cost regressed against its own baseline
+    /// (#2674) — the self-alert's detection query. Per (server, collector): latest day's summed sql_ms vs
+    /// the AVERAGE of the prior days in the window, returned only when the baseline is meaningful (>= floor,
+    /// and at least 3 prior days so a new collector cannot trip it) and the latest exceeds it by the factor.
+    /// $1 = baseline window start (naive UTC), $2 = baseline floor ms, $3 = factor.</summary>
+    public const string RegressionSql = @"
+WITH daily AS
+(
+    SELECT cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time) AS day, sum(cc.total_sql_ms) AS sql_ms
+    FROM collect.collector_cost AS cc
+    WHERE cc.metric_time >= $1
+    GROUP BY cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time)
+),
+ranked AS
+(
+    SELECT server_id, collector_name, day, sql_ms,
+           max(day) OVER (PARTITION BY server_id, collector_name) AS latest_day
+    FROM daily
+),
+agg AS
+(
+    SELECT server_id, collector_name,
+           max(sql_ms) FILTER (WHERE day = latest_day)  AS latest_ms,
+           avg(sql_ms) FILTER (WHERE day < latest_day)  AS baseline_ms,
+           count(*)    FILTER (WHERE day < latest_day)  AS baseline_days
+    FROM ranked
+    GROUP BY server_id, collector_name
+)
+SELECT a.server_id, COALESCE(s.display_name, s.server_name) AS server_name, a.collector_name, a.latest_ms, a.baseline_ms
+FROM agg AS a
+JOIN collect.servers AS s ON s.server_id = a.server_id
+WHERE a.baseline_days >= 3
+AND   a.baseline_ms >= $2
+AND   a.latest_ms > a.baseline_ms * $3
+ORDER BY (a.latest_ms - a.baseline_ms) DESC";
+
+    public sealed record CostRegression(
+        int ServerId,
+        string ServerName,
+        string CollectorName,
+        long LatestMs,
+        double BaselineMs);
+
+    public static async Task<List<CostRegression>> GetCostRegressionsAsync(
+        NpgsqlDataSource postgres, DateTime baselineSinceUtc, long baselineFloorMs, double factor,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<CostRegression>();
+        await using var command = postgres.CreateCommand(RegressionSql);
+        command.Parameters.AddWithValue(baselineSinceUtc);
+        command.Parameters.AddWithValue(baselineFloorMs);
+        command.Parameters.AddWithValue(factor);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new CostRegression(
+                reader.GetInt32(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt64(3),
+                reader.GetDouble(4)));
+        }
+
+        return rows;
+    }
 }

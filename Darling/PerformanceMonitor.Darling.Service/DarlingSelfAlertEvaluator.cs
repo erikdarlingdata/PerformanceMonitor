@@ -161,6 +161,18 @@ internal sealed class DarlingSelfAlertEvaluator
     /// </summary>
     private readonly ConcurrentDictionary<string, double> _lastAlertedDiskPressurePercent = new();
 
+    /* #2674: the tool's OWN collectors regressing in cost on a monitored server. Keyed cost:{serverId}:{collector};
+       value is the server name so a resolution has it without a second read. Same active-flag + CooldownElapsed
+       idiom as the per-server conditions above. Thresholds are hardcoded conservative defaults (this class's
+       stated posture): a collector must have cost at least CostRegressionBaselineFloorMs/day on average over at
+       least three prior days, and its latest day must exceed that baseline by CostRegressionFactor, before it
+       alerts — so a cheap collector, or a new one, cannot trip it. */
+    private readonly ConcurrentDictionary<string, string> _activeCostRegression = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastCostRegressionAlert = new();
+    private const double CostRegressionFactor = 2.0;
+    private const long CostRegressionBaselineFloorMs = 1000;
+    private static readonly TimeSpan CostRegressionBaselineWindow = TimeSpan.FromDays(14);
+
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
 
@@ -568,6 +580,84 @@ internal sealed class DarlingSelfAlertEvaluator
             await RecordResolutionAsync(new AlertResolution(
                 key, serverName, "Capture Down",
                 "Capture Restored", $"{serverName}: Blocking/deadlock capture is running again"), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// FLEET-level (not per-server): the tool's OWN collectors regressing in cost ON the monitored servers
+    /// (#2674) — the self-monitoring that makes a collector "sticking out" on a target page us instead of
+    /// hiding in a log. Reads <c>collect.collector_cost</c> for per-(server, collector) pairs whose latest
+    /// day's target-side query time exceeds their own baseline (see the thresholds above), fires once per pair
+    /// on entry, re-fires on the cooldown while it stays regressed, and resolves the moment it drops back.
+    /// Called once per cycle from the worker's hourly store-metrics tick, AFTER the flush that writes the
+    /// latest hour. Testable directly with a recording deliverer + a controllable clock.
+    /// </summary>
+    public async Task EvaluateCollectorCostAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        List<Mcp.DarlingCollectorCostReader.CostRegression> regressions;
+        try
+        {
+            regressions = await Mcp.DarlingCollectorCostReader.GetCostRegressionsAsync(
+                postgres, _utcNow() - CostRegressionBaselineWindow,
+                CostRegressionBaselineFloorMs, CostRegressionFactor, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A self-alert read that fails must not take the loop down — it is best-effort telemetry. */
+            _logger?.LogDebug(ex, "collector-cost regression evaluation failed");
+            return;
+        }
+
+        await ApplyCostRegressionsAsync(regressions, cancellationToken);
+    }
+
+    /// <summary>The apply half of <see cref="EvaluateCollectorCostAsync"/>, split out so the fire-once /
+    /// re-fire / resolve lifecycle is unit-testable with a recording deliverer and a controllable clock,
+    /// with the regression set fabricated rather than read from a store.</summary>
+    internal async Task ApplyCostRegressionsAsync(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> regressions, CancellationToken cancellationToken)
+    {
+        var now = _utcNow();
+        var current = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var regression in regressions)
+        {
+            var key = $"cost:{regression.ServerId}:{regression.CollectorName}";
+            current.Add(key);
+            _activeCostRegression[key] = regression.ServerName;
+
+            if (CooldownElapsed(_lastCostRegressionAlert, key, now))
+            {
+                _lastCostRegressionAlert[key] = now;
+                var ratio = regression.BaselineMs > 0 ? regression.LatestMs / regression.BaselineMs : 0;
+                await FireAsync(
+                    key, regression.ServerName, "Collector Cost Regression",
+                    currentValue: $"{regression.LatestMs:N0} ms/day",
+                    thresholdValue: $"{regression.BaselineMs:N0} ms/day baseline x {CostRegressionFactor:N1}",
+                    detail: $"The '{regression.CollectorName}' collector's OWN query time on {regression.ServerName} rose to " +
+                        $"{regression.LatestMs:N0} ms/day, {ratio:N1}x its {CostRegressionBaselineWindow.TotalDays:N0}-day baseline of " +
+                        $"{regression.BaselineMs:N0} ms/day. This is the MONITORING TOOL's cost on the target, not the server's own " +
+                        $"workload - the tool is spending more time on that server than it used to. get_collector_cost with " +
+                        $"collector_name={regression.CollectorName} shows the trend.",
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: $"{regression.CollectorName} collection cost on {regression.ServerName} is {ratio:N1}x its baseline",
+                    numericCurrentValue: regression.LatestMs, numericThresholdValue: regression.BaselineMs * CostRegressionFactor,
+                    cancellationToken);
+            }
+        }
+
+        /* Resolve any pair that was regressing and no longer is (edge recovery, one history row). */
+        foreach (var key in _activeCostRegression.Keys.ToArray())
+        {
+            if (!current.Contains(key) && _activeCostRegression.TryRemove(key, out var serverName))
+            {
+                _lastCostRegressionAlert.TryRemove(key, out _);
+                var parts = key.Split(':', 3);
+                var collector = parts.Length == 3 ? parts[2] : key;
+                await RecordResolutionAsync(new AlertResolution(
+                    key, serverName, "Collector Cost Regression",
+                    "Cost Regression Cleared", $"{serverName}: {collector} collection cost is back within its baseline"), cancellationToken);
+            }
         }
     }
 

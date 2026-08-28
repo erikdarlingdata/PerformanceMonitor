@@ -100,16 +100,13 @@ FROM unnest($2::integer[], $3::text[], $4::integer[], $5::bigint[], $6::bigint[]
 DELETE FROM collect.collector_cost
 WHERE metric_time < $1";
 
-    public async Task FlushAsync(NpgsqlConnection connection, DateTime metricTimeUtc, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>Drain the accumulated buckets — one aggregate per (server, collector) — and RESET the window
+    /// (TryRemove), so the next hour starts clean and an hour with no runs writes nothing. Extracted so the
+    /// aggregation is unit-testable without a store.</summary>
+    internal IReadOnlyList<DrainedCost> Drain()
     {
         var keys = _buckets.Keys.ToArray();
-        var serverIds = new List<int>(keys.Length);
-        var collectors = new List<string>(keys.Length);
-        var runCounts = new List<int>(keys.Length);
-        var totalSql = new List<long>(keys.Length);
-        var maxSql = new List<long>(keys.Length);
-        var totalStorage = new List<long>(keys.Length);
-        var totalRows = new List<long>(keys.Length);
+        var rows = new List<DrainedCost>(keys.Length);
 
         foreach (var key in keys)
         {
@@ -120,27 +117,33 @@ WHERE metric_time < $1";
 
             lock (bucket)
             {
-                serverIds.Add(key.ServerId);
-                collectors.Add(key.Collector);
-                runCounts.Add((int)Math.Min(bucket.RunCount, int.MaxValue));
-                totalSql.Add(bucket.TotalSqlMs);
-                maxSql.Add(bucket.MaxSqlMs);
-                totalStorage.Add(bucket.TotalStorageMs);
-                totalRows.Add(bucket.TotalRows);
+                rows.Add(new DrainedCost(
+                    key.ServerId, key.Collector, bucket.RunCount, bucket.TotalSqlMs,
+                    bucket.MaxSqlMs, bucket.TotalStorageMs, bucket.TotalRows));
             }
         }
 
-        if (serverIds.Count > 0)
+        return rows;
+    }
+
+    internal sealed record DrainedCost(
+        int ServerId, string CollectorName, long RunCount, long TotalSqlMs, long MaxSqlMs, long TotalStorageMs, long TotalRows);
+
+    public async Task FlushAsync(NpgsqlConnection connection, DateTime metricTimeUtc, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var drained = Drain();
+
+        if (drained.Count > 0)
         {
             await using var insert = new NpgsqlCommand(InsertSql, connection) { CommandTimeout = FlushTimeoutSeconds };
             insert.Parameters.AddWithValue(metricTimeUtc);
-            insert.Parameters.AddWithValue(serverIds.ToArray());
-            insert.Parameters.AddWithValue(collectors.ToArray());
-            insert.Parameters.AddWithValue(runCounts.ToArray());
-            insert.Parameters.AddWithValue(totalSql.ToArray());
-            insert.Parameters.AddWithValue(maxSql.ToArray());
-            insert.Parameters.AddWithValue(totalStorage.ToArray());
-            insert.Parameters.AddWithValue(totalRows.ToArray());
+            insert.Parameters.AddWithValue(drained.Select(d => d.ServerId).ToArray());
+            insert.Parameters.AddWithValue(drained.Select(d => d.CollectorName).ToArray());
+            insert.Parameters.AddWithValue(drained.Select(d => (int)Math.Min(d.RunCount, int.MaxValue)).ToArray());
+            insert.Parameters.AddWithValue(drained.Select(d => d.TotalSqlMs).ToArray());
+            insert.Parameters.AddWithValue(drained.Select(d => d.MaxSqlMs).ToArray());
+            insert.Parameters.AddWithValue(drained.Select(d => d.TotalStorageMs).ToArray());
+            insert.Parameters.AddWithValue(drained.Select(d => d.TotalRows).ToArray());
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -148,6 +151,6 @@ WHERE metric_time < $1";
         retention.Parameters.AddWithValue(metricTimeUtc.AddDays(-RetentionDays));
         await retention.ExecuteNonQueryAsync(cancellationToken);
 
-        logger?.LogDebug("collector_cost flush wrote {Rows} server+collector rows", serverIds.Count);
+        logger?.LogDebug("collector_cost flush wrote {Rows} server+collector rows", drained.Count);
     }
 }

@@ -1535,6 +1535,20 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _nextStoreMetricsUtc = DateTime.UtcNow.Add(s_storeMetricsInterval);
                 await SweepStoreSelfMetricsAsync(stoppingToken);
+
+                /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
+                   regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
+                if (_selfAlerts is not null)
+                {
+                    try
+                    {
+                        await _selfAlerts.EvaluateCollectorCostAsync(_postgres!, stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
+                    }
+                }
             }
 
             try

@@ -2461,4 +2461,47 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var recovered = Assert.Single(h.History.Records);
         Assert.Equal("Store Job Cadence Recovered", recovered.MetricName);
     }
+    /* ---------------- #2674 collector-cost regression self-alert ---------------- */
+
+    private static PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression Regression(
+        long latestMs = 8000, double baselineMs = 2000.0, int serverId = 7, string collector = "query_store") =>
+        new(serverId, "prod-multi-19", collector, latestMs, baselineMs);
+
+    [Fact]
+    public async Task CollectorCostRegression_FiresOnEntry_SuppressedWithinCooldown_ResolvesWhenGone()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 1) fires once on entry. */
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Collector Cost Regression", fired.MetricName);
+
+        /* 2) still regressing on the next tick, inside the cooldown -> no new notification. */
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* 3) no longer regressing -> exactly one resolution history row, nothing new to the deliverer. */
+        await e.ApplyCostRegressionsAsync(
+            System.Array.Empty<PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression>(), Ct);
+        var cleared = Assert.Single(h.History.Records);
+        Assert.Equal("Cost Regression Cleared", cleared.MetricName);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CollectorCostRegression_DistinctCollectors_FireIndependently()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCostRegressionsAsync(new[]
+        {
+            Regression(collector: "query_store"),
+            Regression(collector: "procedure_stats")
+        }, Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
 }
