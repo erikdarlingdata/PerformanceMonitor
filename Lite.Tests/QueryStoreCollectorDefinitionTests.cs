@@ -544,9 +544,10 @@ public sealed class QueryStoreCollectorDefinitionTests
     /// covers "nothing else moved" for every column at once, rather than for the handful someone thought
     /// to list.</para>
     ///
-    /// <para>The <c>query_store_query_text</c> join deliberately REMAINS. It is one row per key, and the
-    /// 10x measurement behind this change was taken with it in place, so dropping it would be an
-    /// unmeasured change riding along on a measured one.</para>
+    /// <para>The <c>query_store_query_text</c> join is DROPPED with the flag on: Darling nulls the text
+    /// column and fetches text by-ids, so the join fed nothing. Measured -12% on a 40,388-plan catalog.
+    /// Lite (flag off) keeps the join because it reads the text inline. Ordinal-safety of the SELECT list
+    /// is still asserted below, with both the text column and the Lite-only join normalized out.</para>
     /// </summary>
     [Fact]
     public void WithTheFlag_TheTextIsNulledAtTheSameOrdinal()
@@ -558,11 +559,17 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("query_sql_text = CONVERT(nvarchar(1), NULL),", nulled, StringComparison.Ordinal);
         /* Immediately before query_hash, exactly where the real column sat. */
         Assert.Contains("query_sql_text = CONVERT(nvarchar(1), NULL),\n    query_hash", Lf(nulled), StringComparison.Ordinal);
-        Assert.Contains("JOIN sys.query_store_query_text AS qst", nulled, StringComparison.Ordinal);
+        /* The qst join is dropped with the flag on (text arrives by-ids); Lite keeps it. */
+        Assert.DoesNotContain("JOIN sys.query_store_query_text AS qst", nulled, StringComparison.Ordinal);
+        Assert.Contains("JOIN sys.query_store_query_text AS qst", inline, StringComparison.Ordinal);
 
+        /* Ordinal-safety still holds: normalize out BOTH the text column and the Lite-only qst join, and
+           the remainder - every other column at its ordinal - must be identical between the two forms. */
+        const string qstJoin = "JOIN sys.query_store_query_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
         Assert.Equal(
-            inline.Replace("query_sql_text = qst.query_sql_text,", "@@TEXT@@", StringComparison.Ordinal),
-            nulled.Replace("query_sql_text = CONVERT(nvarchar(1), NULL),", "@@TEXT@@", StringComparison.Ordinal));
+            Lf(inline).Replace("query_sql_text = qst.query_sql_text,", "@@TEXT@@", StringComparison.Ordinal)
+                      .Replace(qstJoin, "", StringComparison.Ordinal),
+            Lf(nulled).Replace("query_sql_text = CONVERT(nvarchar(1), NULL),", "@@TEXT@@", StringComparison.Ordinal));
     }
 
     /// <summary>
