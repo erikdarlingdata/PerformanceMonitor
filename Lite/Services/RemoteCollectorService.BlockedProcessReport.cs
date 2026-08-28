@@ -377,33 +377,43 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
 
                     if (await IsDatabaseScopedXeSessionVisibleAsync(connection, sessionName, cancellationToken))
                     {
+                        /* Visible again — clear any prior give-up so a recovered session is not held in
+                           backoff (#2677). */
+                        _xeSessionRecreateGaveUp.TryRemove(recreateKey, out _);
                         AppLogger.Debug("XeSession", $"[{server.DisplayName}] [{databaseName}] {captureName} XE session already present (benign, #1251)");
                     }
-                    else if (_xeSessionRecreateGaveUp.ContainsKey(recreateKey))
+                    else if (_xeSessionRecreateGaveUp.TryGetValue(recreateKey, out var gaveUpAtUtc)
+                             && DateTime.UtcNow - gaveUpAtUtc < XeSessionRecreateRetryCooldown)
                     {
-                        /* Recreate already proven not to fix visibility here — don't churn the
-                           session every cycle (each DROP wipes captured-but-unread events).
-                           Counted unhealthy, quietly (the give-up itself was logged at Error). */
-                        AppLogger.Debug("XeSession", $"[{server.DisplayName}] [{databaseName}] {captureName} XE session still not readable; recreate previously didn't help — skipping (#1535)");
+                        /* A recent recreate did not fix visibility here — back off rather than churn the
+                           session every cycle (each DROP wipes captured-but-unread events, #1535). This is a
+                           COOLDOWN, not a permanent give-up (#2677): once it elapses the recreate is
+                           re-attempted, because the invisibility is usually a transient Azure failover/scale
+                           that clears on its own. Counted unhealthy, quietly. */
+                        AppLogger.Debug("XeSession", $"[{server.DisplayName}] [{databaseName}] {captureName} XE session still not readable; recreate recently didn't help — backing off until the cooldown elapses (#2677)");
                         readable = false;
                         firstFailure ??= ex;
                     }
                     else
                     {
-                        /* Exists per the engine, invisible to the reader's DMV — reclaim it.
+                        /* Exists per the engine, invisible to the reader's DMV — reclaim it. Reached when
+                           there was no give-up, OR the cooldown has elapsed and it is worth another try.
                            Failures here fall to the per-database catch below. */
                         await RecreateDatabaseScopedXeSessionAsync(connection, sessionName, ensureAsync, cancellationToken);
 
                         if (await IsDatabaseScopedXeSessionVisibleAsync(connection, sessionName, cancellationToken))
                         {
+                            _xeSessionRecreateGaveUp.TryRemove(recreateKey, out _);
                             AppLogger.Info("XeSession", $"[{server.DisplayName}] [{databaseName}] {captureName} XE session existed but was not visible to the ring-buffer reader — dropped and recreated (#1535)");
                         }
                         else
                         {
-                            /* Recreated under THIS principal and still invisible — recreating
-                               again next cycle can't help and would only churn events away. */
-                            _xeSessionRecreateGaveUp[recreateKey] = 1;
-                            AppLogger.Error("XeSession", $"[{server.DisplayName}] [{databaseName}] {captureName} XE session is still not visible in sys.dm_xe_database_sessions after recreating it — the ring-buffer reader cannot see this database's capture; giving up on recreates until the app restarts (#1535)");
+                            /* Recreated under THIS principal and still invisible. Back off for the cooldown
+                               and re-attempt after it, rather than giving up until an app restart (#2677) — a
+                               24/7 PMLite never restarts, so a permanent give-up was a silent capture outage
+                               (deadlocks and blocked-process both). */
+                            _xeSessionRecreateGaveUp[recreateKey] = DateTime.UtcNow;
+                            AppLogger.Error("XeSession", $"[{server.DisplayName}] [{databaseName}] {captureName} XE session is still not visible in sys.dm_xe_database_sessions after recreating it — the ring-buffer reader cannot see this database's capture; backing off recreates for {XeSessionRecreateRetryCooldown.TotalMinutes:N0} minutes, then retrying (#2677)");
                             readable = false;
                             firstFailure ??= ex;
                         }
@@ -441,8 +451,21 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /* Databases where a drop+recreate demonstrably did NOT make the session visible to the reader
        (see the give-up branch above): keyed server:database:session, in-memory so an app restart
        retries once. Prevents a per-cycle DROP/CREATE ping-pong that would wipe captured-but-unread
-       ring-buffer events every cycle in a pathological-permissions database. */
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _xeSessionRecreateGaveUp = new();
+       ring-buffer events every cycle in a pathological-permissions database.
+
+       Value is the UTC time the recreate was abandoned, NOT a bare flag (#2677). The invisibility this
+       guards is usually a TRANSIENT Azure condition - a failover or scale operation leaves the session in
+       sys.database_event_sessions but not sys.dm_xe_database_sessions - so a PERMANENT give-up turned a
+       one-time blip into a capture outage that only an app restart could clear, and a 24/7 PMLite never
+       restarts (deadlocks and blocked-process both went dark for the field reporter on #2677). The recreate
+       is now re-attempted once XeSessionRecreateRetryCooldown has elapsed, and the entry is cleared the
+       moment the session reads back as visible. */
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _xeSessionRecreateGaveUp = new();
+
+    /* How long to back off recreates after one failed to restore visibility, before trying again. Long
+       enough not to churn DROP/CREATE (#1535); short enough that an Azure failover/scale that cleared on its
+       own is picked up the same hour rather than only at the next restart (#2677). */
+    private static readonly TimeSpan XeSessionRecreateRetryCooldown = TimeSpan.FromMinutes(30);
 
     /// <summary>
     /// Whether the database-scoped session is visible to THIS principal in
