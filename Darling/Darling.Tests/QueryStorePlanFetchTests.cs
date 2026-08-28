@@ -115,10 +115,18 @@ public class QueryStorePlanFetchTests
 
         Assert.Contains("b.running_bytes - b.plan_bytes < 12582912", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("b.running_bytes <= ", sql, StringComparison.Ordinal);
-        Assert.Contains("COALESCE(DATALENGTH(c.query_plan_text), 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(DATALENGTH(p.query_plan_text), 0)", sql, StringComparison.Ordinal);
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
         Assert.Contains("query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("JOIN sys.query_store_plan", sql, StringComparison.Ordinal);
+
+        /* #2675: the plan is decompressed EXACTLY ONCE. query_plan is materialised to #plan_fetch, and the
+           budget/emit run over that column - so CONVERT(nvarchar(max), qsp.query_plan), the decompression,
+           appears once, not the three references the prior inline CTE re-ran (~4.5x CPU on the rig). A revert
+           to the inline form trips this. */
+        Assert.Contains("INTO #plan_fetch", sql, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(sql, "CONVERT(nvarchar(max), qsp.query_plan)"));
+        Assert.Contains("SET NOCOUNT ON;", sql, StringComparison.Ordinal);
 
         /* The hash rides along without decompressing anything, rendered the way the runtime payload
            renders it — TouchAndProbeSql compares the two, so the formats must agree byte-for-byte. */
@@ -173,6 +181,12 @@ public class QueryStorePlanFetchTests
         Assert.Contains("JOIN sys.query_store_query_text AS qst", sql, StringComparison.Ordinal);
         Assert.Contains("b.running_bytes - b.text_bytes < 12582912", sql, StringComparison.Ordinal);
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
+
+        /* #2675: text is read once - materialised to #text_fetch, then budgeted/emitted from there, the same
+           single-read shape as the plan fetch. */
+        Assert.Contains("INTO #text_fetch", sql, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(sql, "query_sql_text = qst.query_sql_text"));
+        Assert.Contains("SET NOCOUNT ON;", sql, StringComparison.Ordinal);
 
         /* query_id is only unique until a Query Store reset renumbers it; the stored hash is how the probe
            sees that id 5 now names a DIFFERENT statement. Same rendering as the runtime payload. */
