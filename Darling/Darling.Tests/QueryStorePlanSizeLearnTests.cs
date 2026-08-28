@@ -116,5 +116,76 @@ public sealed class QueryStorePlanSizeLearnTests
 
         Assert.Equal(0, estimate.AvgBytes);
         Assert.False(estimate.CatchUpInProgress);
+        Assert.Equal(0, estimate.ClampedStreak);
+    }
+
+    /* ---------- #2683: runaway back-off (a store whose fetch never drains) ---------- */
+
+    /// <summary>Each consecutive catch-up (clamped) pass increments the runaway streak.</summary>
+    [Fact]
+    public void ConsecutiveCatchUpPassesGrowTheClampedStreak()
+    {
+        var e = new QueryStorePlanXmlState.PlanSizeEstimate(15_000, CatchUpInProgress: true, ClampedStreak: 5);
+
+        // A full-window pass = still clamped -> streak advances.
+        var next = QueryStorePlanXmlState.Learn(
+            e, bytesShipped: 30_000_000, plansShipped: 2048, plansMeasured: 2048, candidateWindow: 2048, budgetBytes: 33_554_432);
+
+        Assert.True(next.CatchUpInProgress);
+        Assert.Equal(6, next.ClampedStreak);
+    }
+
+    /// <summary>A pass that finally DRAINS (partial, under budget) resets the streak — a legit heavy store is never throttled.</summary>
+    [Fact]
+    public void ADrainedPassResetsTheClampedStreak()
+    {
+        var e = new QueryStorePlanXmlState.PlanSizeEstimate(15_000, CatchUpInProgress: true, ClampedStreak: 30);
+
+        // Shipped fewer than the window and under budget -> caught up.
+        var next = QueryStorePlanXmlState.Learn(
+            e, bytesShipped: 900_000, plansShipped: 60, plansMeasured: 60, candidateWindow: 2048, budgetBytes: 33_554_432);
+
+        Assert.False(next.CatchUpInProgress);
+        Assert.Equal(0, next.ClampedStreak);
+    }
+
+    /// <summary>An empty pass also resets the streak (it proves the fetch caught up).</summary>
+    [Fact]
+    public void AnEmptyPassResetsTheClampedStreak()
+    {
+        var e = new QueryStorePlanXmlState.PlanSizeEstimate(15_000, CatchUpInProgress: true, ClampedStreak: 40);
+
+        var next = QueryStorePlanXmlState.Learn(
+            e, bytesShipped: 0, plansShipped: 0, plansMeasured: 0, candidateWindow: 2048, budgetBytes: 33_554_432);
+
+        Assert.Equal(0, next.ClampedStreak);
+    }
+
+    /// <summary>
+    /// The back-off itself. The expensive AYR-shaped passes — the ones that clamp to the full 2048 — run with
+    /// catch-up NOT in progress (a small learned average is trusted, not seed-floored), so wanted greatly
+    /// exceeds the cap. Below the streak threshold that lands at MaxCandidatePlans; at/after the threshold the
+    /// ceiling drops to RunawayCandidatePlans. (With catch-up in progress the seed-floor already shrinks
+    /// wanted, so the ceiling is moot — the back-off targets exactly the passes that were costing 2048.)
+    /// </summary>
+    [Fact]
+    public void PastTheStreakThreshold_TheCeilingDropsToRunawayCandidatePlans()
+    {
+        // ~15 KB plans (trusted, not catching up), 32 MB budget -> wants ~3277, well past the full cap.
+        long avg = 15 * 1024, budget = 32L * 1024 * 1024;
+
+        var belowThreshold = QueryStorePlanXmlState.CandidatePlanCount(
+            avg, budget, catchUpInProgress: false, out var clampedBelow,
+            clampedStreak: QueryStorePlanXmlState.RunawayClampedStreakThreshold - 1);
+        Assert.Equal(QueryStorePlanXmlState.MaxCandidatePlans, belowThreshold);
+        Assert.True(clampedBelow);
+
+        var runaway = QueryStorePlanXmlState.CandidatePlanCount(
+            avg, budget, catchUpInProgress: false, out var clampedRunaway,
+            clampedStreak: QueryStorePlanXmlState.RunawayClampedStreakThreshold);
+        Assert.Equal(QueryStorePlanXmlState.RunawayCandidatePlans, runaway);
+        Assert.True(clampedRunaway);
+
+        Assert.True(runaway < belowThreshold, "runaway back-off must reduce the per-pass cap");
     }
 }

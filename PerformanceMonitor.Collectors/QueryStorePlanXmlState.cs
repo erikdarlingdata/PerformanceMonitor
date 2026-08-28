@@ -58,6 +58,23 @@ public static class QueryStorePlanXmlState
     public const int MaxCandidatePlans = 2048;
 
     /// <summary>
+    /// #2683: a store whose fetch stays catch-up-clamped for this many CONSECUTIVE passes is treated as
+    /// RUNAWAY — its plan population churns faster than any pass can drain (a tenant generating tens of
+    /// thousands of plans/day from ad-hoc/unparameterized SQL: one production catalog held 100k plans and
+    /// added ~5k/hour, so the fetch clamped at <see cref="MaxCandidatePlans"/> every pass indefinitely,
+    /// spending ~40s decompressing plan XML that had aged out of cache before it was fetched). Chasing every
+    /// plan is futile there and just makes the collector the hog it must never be on a stock Query Store.
+    /// Past this streak the per-pass ceiling drops to <see cref="RunawayCandidatePlans"/> so the collection
+    /// body stays short instead of grinding at the full cap forever. A pass that finally DRAINS (ships fewer
+    /// than the cap and under budget) resets the streak — so a legitimately-heavy store catching up keeps the
+    /// full cap and is never throttled.
+    /// </summary>
+    public const int RunawayClampedStreakThreshold = 24;
+
+    /// <summary>The reduced per-pass ceiling for a runaway store (see <see cref="RunawayClampedStreakThreshold"/>).</summary>
+    public const int RunawayCandidatePlans = 512;
+
+    /// <summary>
     /// How far past the budget the cap reaches, in expected plans. The cap is the COARSE bound and the
     /// running byte total is the exact one, so the margin only has to cover the estimate being wrong in the
     /// "plans are smaller than expected" direction — where extra plans genuinely fit the budget.
@@ -84,7 +101,7 @@ public static class QueryStorePlanXmlState
     /// <see cref="CandidatePlanCount(long?, long, bool, out bool)"/> overload floors it).
     /// <c>AvgBytes</c> of zero means "never learned"; callers pass null to CandidatePlanCount then.
     /// </summary>
-    public readonly record struct PlanSizeEstimate(long AvgBytes, bool CatchUpInProgress);
+    public readonly record struct PlanSizeEstimate(long AvgBytes, bool CatchUpInProgress, int ClampedStreak = 0);
 
     /// <summary>
     /// Folds one pass's outcome into the carried estimate. The rules, each load-bearing:
@@ -106,12 +123,16 @@ public static class QueryStorePlanXmlState
     {
         if (plansShipped <= 0)
         {
-            return new PlanSizeEstimate(previous.AvgBytes, CatchUpInProgress: false);
+            // A pass that shipped nothing proves the fetch is caught up; the runaway streak (#2683) resets.
+            return new PlanSizeEstimate(previous.AvgBytes, CatchUpInProgress: false, ClampedStreak: 0);
         }
 
         var catchUp = plansShipped >= candidateWindow || bytesShipped >= budgetBytes;
         var avg = ObservedAvgPlanBytes(bytesShipped, plansMeasured) ?? previous.AvgBytes;
-        return new PlanSizeEstimate(avg, catchUp);
+        // #2683: count CONSECUTIVE catch-up (clamped) passes; a drained pass resets it to zero. A store that
+        // never drains crosses RunawayClampedStreakThreshold and CandidatePlanCount backs its ceiling down.
+        var streak = catchUp ? previous.ClampedStreak + 1 : 0;
+        return new PlanSizeEstimate(avg, catchUp, streak);
     }
 
     /// <summary>
@@ -147,7 +168,7 @@ public static class QueryStorePlanXmlState
     /// over-estimate-is-safe logic the seed itself rests on, for the one window where the sample is known to be
     /// unrepresentative. Once caught up the sample spans the catalog and the observed average is trusted.</para>
     /// </summary>
-    public static int CandidatePlanCount(long? observedAvgPlanBytes, long budgetBytes, bool catchUpInProgress, out bool clamped)
+    public static int CandidatePlanCount(long? observedAvgPlanBytes, long budgetBytes, bool catchUpInProgress, out bool clamped, int clampedStreak = 0)
     {
         var avg = observedAvgPlanBytes is long observed && observed > 0 ? observed : FirstContactAvgPlanBytes;
 
@@ -168,7 +189,11 @@ public static class QueryStorePlanXmlState
            reports on. int.MaxValue only guards the cast itself, since the budget is operator input. */
         var wanted = (double)budgetBytes / avg * CandidatePlanMargin;
         var unclamped = wanted >= int.MaxValue ? int.MaxValue : (int)System.Math.Ceiling(wanted);
-        var bounded = System.Math.Clamp(unclamped, MinCandidatePlans, MaxCandidatePlans);
+        // #2683: a runaway store (clamped every pass past the streak threshold — its plan population churns
+        // faster than any pass can drain) gets a reduced ceiling so its fetch stops grinding at the full cap;
+        // a store still legitimately catching up (streak below the threshold) keeps MaxCandidatePlans.
+        var ceiling = clampedStreak >= RunawayClampedStreakThreshold ? RunawayCandidatePlans : MaxCandidatePlans;
+        var bounded = System.Math.Clamp(unclamped, MinCandidatePlans, ceiling);
 
         /* Reports that a bound CHANGED the answer, not that the answer happens to equal one. A cap whose
            measured size lands naturally on 32 or 2048 was sized by the measurement and needs no log line; saying
