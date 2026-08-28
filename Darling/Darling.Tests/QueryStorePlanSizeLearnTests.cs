@@ -162,24 +162,26 @@ public sealed class QueryStorePlanSizeLearnTests
     }
 
     /// <summary>
-    /// The back-off itself: with small plans and a big budget the fetch WANTS more than the full cap, so below
-    /// the streak threshold it lands at MaxCandidatePlans; at/after the threshold the ceiling drops to
-    /// RunawayCandidatePlans. This is the AYR case — 100k churning plans, clamped every pass.
+    /// The back-off itself. The expensive AYR-shaped passes — the ones that clamp to the full 2048 — run with
+    /// catch-up NOT in progress (a small learned average is trusted, not seed-floored), so wanted greatly
+    /// exceeds the cap. Below the streak threshold that lands at MaxCandidatePlans; at/after the threshold the
+    /// ceiling drops to RunawayCandidatePlans. (With catch-up in progress the seed-floor already shrinks
+    /// wanted, so the ceiling is moot — the back-off targets exactly the passes that were costing 2048.)
     /// </summary>
     [Fact]
     public void PastTheStreakThreshold_TheCeilingDropsToRunawayCandidatePlans()
     {
-        // ~15 KB plans, 32 MB budget -> wants ~3300, well past the full cap.
+        // ~15 KB plans (trusted, not catching up), 32 MB budget -> wants ~3277, well past the full cap.
         long avg = 15 * 1024, budget = 32L * 1024 * 1024;
 
         var belowThreshold = QueryStorePlanXmlState.CandidatePlanCount(
-            avg, budget, catchUpInProgress: true, out var clampedBelow,
+            avg, budget, catchUpInProgress: false, out var clampedBelow,
             clampedStreak: QueryStorePlanXmlState.RunawayClampedStreakThreshold - 1);
         Assert.Equal(QueryStorePlanXmlState.MaxCandidatePlans, belowThreshold);
         Assert.True(clampedBelow);
 
         var runaway = QueryStorePlanXmlState.CandidatePlanCount(
-            avg, budget, catchUpInProgress: true, out var clampedRunaway,
+            avg, budget, catchUpInProgress: false, out var clampedRunaway,
             clampedStreak: QueryStorePlanXmlState.RunawayClampedStreakThreshold);
         Assert.Equal(QueryStorePlanXmlState.RunawayCandidatePlans, runaway);
         Assert.True(clampedRunaway);
