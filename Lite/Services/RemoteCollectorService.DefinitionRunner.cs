@@ -745,16 +745,26 @@ public partial class RemoteCollectorService
             }
             else
             {
-                /* Plain single-query path — unchanged: read all rows, then write them in one batch
+                /* Plain single-query path (server-scoped): read all rows, then write them in one batch
                    (supplemental never runs for per-database collectors). Routed through WriteBatch so
-                   all three paths share one writer. */
+                   all three paths share one writer.
+
+                   #2673: the primary read + DRAIN is bounded by the collector's PerItemWallClockBudget (one
+                   item = the whole server). The 60s per-command timeout covers only execution, not the drain
+                   of a large result set, so a heavy server-scoped collector (procedure_stats, query_stats)
+                   could occupy the monitored server for minutes. Bites hardest on Lite, whose live collectors
+                   run strictly one after another. Null budget = itemToken IS cancellationToken and this block
+                   is byte-for-byte what it was. */
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
-                using (var command = CreateCollectorCommand(plan, sqlConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds))
-                using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+                using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
+                var itemToken = itemBudget?.Token ?? cancellationToken;
+                try
                 {
-                    rows = await definition.ReadAsync(reader, context, cancellationToken);
+                    using var command = CreateCollectorCommand(plan, sqlConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
+                    using var reader = await command.ExecuteReaderAsync(itemToken);
+                    rows = await definition.ReadAsync(reader, context, itemToken);
 
                     /* #1851: a definition that declares it may hand back an OPTIONAL trailing
                        (item_name, error_text) result set naming items its own server-side cursor
@@ -767,10 +777,25 @@ public partial class RemoteCollectorService
                        exactly what they were. */
                     if (definition.EmitsProbeFailures)
                     {
-                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, cancellationToken);
+                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
                         telemetry.Note = probes.Note;
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }
+                }
+                catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
+                {
+                    /* #2673: this server-scoped collector blew its wall-clock budget mid read/drain. Abandon
+                       the cycle WITHOUT advancing any watermark — ship nothing, retry next — so no single
+                       collector runs minutes on a monitored server. Returning skips the storage phase and the
+                       state-persistence at the method tail, which is what keeps the watermark from moving. */
+                    _ = ex;
+                    var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
+                    telemetry.SqlMs = sqlSlice.ElapsedMilliseconds;
+                    telemetry.Note = $"wall-clock budget ({budgetSeconds}s) reached; cycle abandoned";
+                    _logger?.LogWarning(
+                        "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
+                        definition.Name, context.ServerName, budgetSeconds);
+                    return 0;
                 }
 
                 /* Optional best-effort second query on the same connection (e.g. server_properties'

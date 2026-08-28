@@ -435,13 +435,20 @@ public sealed class EnumeratedCollectorDriverTests
     /// healthy field passes against 37.6 minutes at the low end of the pathological ones.
     /// </summary>
     [Fact]
-    public void OnlyQueryStore_DeclaresAWallClockBudget()
+    public void TheHeavyCollectors_DeclareAWallClockBudget_AndTheLightOnesDoNot()
     {
+        // query_store: the per-database plan/text fetch (#2150).
         Assert.Equal(TimeSpan.FromMinutes(10), QueryStoreCollector.Instance.PerItemWallClockBudget);
         Assert.Equal(QueryStoreCollector.PerDatabaseWallClockBudget, QueryStoreCollector.Instance.PerItemWallClockBudget);
 
-        /* The siblings that also run per database stay unbounded: neither has an unbounded-input shape, and
-           a budget on a collector with no field evidence for one is a cut waiting to surprise somebody. */
+        /* #2673: the two heaviest server-scoped collectors get a tighter bound on the execute + drain
+           (measured tails 176s / 168s on prod). Bounds the tail so no collector runs minutes on a monitored
+           server; a cycle that blows it ships nothing and retries next. */
+        Assert.Equal(TimeSpan.FromSeconds(120), ProcedureStatsCollector.Instance.PerItemWallClockBudget);
+        Assert.Equal(TimeSpan.FromSeconds(120), QueryStatsCollector.Instance.PerItemWallClockBudget);
+
+        /* The light per-database siblings stay unbounded: neither has an unbounded-input shape, and a budget
+           on a collector with no field evidence for one is a cut waiting to surprise somebody. */
         Assert.Null(DatabaseSizeStatsCollector.Instance.PerItemWallClockBudget);
         Assert.Null(DatabaseScopedConfigCollector.Instance.PerItemWallClockBudget);
     }
