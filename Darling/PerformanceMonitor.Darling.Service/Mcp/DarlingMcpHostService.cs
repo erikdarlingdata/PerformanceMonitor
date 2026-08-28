@@ -565,6 +565,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                    size + enabled-server count) for capacity forecasting. Darling-only: a single-server
                    edition has no central store to measure, so no Lite twin. */
                 .WithGeminiCompatibleTools<DarlingMcpStoreMetricsTools>()
+                .WithGeminiCompatibleTools<DarlingMcpCollectorCostTools>()
                 /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
                    the duration threshold + attentions), over Darling's Postgres store (STORED read). */
                 .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()

@@ -407,6 +407,10 @@ public sealed class DarlingWorker : BackgroundService
        too; only the per-hypertable arm inside the sweep needs (and gets) the flag. */
     private DateTime _nextStoreMetricsUtc = DateTime.MinValue;
 
+    /* #2674: per-collector cost on the monitored servers, accumulated in memory and flushed hourly on the
+       store-metrics tick. Held here (not in the runner) so its lifetime matches the sweep that drains it. */
+    private readonly CollectorCostAccumulator _collectorCost = new();
+
     /* Fleet-level working-set launch-guard latch (#1556): true once ShouldLaunchSweeps has tripped this
        episode, so its CRITICAL log is emitted ONCE rather than every sweep (the WarnedThisEpisode idiom —
        but fleet-wide: the guard is about the whole process's working set, so it is a single worker field,
@@ -1531,6 +1535,20 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _nextStoreMetricsUtc = DateTime.UtcNow.Add(s_storeMetricsInterval);
                 await SweepStoreSelfMetricsAsync(stoppingToken);
+
+                /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
+                   regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
+                if (_selfAlerts is not null)
+                {
+                    try
+                    {
+                        await _selfAlerts.EvaluateCollectorCostAsync(_postgres!, stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
+                    }
+                }
             }
 
             try
@@ -3012,6 +3030,10 @@ LIMIT 1", connection);
         {
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
             await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, budget.Token);
+
+            /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)
+               for the window, plus the accumulator's own bounded retention DELETE. */
+            await _collectorCost.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -4581,6 +4603,10 @@ LIMIT 1";
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, result.Note,
                 result.Fanout, _logger, cancellationToken);
+
+            /* #2674: record this run's cost for the hourly collector_cost aggregate — the same numbers that
+               go to collection_log, kept as a compact per-(server, collector) series for the cost panel. */
+            _collectorCost.Record(runtime.ServerId, collectorName, result.Rows, result.SqlMs, result.StorageMs);
 
             /* #2219: statement TEXT rides alongside the statement stats, on its own hourly cadence. Hung off the
                stats collector's success rather than given its own loop because it is meaningless without those

@@ -161,6 +161,7 @@ public static class PgMigrations
         new Migration(102, "pg-server-config", V102Sql),
         new Migration(103, "pg-deadlocks", V103Sql),
         new Migration(104, "pg-deadlock-identity-index", V104Sql),
+        new Migration(105, "collector-cost", V105Sql),
     };
 
     /// <summary>
@@ -2280,6 +2281,37 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V105 — <c>collect.collector_cost</c>, the tool's own per-collector cost on the monitored servers
+    /// (#2674). NOT a collector: it is INTERNAL self-telemetry, written by the worker's hourly self-metrics
+    /// sweep like <c>collect.store_metrics</c> (V53), so it is deliberately absent from
+    /// <c>CollectorCatalog.All</c> and therefore from the generator-parity pins. Hand-written DDL, a plain
+    /// table (not a hypertable — the sweep aggregates to one row per server+collector per hour, and its own
+    /// bounded retention DELETE keeps it small, the same shape store_metrics uses). Columns are an hourly
+    /// aggregate: run_count, total/max sql_ms (the MAX is the load-bearing one — the tail is how a collector
+    /// "sticks out" on a target), total storage_ms and total_rows. database_name is nullable for
+    /// server-scoped collectors.
+    /// </summary>
+    private const string V105Sql = @"
+CREATE TABLE IF NOT EXISTS collect.collector_cost
+(
+    metric_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    database_name text,
+    collector_name text NOT NULL,
+    run_count integer NOT NULL,
+    total_sql_ms bigint NOT NULL,
+    max_sql_ms bigint NOT NULL,
+    total_storage_ms bigint NOT NULL,
+    total_rows bigint NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_collector_cost_time
+    ON collect.collector_cost(metric_time);
+
+CREATE INDEX IF NOT EXISTS idx_collector_cost_lookup
+    ON collect.collector_cost(server_id, collector_name, metric_time);";
 
     /// <summary>
     /// V104 — the lookup index for <c>collect.pg_deadlocks</c> (#2661), and a SEPARATE rung on purpose.
