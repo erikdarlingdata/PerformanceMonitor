@@ -1072,16 +1072,26 @@ public sealed class DarlingCollectorRunner
             }
             else
             {
-                /* Plain single-query path — unchanged: read all rows, then write them in one batch
+                /* Plain single-query (server-scoped) path: read all rows, then write them in one batch
                    (supplemental never runs for per-database collectors). Routed through WriteBatchAsync
-                   so all three paths share one writer. */
+                   so all three paths share one writer.
+
+                   #2673: the primary read + DRAIN is bounded by the collector's PerItemWallClockBudget
+                   (one item = the whole server here). The 60s per-command timeout covers only EXECUTION,
+                   not the drain of a large result set, so a heavy server-scoped collector (procedure_stats,
+                   query_stats) could occupy a monitored server for minutes — the exact profile we must never
+                   present. Null budget = itemToken IS cancellationToken and this block is byte-for-byte what
+                   it was. */
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
-                using (var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds))
-                using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+                using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
+                var itemToken = itemBudget?.Token ?? cancellationToken;
+                try
                 {
-                    rows = await definition.ReadAsync(reader, context, cancellationToken);
+                    using var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
+                    using var reader = await command.ExecuteReaderAsync(itemToken);
+                    rows = await definition.ReadAsync(reader, context, itemToken);
 
                     /* #1851: a definition that declares it may hand back an OPTIONAL trailing
                        (item_name, error_text) result set naming items its own server-side cursor
@@ -1094,10 +1104,25 @@ public sealed class DarlingCollectorRunner
                        exactly what they were. */
                     if (definition.EmitsProbeFailures)
                     {
-                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, cancellationToken);
+                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
                         collectionNote = probes.Note;
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }
+                }
+                catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
+                {
+                    /* #2673: this server-scoped collector blew its wall-clock budget mid read/drain. Abandon
+                       the whole cycle WITHOUT advancing any watermark — ship nothing, retry next cycle with
+                       the same cutoff — so no single collector runs minutes on a target. Returning here skips
+                       the storage phase AND the state-persistence block below, which is what keeps the
+                       watermark from moving. The provider's cancellation artifact (ex) is dropped in favour
+                       of the budget message, the same as the per-item arm. */
+                    _ = ex;
+                    var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
+                    _logger?.LogWarning(
+                        "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
+                        definition.Name, server.Config.DisplayName, budgetSeconds);
+                    return new CollectorRunResult(0, sqlSlice.ElapsedMilliseconds, 0, $"wall-clock budget ({budgetSeconds}s) reached; cycle abandoned");
                 }
 
                 /* Optional best-effort second query on the same connection (server_properties'
