@@ -134,6 +134,11 @@ public sealed class CrossAppMcpToolInventoryPinTests
            payload dimensions, so there is no Lite twin to port. */
         "get_store_metrics",
 
+        /* #2674: the collector-cost read (get_collector_cost) over collect.collector_cost — the tool measuring
+           its OWN per-collector cost on the monitored servers. Darling-ONLY by architecture, the same as
+           get_store_metrics: it is an internal self-metric over the central store, which Lite has no twin of. */
+        "get_collector_cost",
+
         /* #1562: the pre-banded fleet-overview read born from the web dashboard's DarlingFleetReader.
            Lite twin = a DuckDB fleet reader over the SAME shared ServerHealthClassifier (Common) — tracked
            in #1573 alongside unifying Lite's own card banding onto that classifier; port it, then remove
