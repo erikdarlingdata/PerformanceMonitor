@@ -745,7 +745,7 @@ public partial class RemoteCollectorService
             }
             else
             {
-                /* Plain single-query (server-scoped) path: read all rows, then write them in one batch
+                /* Plain single-query path (server-scoped): read all rows, then write them in one batch
                    (supplemental never runs for per-database collectors). Routed through WriteBatch so
                    all three paths share one writer.
 
