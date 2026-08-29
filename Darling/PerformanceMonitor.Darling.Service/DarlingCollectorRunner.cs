@@ -1597,7 +1597,7 @@ public sealed class DarlingCollectorRunner
                 : default;
             var cap = QueryStorePlanXmlState.CandidatePlanCount(
                 estimate.AvgBytes > 0 ? estimate.AvgBytes : null, budget, estimate.CatchUpInProgress, out var clamped,
-                estimate.ClampedStreak);
+                estimate.Runaway);
             if (clamped)
             {
                 _logger?.LogInformation(
@@ -1607,11 +1607,11 @@ public sealed class DarlingCollectorRunner
             /* #2683: announce the runaway back-off ONCE, at the streak-threshold crossing, so it is not silent
                and not spammed every pass thereafter. The store's plans churn faster than any pass can drain, so
                its cap is now RunawayCandidatePlans instead of the full ceiling. */
-            if (estimate.ClampedStreak == QueryStorePlanXmlState.RunawayClampedStreakThreshold)
+            if (estimate.Runaway && estimate.ClampedStreak == QueryStorePlanXmlState.RunawayClampedStreakThreshold)
             {
                 _logger?.LogWarning(
-                    "query_store plan fetch on '{Server}' database [{Database}]: RUNAWAY plan population — the fetch has clamped {Streak} consecutive passes without draining, so it churns faster than any pass can capture. Backing the per-pass cap down to {Cap} plans so the collection stops grinding (#2683); plan-XML coverage for this database will stay partial by design.",
-                    server.Config.DisplayName, databaseName, estimate.ClampedStreak, cap);
+                    "query_store plan fetch on '{Server}' database [{Database}]: RUNAWAY plan population — clamped {Streak} consecutive passes without draining, so it churns faster than any pass can capture. Holding the per-pass cap at {Cap} plans (STICKY through the estimator's oscillation until it drains {Clear} passes in a row) so the collection stops grinding (#2683b); plan-XML coverage for this database stays partial by design.",
+                    server.Config.DisplayName, databaseName, estimate.ClampedStreak, cap, QueryStorePlanXmlState.RunawayClearDrainedThreshold);
             }
 
             /* Ascending ids (SortedSet order) so the budget's in-SQL cut and the cross-chunk break are
