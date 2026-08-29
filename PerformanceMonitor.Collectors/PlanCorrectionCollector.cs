@@ -133,7 +133,11 @@ public sealed class PlanCorrectionCollector : CollectorDefinitionBase<PlanCorrec
     /// COMPATIBILITY LEVEL 130 or higher, and a compat-100 database on a 2017+ instance is perfectly
     /// legal. Verified 2026-08-01 on SQL2022 against a compat-100 database — JSON_VALUE returned the
     /// value, OPENJSON failed to parse at all ("Incorrect syntax near '$.queryId'"). The documented
-    /// query would take out the whole collection for that database.
+    /// query would take out the whole collection for that database. For the same reason the numeric
+    /// extractions use TRY_CAST, not TRY_CONVERT: TRY_CONVERT is not a recognized built-in below
+    /// COMPATIBILITY LEVEL 110 (raises Msg 195), while TRY_CAST binds at compat 100 — verified on the
+    /// SQL 2025 rig, TRY_CAST('123' AS bigint) returns 123 at compat 100 where TRY_CONVERT throws.
+    /// (House rule: always TRY_CAST over TRY_CONVERT unless a CONVERT style code is actually needed.)
     /// </para>
     ///
     /// <para>
@@ -212,31 +216,31 @@ CROSS APPLY
 (
     SELECT
         query_id =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.queryId')),
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.queryId') AS bigint),
         regressed_plan_id =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanId')),
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanId') AS bigint),
         last_good_plan_id =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanId')),
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanId') AS bigint),
         regressed_plan_execution_count =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanExecutionCount')),
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanExecutionCount') AS bigint),
         last_good_plan_execution_count =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanExecutionCount')),
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanExecutionCount') AS bigint),
         regressed_plan_cpu_time_average =
-            TRY_CONVERT(float, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanCpuTimeAverage')),
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanCpuTimeAverage') AS float),
         last_good_plan_cpu_time_average =
-            TRY_CONVERT(float, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanCpuTimeAverage')),
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanCpuTimeAverage') AS float),
         /*Docs defect: the column table says AbortedCount, every example says ErrorCount. Read both.*/
         regressed_plan_error_count =
             COALESCE
             (
-                TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanAbortedCount')),
-                TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanErrorCount'))
+                TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanAbortedCount') AS bigint),
+                TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanErrorCount') AS bigint)
             ),
         last_good_plan_error_count =
             COALESCE
             (
-                TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanAbortedCount')),
-                TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanErrorCount'))
+                TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanAbortedCount') AS bigint),
+                TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanErrorCount') AS bigint)
             )
 ) AS pfd
 OPTION(RECOMPILE);
