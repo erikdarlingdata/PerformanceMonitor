@@ -446,6 +446,7 @@ public sealed class EnumeratedCollectorDriverTests
            server; a cycle that blows it ships nothing and retries next. */
         Assert.Equal(TimeSpan.FromSeconds(120), ProcedureStatsCollector.Instance.PerItemWallClockBudget);
         Assert.Equal(TimeSpan.FromSeconds(120), QueryStatsCollector.Instance.PerItemWallClockBudget);
+        Assert.Equal(TimeSpan.FromSeconds(120), PlanCorrectionCollector.Instance.PerItemWallClockBudget);
 
         /* The light per-database siblings stay unbounded: neither has an unbounded-input shape, and a budget
            on a collector with no field evidence for one is a cut waiting to surprise somebody. */

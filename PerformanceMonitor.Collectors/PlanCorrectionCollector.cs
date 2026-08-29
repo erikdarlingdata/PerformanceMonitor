@@ -324,6 +324,15 @@ OPTION(RECOMPILE);";
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;
 
+    /// <summary>
+    /// #2673: bound the per-server wall-clock (execute + DRAIN). Measured the WORST single-collector tail in
+    /// the fleet — 260s on one prod server (avg ~4s) — because the plan-correction read scans forced-plan
+    /// state across a large plan cache and the 60s command timeout covers only execution, not the drain.
+    /// Server-scoped on on-prem/RDS (where that tail is), per database on Azure SQL DB; a cycle that blows the
+    /// budget ships nothing and retries next, so this collector cannot run minutes on a monitored server.
+    /// </summary>
+    public override TimeSpan? PerItemWallClockBudget => TimeSpan.FromSeconds(120);
+
     /// <summary>The Azure per-database branch: already connected to the database, so read it directly.</summary>
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
