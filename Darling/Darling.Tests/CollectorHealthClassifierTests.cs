@@ -37,42 +37,69 @@ public sealed class CollectorHealthClassifierTests
 
     [Theory]
     /* NEVER_RUN wins first, whatever else is set (including on-load). */
-    [InlineData(0, 0, 0, 0, 999, OneMinute, false, CollectorHealthClassifier.NeverRun)]
-    [InlineData(0, 0, 0, 0, 0, OnLoadFreq, true, CollectorHealthClassifier.NeverRun)]
+    [InlineData(0, 0, 0, 0, 999, 999, OneMinute, false, CollectorHealthClassifier.NeverRun)]
+    [InlineData(0, 0, 0, 0, 0, 0, OnLoadFreq, true, CollectorHealthClassifier.NeverRun)]
 
-    /* NO_PERMISSIONS (only permission denials) is checked before the on-load branch. */
-    [InlineData(5, 0, 0, 5, 999, OneMinute, false, CollectorHealthClassifier.NoPermissions)]
-    [InlineData(5, 0, 0, 5, 999, OnLoadFreq, true, CollectorHealthClassifier.NoPermissions)]
+    /* NO_PERMISSIONS (only permission denials) is checked before the on-load branch and before STOPPED -
+       a collector whose every run this window was a denied grant is still actively RUNNING (hoursSinceLastRun
+       is small), so this is not a STOPPED case, but the precedence is worth pinning regardless. */
+    [InlineData(5, 0, 0, 5, 999, 2, OneMinute, false, CollectorHealthClassifier.NoPermissions)]
+    [InlineData(5, 0, 0, 5, 999, 2, OnLoadFreq, true, CollectorHealthClassifier.NoPermissions)]
 
-    /* On-load collectors are staleness-exempt: banded by failure rate only, never STALE/FAILING. */
-    [InlineData(10, 10, 0, 0, 500, OnLoadFreq, true, CollectorHealthClassifier.Healthy)]
-    [InlineData(10, 7, 3, 0, 500, OnLoadFreq, true, CollectorHealthClassifier.Warning)]   // 30% > 20%
+    /* On-load collectors are staleness-exempt: banded by failure rate only, never STOPPED/STALE/FAILING. */
+    [InlineData(10, 10, 0, 0, 500, 500, OnLoadFreq, true, CollectorHealthClassifier.Healthy)]
+    [InlineData(10, 7, 3, 0, 500, 500, OnLoadFreq, true, CollectorHealthClassifier.Warning)]   // 30% > 20%
 
-    /* Frequent (1-min) collector - the floors mean these are IDENTICAL to the old flat thresholds. */
-    [InlineData(10, 10, 0, 0, 2, OneMinute, false, CollectorHealthClassifier.Healthy)]    // < 4h
-    [InlineData(10, 7, 3, 0, 2, OneMinute, false, CollectorHealthClassifier.Warning)]     // recent, 30% fail
-    [InlineData(10, 10, 0, 0, 5, OneMinute, false, CollectorHealthClassifier.Stale)]      // > 4h, < 24h
-    [InlineData(10, 10, 0, 0, 25, OneMinute, false, CollectorHealthClassifier.Failing)]   // > 24h
-    [InlineData(5, 0, 5, 0, 999, OneMinute, false, CollectorHealthClassifier.Failing)]    // ran, never a success (999 sentinel)
+    /* Frequent (1-min) collector - the floors mean these are IDENTICAL to the old flat thresholds for the
+       cases where hoursSinceLastRun stays recent. */
+    [InlineData(10, 10, 0, 0, 2, 2, OneMinute, false, CollectorHealthClassifier.Healthy)]    // < 4h
+    [InlineData(10, 7, 3, 0, 2, 2, OneMinute, false, CollectorHealthClassifier.Warning)]     // recent, 30% fail
+    [InlineData(10, 10, 0, 0, 5, 5, OneMinute, false, CollectorHealthClassifier.Stale)]      // > 4h, < 24h
+
+    /* STOPPED vs FAILING is the whole point of this pair: same hoursSinceLastSuccess (30h, past the 24h
+       cutoff), but one collector is STILL BEING INVOKED (a recent failed attempt, hoursSinceLastRun=2) and
+       the other has gone completely dark (hoursSinceLastRun=30, nothing attempted since that old success). */
+    [InlineData(20, 15, 5, 0, 30, 2, OneMinute, false, CollectorHealthClassifier.Failing)]   // recent failure -> still trying
+    [InlineData(10, 10, 0, 0, 25, 25, OneMinute, false, CollectorHealthClassifier.Stopped)]  // nothing since -> gone dark
+
+    /* Ran, never a success (999 sentinel on hoursSinceLastSuccess) - but the collector is still being
+       invoked (hoursSinceLastRun=1), so this correctly stays FAILING rather than reading STOPPED. This is
+       the exact interaction #1573's original 999-sentinel comment described, now proven against STOPPED too. */
+    [InlineData(5, 0, 5, 0, 999, 1, OneMinute, false, CollectorHealthClassifier.Failing)]
 
     /* Hourly (60-min) collector - 1.5h/2h are both under the 4h/24h floors, so still floor-bound. */
-    [InlineData(10, 10, 0, 0, 5, Hourly, false, CollectorHealthClassifier.Stale)]         // > 4h floor
-    [InlineData(10, 10, 0, 0, 25, Hourly, false, CollectorHealthClassifier.Failing)]      // > 24h floor
+    [InlineData(10, 10, 0, 0, 5, 5, Hourly, false, CollectorHealthClassifier.Stale)]         // > 4h floor
+    [InlineData(10, 10, 0, 0, 25, 25, Hourly, false, CollectorHealthClassifier.Stopped)]     // > 24h floor, dark since
 
-    /* Daily (1440-min) collector - the FIX. STALE line 36h, FAILING line 48h. */
-    [InlineData(30, 30, 0, 0, 27, Daily, false, CollectorHealthClassifier.Healthy)]       // THE BUG: was FAILING, now HEALTHY
-    [InlineData(30, 30, 0, 0, 35, Daily, false, CollectorHealthClassifier.Healthy)]       // still under the 36h stale line
-    [InlineData(30, 30, 0, 0, 37, Daily, false, CollectorHealthClassifier.Stale)]         // > 36h, < 48h
-    [InlineData(30, 30, 0, 0, 47, Daily, false, CollectorHealthClassifier.Stale)]         // still stale, not failing
-    [InlineData(30, 30, 0, 0, 49, Daily, false, CollectorHealthClassifier.Failing)]       // > 48h
-    [InlineData(10, 7, 3, 0, 1, Daily, false, CollectorHealthClassifier.Warning)]         // recent, 30% fail -> WARNING not STALE
+    /* Daily (1440-min) collector - the FIX. STALE line 36h, FAILING/STOPPED line 48h. */
+    [InlineData(30, 30, 0, 0, 27, 27, Daily, false, CollectorHealthClassifier.Healthy)]      // THE #1573 BUG: was FAILING, now HEALTHY
+    [InlineData(30, 30, 0, 0, 35, 35, Daily, false, CollectorHealthClassifier.Healthy)]      // still under the 36h stale line
+    [InlineData(30, 30, 0, 0, 37, 37, Daily, false, CollectorHealthClassifier.Stale)]        // > 36h, < 48h
+    [InlineData(30, 30, 0, 0, 47, 47, Daily, false, CollectorHealthClassifier.Stale)]        // still stale, not failing
+    [InlineData(30, 30, 0, 0, 49, 49, Daily, false, CollectorHealthClassifier.Stopped)]      // > 48h, dark since (was FAILING)
+    [InlineData(10, 7, 3, 0, 1, 1, Daily, false, CollectorHealthClassifier.Warning)]         // recent, 30% fail -> WARNING not STALE
     public void Classify_BandsTheDecisionTable(
         long totalRuns, long successCount, long errorCount, long permissionDeniedCount,
-        double hoursSinceLastSuccess, int frequencyMinutes, bool isOnLoad, string expected)
+        double hoursSinceLastSuccess, double hoursSinceLastRun, int frequencyMinutes, bool isOnLoad, string expected)
     {
         Assert.Equal(expected, CollectorHealthClassifier.Classify(
             totalRuns, successCount, errorCount, permissionDeniedCount,
-            hoursSinceLastSuccess, frequencyMinutes, isOnLoad));
+            hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes, isOnLoad));
+    }
+
+    /// <summary>
+    /// The field shape this band exists for: a collector whose gate flipped off for a target (agent_status
+    /// and running_jobs on an RDS SQL Server instance where SQL Agent job data is not reachable) simply
+    /// stops being invoked. Its last historical success sits well inside the health window and ages past
+    /// the FAILING cutoff exactly like a genuinely broken collector would - the field symptom this whole
+    /// band exists to stop misreporting.
+    /// </summary>
+    [Fact]
+    public void Classify_LongDormantCollector_WithNoRecentActivityOfAnyKind_IsStoppedNotFailing()
+    {
+        Assert.Equal(CollectorHealthClassifier.Stopped, CollectorHealthClassifier.Classify(
+            totalRuns: 882, successCount: 882, errorCount: 0, permissionDeniedCount: 0,
+            hoursSinceLastSuccess: 120, hoursSinceLastRun: 120, frequencyMinutes: 5, isOnLoad: false));
     }
 
     [Theory]
@@ -153,8 +180,12 @@ public sealed class CollectorHealthClassifierTests
     }
 
     [Fact]
-    public void CollectorHealthRow_IndexObjectStats_At49Hours_IsFailing()
+    public void CollectorHealthRow_IndexObjectStats_At49Hours_IsStoppedNotFailing()
     {
+        /* This row never sets LastRunTime, so HoursSinceLastRun falls back to HoursSinceLastSuccess (49h) -
+           a 100%-success collector whose last success was 49h ago has, by definition, attempted NOTHING
+           since (no later success, no failure either), which is the STOPPED signature, not FAILING's
+           "still running and erroring". Reclassified from FAILING now that the two clocks are distinguished. */
         var row = new CollectorHealthRow
         {
             CollectorName = "index_object_stats",
@@ -162,14 +193,17 @@ public sealed class CollectorHealthClassifierTests
             SuccessCount = 7,
             LastSuccessTime = DateTime.UtcNow.AddHours(-49),
         };
-        Assert.Equal("FAILING", row.HealthStatus);
+        Assert.Equal("STOPPED", row.HealthStatus);
     }
 
     [Fact]
-    public void CollectorHealthRow_FrequentCollector_BandsUnchanged()
+    public void CollectorHealthRow_FrequentCollector_GoneDarkFor30Hours_IsStoppedNotFailing()
     {
-        /* A 1-min collector is unaffected by the relative thresholds (the floors dominate): 30h -> FAILING,
-           exactly as before the #1573 change. */
+        /* A 1-min collector unaffected by the relative thresholds (the floors dominate): 30h past its last
+           (and, since 100% success, its ONLY recent) activity now reads STOPPED - it has gone completely
+           dark, which is a different fact from "it keeps running and erroring" (FAILING, proven by the
+           direct decision-table cases above). Reclassified from FAILING for the same reason as the
+           index_object_stats case: no LastRunTime set, so it falls back to HoursSinceLastSuccess. */
         var row = new CollectorHealthRow
         {
             CollectorName = "wait_stats",
@@ -177,6 +211,6 @@ public sealed class CollectorHealthClassifierTests
             SuccessCount = 100,
             LastSuccessTime = DateTime.UtcNow.AddHours(-30),
         };
-        Assert.Equal("FAILING", row.HealthStatus);
+        Assert.Equal("STOPPED", row.HealthStatus);
     }
 }

@@ -475,6 +475,17 @@ public class CollectorHealthRow
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
         : 999;
 
+    /// <summary>Hours since the newest run of ANY status — the input <see cref="CollectorHealthClassifier"/>'s
+    /// STOPPED band reads. Distinct from <see cref="HoursSinceLastSuccess"/>: a collector that keeps being
+    /// invoked and keeps failing has a small value here even while its success clock runs out; a collector
+    /// whose gate flipped off and stopped being invoked entirely has a large value here too, which is what
+    /// tells the two apart. Falls back to <see cref="HoursSinceLastSuccess"/> rather than the bare 999
+    /// sentinel when the column is unset: a run can never be MORE certain than a known success, so absent
+    /// better information this must not read more dormant than the success clock alone already says.</summary>
+    public double HoursSinceLastRun => LastRunTime.HasValue
+        ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
+        : HoursSinceLastSuccess;
+
     /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
     /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
     /// shipped default, not the per-install ScheduleManager override, so all three surfaces stay in parity.
@@ -485,7 +496,7 @@ public class CollectorHealthRow
 
     public string HealthStatus => CollectorHealthClassifier.Classify(
         TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount,
-        HoursSinceLastSuccess, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
+        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"

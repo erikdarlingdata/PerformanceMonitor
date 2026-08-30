@@ -207,7 +207,10 @@ GROUP BY server_id";
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
     /// the columns the shared <c>CollectorHealth.HealthStatus</c> banding needs, so the caller counts each
     /// server's FAILING collectors exactly as the per-server Collection Health tab does. $1 window start (the
-    /// trailing 7 days, naive UTC).</summary>
+    /// trailing 7 days, naive UTC). <c>last_run_time</c> (any status, not just success) feeds the STOPPED band
+    /// — a collector that has gone dark entirely (its AppliesTo gate flipped off, say) must not read as
+    /// FAILING just because its last SUCCESS is old; a collector still being invoked and erroring every cycle
+    /// has a recent last_run_time and correctly stays FAILING.</summary>
     public const string FleetCollectionHealthSql = @"
 SELECT
     server_id,
@@ -216,7 +219,8 @@ SELECT
     SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
     SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
     MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
-    SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count
+    SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
+    MAX(collection_time) AS last_run_time
 FROM v_collection_log
 WHERE collection_time >= $1
 GROUP BY server_id, collector_name";
@@ -767,6 +771,7 @@ GROUP BY server_id, collector_name";
                 ErrorCount = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4)),
                 LastSuccessTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
                 PermissionDeniedCount = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
+                LastRunTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
             };
 
             counts.TryGetValue(serverId, out var existing);
