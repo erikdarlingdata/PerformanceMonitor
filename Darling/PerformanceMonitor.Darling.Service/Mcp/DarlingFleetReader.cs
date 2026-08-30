@@ -198,10 +198,19 @@ WHERE deadlock_time >= $1
 AND   deadlock_time <= $2
 GROUP BY server_id";
 
-    /// <summary>Newest collection time per server — drives each card's freshness status. $ none.</summary>
+    /// <summary>Newest collection time per server — drives each card's freshness status. $1 window start.
+    /// Bounded (not a bare GROUP BY over the whole table) so TimescaleDB can chunk-exclude: this table only
+    /// grows, and every collector run adds a row, so an unbounded MAX(collection_time) over ALL history was
+    /// re-scanning the server's ENTIRE collection archive (millions of rows) on every fleet-overview call just
+    /// to find a timestamp from the last few minutes — the exact "materialize a bound, don't scan the whole
+    /// history" mistake fixed elsewhere today (pg_statement_stats #2691, pg_wait_stats #2695). The window is
+    /// 48 hours, not the 15-minute OfflineThreshold this feeds: a server genuinely offline for HOURS must still
+    /// report its true last-seen time (age computed correctly, still bands Offline) rather than falling out of
+    /// the result entirely and being treated as having no history at all.</summary>
     public const string FleetLastCollectionSql = @"
 SELECT server_id, MAX(collection_time) AS last_collection_time
 FROM v_collection_log
+WHERE collection_time >= $1
 GROUP BY server_id";
 
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
@@ -255,7 +264,7 @@ GROUP BY server_id, collector_name";
         var threads = await ReadThreadsAsync(postgres, cancellationToken);
         var blocking = await ReadBlockingAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
         var deadlocks = await ReadDeadlocksAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
-        var lastCollection = await ReadLastCollectionAsync(postgres, cancellationToken);
+        var lastCollection = await ReadLastCollectionAsync(postgres, now, cancellationToken);
         var failingCollectors = await ReadFailingCollectorCountsAsync(postgres, now, cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
@@ -269,7 +278,16 @@ GROUP BY server_id, collector_name";
             threads.TryGetValue(server.ServerId, out var t);
             blocking.TryGetValue(server.ServerId, out var b);
             deadlocks.TryGetValue(server.ServerId, out var deadlock);
-            lastCollection.TryGetValue(server.ServerId, out var lastColl);
+            /* Not `lastCollection.TryGetValue(..., out var lastColl)` — that leaves lastColl as
+               default(DateTime) (0001-01-01) on a miss, and default(DateTime) is NOT null, so it
+               does not hit ClassifyFreshness's NeverCollected branch: it falls through to the
+               age-vs-OfflineThreshold check with an age of ~2000 years and always bands Offline.
+               A server whose row fell outside the bounded window above (or, before that fix, was
+               ever missing for any other reason) must read as "no recent history", not as a fake
+               ancient timestamp. */
+            DateTime? lastColl = lastCollection.TryGetValue(server.ServerId, out var lastCollValue)
+                ? lastCollValue
+                : null;
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
             tags.TryGetValue(server.ServerId, out var serverTags);
 
@@ -735,10 +753,11 @@ GROUP BY server_id, collector_name";
         return map;
     }
 
-    private static async Task<Dictionary<int, DateTime>> ReadLastCollectionAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    private static async Task<Dictionary<int, DateTime>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
     {
         var map = new Dictionary<int, DateTime>();
         await using var command = postgres.CreateCommand(FleetLastCollectionSql);
+        AddTimestamp(command, DateTime.SpecifyKind(now.AddHours(-48), DateTimeKind.Unspecified));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

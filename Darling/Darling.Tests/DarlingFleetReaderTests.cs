@@ -133,6 +133,22 @@ public sealed class DarlingFleetReaderSqlTests
     }
 
     /// <summary>
+    /// Regression pin for a fleet false-Offline (found live on prod-pos-use1-monitor-01, 2026-08-30): this
+    /// query used to be a bare `GROUP BY server_id` with no bound at all — a full scan of the server's ENTIRE
+    /// collection_log history on every fleet-overview call, exactly the pattern already fixed elsewhere the same
+    /// day (pg_statement_stats #2691, pg_wait_stats #2695). It must stay windowed like every other fleet read
+    /// here (<see cref="FleetCollectionHealthSql_PerServerPerCollector"/>, <see cref="FleetDeadlockSql_PerServerCount_WindowedBothBounds"/>).
+    /// </summary>
+    [Fact]
+    public void FleetLastCollectionSql_IsWindowed_NotAFullHistoryScan()
+    {
+        var sql = DarlingFleetReader.FleetLastCollectionSql;
+        Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The read-only fleet-tag join (#2020): every (server, tag) assignment, joined to the tag for its name and
     /// stored colour, ordered so a card's pills are stable. Bare table names resolve through the store's
     /// search_path to the config-schema tag tables, the same way FleetServersSql reads servers / config_mute_rules.
@@ -343,8 +359,62 @@ public sealed class DarlingFleetReaderLivePostgresTests
 {
     private const int XeServerId = -951001;   // 2 XE reports + 1 DMV snapshot -> XE preferred (2), no deadlock -> Warning
     private const int DmvServerId = -951002;  // 3 DMV snapshots (fallback), 1 deadlock -> Critical
+    private const int NoHistoryServerId = -951003;  // registered, zero collection_log rows ever -> never collected
     private const string XeName = "fleet-reader-e2e-xe";
     private const string DmvName = "fleet-reader-e2e-dmv";
+    private const string NoHistoryName = "fleet-reader-e2e-no-history";
+
+    /// <summary>
+    /// Regression test for a fleet false-Offline found live on prod-pos-use1-monitor-01 (2026-08-30): a server
+    /// with NO row in <c>collection_log</c> at all — the "never collected" bootstrap state — must band Warning
+    /// with <c>IsOnline = null</c> and <c>AwaitingFirstCollection = true</c>
+    /// (<see cref="ServerCollectionStatusRules.FlagsFor"/>), never <c>FleetHealthBand.Offline</c> with
+    /// <c>IsOnline = false</c>. Before the fix, <c>ReadLastCollectionAsync</c>'s dictionary miss fell through
+    /// `TryGetValue(..., out var lastColl)` to `default(DateTime)` (0001-01-01) — a value that IS non-null, so
+    /// <c>ClassifyFreshness</c> never reached its `NeverCollected` branch and instead computed an age of ~2000
+    /// years, which is always past <c>OfflineThreshold</c>. This is exactly the failure mode that showed up live
+    /// as a rotating set of actively-collecting servers reading "Offline - no recent collection".
+    /// </summary>
+    [Fact]
+    public async Task GetFleetOverview_ServerWithNoCollectionHistory_ReadsAwaitingFirstCollection_NotOffline()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live fleet-reader test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteSentinelRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.UtcNow;
+
+            /* Registered, but no collection_log row is ever inserted for this server_id. */
+            await InsertServerAsync(connection, NoHistoryServerId, NoHistoryName, 3, ct);
+
+            var result = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-1), now, now, cancellationToken: ct);
+
+            var card = result.Cards.Single(c => c.ServerId == NoHistoryServerId);
+
+            Assert.Null(card.IsOnline);
+            Assert.True(card.AwaitingFirstCollection);
+            Assert.Equal(FleetHealthBand.Warning, card.Band);
+            Assert.NotEqual(FleetHealthBand.Offline, card.Band);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSentinelRowsAsync(cleanup, cleanupCt));
+        }
+    }
 
     [Fact]
     public async Task GetFleetOverview_PerServerFallbackAndBanding_AgainstDevPostgres()
@@ -490,7 +560,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
         foreach (var table in new[] { "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "collection_log", "servers" })
         {
             using var cleanup = new NpgsqlCommand(
-                $"DELETE FROM {table} WHERE server_id IN ({XeServerId}, {DmvServerId});", connection);
+                $"DELETE FROM {table} WHERE server_id IN ({XeServerId}, {DmvServerId}, {NoHistoryServerId});", connection);
             await cleanup.ExecuteNonQueryAsync(ct);
         }
     }
