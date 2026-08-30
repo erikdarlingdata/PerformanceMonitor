@@ -40,6 +40,42 @@ namespace PerformanceMonitor.Collectors;
 /// the vanilla path: zero would say Aurora measured no storage reads for this statement, which is a
 /// claim about the server, not about the source. Every consumer of those columns already tolerates NULL
 /// because Aurora itself returns NULL for a statement with no such activity.</para>
+/// <para><b>A row that had zero calls since the last cycle is not shipped.</b> <c>pg_stat_statements</c>
+/// has no server-side WHERE for "changed since I last looked" — the query already reads the whole live
+/// catalog, and at a 50-cluster fleet running the 1-minute cadence <see cref="CollectorScheduleDefaults"/>
+/// gives every PostgreSQL collector, that meant re-writing every tracked statement shape every minute
+/// whether or not anyone ran it: <c>pg_statement_stats</c> reached 176.9 GB of a 180 GB store within 36
+/// hours of the fleet's onboarding, growing 126 GB in a single day. The fix is the same shape as the
+/// SQL Server side's rank-then-render split (#1959), aimed at a different cost: there is no plan XML to
+/// defer here, so the lever is ROW COUNT, not row content — most statements in any given minute are idle,
+/// and an idle repeat carries no information a reader does not already have.</para>
+/// <para>The delta on CALLS decides it, computed once in <see cref="ReadAsync"/> rather than
+/// <c>WritePayload</c> because the write loop starts the binary-import row before <c>WritePayload</c>
+/// runs (see <c>DarlingCollectorRunner</c>) — by the time a collector could refuse to write, the row
+/// already exists. Skipping has to happen earlier, in the list <see cref="ReadAsync"/> returns.</para>
+/// <para>The distinction the skip decision rests on is the one <see cref="CollectorDeltaCalculator"/>
+/// already draws between an UNKNOWN zero and a CONFIRMED one: a first sighting and a counter reset both
+/// report interval 0 alongside delta 0, and both are genuinely new information — a shape appearing for
+/// the first time, or one whose plan/counters were just evicted and re-entered — so both still ship.
+/// Only delta 0 paired with a REAL interval (interval &gt; 0) means the statement demonstrably ran zero
+/// times since the last look, which is the only case with nothing left to say. Calls is sufficient to
+/// decide this alone: <c>pg_stat_statements</c> only advances total_exec_time, rows, or any other counter
+/// here when calls also advances, so a confirmed zero-calls interval means every other counter on the row
+/// is unchanged too.</para>
+/// <para>The other two delta series (total_exec_time, rows) are still computed for every row the query
+/// returns, including ones this ultimately skips — not merely for symmetry, but because
+/// <see cref="CollectorDeltaCalculator"/> refreshes a series' cached timestamp only when it is called.
+/// Skipping that call during an idle stretch would leave those two series' baselines stale, so the next
+/// GENUINELY active cycle could see a gap exceeding <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>
+/// against a baseline that is, in fact, still current — reporting a false counter-reset (a real accrual
+/// wrongly zeroed) on a statement whose calls delta correctly showed the activity. Calling all three
+/// unconditionally, and gating only the OUTPUT on the calls delta, keeps every series' baseline exactly as
+/// fresh as it is today.</para>
+/// <para>No TOP-N cap layers on top of this. The measured driver of the growth was idle repeats, not a
+/// large ACTIVE statement population — a cluster whose entire tracked catalog turns over every cycle
+/// would need one, but that is a distinct, not-yet-observed failure mode with its own tuning (mirroring
+/// the SQL Server compile-churn pattern already found on the use2 fleet), and adding a cap without
+/// evidence it is needed would just be another number to defend later.</para>
 /// </summary>
 public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<PgStatementStatsCollector.Row>
 {
@@ -78,7 +114,13 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
         long WalFpi,
         long WalBytes,
         long? TotalExecPeakMemBytes,
-        long? MaxExecPeakMemBytes);
+        long? MaxExecPeakMemBytes,
+        /* Computed in ReadAsync, not WritePayload — see the class remarks on why the delta decides
+           whether this row ships at all, which means it must exist before the row is (or is not)
+           added to the list WritePayload will later be called once per. */
+        long DeltaCalls,
+        long DeltaTotalExecTimeMs,
+        long DeltaRows);
 
     /* Column names DIFFER between PostgreSQL 16 and 17 and our fleet spans both, so the query is
        built per major rather than SELECT *-ed. Verified against live 16.11 and 17.7:
@@ -244,17 +286,67 @@ WHERE calls > 0";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            var queryId = reader.GetInt64(0);
+            var databaseId = reader.GetInt64(1);
+            var userId = reader.GetInt64(2);
+            var topLevel = !reader.IsDBNull(3) && reader.GetBoolean(3);
+            var calls = reader.GetInt64(4);
+            var totalExecTimeMs = Dbl(reader, 5);
+            var rowsReturned = reader.GetInt64(9);
+
+            /* Delta key is (queryid, dbid, userid, toplevel) — the full pg_stat_statements identity, not
+               queryid alone. The same normalized statement run by a different user or against a different
+               database is a DIFFERENT entry with its own counters, so keying on queryid alone would
+               interleave several series into one and produce nonsense deltas.
+
+               queryid itself is not stable across major versions (it is derived from a post-parse-analysis
+               tree, including internal object identifiers), so a mass reset after an upgrade is expected
+               behaviour rather than an anomaly — the delta calculator's counter-regression handling covers
+               it the same way it covers a restart. */
+            var key = string.Create(CultureInfo.InvariantCulture,
+                $"{queryId}|{databaseId}|{userId}|{(topLevel ? 1 : 0)}");
+
+            var deltaCalls = context.Deltas.CalculateDeltaWithInterval(
+                context.ServerId, "pg_statement_stats_calls", key, calls, out var callsIntervalSeconds,
+                collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+            /* Time is stored as double milliseconds but the delta machinery is integral, so the delta is
+               taken on whole milliseconds. Sub-millisecond drift per interval is immaterial against the
+               totals this feeds, and keeping one delta calculator for both engines is worth more.
+
+               Computed unconditionally, even on a row this pass goes on to skip: CalculateDelta is also
+               what refreshes a series' cached timestamp, and skipping the call on an idle row would leave
+               THIS series stale while the calls series (called for every row, always) stayed fresh —
+               so the next genuinely active cycle could see a gap here that calls never sees, and report a
+               false counter-reset on a real accrual. See the class remarks. */
+            var deltaTotalTime = context.Deltas.CalculateDelta(
+                context.ServerId, "pg_statement_stats_time", key, (long)totalExecTimeMs,
+                collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+            var deltaRows = context.Deltas.CalculateDelta(
+                context.ServerId, "pg_statement_stats_rows", key, rowsReturned,
+                collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+            /* The skip: a REAL interval (this is not a first sighting, a counter reset, or a gap this
+               pass just re-baselined) with zero new calls means the statement demonstrably did not run,
+               and pg_stat_statements only advances any OTHER counter on a call — so nothing on this row
+               changed and there is nothing new to write. interval == 0 covers first-sight/reset/gap-reset
+               together, and all three are genuinely new information, so all three still ship. See the
+               class remarks for the full reasoning and why this check is calls-only. */
+            if (callsIntervalSeconds > 0 && deltaCalls == 0)
+            {
+                continue;
+            }
+
             rows.Add(new Row(
-                QueryId: reader.GetInt64(0),
-                DatabaseId: reader.GetInt64(1),
-                UserId: reader.GetInt64(2),
-                TopLevel: !reader.IsDBNull(3) && reader.GetBoolean(3),
-                Calls: reader.GetInt64(4),
-                TotalExecTimeMs: Dbl(reader, 5),
+                QueryId: queryId,
+                DatabaseId: databaseId,
+                UserId: userId,
+                TopLevel: topLevel,
+                Calls: calls,
+                TotalExecTimeMs: totalExecTimeMs,
                 MinExecTimeMs: Dbl(reader, 6),
                 MaxExecTimeMs: Dbl(reader, 7),
                 MeanExecTimeMs: Dbl(reader, 8),
-                RowsReturned: reader.GetInt64(9),
+                RowsReturned: rowsReturned,
                 SharedBlocksHit: reader.GetInt64(10),
                 SharedBlocksRead: reader.GetInt64(11),
                 SharedBlocksDirtied: reader.GetInt64(12),
@@ -273,7 +365,10 @@ WHERE calls > 0";
                 WalFpi: reader.GetInt64(23),
                 WalBytes: reader.GetInt64(24),
                 TotalExecPeakMemBytes: NullableLong(reader, 25),
-                MaxExecPeakMemBytes: NullableLong(reader, 26)));
+                MaxExecPeakMemBytes: NullableLong(reader, 26),
+                DeltaCalls: deltaCalls,
+                DeltaTotalExecTimeMs: deltaTotalTime,
+                DeltaRows: deltaRows));
         }
 
         return rows;
@@ -287,31 +382,6 @@ WHERE calls > 0";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
-        /* Delta key is (queryid, dbid, userid, toplevel) — the full pg_stat_statements identity, not
-           queryid alone. The same normalized statement run by a different user or against a different
-           database is a DIFFERENT entry with its own counters, so keying on queryid alone would
-           interleave several series into one and produce nonsense deltas.
-
-           queryid itself is not stable across major versions (it is derived from a post-parse-analysis
-           tree, including internal object identifiers), so a mass reset after an upgrade is expected
-           behaviour rather than an anomaly — the delta calculator's counter-regression handling covers
-           it the same way it covers a restart. */
-        var key = string.Create(CultureInfo.InvariantCulture,
-            $"{row.QueryId}|{row.DatabaseId}|{row.UserId}|{(row.TopLevel ? 1 : 0)}");
-
-        var deltaCalls = context.Deltas.CalculateDelta(
-            context.ServerId, "pg_statement_stats_calls", key, row.Calls,
-            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        /* Time is stored as double milliseconds but the delta machinery is integral, so the delta is
-           taken on whole milliseconds. Sub-millisecond drift per interval is immaterial against the
-           totals this feeds, and keeping one delta calculator for both engines is worth more. */
-        var deltaTotalTime = context.Deltas.CalculateDelta(
-            context.ServerId, "pg_statement_stats_time", key, (long)row.TotalExecTimeMs,
-            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaRows = context.Deltas.CalculateDelta(
-            context.ServerId, "pg_statement_stats_rows", key, row.RowsReturned,
-            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-
         writer
             .Value(row.QueryId)
             .Value(row.DatabaseId)
@@ -340,8 +410,8 @@ WHERE calls > 0";
             .Value(row.WalBytes)
             .Value(row.TotalExecPeakMemBytes)
             .Value(row.MaxExecPeakMemBytes)
-            .Value(deltaCalls)
-            .Value(deltaTotalTime)
-            .Value(deltaRows);
+            .Value(row.DeltaCalls)
+            .Value(row.DeltaTotalExecTimeMs)
+            .Value(row.DeltaRows);
     }
 }
