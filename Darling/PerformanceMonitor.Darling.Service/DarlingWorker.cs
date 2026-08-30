@@ -3858,7 +3858,33 @@ LIMIT 1", connection);
                 }
 
                 server.NextDue[name] = now.AddMinutes(effective.FrequencyMinutes);
-                await RunOneAsync(server, runner, name, cancellationToken);
+
+                /* #2700: query_store is split off this sequential body rather than awaited inline. Its
+                   run time is bimodal — a heavy batch runs 100-230+ seconds against a ~5-35s mean, on its
+                   own 5-minute cadence — and every OTHER due collector in this foreach (query_stats,
+                   procedure_stats, wait_stats, all 1-minute cadence) would otherwise queue behind that one
+                   await for the rest of the body's duration. Worse, this body IS the unit the outer launch
+                   loop will not relaunch while it is still running (INV-2, "one body per server"), so a
+                   single heavy query_store run stalled the server's ENTIRE collection for its duration, not
+                   just query_store's own row — confirmed via get_collection_health's BODY_OVERRUN
+                   diagnostic as the mechanism that pushed several servers' last_collection stale enough to
+                   false-trip the fleet's 15-minute Offline threshold while every collector was otherwise
+                   healthy (zero failures, a pure scheduling overrun). Fire-and-forget is safe here
+                   specifically because RunOneAsync already gates query_store through the per-server
+                   QueryStoreServerGate (#2165) — a still-in-flight previous tick skips rather than
+                   overlapping — and query_store's own window is watermark-driven (#1960), so a detached run
+                   that outlives this sweep resumes correctly from its own gate rather than dropping rows.
+                   RunOneAsync's catch-all already contains every fault but cancellation, so
+                   RunDetachedQueryStoreAsync exists only to keep a shutdown-time
+                   OperationCanceledException from surfacing as an unobserved task exception. */
+                if (IsQueryStoreCollector(name))
+                {
+                    _ = RunDetachedQueryStoreAsync(server, runner, name, cancellationToken);
+                }
+                else
+                {
+                    await RunOneAsync(server, runner, name, cancellationToken);
+                }
             }
         }
         finally
@@ -4786,6 +4812,27 @@ LIMIT 1";
             }
 
             return 0;
+        }
+    }
+
+    /// <summary>
+    /// #2700: fire-and-forget wrapper around <see cref="RunOneAsync"/> for query_store, the one collector
+    /// split off <see cref="RunDueCollectorsAsync"/>'s sequential body — see that call site for why.
+    /// RunOneAsync's own catch-all already contains every fault but cancellation, so this wrapper exists
+    /// only to keep a shutdown-time <see cref="OperationCanceledException"/> from surfacing as an
+    /// unobserved task exception, the same containment every other fire-and-track body in this file gets.
+    /// </summary>
+    private async Task RunDetachedQueryStoreAsync(
+        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunOneAsync(server, runner, collectorName, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            /* Shutdown — expected, and safe to abandon: query_store's window is watermark-driven (#1960),
+               so an in-flight run dropped here resumes from the same boundary on the next start. */
         }
     }
 
