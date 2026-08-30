@@ -272,8 +272,14 @@ public sealed class ViewerDailyHealthRowTests
     }
 
     [Fact]
-    public void CollectorHealthRow_Failing_WhenLastSuccessOlderThan24Hours()
+    public void CollectorHealthRow_Stopped_WhenLastSuccessOlderThan24HoursAndNothingSince()
     {
+        /* This row never sets LastRunTime, so HoursSinceLastRun falls back to HoursSinceLastSuccess (30h) -
+           a 100%-success collector whose last success was 30h ago has attempted NOTHING since (no later
+           success, no failure either), which is the STOPPED signature, not FAILING's "still running and
+           erroring". Reclassified from FAILING now that the two clocks are distinguished; see
+           CollectorHealthClassifierTests for the paired case proving FAILING still fires when the
+           collector has a RECENT attempt (of any status) despite an old last success. */
         var row = new CollectorHealthRow
         {
             CollectorName = "wait_stats",
@@ -281,7 +287,7 @@ public sealed class ViewerDailyHealthRowTests
             SuccessCount = 10,
             LastSuccessTime = DateTime.UtcNow.AddHours(-30),
         };
-        Assert.Equal("FAILING", row.HealthStatus);
+        Assert.Equal("STOPPED", row.HealthStatus);
     }
 
     [Fact]

@@ -540,6 +540,7 @@ namespace PerformanceMonitor.Common
         /* The band strings every surface's brush / display mapping already switches on — unchanged values. */
         public const string NeverRun = "NEVER_RUN";
         public const string NoPermissions = "NO_PERMISSIONS";
+        public const string Stopped = "STOPPED";
         public const string Failing = "FAILING";
         public const string Stale = "STALE";
         public const string Warning = "WARNING";
@@ -648,13 +649,17 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// Band one collector's trailing-window roll-up. Order is fixed: NEVER_RUN (no runs at all) ->
-        /// NO_PERMISSIONS (only permission denials) -> on-load (failure-rate only, never STALE/FAILING) ->
-        /// FAILING -> STALE -> WARNING (failure rate over the threshold) -> HEALTHY.
+        /// NO_PERMISSIONS (only permission denials) -> on-load (failure-rate only, never STOPPED/STALE/
+        /// FAILING) -> STOPPED (no attempt of ANY kind recently, despite a history of runs) -> FAILING ->
+        /// STALE -> WARNING (failure rate over the threshold) -> HEALTHY.
         /// <paramref name="hoursSinceLastSuccess"/> is the caller's elapsed-hours value — its 999 sentinel
         /// for "ran but never a success" flows straight through to FAILING, exactly as before.
-        /// <paramref name="frequencyMinutes"/> is the collector's cadence (callers resolve it from
-        /// <c>CollectorScheduleDefaults</c>; 0 for on-load or an unknown collector, which yields the floor
-        /// thresholds = the old flat behavior). <paramref name="isOnLoad"/> is <see cref="IsOnLoadCollector"/>.
+        /// <paramref name="hoursSinceLastRun"/> is hours since the newest run of ANY status (success,
+        /// error, or permissions) — see <see cref="Stopped"/> below for why this is a separate input from
+        /// <paramref name="hoursSinceLastSuccess"/>. <paramref name="frequencyMinutes"/> is the collector's
+        /// cadence (callers resolve it from <c>CollectorScheduleDefaults</c>; 0 for on-load or an unknown
+        /// collector, which yields the floor thresholds = the old flat behavior). <paramref name="isOnLoad"/>
+        /// is <see cref="IsOnLoadCollector"/>.
         /// </summary>
         public static string Classify(
             long totalRuns,
@@ -662,6 +667,7 @@ namespace PerformanceMonitor.Common
             long errorCount,
             long permissionDeniedCount,
             double hoursSinceLastSuccess,
+            double hoursSinceLastRun,
             int frequencyMinutes,
             bool isOnLoad)
         {
@@ -680,6 +686,25 @@ namespace PerformanceMonitor.Common
             if (isOnLoad)
             {
                 return failureRatePercent > WarningFailureRatePercent ? Warning : Healthy;
+            }
+
+            /* STOPPED: a collector whose LAST ATTEMPT OF ANY KIND — success, error, or
+               permissions, not just success — is older than the FAILING cutoff has not been invoked at
+               all, which is a different fact from "it runs and keeps failing". A collector that is still
+               being invoked and erroring every cycle has a RECENT hoursSinceLastRun (the failure itself
+               is a run), so it falls through to FAILING below exactly as before; this branch only catches
+               genuine silence. hoursSinceLastRun can never exceed hoursSinceLastSuccess (every success is
+               a run), so this is strictly a subset of what would otherwise read FAILING — it recategorizes
+               rather than suppresses. The house case: a collector whose AppliesTo gate flipped off for a
+               target (an RDS instance where SQL Agent job/status collection is not applicable) stops being
+               invoked entirely; its last historical success sits inside the health window and ages past
+               the FAILING cutoff, reading as an alarming "this keeps failing" when nothing has been
+               attempted in either direction. Reusing FailingThresholdHours rather than a new constant: the
+               question here is the same one FAILING already asks ("has this collector gone dark for too
+               long"), just asked of attempts instead of successes. */
+            if (hoursSinceLastRun > FailingThresholdHours(frequencyMinutes))
+            {
+                return Stopped;
             }
 
             if (hoursSinceLastSuccess > FailingThresholdHours(frequencyMinutes))
