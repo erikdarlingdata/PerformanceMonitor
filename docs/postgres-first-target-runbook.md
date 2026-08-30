@@ -67,6 +67,33 @@ connects to. One installation covers the whole instance; the extension is keyed 
 databases. Skipping this is fine: the collector records a non-fatal skip that says exactly this (step 9),
 and the other six are unaffected.
 
+### IAM, for the two collectors that read the server log (plan capture, deadlocks)
+
+This is a **different axis from the grant above** — it authorizes the **monitoring host's AWS identity**,
+not the PostgreSQL login. On Aurora/RDS there is no local log directory a SQL session can read with
+`pg_read_file()`; plan capture and deadlock detection instead pull the log tail through the RDS control
+plane. Attach this to the instance role/profile the Darling service actually runs as:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "rds:DescribeDBClusters",
+    "rds:DescribeDBLogFiles",
+    "rds:DownloadDBLogFilePortion"
+  ],
+  "Resource": [
+    "arn:aws:rds:<region>:<account-id>:cluster:*",
+    "arn:aws:rds:<region>:<account-id>:db:*"
+  ]
+}
+```
+
+`DescribeDBClusters` resolves an Aurora cluster to its current writer instance; the other two list and read
+the log file itself. Self-managed PostgreSQL doesn't need this at all — it reads `pg_read_file()` directly,
+and the DB-level grant above is the only one it wants. Skipping this on Aurora/RDS is not silent: both
+collectors log the missing action by name (see step 10).
+
 ## 2. Register the target
 
 **Which path you use depends on whether this store has ever been seeded**, and getting this wrong is the
@@ -431,6 +458,7 @@ says which kind it is.
 | `PERMISSIONS` | "NOT a missing grant", view/function absent | `pg_stat_statements` never created | step 1's optional half |
 | `PERMISSIONS` | "NOT a missing grant", not implemented | reading something this engine lacks | nothing — expected off Aurora |
 | `PERMISSIONS` | "NOT a missing grant", feature disabled | switched off in the parameter group | enable it, or accept the gap |
+| `PERMISSIONS` | `is not authorized to perform: rds:Describe...`/`rds:Download...`, names an IAM role ARN | the **monitoring host's IAM role** lacks the AWS-level grant plan capture/deadlocks need on Aurora/RDS | attach the IAM policy in step 1's IAM subsection — a DB-side grant cannot fix this, it's a different identity entirely |
 | `ERROR` | a statement timeout | the query was too slow **once** | usually transient; deliberately does *not* drop the connection, so a slow query cannot cause a reconnect storm |
 | `ERROR` | anything else | unclassified | read `error_message`; this is the bucket that wants a bug report |
 | `YIELDED` | lock contention | the collector stepped aside | none today — no PostgreSQL collector opts into the lock-timeout yield |
