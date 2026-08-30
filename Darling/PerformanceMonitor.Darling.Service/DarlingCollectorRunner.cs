@@ -192,6 +192,13 @@ public sealed class DarlingCollectorRunner
        forever while looking like it was making progress. */
     private RdsPlanIngestor? _rdsPlans;
 
+    /* A SEPARATE ingestor from _rdsPlans, deliberately: RdsLogSource's resume marker is consumed per
+       (instance, file) on every read, so sharing one instance between plan capture and deadlock ingestion
+       would starve whichever of the two runs second in a cycle. Each needs its own marker to independently
+       read "the same bounded tail of the same file" - matching the pg_read_file route, where the two
+       collectors' SQL queries already read that tail independently rather than sharing a cursor. */
+    private RdsDeadlockIngestor? _rdsDeadlocks;
+
     /// <summary>
     /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
     ///
@@ -219,6 +226,31 @@ public sealed class DarlingCollectorRunner
            different from every other target's. */
         return new CollectorRunResult(rows, 0, elapsedMs,
             rows == 0 ? "no new auto_explain plans in the RDS log window" : null);
+    }
+
+    /// <summary>
+    /// Deadlock capture for Aurora and RDS, where the log is only reachable through the AWS API — the
+    /// dispatch this collector was missing (it dispatched unconditionally to the <c>pg_read_file</c> route
+    /// even against a managed target, which has no filesystem to read; a 100% failure across the whole
+    /// Aurora fleet, since no grant fixes what does not exist there). Mirrors
+    /// <see cref="IngestRdsPlansAsync"/> exactly, including the STORAGE-time accounting rationale.
+    /// </summary>
+    public async Task<CollectorRunResult> IngestRdsDeadlocksAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
+    {
+        _rdsDeadlocks ??= new RdsDeadlockIngestor(_postgres, logger: _logger);
+
+        var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        var started = Stopwatch.GetTimestamp();
+
+        var rows = await _rdsDeadlocks.IngestAsync(
+            server.ServerId, server.StorageName, host, cancellationToken);
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        return new CollectorRunResult(rows, 0, elapsedMs,
+            rows == 0 ? "no new deadlocks in the RDS log window" : null);
     }
 
     public async Task<CollectorRunResult> RunAsync<TRow>(

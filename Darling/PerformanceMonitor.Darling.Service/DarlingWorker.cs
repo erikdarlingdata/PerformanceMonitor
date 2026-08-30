@@ -4850,7 +4850,17 @@ LIMIT 1";
         ["pg_statement_stats"] = (r, s, ct) => r.RunAsync(PgStatementStatsCollector.Instance, s, ct),
         ["pg_wraparound_stats"] = (r, s, ct) => r.RunAsync(PgWraparoundStatsCollector.Instance, s, ct),
         ["pg_server_config"] = (r, s, ct) => r.RunAsync(PgServerConfigCollector.Instance, s, ct),
-        ["pg_deadlocks"] = (r, s, ct) => r.RunAsync(PgDeadlocksCollector.Instance, s, ct),
+        /* TWO TRANSPORTS, one table, same reason as pg_plan_capture below: self-hosted reads the server
+           log with pg_read_file; Aurora and RDS have no filesystem and pg_read_server_files is not
+           grantable, so those go through the AWS log API instead. This branch was the missing half — the
+           collector's own AppliesTo returns true for every target on the assumption the route is "chosen
+           at dispatch", but before this there was no dispatch branch, so every Aurora target fell through
+           to the pg_read_file route and failed PERMISSIONS 100% of the time (no grant fixes a filesystem
+           that is not there). */
+        ["pg_deadlocks"] = (r, s, ct) =>
+            s.Target.IsAurora || s.Target.IsAwsRds
+                ? r.IngestRdsDeadlocksAsync(s, ct)
+                : r.RunAsync(PgDeadlocksCollector.Instance, s, ct),
         ["pg_xmin_horizon"] = (r, s, ct) => r.RunAsync(PgXminHorizonCollector.Instance, s, ct),
         ["pg_replication_slots"] = (r, s, ct) => r.RunAsync(PgReplicationSlotsCollector.Instance, s, ct),
         ["pg_autovacuum_stats"] = (r, s, ct) => r.RunAsync(PgAutovacuumStatsCollector.Instance, s, ct),
