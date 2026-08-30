@@ -50,40 +50,29 @@ public static class QueryStorePlanXmlState
     public const int MinCandidatePlans = 32;
 
     /// <summary>
-    /// Ceiling on the candidate cap. The smallest measured quartile average (15 KB) puts a 12 MB budget at
-    /// ~820 plans, so this leaves headroom for genuinely tiny plans while refusing to let a near-zero estimate
-    /// turn one pass back into "decompress the whole catalog" — which is the first-contact trap the cap exists
-    /// to prevent.
+    /// Ceiling on the candidate cap — FLAT, not adaptive, and deliberately no longer sized to what the
+    /// smallest measured plans could theoretically use.
+    ///
+    /// <para><b>#2683/#2685 tried the adaptive alternative and it failed at the moment it mattered.</b> Those
+    /// issues detected a "runaway" store (one whose plan population churns faster than any pass can drain)
+    /// by watching for 24 CONSECUTIVE passes clamped at a high ceiling (2048), then dropping to a low one
+    /// (512) with hysteresis to survive the estimator's oscillation. Verified against the 2026-08-29 peak
+    /// window on AYR — the pathological store the detector was built for: the log showed ZERO "candidate cap
+    /// clamped" lines and ZERO RUNAWAY/Holding lines during a stretch where plan_fetch still ran 38–73s
+    /// across twelve straight passes. The learned average happened to keep "wanted" just under the 2048
+    /// ceiling, so no pass ever clamped, the streak never advanced, and the throttle that existed
+    /// specifically for this store never engaged when the store needed it.</para>
+    ///
+    /// <para>A flat ceiling doesn't need to detect anything — it is always in effect, so this failure mode
+    /// cannot occur. The trade is the one this file's own philosophy already accepts: "a cap that is too
+    /// small merely spreads the catch-up across more cycles" (see <see cref="FirstContactAvgPlanBytes"/>) —
+    /// a store with many small plans converges over more passes instead of fewer, which is acceptable
+    /// specifically for query_store because it serves HISTORICAL analysis, not in-the-moment
+    /// troubleshooting (unlike query_stats/procedure_stats, which stay fully adaptive because they ARE used
+    /// live). 512 is the value #2683 already proved safe as a throttled ceiling — it just no longer waits
+    /// for detection to apply it.</para>
     /// </summary>
-    public const int MaxCandidatePlans = 2048;
-
-    /// <summary>
-    /// #2683: a store whose fetch stays catch-up-clamped for this many CONSECUTIVE passes is treated as
-    /// RUNAWAY — its plan population churns faster than any pass can drain (a tenant generating tens of
-    /// thousands of plans/day from ad-hoc/unparameterized SQL: one production catalog held 100k plans and
-    /// added ~5k/hour, so the fetch clamped at <see cref="MaxCandidatePlans"/> every pass indefinitely,
-    /// spending ~40s decompressing plan XML that had aged out of cache before it was fetched). Chasing every
-    /// plan is futile there and just makes the collector the hog it must never be on a stock Query Store.
-    /// Past this streak the per-pass ceiling drops to <see cref="RunawayCandidatePlans"/> so the collection
-    /// body stays short instead of grinding at the full cap forever. A pass that finally DRAINS (ships fewer
-    /// than the cap and under budget) resets the streak — so a legitimately-heavy store catching up keeps the
-    /// full cap and is never throttled.
-    /// </summary>
-    public const int RunawayClampedStreakThreshold = 24;
-
-    /// <summary>The reduced per-pass ceiling for a runaway store (see <see cref="RunawayClampedStreakThreshold"/>).</summary>
-    public const int RunawayCandidatePlans = 512;
-
-    /// <summary>
-    /// #2683b: how many CONSECUTIVE drained passes DISARM the sticky runaway flag once it is set. This is the
-    /// hysteresis half — arming on sustained clamping was not enough on its own, because a runaway store's
-    /// candidate-count estimator OSCILLATES: a small-capped pass "drains" (ships fewer than its cap), which
-    /// flipped the old per-pass streak back to zero, so the next pass trusted the small average, capped to
-    /// thousands, and spiked to 60–250s before re-clamping — measured on AYR AFTER it had already been flagged.
-    /// Requiring this many drains IN A ROW to clear means one oscillation drain never disarms it; only a store
-    /// that has genuinely caught up (drains continuously) clears and regains the full cap.
-    /// </summary>
-    public const int RunawayClearDrainedThreshold = 24;
+    public const int MaxCandidatePlans = 512;
 
     /// <summary>
     /// How far past the budget the cap reaches, in expected plans. The cap is the COARSE bound and the
@@ -112,7 +101,7 @@ public static class QueryStorePlanXmlState
     /// <see cref="CandidatePlanCount(long?, long, bool, out bool)"/> overload floors it).
     /// <c>AvgBytes</c> of zero means "never learned"; callers pass null to CandidatePlanCount then.
     /// </summary>
-    public readonly record struct PlanSizeEstimate(long AvgBytes, bool CatchUpInProgress, int ClampedStreak = 0, int DrainedStreak = 0, bool Runaway = false);
+    public readonly record struct PlanSizeEstimate(long AvgBytes, bool CatchUpInProgress);
 
     /// <summary>
     /// Folds one pass's outcome into the carried estimate. The rules, each load-bearing:
@@ -134,24 +123,13 @@ public static class QueryStorePlanXmlState
     {
         // A pass that hit a bound (clamped) proves a backlog remains — catch-up. A pass that ships nothing, or
         // fewer than its cap and under budget, proves caught-up — a DRAIN, and teaches no size (previous
-        // average stands). #2683b tracks both as consecutive streaks and arms/disarms a STICKY runaway flag.
+        // average stands).
         var catchUp = plansShipped > 0 && (plansShipped >= candidateWindow || bytesShipped >= budgetBytes);
         var avg = plansShipped > 0
             ? ObservedAvgPlanBytes(bytesShipped, plansMeasured) ?? previous.AvgBytes
             : previous.AvgBytes;
 
-        var clampedStreak = catchUp ? previous.ClampedStreak + 1 : 0;
-        var drainedStreak = catchUp ? 0 : previous.DrainedStreak + 1;
-        // #2683b HYSTERESIS: ARM runaway on RunawayClampedStreakThreshold consecutive clamps; DISARM only on
-        // RunawayClearDrainedThreshold consecutive drains. #2683 reset a single per-pass streak on any drain,
-        // but a runaway store's estimator OSCILLATES (a small-capped pass drains, the next trusts the small
-        // average and caps to thousands), so the flag never held and the store spiked back to 60–250s. The
-        // sticky flag keeps it capped through the oscillation; only a store that genuinely catches up (drains
-        // continuously) clears it and regains the full cap.
-        var runaway = previous.Runaway
-            ? drainedStreak < RunawayClearDrainedThreshold
-            : clampedStreak >= RunawayClampedStreakThreshold;
-        return new PlanSizeEstimate(avg, catchUp, clampedStreak, drainedStreak, runaway);
+        return new PlanSizeEstimate(avg, catchUp);
     }
 
     /// <summary>
@@ -187,7 +165,7 @@ public static class QueryStorePlanXmlState
     /// over-estimate-is-safe logic the seed itself rests on, for the one window where the sample is known to be
     /// unrepresentative. Once caught up the sample spans the catalog and the observed average is trusted.</para>
     /// </summary>
-    public static int CandidatePlanCount(long? observedAvgPlanBytes, long budgetBytes, bool catchUpInProgress, out bool clamped, bool runaway = false)
+    public static int CandidatePlanCount(long? observedAvgPlanBytes, long budgetBytes, bool catchUpInProgress, out bool clamped)
     {
         var avg = observedAvgPlanBytes is long observed && observed > 0 ? observed : FirstContactAvgPlanBytes;
 
@@ -208,11 +186,7 @@ public static class QueryStorePlanXmlState
            reports on. int.MaxValue only guards the cast itself, since the budget is operator input. */
         var wanted = (double)budgetBytes / avg * CandidatePlanMargin;
         var unclamped = wanted >= int.MaxValue ? int.MaxValue : (int)System.Math.Ceiling(wanted);
-        // #2683/#2683b: a runaway store (the STICKY flag — armed by sustained clamping, held through the
-        // estimator's oscillation until sustained draining) gets a reduced ceiling so its fetch stops grinding
-        // at the full cap; a store legitimately catching up (not flagged) keeps MaxCandidatePlans.
-        var ceiling = runaway ? RunawayCandidatePlans : MaxCandidatePlans;
-        var bounded = System.Math.Clamp(unclamped, MinCandidatePlans, ceiling);
+        var bounded = System.Math.Clamp(unclamped, MinCandidatePlans, MaxCandidatePlans);
 
         /* Reports that a bound CHANGED the answer, not that the answer happens to equal one. A cap whose
            measured size lands naturally on 32 or 2048 was sized by the measurement and needs no log line; saying

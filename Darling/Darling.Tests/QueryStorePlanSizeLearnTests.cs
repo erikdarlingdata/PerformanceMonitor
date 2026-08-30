@@ -116,127 +116,29 @@ public sealed class QueryStorePlanSizeLearnTests
 
         Assert.Equal(0, estimate.AvgBytes);
         Assert.False(estimate.CatchUpInProgress);
-        Assert.Equal(0, estimate.ClampedStreak);
-    }
-
-    /* ---------- #2683: runaway back-off (a store whose fetch never drains) ---------- */
-
-    /// <summary>Each consecutive catch-up (clamped) pass increments the runaway streak.</summary>
-    [Fact]
-    public void ConsecutiveCatchUpPassesGrowTheClampedStreak()
-    {
-        var e = new QueryStorePlanXmlState.PlanSizeEstimate(15_000, CatchUpInProgress: true, ClampedStreak: 5);
-
-        // A full-window pass = still clamped -> streak advances.
-        var next = QueryStorePlanXmlState.Learn(
-            e, bytesShipped: 30_000_000, plansShipped: 2048, plansMeasured: 2048, candidateWindow: 2048, budgetBytes: 33_554_432);
-
-        Assert.True(next.CatchUpInProgress);
-        Assert.Equal(6, next.ClampedStreak);
-    }
-
-    /// <summary>A pass that finally DRAINS (partial, under budget) resets the streak — a legit heavy store is never throttled.</summary>
-    [Fact]
-    public void ADrainedPassResetsTheClampedStreak()
-    {
-        var e = new QueryStorePlanXmlState.PlanSizeEstimate(15_000, CatchUpInProgress: true, ClampedStreak: 30);
-
-        // Shipped fewer than the window and under budget -> caught up.
-        var next = QueryStorePlanXmlState.Learn(
-            e, bytesShipped: 900_000, plansShipped: 60, plansMeasured: 60, candidateWindow: 2048, budgetBytes: 33_554_432);
-
-        Assert.False(next.CatchUpInProgress);
-        Assert.Equal(0, next.ClampedStreak);
-    }
-
-    /// <summary>An empty pass also resets the streak (it proves the fetch caught up).</summary>
-    [Fact]
-    public void AnEmptyPassResetsTheClampedStreak()
-    {
-        var e = new QueryStorePlanXmlState.PlanSizeEstimate(15_000, CatchUpInProgress: true, ClampedStreak: 40);
-
-        var next = QueryStorePlanXmlState.Learn(
-            e, bytesShipped: 0, plansShipped: 0, plansMeasured: 0, candidateWindow: 2048, budgetBytes: 33_554_432);
-
-        Assert.Equal(0, next.ClampedStreak);
     }
 
     /// <summary>
-    /// The back-off itself. The expensive AYR-shaped passes — the ones that clamp to the full 2048 — run with
-    /// catch-up NOT in progress (a small learned average is trusted, not seed-floored), so wanted greatly
-    /// exceeds the cap. NOT runaway -> lands at MaxCandidatePlans; runaway -> ceiling drops to
-    /// RunawayCandidatePlans.
+    /// #2683/#2685 tried an adaptive runaway detector here (a streak of clamped passes armed a reduced
+    /// ceiling, with hysteresis to survive oscillation) and it failed at the moment it mattered: the
+    /// 2026-08-29 peak verification on AYR showed zero clamped passes and zero runaway arms while
+    /// plan_fetch still ran 38-73s across twelve straight passes, because the learned average happened to
+    /// keep "wanted" just under the ceiling. MaxCandidatePlans is now a flat 512 instead, so the throttle
+    /// applies unconditionally and cannot fail to engage. This pins that the ceiling used by
+    /// <see cref="QueryStorePlanXmlState.CandidatePlanCount(long?, long, bool, out bool)"/> really is flat —
+    /// a would-be-runaway-shaped pass (small trusted average, large budget) still lands at MaxCandidatePlans,
+    /// with no second, lower tier to fall into or fail to reach.
     /// </summary>
     [Fact]
-    public void RunawayFlag_DropsTheCeilingToRunawayCandidatePlans()
+    public void TheCandidateCeilingIsFlat_NoRunawayTierToEngageOrMiss()
     {
-        // ~15 KB plans (trusted, not catching up), 32 MB budget -> wants ~3277, well past the full cap.
+        // ~15 KB plans (trusted, not catching up), 32 MB budget -> wants ~3277, well past the ceiling.
         long avg = 15 * 1024, budget = 32L * 1024 * 1024;
 
-        var notRunaway = QueryStorePlanXmlState.CandidatePlanCount(
-            avg, budget, catchUpInProgress: false, out var clampedNot, runaway: false);
-        Assert.Equal(QueryStorePlanXmlState.MaxCandidatePlans, notRunaway);
-        Assert.True(clampedNot);
+        var k = QueryStorePlanXmlState.CandidatePlanCount(avg, budget, catchUpInProgress: false, out var clamped);
 
-        var runaway = QueryStorePlanXmlState.CandidatePlanCount(
-            avg, budget, catchUpInProgress: false, out var clampedRunaway, runaway: true);
-        Assert.Equal(QueryStorePlanXmlState.RunawayCandidatePlans, runaway);
-        Assert.True(clampedRunaway);
-
-        Assert.True(runaway < notRunaway, "the runaway flag must reduce the per-pass cap");
-    }
-
-    /* ---------- #2683b: STICKY runaway (hysteresis) ---------- */
-
-    private static QueryStorePlanXmlState.PlanSizeEstimate Clamp(QueryStorePlanXmlState.PlanSizeEstimate e) =>
-        // a pass that ships its whole cap under budget = clamped/catch-up.
-        QueryStorePlanXmlState.Learn(e, bytesShipped: 300_000, plansShipped: 512, plansMeasured: 512, candidateWindow: 512, budgetBytes: 33_554_432);
-    private static QueryStorePlanXmlState.PlanSizeEstimate Drain(QueryStorePlanXmlState.PlanSizeEstimate e) =>
-        // a pass that ships fewer than its cap under budget = drained.
-        QueryStorePlanXmlState.Learn(e, bytesShipped: 60_000, plansShipped: 40, plansMeasured: 40, candidateWindow: 512, budgetBytes: 33_554_432);
-
-    /// <summary>Runaway ARMS after RunawayClampedStreakThreshold consecutive clamps — and not before.</summary>
-    [Fact]
-    public void Runaway_ArmsAfterSustainedClamping()
-    {
-        var e = default(QueryStorePlanXmlState.PlanSizeEstimate);
-        for (int i = 0; i < QueryStorePlanXmlState.RunawayClampedStreakThreshold - 1; i++) e = Clamp(e);
-        Assert.False(e.Runaway, "not yet armed one short of the threshold");
-        e = Clamp(e);
-        Assert.True(e.Runaway, "armed at the threshold");
-    }
-
-    /// <summary>
-    /// The whole point of #2683b: once armed, a SINGLE drain (the estimator's oscillation) does NOT disarm it —
-    /// this is the case #2683 got wrong, where the store spiked back to thousands the moment its streak reset.
-    /// </summary>
-    [Fact]
-    public void Runaway_SurvivesASingleDrain_AndAnOscillation()
-    {
-        var e = default(QueryStorePlanXmlState.PlanSizeEstimate);
-        for (int i = 0; i < QueryStorePlanXmlState.RunawayClampedStreakThreshold; i++) e = Clamp(e);
-        Assert.True(e.Runaway);
-
-        e = Drain(e);
-        Assert.True(e.Runaway, "one drain must not disarm — the ClampedStreak reset but the sticky flag holds");
-        Assert.Equal(0, e.ClampedStreak);
-
-        // oscillate a while — never RunawayClearDrainedThreshold drains in a row
-        for (int i = 0; i < 50; i++) e = (i % 2 == 0) ? Clamp(e) : Drain(e);
-        Assert.True(e.Runaway, "an oscillating store stays flagged");
-    }
-
-    /// <summary>Only SUSTAINED draining (a genuinely caught-up store) clears the flag and regains the full cap.</summary>
-    [Fact]
-    public void Runaway_ClearsOnlyAfterSustainedDraining()
-    {
-        var e = default(QueryStorePlanXmlState.PlanSizeEstimate);
-        for (int i = 0; i < QueryStorePlanXmlState.RunawayClampedStreakThreshold; i++) e = Clamp(e);
-        Assert.True(e.Runaway);
-
-        for (int i = 0; i < QueryStorePlanXmlState.RunawayClearDrainedThreshold - 1; i++) e = Drain(e);
-        Assert.True(e.Runaway, "still flagged one drain short of the clear threshold");
-        e = Drain(e);
-        Assert.False(e.Runaway, "cleared after sustained draining");
+        Assert.Equal(QueryStorePlanXmlState.MaxCandidatePlans, k);
+        Assert.Equal(512, k);
+        Assert.True(clamped);
     }
 }

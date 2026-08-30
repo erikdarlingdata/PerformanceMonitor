@@ -286,16 +286,15 @@ public class QueryStorePlanFetchTests
     /* ---------- sizing: unchanged arithmetic, still load-bearing (it caps decompression) ---------- */
 
     /// <summary>
-    /// The candidate cap sits just past what the budget can actually ship, at every plan size the fleet
-    /// ACTUALLY exhibits — per-quartile averages of 162 / 80 / 39 / 15 KB measured across 2,166 budget-cut
-    /// passes. The point of the pin is that none of these clamp: if a real fleet plan size hit a bound, the
-    /// bound would be doing the sizing instead of the measurement.
+    /// The candidate cap sits just past what the budget can actually ship, at the three LARGER quartiles of
+    /// measured fleet plan size (162 / 80 / 39 KB, across 2,166 budget-cut passes) — none of these clamp: if
+    /// a real fleet plan size hit a bound, the bound would be doing the sizing instead of the measurement.
+    /// The smallest quartile (15 KB) is pinned separately below, because it DOES now hit the flat ceiling.
     /// </summary>
     [Theory]
     [InlineData(162, 114)]
     [InlineData(80, 231)]
     [InlineData(39, 473)]
-    [InlineData(15, 1229)]
     public void CandidatePlanCount_SitsJustPastTheBudget_AtEveryMeasuredFleetPlanSize(int avgKb, int expected)
     {
         var k = QueryStorePlanXmlState.CandidatePlanCount(avgKb * 1024L, 12L * 1024 * 1024, out var clamped);
@@ -305,6 +304,24 @@ public class QueryStorePlanFetchTests
 
         var actuallyFit = (12L * 1024 * 1024) / (avgKb * 1024L);
         Assert.InRange(k / (double)actuallyFit, 1.4, 1.6);
+    }
+
+    /// <summary>
+    /// The smallest measured fleet quartile (15 KB) wants ~1229 plans at a 12 MB budget — past the flat
+    /// 512 ceiling (#2683/#2685's adaptive runaway detector was retired in favor of this: it failed to
+    /// engage during the 2026-08-29 AYR peak precisely because "wanted" stayed just under the old 2048
+    /// ceiling, so the throttle never armed). A flat ceiling applies unconditionally, so this database-shape
+    /// now converges over more cycles instead of fewer — the accepted trade for query_store, which serves
+    /// historical analysis rather than in-the-moment troubleshooting.
+    /// </summary>
+    [Fact]
+    public void CandidatePlanCount_AtTheSmallestFleetQuartile_HitsTheFlatCeiling()
+    {
+        var k = QueryStorePlanXmlState.CandidatePlanCount(15 * 1024L, 12L * 1024 * 1024, out var clamped);
+
+        Assert.Equal(QueryStorePlanXmlState.MaxCandidatePlans, k);
+        Assert.Equal(512, k);
+        Assert.True(clamped, "the flat ceiling now binds at the fleet's smallest measured plan-size quartile");
     }
 
     /// <summary>
@@ -324,7 +341,7 @@ public class QueryStorePlanFetchTests
 
     [Theory]
     [InlineData(10L * 1024 * 1024, 12L * 1024 * 1024, 32)]
-    [InlineData(1, 12L * 1024 * 1024, 2048)]
+    [InlineData(1, 12L * 1024 * 1024, 512)]
     public void CandidatePlanCount_ClampsAndSaysSo(long avgBytes, long budget, int expected)
     {
         var k = QueryStorePlanXmlState.CandidatePlanCount(avgBytes, budget, out var clamped);
