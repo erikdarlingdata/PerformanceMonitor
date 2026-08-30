@@ -1,0 +1,178 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
+
+namespace PerformanceMonitor.Darling.Service.Targets;
+
+/// <summary>
+/// Stores deadlock reports fetched from the RDS log API into <c>collect.pg_deadlocks</c> — the
+/// managed-PostgreSQL half of deadlock capture, and <see cref="RdsPlanIngestor"/>'s sibling.
+///
+/// <para><b>Its own <see cref="RdsLogSource"/>, not a shared one.</b> <see cref="RdsLogSource"/> keeps an
+/// in-memory resume marker per (instance, file), consumed on every read. Sharing one instance with plan
+/// capture would mean whichever of the two ingestors runs second in a cycle sees only the portion the first
+/// one already consumed — starved, not merely redundant. <see cref="PgDeadlocksCollector"/>'s own SQL route
+/// already reads "the same bounded tail of the same file as plan capture" independently at the database
+/// level; this mirrors that at the RDS-API level rather than inventing a shared-cursor scheme neither route
+/// uses.</para>
+///
+/// <para><b>What it deliberately does NOT duplicate.</b> Parsing and hashing come from
+/// <c>PgDeadlockLogParser</c>, shared with the <c>pg_read_file</c> route via its <c>Extract</c> entry point
+/// — the same reason <c>PgPlanLogParser</c> is shared by <see cref="RdsPlanIngestor"/>. The WRITE goes
+/// through <c>PgCollectorRowWriter</c> and <c>PgDeadlocksCollector</c>'s own definition, so the column order
+/// and the COPY command are the collector's rather than a second opinion about them.</para>
+/// </summary>
+public sealed class RdsDeadlockIngestor
+{
+    private readonly NpgsqlDataSource _postgres;
+    private readonly RdsLogSource _logs;
+    private readonly ILogger? _logger;
+
+    public RdsDeadlockIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null)
+    {
+        _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _logs = logs ?? new RdsLogSource();
+        _logger = logger;
+    }
+
+    /// <param name="host">The target's connection host. A non-RDS host is skipped silently — that target
+    /// uses the <c>pg_read_file</c> route instead, and there is nothing to report.</param>
+    /// <returns>Rows stored, or zero when this target is not RDS or had nothing new.</returns>
+    public async Task<int> IngestAsync(
+        int serverId,
+        string storageName,
+        string host,
+        CancellationToken cancellationToken = default)
+    {
+        RdsLogSource.LogChunk? chunk;
+
+        try
+        {
+            chunk = await _logs.ReadNewestAsync(host, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* #2633's fix, shared: rethrown so the runner degrades an authorization refusal to PERMISSIONS,
+               naming which kind of nothing was found, instead of a SUCCESS row claiming the log was opened
+               and empty. */
+            _logger?.LogWarning(
+                "RDS deadlock log unavailable for {Server}: {Message} — deadlock capture is skipped for "
+                + "this target this cycle; every other collector is unaffected.",
+                storageName, ex.Message);
+
+            throw new RdsLogUnavailableException(
+                ex.Message, RdsLogUnavailableException.IsAuthorizationRefusal(ex), ex);
+        }
+
+        if (chunk is null || string.IsNullOrEmpty(chunk.Value.Text))
+        {
+            return 0;
+        }
+
+        var deadlocks = PgDeadlockLogParser.Extract(chunk.Value.Text);
+
+        if (deadlocks.Count == 0)
+        {
+            /* A log slab with no deadlocks in it is the ordinary case. Not worth a log line every cycle. */
+            return 0;
+        }
+
+        var rows = new List<PgDeadlocksCollector.Row>(deadlocks.Count);
+
+        foreach (var deadlock in deadlocks)
+        {
+            rows.Add(new PgDeadlocksCollector.Row(
+                OccurredAtUtc: deadlock.OccurredAtUtc,
+                VictimPid: deadlock.VictimPid,
+                ParticipantCount: deadlock.ParticipantCount,
+                DeadlockHash: deadlock.DeadlockHash,
+                LockModes: deadlock.LockModes,
+                Resources: deadlock.Resources,
+                VictimStatement: deadlock.VictimStatement,
+                GraphText: deadlock.GraphText));
+        }
+
+        return await WriteAsync(serverId, storageName, rows, cancellationToken);
+    }
+
+    /// <summary>
+    /// The same binary COPY the collector runner uses, driven by the collector's own definition — so the
+    /// column order and COPY command come from one place and cannot drift from the table.
+    /// </summary>
+    private async Task<int> WriteAsync(
+        int serverId,
+        string storageName,
+        IReadOnlyList<PgDeadlocksCollector.Row> rows,
+        CancellationToken cancellationToken)
+    {
+        var definition = PgDeadlocksCollector.Instance;
+
+        /* Naive UTC, the store's convention for every collector timestamp: the columns are `timestamp`
+           without a zone, and letting Kind=Utc through makes Npgsql infer timestamptz and shift the value
+           by the store session's offset. */
+        var collectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        var writer = new PgCollectorRowWriter();
+        var written = 0;
+
+        using (var importer = await connection.BeginBinaryImportAsync(
+            PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
+        {
+            writer.Importer = importer;
+
+            foreach (var row in rows)
+            {
+                await importer.StartRowAsync(cancellationToken);
+
+                if (definition.IncludesCollectionId)
+                {
+                    writer.Value(CollectionIdGenerator.Next());
+                }
+
+                writer.Value(collectionTime)
+                      .Value(serverId)
+                      .Value(storageName);
+
+                writer.BeginPayload();
+                definition.WritePayload(row, writer, NullContext(serverId, storageName, collectionTime));
+                writer.EndPayload(definition.PayloadColumns.Count);
+                written++;
+            }
+
+            await importer.CompleteAsync(cancellationToken);
+        }
+
+        _logger?.LogInformation(
+            "Stored {Count} deadlock report(s) for {Server} from the RDS log API.", written, storageName);
+
+        return written;
+    }
+
+    /* WritePayload takes a context for the collectors that consult deltas or watermarks. This one reads
+       none of it - the rows are already fully formed by the parser - so the context exists to satisfy the
+       signature rather than to carry anything. */
+    private static CollectorContext NullContext(int serverId, string storageName, DateTime collectionTime)
+        => new()
+        {
+            ServerId = serverId,
+            ServerName = storageName,
+            CollectionTime = collectionTime,
+            Deltas = new CollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+        };
+}
