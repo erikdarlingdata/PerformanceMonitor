@@ -20,12 +20,18 @@ namespace PerformanceMonitor.Alerting;
 /// <param name="MultiXactAge">Age of the oldest unfrozen MultiXact (datminmxid).</param>
 /// <param name="AutovacuumFreezeMaxAge">The server's autovacuum_freeze_max_age — the age at which
 /// autovacuum force-starts a wraparound-prevention vacuum whether or not the table is otherwise due.</param>
+/// <param name="WindowPeakXidAge">The highest XID age observed in the same freshness window this reading
+/// came from. 0 means no window data was supplied, which <see cref="XidFreezingIsKeepingUp"/> treats
+/// conservatively as "not recovering" rather than silently assuming health (see #2689).</param>
+/// <param name="WindowPeakMultiXactAge">The same for MultiXact age.</param>
 public sealed record PostgresWraparoundAlertInfo(
     string DatabaseName,
     long XidAge,
     long MultiXactAge,
     long AutovacuumFreezeMaxAge,
-    long AutovacuumMultixactFreezeMaxAge)
+    long AutovacuumMultixactFreezeMaxAge,
+    long WindowPeakXidAge = 0,
+    long WindowPeakMultiXactAge = 0)
 {
     /* WorstAge/WorstCounter used to pick by raw age and the evaluator graded the winner against
        autovacuum_freeze_max_age whichever counter it was. That is wrong: the two counters have DIFFERENT
@@ -58,6 +64,18 @@ public sealed record PostgresWraparoundAlertInfo(
     /// <summary>The name of that setting, so the body cannot contradict itself.</summary>
     public string WorstSettingName =>
         MultiXactIsWorse ? "autovacuum_multixact_freeze_max_age" : "autovacuum_freeze_max_age";
+
+    /* #2689: whether autovacuum has actually brought the age back down from its own recent peak, the
+       signal that separates a healthy sawtooth (routine, resets every cycle) from a stuck climb (autovacuum
+       losing the race). Mirrors DarlingMcpPgWraparoundTools' own derivation (r.FrozenXidAge <
+       r.WindowPeakFrozenXidAge) so the alert and the read tool can never disagree about what "keeping up"
+       means. A peak of 0 (no window supplied) makes this false — conservative, not optimistic. */
+
+    /// <summary>Whether the XID age has come down from its own peak within the window.</summary>
+    public bool XidFreezingIsKeepingUp => XidAge < WindowPeakXidAge;
+
+    /// <summary>The same for MultiXact age.</summary>
+    public bool MultiXactFreezingIsKeepingUp => MultiXactAge < WindowPeakMultiXactAge;
 }
 
 /// <summary>

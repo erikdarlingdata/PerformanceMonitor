@@ -31,8 +31,10 @@ public class PostgresAlertEvaluatorTests
         long xid,
         long multi = 0,
         long freezeMax = StockFreezeMaxAge,
-        long multixactFreezeMax = StockMultixactFreezeMaxAge)
-        => new("appdb", xid, multi, freezeMax, multixactFreezeMax);
+        long multixactFreezeMax = StockMultixactFreezeMaxAge,
+        long windowPeakXid = 0,
+        long windowPeakMulti = 0)
+        => new("appdb", xid, multi, freezeMax, multixactFreezeMax, windowPeakXid, windowPeakMulti);
 
     /// <summary>
     /// Thresholds scale to the SERVER's own autovacuum_freeze_max_age, not to a constant. A cluster tuned to
@@ -51,9 +53,15 @@ public class PostgresAlertEvaluatorTests
         Assert.Null(PostgresAlertEvaluator.EvaluateWraparound(Wrap(400_000_000, freezeMax: 1_500_000_000)));
     }
 
+    /// <summary>
+    /// #2689: the relative Warning arm moved from 90% of freeze_max_age to 100% (the crossing point itself,
+    /// where autovacuum forces the vacuum) - these boundaries use the default FreezingIsKeepingUp=false
+    /// (no window peak supplied), the conservative "not recovering" case, so the relative arm is reachable
+    /// at all. <see cref="WarningIsSuppressedWhileTheCounterIsComingBackDownFromItsPeak"/> covers the gate.
+    /// </summary>
     [Theory]
-    [InlineData(179_999_999, null)]              // just under 90% of 200M
-    [InlineData(180_000_000, "Warning")]         // exactly 90%
+    [InlineData(199_999_999, null)]              // just under 100% of 200M
+    [InlineData(200_000_000, "Warning")]         // exactly at the setting - the forced-vacuum crossing point
     [InlineData(399_999_999, "Warning")]         // just under 2x
     [InlineData(400_000_000, "Critical")]        // exactly 2x
     [InlineData(1_900_000_000, "Critical")]
@@ -68,6 +76,57 @@ public class PostgresAlertEvaluatorTests
         }
 
         Assert.Equal(Enum.Parse<AlertSeverityLevel>(expected), finding!.Severity);
+    }
+
+    /// <summary>
+    /// #2689: the whole point of the fix. A database sitting AT or ABOVE its own forced-vacuum crossing
+    /// point is the routine case if autovacuum is bringing it back down every cycle - the healthy sawtooth,
+    /// not a risk. The old unconditional 90% arm could not tell this from a stuck climb and paged on every
+    /// healthy database.
+    /// </summary>
+    [Fact]
+    public void WarningIsSuppressedWhileTheCounterIsComingBackDownFromItsPeak()
+    {
+        /* Age is past the crossing point (200M), but the window saw it higher (250M) - it HAS come down. */
+        var finding = PostgresAlertEvaluator.EvaluateWraparound(Wrap(200_000_000, windowPeakXid: 250_000_000));
+
+        Assert.Null(finding);
+    }
+
+    /// <summary>
+    /// The other half of the gate: past the crossing point and the window has NEVER seen it lower - autovacuum
+    /// is not winning the race, which is the actual risk #2689 asks this alert to signal.
+    /// </summary>
+    [Fact]
+    public void WarningFiresWhenTheCounterHasNeverComeBackDownInTheWindow()
+    {
+        /* The current reading IS the window's peak - it has only ever climbed. */
+        var finding = PostgresAlertEvaluator.EvaluateWraparound(Wrap(200_000_000, windowPeakXid: 200_000_000));
+
+        Assert.Equal(AlertSeverityLevel.Warning, finding!.Severity);
+        Assert.Contains("not recovering", finding.ThresholdValue, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The absolute Warning arm, mirroring <see cref="CriticalIsReachableOnAClusterTunedPastHalfTheWall"/> one
+    /// severity down: on a cluster tuned high enough, 1.0x setting sits at or past the Critical ceiling arm,
+    /// so the relative Warning arm is unreachable there too. Without the absolute floor at 50% of the true
+    /// wraparound space, that cluster would jump straight from silent to Critical with no early warning.
+    /// </summary>
+    [Fact]
+    public void WarningIsReachableOnAClusterTunedPastHalfTheWall()
+    {
+        const long Tuned = 2_000_000_000;
+
+        /* Relative Warning would be 2B - at or past the 2^31 wall, unreachable. */
+        Assert.True(Tuned >= PostgresAlertEvaluator.WraparoundCeiling);
+
+        /* 1.1B is past 50% of the space (~1.07B) but short of Critical's 74.5% (~1.6B) and short of the
+           2x-tuned relative Critical (4B) - only the absolute Warning arm can fire here. */
+        var finding = PostgresAlertEvaluator.EvaluateWraparound(Wrap(1_100_000_000, freezeMax: Tuned));
+
+        Assert.Equal(AlertSeverityLevel.Warning, finding!.Severity);
+        Assert.Contains("wraparound space", finding.ThresholdValue, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -280,7 +339,7 @@ public class PostgresAlertEvaluatorTests
     public void FindingsAreOrderedWorstFirst()
     {
         var findings = PostgresAlertEvaluator.Evaluate(
-            new[] { Wrap(190_000_000) },                                   // Warning
+            new[] { Wrap(200_000_000) },                                   // Warning
             null,
             new[] { new PostgresSlotAlertInfo("s", "lost", false, 1, 0, null) });  // Critical
 

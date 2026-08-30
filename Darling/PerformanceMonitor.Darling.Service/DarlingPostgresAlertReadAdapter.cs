@@ -46,7 +46,9 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             frozen_xid_age,
             min_multixid_age,
             autovacuum_freeze_max_age,
-            autovacuum_multixact_freeze_max_age
+            autovacuum_multixact_freeze_max_age,
+            MAX(frozen_xid_age) OVER (PARTITION BY database_name) AS window_peak_xid_age,
+            MAX(min_multixid_age) OVER (PARTITION BY database_name) AS window_peak_multixact_age
         FROM pg_wraparound_stats
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -155,7 +157,13 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
                    this adapter simply never selected it, so the evaluator graded MultiXact age against the
                    XID setting — half the size by default, hence warnings at 2.2x premature. 0 reads as
                    "cannot judge that counter", which is the correct fail-quiet. */
-                reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
+                reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                /* ordinals 5/6: the window's peak for each counter (#2689), read over this SAME freshness
+                   window rather than a separate one, so "has it come down" and "is this reading current"
+                   answer consistently off one query. 0 reads as "no window data" -> FreezingIsKeepingUp
+                   false, the conservative default. */
+                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                reader.IsDBNull(6) ? 0 : reader.GetInt64(6)));
         }
 
         return rows;

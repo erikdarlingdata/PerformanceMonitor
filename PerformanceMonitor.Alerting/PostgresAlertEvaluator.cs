@@ -32,12 +32,21 @@ public static class PostgresAlertEvaluator
     /* Wraparound. The wall is 2 billion transactions, but the number that matters first is the server's
        OWN autovacuum_freeze_max_age: at that age autovacuum force-starts a wraparound-prevention vacuum
        whether or not a table is otherwise due, so crossing it means the server has begun defending itself.
-       Warning fires at 90% of it — before the forced vacuum, while a planned one is still an option.
        Critical fires at 2x it, which on a stock 200-million setting is 400 million: comfortably clear of
        the 2-billion stop, but far enough past the engine's own line to mean its defence is not keeping up.
        Both are ratios of a setting the row carries, so a cluster tuned to 1.5 billion gets thresholds
-       scaled to its own configuration rather than to a constant that would never fire for it. */
-    public const double WraparoundWarningFractionOfFreezeMaxAge = 0.9;
+       scaled to its own configuration rather than to a constant that would never fire for it.
+
+       #2689: Warning used to fire at 90% of freeze_max_age unconditionally, and that is a ROUTINE operating
+       point — every healthy database climbs to ~that age on every freeze cycle and is reset, the expected
+       sawtooth. Firing there paged on essentially every healthy database, permanently (one fleet database
+       re-fired the identical alert every ~5-minute cycle at 9% of the way to actual wraparound). The real
+       risk is not "approaching freeze_max_age", it is "age has REACHED freeze_max_age and autovacuum is not
+       bringing it back down" - i.e. the forced vacuum this crossing itself triggers is not winning. So the
+       relative Warning arm now sits AT the setting (1.0x, the crossing point itself) and is gated by
+       FreezingIsKeepingUp: a database sitting above its own setting but coming back down each cycle does not
+       warn; one stuck at or above it, never seen lower within the window, does. */
+    public const double WraparoundWarningFractionOfFreezeMaxAge = 1.0;
     public const double WraparoundCriticalMultipleOfFreezeMaxAge = 2.0;
 
     /// <summary>
@@ -56,6 +65,16 @@ public static class PostgresAlertEvaluator
     /// the setting is tunable to 2B. A tuned cluster would have warned and then never escalated.</para>
     /// </summary>
     public const double WraparoundCriticalFractionOfCeiling = 0.745;
+
+    /// <summary>
+    /// #2689: an absolute early-Warning arm, the same reasoning as <see cref="WraparoundCriticalFractionOfCeiling"/>
+    /// applied one severity down. On a cluster tuned high enough (past ~1.07B), the RELATIVE Warning arm
+    /// (1.0x setting) can land beyond or right at the Critical ceiling arm, robbing the operator of any
+    /// early warning at all. Unconditional (no FreezingIsKeepingUp gate) like the Critical ceiling arm,
+    /// because half the true wraparound space is already such a rare, high-consequence number that no
+    /// healthy database reaches it under a routine sawtooth regardless of oscillation history.
+    /// </summary>
+    public const double WraparoundWarningFractionOfCeiling = 0.5;
 
     /* xmin horizon. 50 million transactions of held-back horizon is roughly where bloat becomes visible
        rather than theoretical on a busy database. The persistence gate is what makes it actionable: a
@@ -157,9 +176,13 @@ public static class PostgresAlertEvaluator
         }
 
         /* Each counter against ITS OWN governing setting. Defaults differ by 2x (200M vs 400M), so grading
-           MultiXact age against the XID setting warned 2.2x premature. */
-        var xid = xidJudgeable ? Grade(db.XidAge, db.AutovacuumFreezeMaxAge) : null;
-        var multi = multiJudgeable ? Grade(db.MultiXactAge, db.AutovacuumMultixactFreezeMaxAge) : null;
+           MultiXact age against the XID setting warned 2.2x premature. Each also carries its OWN
+           FreezingIsKeepingUp (#2689) - a database can have a healthy XID sawtooth and a stuck MultiXact, or
+           the reverse, and gating one counter's Warning off the other's recovery would be exactly backwards. */
+        var xid = xidJudgeable ? Grade(db.XidAge, db.AutovacuumFreezeMaxAge, db.XidFreezingIsKeepingUp) : null;
+        var multi = multiJudgeable
+            ? Grade(db.MultiXactAge, db.AutovacuumMultixactFreezeMaxAge, db.MultiXactFreezingIsKeepingUp)
+            : null;
 
         /* The worse breach wins, and "worse" is the relative position, not the raw age — the only comparison
            that means anything when the denominators differ. Severity first so a Critical MultiXact cannot be
@@ -184,43 +207,71 @@ public static class PostgresAlertEvaluator
         var critical = severity == AlertSeverityLevel.Critical;
         var pctOfCeiling = 100.0 * age / WraparoundCeiling;
 
+        /* #2689: viaCeiling now applies to BOTH severities (the absolute early-Warning arm as well as the
+           absolute Critical arm), so the ceiling fraction quoted has to match whichever one actually fired -
+           quoting the Critical fraction on a Warning message would contradict the severity right next to it. */
+        var ceilingFraction = critical ? WraparoundCriticalFractionOfCeiling : WraparoundWarningFractionOfCeiling;
+
+        var thresholdValue = viaCeiling
+            ? $"{breached:N0} ({ceilingFraction * 100:0.#}% of the 2^31 wraparound space)"
+            : critical
+                ? $"{breached:N0} (2x {settingName} {setting:N0})"
+                : $"{breached:N0} (at {settingName} {setting:N0}, not recovering)";
+
+        string shortMessage;
+        if (critical)
+        {
+            shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} is {pctOfCeiling:0.#}% of the way to the "
+                + "wraparound wall"
+                + (viaCeiling
+                    ? " — past vacuum_failsafe_age, where PostgreSQL abandons its cost limits and skips "
+                      + "index cleanup trying to catch up."
+                    : $" and past twice {settingName} ({setting:N0}) — autovacuum's own wraparound defence "
+                      + "is not keeping up.")
+                + " At the wall the server stops accepting writes, and the remedy is hours of vacuuming, so act now.";
+        }
+        else if (viaCeiling)
+        {
+            shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} is {pctOfCeiling:0.#}% of the way to the "
+                + "wraparound wall — already well past the routine vacuum-forcing point on this cluster's own "
+                + $"{settingName}. Vacuum now rather than waiting to see if autovacuum keeps pace.";
+        }
+        else
+        {
+            shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} has reached {settingName} ({setting:N0}) — "
+                + "the point where autovacuum forces a wraparound-prevention vacuum — and has not come back down "
+                + "since. Confirm autovacuum is actually keeping up rather than merely running.";
+        }
+
         return new Finding(
             WraparoundMetric,
             severity,
             db.DatabaseName,
             $"{counter} age {age:N0} in [{db.DatabaseName}]",
-            viaCeiling
-                ? $"{breached:N0} ({WraparoundCriticalFractionOfCeiling * 100:0.#}% of the 2^31 wraparound space)"
-                : $"{breached:N0} ({(critical ? "2x" : "90% of")} {settingName} {setting:N0})",
-            critical
-                ? $"[{db.DatabaseName}] {counter} age {age:N0} is {pctOfCeiling:0.#}% of the way to the "
-                  + $"wraparound wall"
-                  + (viaCeiling
-                      ? " — past vacuum_failsafe_age, where PostgreSQL abandons its cost limits and skips "
-                        + "index cleanup trying to catch up."
-                      : $" and past twice {settingName} ({setting:N0}) — autovacuum's own wraparound defence "
-                        + "is not keeping up.")
-                  + " At the wall the server stops accepting writes, and the remedy is hours of vacuuming, so act now."
-                : $"[{db.DatabaseName}] {counter} age {age:N0} is approaching {settingName} ({setting:N0}), "
-                  + "where autovacuum will force a wraparound-prevention vacuum. Vacuum on your schedule now "
-                  + "rather than on its schedule later.",
+            thresholdValue,
+            shortMessage,
             age,
             breached);
     }
 
     /// <summary>
-    /// Grades one counter against its own setting, then OR-s in the absolute arm. Returns the severity, the
-    /// threshold actually breached, and whether it was the absolute one — so the message can say which.
+    /// Grades one counter against its own setting, then OR-s in the absolute arms. Returns the severity, the
+    /// threshold actually breached, and whether it was one of the absolute ones — so the message can say which.
     /// </summary>
-    private static (AlertSeverityLevel Severity, long Breached, bool ViaCeiling)? Grade(long age, long setting)
+    /// <param name="freezingIsKeepingUp">#2689: whether this counter has come down from its own recent peak.
+    /// Gates the RELATIVE Warning arm only - a database sitting above its own setting but resetting every
+    /// cycle is the routine sawtooth, not a risk; the absolute arms stay unconditional, same as Critical's.</param>
+    private static (AlertSeverityLevel Severity, long Breached, bool ViaCeiling)? Grade(
+        long age, long setting, bool freezingIsKeepingUp)
     {
         var warnAt = (long)(setting * WraparoundWarningFractionOfFreezeMaxAge);
         var criticalAt = (long)(setting * WraparoundCriticalMultipleOfFreezeMaxAge);
         var ceilingCriticalAt = (long)(WraparoundCeiling * WraparoundCriticalFractionOfCeiling);
+        var ceilingWarnAt = (long)(WraparoundCeiling * WraparoundWarningFractionOfCeiling);
 
-        /* The absolute arm is checked FIRST and independently: on a cluster tuned past ~1.07B the relative
-           criticalAt sits beyond the wall and can never be reached, which is precisely where an alert is
-           needed most. */
+        /* The absolute arms are checked FIRST and independently: on a cluster tuned past ~1.07B the relative
+           arms sit beyond the wall and can never be reached, which is precisely where an alert is needed
+           most. Unconditional on FreezingIsKeepingUp - see the constant doc comments for why. */
         if (age >= ceilingCriticalAt)
         {
             return (AlertSeverityLevel.Critical, ceilingCriticalAt, true);
@@ -231,7 +282,14 @@ public static class PostgresAlertEvaluator
             return (AlertSeverityLevel.Critical, criticalAt, false);
         }
 
-        return age >= warnAt ? (AlertSeverityLevel.Warning, warnAt, false) : null;
+        if (age >= ceilingWarnAt)
+        {
+            return (AlertSeverityLevel.Warning, ceilingWarnAt, true);
+        }
+
+        return age >= warnAt && !freezingIsKeepingUp
+            ? (AlertSeverityLevel.Warning, warnAt, false)
+            : null;
     }
 
     public static Finding? EvaluateXmin(PostgresXminHorizonAlertInfo? xmin)
