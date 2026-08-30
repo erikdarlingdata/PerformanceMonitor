@@ -600,18 +600,29 @@ public sealed class ViewerDailyHealthLivePostgresTests
             await InsertCollectionLogAsync(connection, HealthServerId, "healthy_collector", recent, "SUCCESS");
             /* skipped_collector: recent SKIPPED counts as a healthy run → HEALTHY (not STALE). */
             await InsertCollectionLogAsync(connection, HealthServerId, "skipped_collector", recent, "SKIPPED");
-            /* failing_collector: only an old SUCCESS (>24h) → FAILING. */
-            await InsertCollectionLogAsync(connection, HealthServerId, "failing_collector", old, "SUCCESS");
+            /* stopped_collector: ONE old SUCCESS (>24h) and nothing since - the real SQL's last_run_time
+               equals that same old success, so hoursSinceLastRun and hoursSinceLastSuccess agree: nothing
+               of ANY kind has been attempted in 30h, which is STOPPED (gone dark), not FAILING (still
+               running and erroring). Renamed from "failing_collector" now that the two clocks are
+               distinguished - see CollectorHealthClassifierTests for the paired case proving FAILING
+               still fires given a recent attempt of any status. */
+            await InsertCollectionLogAsync(connection, HealthServerId, "stopped_collector", old, "SUCCESS");
+            /* still_failing_collector: an old SUCCESS AND a RECENT ERROR - still being invoked, still
+               erroring, so this is the genuinely-FAILING shape the renamed case above no longer covers. */
+            await InsertCollectionLogAsync(connection, HealthServerId, "still_failing_collector", old, "SUCCESS");
+            await InsertCollectionLogAsync(connection, HealthServerId, "still_failing_collector", recent, "ERROR");
 
             var rows = await viewer.GetCollectionHealthAsync(HealthServerId);
 
             var healthy = rows.Single(r => r.CollectorName == "healthy_collector");
             var skipped = rows.Single(r => r.CollectorName == "skipped_collector");
-            var failing = rows.Single(r => r.CollectorName == "failing_collector");
+            var stopped = rows.Single(r => r.CollectorName == "stopped_collector");
+            var stillFailing = rows.Single(r => r.CollectorName == "still_failing_collector");
 
             Assert.Equal("HEALTHY", healthy.HealthStatus);
             Assert.Equal("HEALTHY", skipped.HealthStatus);   // SKIPPED is a healthy run
-            Assert.Equal("FAILING", failing.HealthStatus);
+            Assert.Equal("STOPPED", stopped.HealthStatus);
+            Assert.Equal("FAILING", stillFailing.HealthStatus);
             Assert.Equal(1, healthy.TotalRuns);
             Assert.Equal(1, healthy.SuccessCount);
 
