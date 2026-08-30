@@ -116,9 +116,9 @@ public class PostgresAlertEvaluatorTests
     [Fact]
     public void WarningIsReachableOnAClusterTunedPastHalfTheWall()
     {
-        const long Tuned = 2_000_000_000;
+        const long Tuned = 2_200_000_000;
 
-        /* Relative Warning would be 2B - at or past the 2^31 wall, unreachable. */
+        /* Relative Warning would be 2.2B - at or past the 2^31 (2,147,483,648) wall, unreachable. */
         Assert.True(Tuned >= PostgresAlertEvaluator.WraparoundCeiling);
 
         /* 1.1B is past 50% of the space (~1.07B) but short of Critical's 74.5% (~1.6B) and short of the
@@ -202,7 +202,7 @@ public class PostgresAlertEvaluatorTests
     public void AnUnjudgeableCounterDoesNotSilenceTheJudgeableOne()
     {
         var finding = PostgresAlertEvaluator.EvaluateWraparound(
-            Wrap(190_000_000, multi: 900_000_000, multixactFreezeMax: 0));
+            Wrap(200_000_000, multi: 900_000_000, multixactFreezeMax: 0));
 
         Assert.NotNull(finding);
         Assert.Contains("XID", finding!.CurrentValue, StringComparison.Ordinal);
