@@ -2468,6 +2468,57 @@ public sealed class DarlingComposeTests
         Assert.Equal(declaredKeys, templates.Select(t => t.Name).OrderBy(k => k, StringComparer.Ordinal).ToArray());
     }
 
+    /* ─────────── #2734: the editor's shape vocabulary must cover every server mode ─────────── */
+
+    /// <summary>
+    /// The category pin behind the #2743 review's save-path finding: the web composer models a panel's mode as a
+    /// single <c>shape</c> enum, and a server <see cref="PanelMode"/> with NO shape to map onto does not fail
+    /// loudly — it round-trips LOSSILY. A stored rank-then-bucket panel loaded as a plain "timeseries" re-saved
+    /// as one, silently dropping topN/includeOther and downgrading the panel, with no validation error because
+    /// the degraded result is itself valid. That is the exact silently-wrong class #2733 and this PR exist to
+    /// close, reached through the editor's round trip instead of the parser.
+    ///
+    /// <para>So this asserts the INVARIANT, not the instance: SHAPE_LABELS (editor.js — the shape vocabulary
+    /// both the dashboard composer and notebook.js share) declares exactly as many shapes as there are
+    /// PanelMode values. A fifth server mode added without an editor shape fails HERE, at the seam, instead of
+    /// quietly eating someone's stored panel on their next save.</para>
+    /// </summary>
+    [Fact]
+    public void EveryServerPanelMode_HasAnEditorShape()
+    {
+        var shapes = EditorShapeKeys();
+        Assert.Equal(Enum.GetValues<PanelMode>().Length, shapes.Length);
+
+        /* The rank-then-bucket shape specifically, since it is the one this PR adds — and both round-trip
+           functions must know it, or the save path drops a key the load path read. */
+        Assert.Contains("topseries", shapes);
+        var editor = EditorSource();
+        Assert.Contains("hasBucket && hasTopN ? \"topseries\"", editor, StringComparison.Ordinal);
+        Assert.Contains("else if (p.shape === \"topseries\")", editor, StringComparison.Ordinal);
+        /* Both keys AND the residual flag survive serialization — dropping any one is the data loss. */
+        Assert.Contains("d.includeOther = true;", editor, StringComparison.Ordinal);
+    }
+
+    /// <summary>The shape keys declared in <c>SHAPE_LABELS</c> (wwwroot/js/editor.js) — the composer's whole
+    /// mode vocabulary, shared with notebook.js, which imports both round-trip functions from it.</summary>
+    private static string[] EditorShapeKeys()
+    {
+        var line = Regex.Match(EditorSource(), @"^const SHAPE_LABELS = \{(?<body>[^}]*)\};", RegexOptions.Multiline);
+        Assert.True(line.Success, "SHAPE_LABELS not found in editor.js (did the composer's shape model move?)");
+        return Regex.Matches(line.Groups["body"].Value, @"(?<key>\w+)\s*:")
+            .Select(m => m.Groups["key"].Value)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static string EditorSource([CallerFilePath] string thisFile = "")
+    {
+        var editorJs = Path.GetFullPath(Path.Combine(
+            Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "editor.js"));
+        Assert.True(File.Exists(editorJs), $"editor.js not found at {editorJs} (did the frontend move?)");
+        return File.ReadAllText(editorJs);
+    }
+
     /// <summary>Every <c>key:</c> declared in <c>NOTEBOOK_TEMPLATES</c> (wwwroot/js/notebook.js), sorted.
     /// <c>key:</c> appears nowhere else in that file, so a plain line scan is unambiguous.</summary>
     private static string[] NotebookTemplateKeys([CallerFilePath] string thisFile = "")

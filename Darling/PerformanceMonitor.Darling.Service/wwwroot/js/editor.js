@@ -50,7 +50,7 @@ const RANGE_OPTIONS = [
 const DEFAULT_RANGE_HOURS = 24;
 
 /** The default chart per composed-panel shape (a working chart the instant a measure is picked). */
-const DEFAULT_VIZ_FOR_SHAPE = { timeseries: "line", ranked: "bar", scalar: "stat" };
+const DEFAULT_VIZ_FOR_SHAPE = { timeseries: "line", topseries: "line", ranked: "bar", scalar: "stat" };
 
 /** The most event-annotation sources a time-series panel may overlay (design D5) — mirrors the server's
  *  ComposeLimits.MaxAnnotations so the composer caps at the same number the run endpoint accepts. */
@@ -133,6 +133,7 @@ export function newComposedPanel() {
     shape: "timeseries",
     timeBucket: "auto",
     topN: 10,
+    includeOther: false,
     filters: [],
     groupBy: [],
     viz: "",
@@ -187,9 +188,12 @@ export function descToComposedPanel(d) {
     ratio: d.ratio || "",
     aggregate: d.aggregate || "",
     unit: d.unit || "",
-    shape: hasBucket ? "timeseries" : hasTopN ? "ranked" : "scalar",
+    /* #2734: BOTH keys is the rank-then-bucket mode. It must be recognized here or the round trip
+       silently downgrades a stored top-N series to a plain one on the next save. */
+    shape: hasBucket && hasTopN ? "topseries" : hasBucket ? "timeseries" : hasTopN ? "ranked" : "scalar",
     timeBucket: hasBucket ? d.timeBucket : "auto",
     topN: hasTopN ? d.topN : 10,
+    includeOther: d.includeOther === true,
     filters: Array.isArray(d.filters) ? d.filters.map(descToFilter) : [],
     groupBy: Array.isArray(d.groupBy) ? d.groupBy.map(String) : [],
     viz: d.viz || "",
@@ -243,6 +247,12 @@ export function composedPanelToDesc(p) {
   if (p.unit) d.unit = p.unit;
   if (p.shape === "timeseries") d.timeBucket = p.timeBucket || "auto";
   else if (p.shape === "ranked") d.topN = clampInt(p.topN, 1, 1000, 10);
+  else if (p.shape === "topseries") {
+    /* #2734 rank-then-bucket emits BOTH — dropping either one here is silent data loss, not a smaller panel. */
+    d.timeBucket = p.timeBucket || "auto";
+    d.topN = clampInt(p.topN, 1, 1000, 10);
+    if (p.includeOther === true) d.includeOther = true;
+  }
   const filters = (p.filters || []).map(filterToDesc).filter((f) => f.dimension && f.op);
   if (filters.length) d.filters = filters;
   if ((p.groupBy || []).length) d.groupBy = [...p.groupBy];
@@ -252,7 +262,7 @@ export function composedPanelToDesc(p) {
   /* Event-annotation sources (design D5) are only meaningful on a time-series panel — the server rejects them
      otherwise — so emit them only for that shape. Kept in the model across shape changes (like thresholds), just
      not serialized off a ranked/scalar panel. */
-  if (p.shape === "timeseries") {
+  if (p.shape === "timeseries" || p.shape === "topseries") {
     const annotations = cleanAnnotations(p.annotations);
     if (annotations.length) d.annotations = annotations;
   }
@@ -523,6 +533,7 @@ export function composedBlocker(p, catalog) {
   const groups = (p.groupBy || []).length;
   if (p.shape === "scalar" && groups > 0) return "a single value can't group — switch to Over time or Ranked.";
   if (p.shape === "ranked" && groups === 0) return "a ranked chart needs a group-by (the categories to rank).";
+  if (p.shape === "topseries" && groups === 0) return "a top-N over time needs a group-by (the series to rank and keep).";
   const reason = vizModeReason(p.viz, p.shape, groups, p.overlay);
   if (reason) return reason;
   return null;
@@ -876,7 +887,7 @@ const AGG_LABELS = { sum: "Sum", avg: "Average", min: "Minimum", max: "Maximum",
 const OP_LABELS = { eq: "is (=)", neq: "is not (≠)", like: "matches (LIKE)", gt: ">", gte: "≥", lt: "<", lte: "≤" };
 const BUCKET_LABELS = { minute: "Per minute", hour: "Per hour", day: "Per day", auto: "Auto (fit to range)" };
 const ARCHETYPE_LABELS = { Cumulative: "counter", Delta: "per-interval delta", Gauge: "gauge", PerEvent: "per-event" };
-const SHAPE_LABELS = { timeseries: "Over time", ranked: "Ranked", scalar: "Single value" };
+const SHAPE_LABELS = { timeseries: "Over time", topseries: "Top N over time", ranked: "Ranked", scalar: "Single value" };
 
 /*
  * The v2 metric composer for one panel: pick a measure (or ratio), an aggregate, a SHAPE (over time / ranked /
@@ -1030,6 +1041,11 @@ export function buildComposedPanelBody(p, opts) {
     kids.push(field("Shape", shapeSegmented()));
     if (p.shape === "timeseries") kids.push(field("Bucket", bucketSelect()));
     else if (p.shape === "ranked") kids.push(field("Top N", topNInput()));
+    else if (p.shape === "topseries") {
+      kids.push(field("Bucket", bucketSelect()));
+      kids.push(field("Top N", topNInput()));
+      kids.push(field("Show rest", includeOtherToggle()));
+    }
     return el("div", { class: "composed-fields" }, kids);
   }
 
@@ -1049,14 +1065,14 @@ export function buildComposedPanelBody(p, opts) {
 
   function shapeSegmented() {
     const seg = el("div", { class: "seg-control", role: "group", "aria-label": "Panel shape" });
-    for (const v of ["timeseries", "ranked", "scalar"]) {
+    for (const v of ["timeseries", "topseries", "ranked", "scalar"]) {
       const active = p.shape === v;
       const btn = el("button", { class: "seg-opt" + (active ? " active" : ""), type: "button", text: SHAPE_LABELS[v], "aria-pressed": active ? "true" : "false" });
       btn.addEventListener("click", () => {
         if (p.shape === v) return;
         p.shape = v;
-        if (v === "timeseries" && !p.timeBucket) p.timeBucket = "auto";
-        if (v === "ranked" && !p.topN) p.topN = 10;
+        if ((v === "timeseries" || v === "topseries") && !p.timeBucket) p.timeBucket = "auto";
+        if ((v === "ranked" || v === "topseries") && !p.topN) p.topN = 10;
         if (v === "scalar") p.groupBy = [];
         if (!vizShapeCompatible(p.viz, p.shape)) p.viz = DEFAULT_VIZ_FOR_SHAPE[p.shape];
         onStructural();
@@ -1087,6 +1103,18 @@ export function buildComposedPanelBody(p, opts) {
       onLive();
     });
     return inp;
+  }
+
+  /* #2734: fold everything outside the top N into one "(other)" series, so the buckets still sum to the
+     window total. Off by default — on, the chart is honest about the whole; off, it shows only the winners. */
+  function includeOtherToggle() {
+    const box = el("input", { type: "checkbox", class: "editor-check", "aria-label": "Include an (other) series for the rest" });
+    box.checked = p.includeOther === true;
+    box.addEventListener("change", () => {
+      p.includeOther = box.checked;
+      onLive();
+    });
+    return box;
   }
 
   function groupByBlock(m) {
@@ -1168,7 +1196,7 @@ export function buildComposedPanelBody(p, opts) {
     const rows = [field("Unit / magnitude", unitControl(m)), field("Time range", timeOverrideControl())];
     if (vizDrawsThresholds(p.viz)) rows.push(field("Reference lines", thresholdsControl(m)));
     /* Event markers (design D5) overlay only on a time-series panel — the run endpoint rejects them otherwise. */
-    if (p.shape === "timeseries") rows.push(field("Event markers", annotationsControl()));
+    if (p.shape === "timeseries" || p.shape === "topseries") rows.push(field("Event markers", annotationsControl()));
     if (p.aggregate === "percentile_cont") rows.push(el("div", { class: "block-help", text: "Percentile is fixed at p95." }));
     return el("details", { class: "composed-advanced" }, [el("summary", { text: "Advanced" }), el("div", { class: "cfg" }, rows)]);
   }
@@ -1577,7 +1605,7 @@ function measureAvailabilityNote(m, scopeServer) {
 /** Whether a viz is compatible with a shape ignoring the group-by requirement (table works with any shape). */
 function vizShapeCompatible(viz, shape) {
   if (viz === "table") return true;
-  if (shape === "timeseries") return viz === "line" || viz === "area" || viz === "stacked" || viz === "stacked-bar";
+  if (shape === "timeseries" || shape === "topseries") return viz === "line" || viz === "area" || viz === "stacked" || viz === "stacked-bar";
   if (shape === "ranked") return viz === "bar" || viz === "pie" || viz === "scatter";
   return viz === "stat";
 }
@@ -1602,7 +1630,7 @@ function vizModeReason(viz, shape, groupCount, overlay) {
   if (!viz) return null;
   const hasOverlay = !!(overlay && overlay.measure);
   if (viz === "table") return hasOverlay ? "A table can't carry a second measure — overlays belong to scatter and ungrouped line/area." : null;
-  if (shape === "timeseries") {
+  if (shape === "timeseries" || shape === "topseries") {
     if (!["line", "area", "stacked", "stacked-bar"].includes(viz)) return "A " + (VIZ_LABELS[viz] || viz) + " chart isn't a time series — use line, area, stacked, or stacked bar.";
     if ((viz === "stacked" || viz === "stacked-bar") && groupCount === 0) return "A stacked chart needs a group-by (the parts that stack).";
     if (hasOverlay && !(viz === "line" || viz === "area")) return "A second measure (overlay) needs a line or area chart.";
