@@ -3118,12 +3118,13 @@ public sealed class DarlingWorker : BackgroundService
 
         try
         {
-            var thresholdMinutes = new DarlingAlertSettings(config).LongRunningQueryThresholdMinutes;
+            var alertSettings = new DarlingAlertSettings(config);
+            var thresholdMinutes = alertSettings.LongRunningQueryThresholdMinutes;
             var now = DateTime.UtcNow;
 
             var rows = await DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync(
                 _postgres, runtime.ServerId, thresholdMs: thresholdMinutes * 60_000L, now,
-                PgLongRunningQueryRecencyMinutes, limit: 50, cancellationToken);
+                PgLongRunningQueryRecencyMinutes, limit: alertSettings.LongRunningQueryMaxResults, cancellationToken);
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
             var wasActive = _activePgLongRunningQueryAlert.TryGetValue(key, out var activeBefore) && activeBefore;

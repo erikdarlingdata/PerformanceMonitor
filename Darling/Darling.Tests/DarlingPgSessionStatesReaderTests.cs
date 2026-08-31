@@ -79,12 +79,31 @@ public class DarlingPgSessionStatesReaderTests
     }
 
     /// <summary>No query text projected — the collector deliberately stores none (see its class remarks), so
-    /// a read that tried to select one would be selecting a column that does not exist.</summary>
+    /// a read that tried to select one would be selecting a column that does not exist. Word-boundary regex
+    /// rather than a plain substring check: a naive "s.query" substring search self-matches the legitimate
+    /// "s.query_duration_ms" projection (caught by this exact test failing red the first time it was
+    /// written), since "query" is a literal prefix of that identifier.</summary>
     [Fact]
     public void LongRunningSql_ProjectsNoQueryText()
     {
         Assert.DoesNotContain("query_text", LongRunningSql, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain(" s.query", LongRunningSql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotMatch(new Regex(@"\bquery\b", RegexOptions.IgnoreCase), LongRunningSql);
+    }
+
+    /// <summary>
+    /// Excludes idle-in-transaction sessions. Per PostgreSQL's own semantics, <c>query_duration_ms</c> for a
+    /// session sitting idle-in-transaction measures how long ago its LAST query started, not how long a query
+    /// has actually been running — that query already finished. Without this filter a session that ran a 5ms
+    /// UPDATE and has sat idle-in-transaction for 40 minutes since would read identically to one whose UPDATE
+    /// has genuinely been running for 40 minutes, which is a different, differently-actioned incident (an app
+    /// connection-pool bug vs. a slow statement). Matches the SQL Server equivalent
+    /// (<c>AlertEngine.CheckLongRunningQueriesAsync</c>), which reads <c>sys.dm_exec_requests</c> — a table of
+    /// requests actually executing, where an idle session has no row at all.
+    /// </summary>
+    [Fact]
+    public void LongRunningSql_ExcludesIdleInTransactionSessions()
+    {
+        Assert.Contains("s.is_idle_in_transaction = false", LongRunningSql, StringComparison.Ordinal);
     }
 
     // ── Scoping and parameterisation ─────────────────────────────────────────────────────────────

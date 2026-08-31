@@ -369,6 +369,18 @@ public static class DarlingPgSessionStatesReader
     /// accumulating literal parameter values for a condition an ordinary application can cross, so the alert
     /// this backs identifies a session by pid/database/command tag rather than a statement preview.</para>
     ///
+    /// <para><b>Excludes idle-in-transaction sessions.</b> Per PostgreSQL's own semantics for
+    /// <c>pg_stat_activity.query_start</c> ("time when the currently active query was started, OR IF STATE IS
+    /// NOT ACTIVE, when the last query was started"), <c>query_duration_ms</c> for a session sitting
+    /// <c>idle in transaction</c> measures how long ago its LAST query started, not how long a query has
+    /// actually been running — that query already finished. Without this filter a session that ran a 5ms
+    /// UPDATE and has sat idle-in-transaction for 40 minutes since (the common "forgot to COMMIT" shape) would
+    /// read identically to one whose UPDATE has genuinely been executing for 40 minutes, and the two are
+    /// different incidents needing different fixes (an app connection-pool bug vs. a slow statement). This
+    /// matches the SQL Server equivalent (<c>AlertEngine.CheckLongRunningQueriesAsync</c>), which reads
+    /// <c>sys.dm_exec_requests</c> — a table of requests actually executing, where an idle session has no
+    /// row at all.</para>
+    ///
     /// <para>$1 server_id, $2 threshold (ms), $3 recency floor (naive UTC), $4 row limit.</para>
     /// </summary>
     public const string CurrentLongRunningSessionsSql = """
@@ -391,6 +403,7 @@ public static class DarlingPgSessionStatesReader
           ON  s.collection_time = r.latest_capture
         WHERE s.server_id = $1
         AND   s.query_duration_ms >= $2
+        AND   s.is_idle_in_transaction = false
         ORDER BY s.query_duration_ms DESC, s.pid
         LIMIT $4
         """;
