@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Common;
 /// awaiting it in the sequential foreach, single-flighted per server so a still-running previous tick
 /// skips rather than overlaps.</para>
 ///
-/// <para><b>#2717 is the second.</b> <c>plan_correction</c> (1-minute cadence, a <c>PerItemWallClockBudget</c>
+/// <para><b>#2717 is the second.</b> <c>plan_correction</c> (5-minute cadence, a <c>PerItemWallClockBudget</c>
 /// of 120 seconds set by #2673 for exactly this tail-risk) showed the identical shape on a fleet server:
 /// average ~1 second, occasional 21-second spike, 97% of that spike attributable to one database
 /// independently confirmed to carry the same distinct-plan-population signature already root-caused
