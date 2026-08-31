@@ -1785,12 +1785,163 @@ public sealed class DarlingComposeTests
     [Fact]
     public void ValidateDefinition_RejectsACellsDoc_SentWithoutTheNotebookKind()
     {
-        /* Without "kind":"notebook", a cells-only doc is just a dashboard missing its panels — rejected, so a
-           notebook can never be silently mistaken for (or stored as) an empty dashboard. */
+        /* Without "kind":"notebook", a cells-only doc dispatches down the dashboard arm — still rejected (a
+           notebook can never be silently stored as an empty dashboard), and since #2733 the strict root-key
+           check names the actual mis-shape (add the kind) instead of "panels must be an array". */
         var result = DarlingWebEndpoints.ValidateDefinition(
             "{\"cells\":[{\"type\":\"markdown\",\"text\":\"x\"}]}");
         Assert.False(result.IsValid);
-        Assert.Contains("panels", result.Error!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("'cells'", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("\"kind\":\"notebook\"", result.Error!, StringComparison.Ordinal);
+    }
+
+    /* ─────────────────────────── #2733: unknown keys are write-path errors ─────────────────────────── */
+
+    /* The footgun class: TryParsePanel positive-reads known keys and defaults every optional one on absence,
+       so before #2733 each of these validated {valid:true} and stored a syntactically-valid DIFFERENT panel —
+       a typo'd 'filter' silently dropping the filter and widening the query to the whole fleet. Every case
+       here was proven red against the pre-fix validator (they all validated clean, or failed with the
+       misdirecting "unknown source ''"). */
+    [Theory]
+    /* panel level: the reported footgun — a typo'd/mis-cased optional key that silently defaults. */
+    [InlineData(
+        "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"filter\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"CXPACKET\"}]}]}",
+        "panel 0: panel has unknown key 'filter' — did you mean 'filters'?")]
+    [InlineData(
+        "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"Filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"x\"}]}]}",
+        "panel 0: panel has unknown key 'Filters' — did you mean 'filters'?")]
+    [InlineData(
+        "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"threshold\":[90]}]}",
+        "did you mean 'thresholds'?")]
+    /* filter level. */
+    [InlineData(
+        "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"x\",\"values\":\"y\"}]}]}",
+        "filter 0 has unknown key 'values' — did you mean 'value'?")]
+    /* overlay level. */
+    [InlineData(
+        "{\"panels\":[{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_avg_elapsed_us\",\"unt\":\"us\"}}]}",
+        "overlay has unknown key 'unt' — did you mean 'unit'?")]
+    /* view root, variables, range. */
+    [InlineData(
+        "{\"variabels\":[{\"name\":\"db\",\"dimension\":\"database_name\"}],\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}",
+        "definition has unknown key 'variabels' — did you mean 'variables'?")]
+    [InlineData(
+        "{\"variables\":[{\"name\":\"db\",\"dimension\":\"database_name\",\"defalut\":\"x\"}],\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}",
+        "variable 0 has unknown key 'defalut' — did you mean 'default'?")]
+    [InlineData(
+        "{\"range\":{\"hours\":24,\"days\":3},\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}",
+        "range has unknown key 'days'.")]
+    /* notebook root + cells. */
+    [InlineData(
+        "{\"kind\":\"notebook\",\"panels\":[],\"cells\":[{\"type\":\"markdown\",\"text\":\"x\"}]}",
+        "notebook has unknown key 'panels' — a notebook carries 'cells', not 'panels'.")]
+    [InlineData(
+        "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"markdown\",\"text\":\"x\",\"texte\":\"y\"}]}",
+        "cell 0 (markdown) has unknown key 'texte' — did you mean 'text'?")]
+    [InlineData(
+        "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"panel\",\"titel\":\"t\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}",
+        "cell 0: panel has unknown key 'titel' — did you mean 'title'?")]
+    public void ValidateDefinition_RejectsUnknownKeys_NamingKeyPathAndNearMiss(string json, string expectedError)
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(json);
+        Assert.False(result.IsValid, "a stray key must not validate {valid:true} — that is the #2733 footgun");
+        Assert.Contains(expectedError, result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_NamesTheRunSpecNesting_OnAPanelCell()
+    {
+        /* The reported repro verbatim: run_custom_view_panel's spec nests under 'panel' while a notebook
+           panel cell is FLAT, so nesting is the natural guess — and it used to fail with the misdirecting
+           "unknown source ''". The strict check now names the wrapper and says what to do. */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"panel\",\"panel\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0: panel has unknown key 'panel'", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("run_custom_view_panel", result.Error!, StringComparison.Ordinal);
+        Assert.DoesNotContain("unknown source", result.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ValidateDefinition_NamesTheRunSpecNesting_OnADashboardPanel()
+    {
+        /* The same mis-shape on the dashboard arm: {"panel":{...}} names neither 'read' nor 'source', so it
+           lands in the v1 arm — which now recognizes the wrapper instead of shrugging "missing 'read' or
+           'source'". */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"panels\":[{\"panel\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"table\"}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("nests its spec under 'panel'", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("run_custom_view_panel", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_SuggestsTheModeKey_OnANearMissTypo()
+    {
+        /* 'sorce' names neither mode key, so the panel lands in the v1 arm; the near-miss scan points at the
+           typo instead of leaving the author to diff their JSON against the docs. */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"panels\":[{\"sorce\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"table\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("did you mean 'source' (found 'sorce')?", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_AcceptsEveryDeclaredComposedKey_AtOnce()
+    {
+        /* The sync guard for the key universe: one panel carrying EVERY key in ComposeSpec.ComposedPanelKeys
+           plus every presentation extra (title/span/hours) validates clean, so a key declared in the set but
+           not actually read by the parser cannot hide. The converse cannot drift silently either: the strict
+           check runs BEFORE TryParsePanel on the write path, so a future key the parser learns but the set
+           does not is rejected here — the new feature's own first write-path test goes red. */
+        var ok = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"dashboard\",\"range\":{\"hours\":24},\"variables\":[{\"name\":\"w\",\"dimension\":\"wait_type\",\"default\":\"CXPACKET\"}]," +
+            "\"panels\":[" +
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"unit\":\"ms\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"$w\"}],\"groupBy\":[],\"thresholds\":[100],\"annotations\":[\"deadlocks\"]," +
+            "\"title\":\"T\",\"span\":2,\"hours\":48}," +
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":25,\"groupBy\":[\"query_hash\"],\"viz\":\"scatter\"," +
+            "\"overlay\":{\"measure\":\"query_executions\",\"aggregate\":\"sum\",\"unit\":\"count\"},\"title\":\"S\",\"span\":1}," +
+            "{\"source\":\"wait_stats\",\"ratio\":\"signal_wait_pct\",\"timeBucket\":\"hour\",\"viz\":{\"type\":\"line\"}}]}");
+        Assert.True(ok.IsValid, ok.Error);
+    }
+
+    [Fact]
+    public void ValidateDefinition_LeavesTheV1ReadVocabularyOpen()
+    {
+        /* v1 read panels deliberately keep their open presentation vocabulary (rowsKey/xKey/format/emptyText/
+           columns/... — the renderer's contract, spread from the editor's vizcfg verbatim); enumerating it
+           server-side would be a second copy that decays. The v1 keys with semantic weight are each validated
+           individually, and raw 'path' stays rejected. */
+        var ok = DarlingWebEndpoints.ValidateDefinition(
+            "{\"panels\":[{\"title\":\"CPU\",\"read\":\"get_cpu_utilization\",\"params\":{\"hours\":24},\"viz\":\"line\",\"span\":2," +
+            "\"rowsKey\":\"samples\",\"xKey\":\"sample_time\",\"format\":\"pct\",\"unit\":\"%\",\"emptyText\":\"none\"," +
+            "\"series\":[{\"key\":\"total_cpu\",\"label\":\"Total %\"}]}]}");
+        Assert.True(ok.IsValid, ok.Error);
+    }
+
+    [Fact]
+    public void TryParsePanel_StaysLenient_ForTheRunAndReadPaths()
+    {
+        /* The write/read split (#2733): strictness lives in ValidateDefinition (validate/create/update), NOT
+           in the parser — a definition stored before the strictness existed must keep loading, rendering, and
+           running. This pin keeps a future "tidy-up" from moving the key check into TryParsePanel and
+           breaking every stored view carrying a legacy stray. */
+        var (plan, error) = ComposeSpec.TryParsePanel(
+            PanelJson("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"legacyStray\":1}"),
+            Array.Empty<string>());
+        Assert.True(error is null, error);
+        Assert.NotNull(plan);
+    }
+
+    [Fact]
+    public void TryParsePanel_SaysMissingSource_NotUnknownEmptySource()
+    {
+        /* The misdirecting half of the #2733 report: a mis-shaped panel has no 'source' at all, and "unknown
+           source ''" sent the author hunting the catalog instead of the shape. */
+        var reason = RejectReason("{\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"table\"}");
+        Assert.Contains("missing 'source'", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("unknown source", reason, StringComparison.OrdinalIgnoreCase);
     }
 
     /* ─────────────────────────── D7: list-summary kind (badge/route) ─────────────────────────── */

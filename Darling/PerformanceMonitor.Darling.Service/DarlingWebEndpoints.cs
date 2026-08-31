@@ -371,6 +371,18 @@ public static class DarlingWebEndpoints
             return ComposeRunOutcome.BadRequest("Request body must be a JSON object with a 'panel'.");
         }
 
+        /* The run path stays LENIENT about unknown keys — a definition stored before the #2733 write-path
+           strictness existed must keep running — but the one mis-shape a lenient parse turns into a
+           misdirecting error is named: a DOUBLY-nested spec ({"panel":{"panel":{...}}}) has no 'source' and
+           used to fail as "unknown source ''", pointing at the catalog instead of the nesting. No stored
+           panel can carry a 'panel' key (the write path has never accepted one that parsed), so this
+           misses nothing legitimate. */
+        if (panel["panel"] is JsonObject && panel["source"] is null)
+        {
+            return ComposeRunOutcome.BadRequest(
+                "the spec is doubly nested — 'panel' should hold the panel object itself ({\"panel\":{\"source\":...}}), not another {\"panel\":{...}} wrapper.");
+        }
+
         var (variables, variablesError) = ComposeSpec.ParseVariables(body["variables"]);
         if (variablesError is not null)
         {
@@ -709,6 +721,93 @@ public static class DarlingWebEndpoints
     /// prose/tables, bounded against a definition padded out to the whole-doc size cap by one giant cell.</summary>
     internal const int MaxMarkdownCellBytes = 32 * 1024;
 
+    /* ── the strict key sets (#2733): what each WRITE-path object may carry beyond ComposeSpec's own sets ──
+       These are the ENDPOINT-owned halves of the key universe — the view-shape and presentation keys the
+       compose parser never sees. The composed-panel/filter/overlay/variable/range sets live in ComposeSpec,
+       beside the parser that reads them. v1 READ panels are deliberately NOT key-checked: their descriptor
+       carries an open presentation vocabulary (rowsKey/xKey/format/emptyText/columns/stats/... — the
+       renderer's contract, spread from the editor's vizcfg verbatim), so the server enumerating it would
+       just be a second copy that decays; the v1 keys with SEMANTIC weight are each validated individually
+       (read, viz, span, series colors — and raw 'path' is rejected outright). */
+
+    /// <summary>What a stored DASHBOARD definition's root may carry.</summary>
+    private static readonly IReadOnlySet<string> s_dashboardRootKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "kind", "panels", "variables", "range",
+    };
+
+    /// <summary>What a stored NOTEBOOK definition's root may carry (design D7).</summary>
+    private static readonly IReadOnlySet<string> s_notebookRootKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "kind", "cells", "variables", "range",
+    };
+
+    /// <summary>What a markdown cell may carry: its discriminator and its prose.</summary>
+    private static readonly IReadOnlySet<string> s_markdownCellKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "text",
+    };
+
+    /// <summary>The presentation keys a COMPOSED dashboard panel carries beyond
+    /// <see cref="ComposeSpec.ComposedPanelKeys"/> — written by the composer (editor.js
+    /// <c>composedPanelToDesc</c>), read only by the frontend, never by the parser.</summary>
+    private static readonly IReadOnlySet<string> s_composedDashboardPanelExtraKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "title", "span", "hours",
+    };
+
+    /// <summary>The extra keys a notebook PANEL cell carries: the cell discriminator plus the composed
+    /// presentation keys minus <c>span</c> (a notebook cell has no width — the notebook composer's
+    /// <c>cellToDesc</c> drops it).</summary>
+    private static readonly IReadOnlySet<string> s_notebookPanelCellExtraKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "title", "hours",
+    };
+
+    /// <summary>Targeted guidance for the dashboard root's most likely mis-shape: <c>cells</c> without
+    /// <c>"kind":"notebook"</c> is a notebook that would otherwise read as a dashboard missing its panels.</summary>
+    private static readonly IReadOnlyDictionary<string, string> s_dashboardRootKeyHints = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["cells"] = "a notebook's 'cells' need \"kind\":\"notebook\" on the definition (a dashboard carries 'panels').",
+    };
+
+    /// <summary>Targeted guidance for the notebook root's most likely mis-shape.</summary>
+    private static readonly IReadOnlyDictionary<string, string> s_notebookRootKeyHints = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["panels"] = "a notebook carries 'cells', not 'panels'.",
+    };
+
+    /// <summary>The two keys that decide a panel's mode, for the near-miss suggestion when both are absent.</summary>
+    private static readonly string[] s_panelModeKeys = { "read", "source" };
+
+    /// <summary>Strict-key check (#2733) for the root objects BOTH view kinds share — each declared variable
+    /// (against <see cref="ComposeSpec.VariableKeys"/>) and the <c>range</c> (against
+    /// <see cref="ComposeSpec.RangeKeys"/>). Runs AFTER the ComposeSpec parsers accepted them, so structural
+    /// errors keep their existing messages and this only ever names a genuinely stray key. Returns the first
+    /// stray-key error, or null.</summary>
+    private static string? UnknownSharedRootKeyError(JsonObject rootObject)
+    {
+        if (rootObject["variables"] is JsonArray variableArray)
+        {
+            for (var i = 0; i < variableArray.Count; i++)
+            {
+                if (variableArray[i] is JsonObject variableObject
+                    && ComposeSpec.UnknownKeyError(variableObject, ComposeSpec.VariableKeys, $"variable {i}") is string variableError)
+                {
+                    return variableError;
+                }
+            }
+        }
+
+        if (rootObject["range"] is JsonObject rangeObject
+            && ComposeSpec.UnknownKeyError(rangeObject, ComposeSpec.RangeKeys, "range") is string rangeError)
+        {
+            return rangeError;
+        }
+
+        return null;
+    }
+
     /// <summary>The outcome of <see cref="ValidateDefinition"/>: valid, or invalid with a caller-facing reason.</summary>
     internal readonly record struct DefinitionValidation(bool IsValid, string? Error)
     {
@@ -733,6 +832,17 @@ public static class DarlingWebEndpoints
     /// are dispatched per panel. A <c>span</c> of 1 or 2 and any series <c>color</c> (a <c>#rrggbb</c> hex) are
     /// validated for both modes. Raw <c>path</c>-mode is REJECTED — a definition must stay on the allowlists,
     /// never name an arbitrary endpoint path.</para>
+    ///
+    /// <para><b>Unknown keys are errors (#2733), on the WRITE path only.</b> The compose parser positive-reads
+    /// known keys and defaults every optional one on absence, so before this a typo'd key ("filter", "Filters")
+    /// validated <c>{valid:true}</c> and stored a syntactically-valid DIFFERENT panel — a dropped filter
+    /// silently widening the query. This validator (the authority behind validate/create/update on both the
+    /// web and MCP surfaces) now rejects any key outside the known sets at every level it owns — the
+    /// definition root, each composed panel (+ its filters/overlay/viz object), each notebook cell — naming
+    /// the stray key and suggesting the near-miss. The READ/RUN path is deliberately untouched: a definition
+    /// stored before the strictness existed keeps loading, rendering, and running; it meets the strict check
+    /// only when someone next edits it. v1 READ panels keep their open presentation vocabulary — see the note
+    /// on the key sets above.</para>
     /// </summary>
     internal static DefinitionValidation ValidateDefinition(string? definitionJson)
     {
@@ -770,6 +880,16 @@ public static class DarlingWebEndpoints
             return ValidateNotebookDefinition(rootObject);
         }
 
+        /* Strict keys at the root (#2733): a stray root key is an authoring error, not decoration — before
+           this check, "variabels" quietly declared NO variables and every $var filter downstream failed with
+           a message pointing at the filter. Checked before the panels-shape errors so the most likely
+           mis-shape ('cells' without the notebook kind) gets its targeted message rather than "panels must
+           be an array". */
+        if (ComposeSpec.UnknownKeyError(rootObject, s_dashboardRootKeys, "definition", keyHints: s_dashboardRootKeyHints) is string rootKeyError)
+        {
+            return DefinitionValidation.Fail(rootKeyError);
+        }
+
         if (rootObject["panels"] is not JsonArray panels)
         {
             return DefinitionValidation.Fail("definition.panels must be an array.");
@@ -799,6 +919,13 @@ public static class DarlingWebEndpoints
             return DefinitionValidation.Fail(rangeError);
         }
 
+        /* Strict keys inside the shared root objects (#2733) — after the parsers, so a structural error
+           keeps its existing message and this only ever names a genuinely stray key ("defalut", "days"). */
+        if (UnknownSharedRootKeyError(rootObject) is string sharedKeyError)
+        {
+            return DefinitionValidation.Fail(sharedKeyError);
+        }
+
         var declaredVariables = variables!.Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
 
         var reads = BuildReadDispatch();
@@ -820,6 +947,13 @@ public static class DarlingWebEndpoints
                two coexist in one definition, dispatched per panel. */
             if (ComposeSpec.IsComposedPanel(panel))
             {
+                /* Strict keys FIRST (#2733), so a typo'd key is named as itself ("did you mean 'filters'?")
+                   instead of surfacing as whatever downstream symptom the defaulted absence produces. */
+                if (ComposeSpec.UnknownComposedPanelKeyError(panel, s_composedDashboardPanelExtraKeys) is string strayKeyError)
+                {
+                    return DefinitionValidation.Fail($"panel {i}: {strayKeyError}");
+                }
+
                 var (_, composeError) = ComposeSpec.TryParsePanel(panel, declaredVariables);
                 if (composeError is not null)
                 {
@@ -831,6 +965,24 @@ public static class DarlingWebEndpoints
                 var read = TryGetString(panel, "read");
                 if (string.IsNullOrEmpty(read))
                 {
+                    /* Neither mode key is present, so name the likely mis-shape instead of shrugging
+                       (#2733): the run-spec {"panel":{...}} wrapper, or a near-miss typo of read/source. */
+                    if (panel["panel"] is JsonObject)
+                    {
+                        /* The SAME constant the composed arm's key-hint uses — one wording, no drift. */
+                        return DefinitionValidation.Fail(
+                            $"panel {i} nests its spec under 'panel' — {ComposeSpec.RunSpecNestingHint}");
+                    }
+
+                    foreach (var property in panel)
+                    {
+                        if (ComposeSpec.NearestKnownKey(property.Key, s_panelModeKeys) is string nearMiss)
+                        {
+                            return DefinitionValidation.Fail(
+                                $"panel {i} is missing 'read' or 'source' — did you mean '{nearMiss}' (found '{property.Key}')?");
+                        }
+                    }
+
                     return DefinitionValidation.Fail($"panel {i} is missing 'read' or 'source'.");
                 }
 
@@ -901,10 +1053,19 @@ public static class DarlingWebEndpoints
     /// always compile.</item>
     /// </list>
     /// An unknown cell <c>type</c>, a missing/oversize markdown <c>text</c>, an invalid panel cell, or an over-cap
-    /// cell count is rejected (400), naming the offending cell by index.
+    /// cell count is rejected (400), naming the offending cell by index. Unknown KEYS are errors too (#2733) —
+    /// at the notebook root, on every cell, and inside a panel cell's filters/overlay — with a did-you-mean;
+    /// see the strict-keys paragraph on <see cref="ValidateDefinition"/> for the write/read split.
     /// </summary>
     internal static DefinitionValidation ValidateNotebookDefinition(JsonObject rootObject)
     {
+        /* Strict keys at the notebook root (#2733) — first, so 'panels' on a notebook gets its targeted
+           message rather than "cells must be an array". */
+        if (ComposeSpec.UnknownKeyError(rootObject, s_notebookRootKeys, "notebook", keyHints: s_notebookRootKeyHints) is string rootKeyError)
+        {
+            return DefinitionValidation.Fail(rootKeyError);
+        }
+
         if (rootObject["cells"] is not JsonArray cells)
         {
             return DefinitionValidation.Fail("notebook.cells must be an array.");
@@ -934,6 +1095,12 @@ public static class DarlingWebEndpoints
             return DefinitionValidation.Fail(rangeError);
         }
 
+        /* Strict keys inside the shared root objects (#2733) — same placement rationale as the dashboard arm. */
+        if (UnknownSharedRootKeyError(rootObject) is string sharedKeyError)
+        {
+            return DefinitionValidation.Fail(sharedKeyError);
+        }
+
         var declaredVariables = variables!.Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
 
         for (var i = 0; i < cells.Count; i++)
@@ -947,6 +1114,12 @@ public static class DarlingWebEndpoints
             switch (type)
             {
                 case "markdown":
+                    /* Strict keys first (#2733): a markdown cell is its discriminator and its prose, nothing else. */
+                    if (ComposeSpec.UnknownKeyError(cell, s_markdownCellKeys, $"cell {i} (markdown)") is string markdownKeyError)
+                    {
+                        return DefinitionValidation.Fail(markdownKeyError);
+                    }
+
                     /* A markdown cell is prose only — a string 'text' (present, a real string) within the cell
                        byte cap. It never enters the compiler; the renderer is responsible for safe markdown->HTML. */
                     if (cell["text"] is not JsonValue textValue || !textValue.TryGetValue<string>(out var text))
@@ -963,6 +1136,15 @@ public static class DarlingWebEndpoints
                     break;
 
                 case "panel":
+                    /* Strict keys FIRST (#2733). This is the reported repro's home: a panel cell is FLAT (the
+                       cell object IS the panel, plus 'type'), while run_custom_view_panel's spec nests under
+                       'panel' — the natural mis-shape used to fail as "unknown source ''", pointing at the
+                       catalog instead of the nesting. The walker's 'panel'-key hint now names it. */
+                    if (ComposeSpec.UnknownComposedPanelKeyError(cell, s_notebookPanelCellExtraKeys) is string strayKeyError)
+                    {
+                        return DefinitionValidation.Fail($"cell {i}: {strayKeyError}");
+                    }
+
                     /* A panel cell is a v2 composed panel, validated by the SAME ComposeSpec.TryParsePanel authority
                        a dashboard's composed panel routes through (against the notebook's declared variables) — so a
                        stored notebook panel cell can always compile and carries all the v2 safety. */
