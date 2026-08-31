@@ -212,6 +212,40 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
         Assert.Null(await store.GetLastWebhookSentUtcAsync("9", "Blocking Detected", "eeee5555"));
     }
 
+    /// <summary>
+    /// #2716's Postgres Tier-0-predictor cooldown seed passes a RAW database/slot name as dedupKey —
+    /// not a #1140 hash — so this filter has to be correct for arbitrary text, not just hex. Three
+    /// failure modes, proven against the real store rather than the escaping logic in isolation:
+    /// a quote/backslash breaks the naive string-concatenation match (the value Serialize() actually
+    /// writes is JSON-escaped, the old hand-built search pattern was not); an underscore is a SQL LIKE
+    /// wildcard, so a naive pattern for "orders_db" would also match "ordersXdb" for any X; and a
+    /// non-ASCII character is escaped by the default JSON encoder into a \uXXXX sequence the old
+    /// pattern never accounted for either.
+    /// </summary>
+    [Fact]
+    public async Task GetLastAlertTime_WithDedupKey_HandlesRawNonHexSubjectsSafely()
+    {
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+
+        // Quote/backslash: a subject like a Windows-style path or a quoted identifier.
+        await RecordWithContextAsync(store, "20", "Wraparound Risk", "tray", JsonWith("db\"with\\quote"));
+        Assert.NotNull(await store.GetLastAlertTimeAsync("20", "Wraparound Risk", "db\"with\\quote"));
+
+        // Underscore: must match only the exact subject, never a same-shaped different one.
+        await RecordWithContextAsync(store, "21", "Wraparound Risk", "tray", JsonWith("orders_db"));
+        Assert.NotNull(await store.GetLastAlertTimeAsync("21", "Wraparound Risk", "orders_db"));
+        Assert.Null(await store.GetLastAlertTimeAsync("21", "Wraparound Risk", "ordersXdb"));
+
+        // Non-ASCII: the default JSON encoder escapes this to a \uXXXX sequence before it is stored.
+        await RecordWithContextAsync(store, "22", "Wraparound Risk", "tray", JsonWith("café"));
+        Assert.NotNull(await store.GetLastAlertTimeAsync("22", "Wraparound Risk", "café"));
+
+        // Percent: the other SQL LIKE wildcard, same shape as the underscore case.
+        await RecordWithContextAsync(store, "23", "Wraparound Risk", "tray", JsonWith("100%done"));
+        Assert.NotNull(await store.GetLastAlertTimeAsync("23", "Wraparound Risk", "100%done"));
+        Assert.Null(await store.GetLastAlertTimeAsync("23", "Wraparound Risk", "100Xdone"));
+    }
+
     [Fact]
     public async Task EdgeTriggerWatermark_SaveLoad_RoundTripsAndUpserts()
     {

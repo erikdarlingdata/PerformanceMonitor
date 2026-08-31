@@ -458,6 +458,25 @@ public sealed class DarlingWorker : BackgroundService
     private readonly ConcurrentDictionary<string, bool> _activePgBlockingAlert = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, int> _lastAlertedPgBlockingCount = new(StringComparer.Ordinal);
 
+    /* #2716: none of the Postgres alerts' watermarks above survive a restart — AlertEngine seeds its
+       own SQL Server twins of _lastAlertedPgDeadlockCount/_lastAlertedPgBlockingCount from
+       IAlertStateStore on each server's first post-restart sweep (EnsureWatermarksSeededAsync), but
+       nothing does the equivalent here, so a restart resets the watermark to 0 and the very next sweep
+       re-fires on a deadlock/blocking count still sitting in the rolling window from before the
+       restart. Seeded once per (server, metric) key, mirroring AlertEngine's _seededServerKeys. */
+    private readonly ConcurrentDictionary<string, bool> _pgDeadlockWatermarkSeeded = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _pgBlockingWatermarkSeeded = new(StringComparer.Ordinal);
+
+    /* #2716: the three Tier 0 predictors' cooldown (_lastPostgresAlert, keyed per server|metric|subject)
+       has the same restart gap, but no watermark COUNT to seed — it is a plain last-alerted TIME per
+       subject, so IAlertStateStore's int-watermark shape does not fit it. Seeded instead from
+       IAlertHistoryStore.GetLastAlertTimeAsync's existing #1154 dedup-key filter (finding.Subject IS
+       the #1140 dedup fingerprint these alerts already fire with), which already reconstructs a
+       per-fingerprint last-alerted time for the email/webhook cooldowns and needs no new schema.
+       Guards one history read per (server, metric, subject) for the life of the process — see the call
+       site for why an unconditional per-sweep read would be a real cost, not just noise. */
+    private readonly ConcurrentDictionary<string, bool> _postgresAlertHistorySeeded = new(StringComparer.Ordinal);
+
     /// <summary>
     /// Held for the same reason <see cref="_alertDeliverer"/> is: the Postgres Deadlocks/Blocking alerts
     /// (#2711) need to write a resolution history row on the active→inactive transition, exactly like
@@ -2829,6 +2848,27 @@ public sealed class DarlingWorker : BackgroundService
                     CultureInfo.InvariantCulture,
                     $"{snapshot.ServerKey}|{finding.MetricName}|{finding.Subject}");
 
+                /* #2716: this cooldown has no in-memory entry for a subject this process has never
+                   evaluated, which includes every subject after a restart even if it was alerted on
+                   moments before. Seed it ONCE per key from history before trusting its absence —
+                   finding.Subject IS the #1140 dedup fingerprint this alert already fires with, so
+                   GetLastAlertTimeAsync's existing #1154 filter reconstructs exactly the per-subject
+                   time this cooldown needs, no new schema required. Guarded by
+                   _postgresAlertHistorySeeded so a subject that has never alerted (the common case —
+                   most databases never cross the wraparound line) costs one history read per process
+                   lifetime, not one per sweep forever. */
+                if (!_lastPostgresAlert.ContainsKey(cooldownKey)
+                    && _historyStore is not null
+                    && _postgresAlertHistorySeeded.TryAdd(cooldownKey, true))
+                {
+                    var seeded = await _historyStore.GetLastAlertTimeAsync(
+                        snapshot.ServerKey, finding.MetricName, dedupKey: finding.Subject);
+                    if (seeded.HasValue)
+                    {
+                        _lastPostgresAlert[cooldownKey] = seeded.Value;
+                    }
+                }
+
                 if (_lastPostgresAlert.TryGetValue(cooldownKey, out var last) && now - last < cooldown)
                 {
                     continue;
@@ -2914,9 +2954,24 @@ public sealed class DarlingWorker : BackgroundService
 
         const string metricName = "Deadlocks Detected";
         var key = snapshot.ServerKey;
+        var stateStore = new PgAlertStateStore(_postgres, _logger);
 
         try
         {
+            /* #2716: seed the watermark from the same config_edge_trigger_watermarks row
+               AlertEngine's own SQL Server "Deadlocks Detected" twin reads/writes — the parity metric
+               name #2711 deliberately chose means no new column or row shape is needed, only a read
+               before trusting an in-memory zero. Once per key, mirroring AlertEngine's
+               EnsureWatermarksSeededAsync/_seededServerKeys. */
+            if (_pgDeadlockWatermarkSeeded.TryAdd(key, true))
+            {
+                var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                if (seeded.HasValue)
+                {
+                    _lastAlertedPgDeadlockCount[key] = seeded.Value;
+                }
+            }
+
             var now = DateTime.UtcNow;
             var windowStart = now.AddHours(-AlertEngine.RollingCountWindowHours);
 
@@ -2934,6 +2989,14 @@ public sealed class DarlingWorker : BackgroundService
             var decision = RollingCountAlertGate.Evaluate(
                 count, PgDeadlockCountThreshold, watermark, cooldownElapsed, suppressed: false);
             _lastAlertedPgDeadlockCount[key] = decision.Watermark;
+            if (decision.Watermark != watermark)
+            {
+                /* On-change only (#1145's own contract) — persist AFTER the in-memory update so a
+                   store failure never desyncs the two; the in-memory watermark still gates this
+                   process even if the write is lost, same posture as every other watermark save
+                   in this codebase. */
+                await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, decision.Watermark);
+            }
 
             var wasActive = _activePgDeadlockAlert.TryGetValue(key, out var activeBefore) && activeBefore;
             _activePgDeadlockAlert[key] = decision.Active;
@@ -3002,9 +3065,20 @@ public sealed class DarlingWorker : BackgroundService
 
         const string metricName = "Blocking Detected";
         var key = snapshot.ServerKey;
+        var stateStore = new PgAlertStateStore(_postgres, _logger);
 
         try
         {
+            /* #2716: same restart-survival seed as EvaluatePgDeadlocksAsync — see its comment. */
+            if (_pgBlockingWatermarkSeeded.TryAdd(key, true))
+            {
+                var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                if (seeded.HasValue)
+                {
+                    _lastAlertedPgBlockingCount[key] = seeded.Value;
+                }
+            }
+
             var now = DateTime.UtcNow;
             var windowStart = now.AddHours(-AlertEngine.RollingCountWindowHours);
 
@@ -3021,6 +3095,10 @@ public sealed class DarlingWorker : BackgroundService
             var decision = RollingCountAlertGate.Evaluate(
                 count, PgBlockingCountThreshold, watermark, cooldownElapsed, suppressed: false);
             _lastAlertedPgBlockingCount[key] = decision.Watermark;
+            if (decision.Watermark != watermark)
+            {
+                await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, decision.Watermark);
+            }
 
             var wasActive = _activePgBlockingAlert.TryGetValue(key, out var activeBefore) && activeBefore;
             _activePgBlockingAlert[key] = decision.Active;

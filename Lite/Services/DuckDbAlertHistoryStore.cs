@@ -150,9 +150,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
             /* A successful email send is logged with a notification_type of
                'email' / 'email+webhook' and a null send_error — that mirrors
                exactly when the cooldown is stamped after SendEmailAsync.
-               #1154: when a dedupKey is supplied, push the per-fingerprint filter into
-               DuckDB via an anchored LIKE on the serialized "DedupKey":"<hex>" property
-               (the hex key has no LIKE wildcards; NULL context_json rows fail the match). */
+               #1154: when a dedupKey is supplied, push the per-fingerprint filter into DuckDB via
+               an anchored LIKE on the serialized "DedupKey":"<value>" property, built (with any
+               LIKE/JSON special characters escaped) by AlertContextSerializer.BuildDedupKeyLikePattern
+               rather than hand-concatenated — see its doc comment for why a hand-built pattern is
+               unsafe for a caller whose dedupKey is not a hash. NULL context_json rows fail the
+               match either way. */
             command.CommandText = @"
 SELECT MAX(alert_time)
 FROM config_alert_log
@@ -160,11 +163,11 @@ WHERE server_id = $1
 AND   metric_name = $2
 AND   notification_type IN ('email', 'email+webhook')
 AND   send_error IS NULL"
-            + (dedupKey is null ? "" : "\nAND   context_json LIKE $3");
+            + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'");
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
             if (dedupKey is not null)
-                command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = "%\"DedupKey\":\"" + dedupKey + "\"%" });
+                command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
 
             var result = await command.ExecuteScalarAsync();
             if (result == null || result == DBNull.Value) return null;
@@ -213,19 +216,22 @@ AND   send_error IS NULL"
                when WebhookSent is true, so the type alone implies success.
                send_error tracks the EMAIL channel, so it is NOT filtered on:
                an email-failed-but-webhook-sent row must still seed the cooldown.
-               #1154: when a dedupKey is supplied, push the per-fingerprint filter into
-               DuckDB via an anchored LIKE on the serialized "DedupKey":"<hex>" property. */
+               #1154: when a dedupKey is supplied, push the per-fingerprint filter into DuckDB via
+               an anchored LIKE built (with any LIKE/JSON special characters escaped) by
+               AlertContextSerializer.BuildDedupKeyLikePattern — see its doc comment for why a
+               hand-built "%\"DedupKey\":\"<value>\"%" pattern is unsafe for a caller whose dedupKey
+               is not a hash. */
             command.CommandText = @"
 SELECT MAX(alert_time)
 FROM config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
 AND   notification_type IN ('webhook', 'email+webhook')"
-            + (dedupKey is null ? "" : "\nAND   context_json LIKE $3");
+            + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'");
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
             if (dedupKey is not null)
-                command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = "%\"DedupKey\":\"" + dedupKey + "\"%" });
+                command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
 
             var result = await command.ExecuteScalarAsync();
             if (result == null || result == DBNull.Value) return null;
@@ -249,8 +255,13 @@ AND   notification_type IN ('webhook', 'email+webhook')"
     /// email cooldown (which filters to successful sends), the analysis
     /// cooldown is stamped unconditionally, so the persisted equivalent
     /// is the latest row for that metric_name, period.
+    /// <para>
+    /// #2716: when <paramref name="dedupKey"/> is supplied, the same #1154 anchored-LIKE filter its
+    /// email/webhook siblings use is applied here too, reconstructing a per-fingerprint last-alerted
+    /// time rather than a metric-level one.
+    /// </para>
     /// </summary>
-    public async Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
+    public async Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null)
     {
         var sid = int.TryParse(serverId, out var s) ? s : 0;
         try
@@ -278,9 +289,12 @@ AND   notification_type IN ('webhook', 'email+webhook')"
 SELECT MAX(alert_time)
 FROM config_alert_log
 WHERE server_id = $1
-AND   metric_name = $2";
+AND   metric_name = $2"
+            + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'");
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+            if (dedupKey is not null)
+                command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
 
             var result = await command.ExecuteScalarAsync();
             if (result == null || result == DBNull.Value) return null;
