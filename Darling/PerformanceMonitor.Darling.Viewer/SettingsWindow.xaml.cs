@@ -1645,6 +1645,10 @@ public partial class SettingsWindow : Window
         public double AnalysisNotifySeverity { get; private init; }
         public int AnalysisNotifyCooldownMinutes { get; private init; }
 
+        /* #2710: test sends never carry a triage link (the builders' isTest paths skip it anyway), and the
+           Viewer edits the store, not the headless box's darling.json where web.publicBaseUrl lives. */
+        public string TriageBaseUrl => "";
+
         public static TestAlertSettings FromUi(SettingsWindow w)
         {
             int.TryParse(w.SmtpPortBox.Text, out var smtpPort);

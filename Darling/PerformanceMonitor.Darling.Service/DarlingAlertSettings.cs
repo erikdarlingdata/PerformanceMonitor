@@ -240,4 +240,9 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /* #2107: was a hardcoded 360 while the shared engine accepts a clamped [30, 10080] value and
        Lite always passed a configured one through — the Darling parity gap gotqn called out. */
     public int AnalysisNotifyCooldownMinutes => Math.Clamp(_config.Alerts.AnalysisNotifyCooldownMinutes, 30, 10080);
+
+    /// <summary>#2710: the triage-link base — <c>web.publicBaseUrl</c>, read live through the by-reference
+    /// config seam like every sibling. File-authoritative on purpose (see the WebConfig doc comment): a store
+    /// config reload overwrites only Web.Enabled/Web.Port, so this survives it.</summary>
+    public string TriageBaseUrl => _config.Web.PublicBaseUrl ?? "";
 }
