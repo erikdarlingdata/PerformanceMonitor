@@ -128,12 +128,33 @@ public sealed class DarlingPgOperationalAlertTests
     }
 
     [Fact]
-    public void WorstPgBlockingChainPerRoot_NeverCollapsesTheVanishedBlockerSentinel_EvenAcrossUnrelatedIncidents()
+    public void WorstPgBlockingChainPerRoot_CollapsesRepeatedSamplesOfTheSameSentinelRoot_ToOneEntry()
+    {
+        /* The re-fire-class regression review caught: deduping the vanished-blocker sentinel (RootBackendId
+           == 0) by RootPid must still collapse repeated samples of the SAME persisting vanished-root block
+           — otherwise RollingCountAlertGate's watermark climbs every sweep and the alert re-fires every
+           cooldown for one ongoing incident (the #1091/#2704/#2708 class this design exists to avoid). */
+        var rows = new[]
+        {
+            BlockingRow(rootBackendId: 0, rootPid: 777, capturedAt: new DateTime(2026, 8, 31, 0, 5, 0, DateTimeKind.Utc)),
+            BlockingRow(rootBackendId: 0, rootPid: 777, capturedAt: new DateTime(2026, 8, 31, 0, 10, 0, DateTimeKind.Utc)),
+            BlockingRow(rootBackendId: 0, rootPid: 777, capturedAt: new DateTime(2026, 8, 31, 0, 15, 0, DateTimeKind.Utc)),
+        };
+
+        var worst = DarlingWorker.WorstPgBlockingChainPerRoot(rows);
+
+        Assert.Single(worst);
+        Assert.Equal(777, worst[0].RootPid);
+    }
+
+    [Fact]
+    public void WorstPgBlockingChainPerRoot_KeepsDifferentSentinelPidsSeparate()
     {
         /* RootBackendId == 0 is PgBlockingCollector's coalesce(blocker.backend_id, 0) sentinel — the root's
            own row had already left pg_stat_activity by capture time. Two GENUINELY DIFFERENT blocking
-           situations that both happen to hit this case in the same window must both survive; a plain
-           GroupBy-by-RootBackendId would wrongly merge them (the review finding this test pins). */
+           situations that both happen to hit this case in the same window (different pids) must both
+           survive; a plain GroupBy-by-RootBackendId would wrongly merge them (the review finding this test
+           pins) — dedup for the sentinel case is by RootPid instead, so different pids stay distinct. */
         var unrelatedIncidentOne = BlockingRow(rootBackendId: 0, rootPid: 111, databases: new[] { "eden" });
         var unrelatedIncidentTwo = BlockingRow(rootBackendId: 0, rootPid: 222, databases: new[] { "sky" });
         var rows = new[] { unrelatedIncidentOne, unrelatedIncidentTwo };

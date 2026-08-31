@@ -3153,25 +3153,50 @@ public sealed class DarlingWorker : BackgroundService
     /// cycle for the whole rolling window would inflate the alert's count far past what an operator would
     /// call "how many blocking situations", since blocking here is sampled state, not an engine-recorded
     /// event log (same caveat the collector's own doc comment carries).</para>
-    /// <para><b><c>RootBackendId == 0</c> is the vanished-blocker sentinel and is NEVER deduped against
-    /// another zero.</b> <c>PgBlockingCollector</c> writes <c>coalesce(blocker.backend_id, 0)</c> when the
-    /// root's own row had already left <c>pg_stat_activity</c> by capture time, and
-    /// <c>DarlingPgBlockingReader</c>'s own <c>recurrence</c> CTE already excludes
-    /// <c>blocking_backend_id &lt;&gt; 0</c> for the identical reason: grouping on the sentinel would count
-    /// unrelated one-off incidents in different captures as repeat appearances of one backend. A plain
-    /// GroupBy-by-RootBackendId would collapse two genuinely different vanished-root blocking situations
-    /// into one entry and merge their fingerprints — a real undercounting bug review caught before this
-    /// was reused as an alert count rather than a display grouping.</para>
+    /// <para><b><c>RootBackendId == 0</c> is the vanished-blocker sentinel, and it needs its OWN identity to
+    /// dedupe against, not the raw backend id.</b> <c>PgBlockingCollector</c> writes
+    /// <c>coalesce(blocker.backend_id, 0)</c> when the root's own row had already left
+    /// <c>pg_stat_activity</c> by capture time, so every genuinely different vanished-root incident shares
+    /// the literal value 0 — <c>DarlingPgBlockingReader</c>'s own <c>recurrence</c> CTE excludes
+    /// <c>blocking_backend_id &lt;&gt; 0</c> for the identical reason. Two failure modes sit on either side
+    /// of this, and both were caught by review before shipping:
+    /// <list type="bullet">
+    /// <item>Grouping by the raw <c>RootBackendId</c> (as if 0 were a real id) collapses two UNRELATED
+    /// vanished-root incidents into one entry and merges their fingerprints — an undercount.</item>
+    /// <item>Never deduping sentinel rows at all re-introduces the #1091/#2704/#2708 re-fire class for
+    /// exactly this case: the SAME persisting vanished-root block, sampled every sweep, would add a new
+    /// list entry every cycle, so <see cref="RollingCountAlertGate"/>'s watermark keeps climbing and the
+    /// alert re-fires every cooldown for one ongoing incident.</item>
+    /// </list>
+    /// The fix is <c>RootPid</c> as the sentinel case's dedup identity — the same value
+    /// <see cref="BuildPgBlockingIncident"/> already folds into that case's <c>DedupKey</c> — which narrows
+    /// the risk to pid reuse inside one rolling 1-hour window, far smaller than either failure mode
+    /// above.</para>
     /// </summary>
     internal static List<DarlingPgBlockingReader.PgBlockingChainRow> WorstPgBlockingChainPerRoot(
         IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> rows)
     {
         var result = new List<DarlingPgBlockingReader.PgBlockingChainRow>();
-        var seenRootBackendIds = new HashSet<long>();
+        var seenRealBackendIds = new HashSet<long>();
+        var seenSentinelPids = new HashSet<int>();
 
         foreach (var row in rows)
         {
-            if (row.RootBackendId == 0 || seenRootBackendIds.Add(row.RootBackendId))
+            /* Never deduping the sentinel at all (an earlier version of this method) traded one bug for
+               another: the SAME persisting vanished-root block, sampled every sweep, would then add a NEW
+               list entry every cycle — RollingCountAlertGate's watermark keeps climbing as long as the
+               count keeps climbing, re-firing "Blocking Detected" every cooldown for what is one ongoing
+               incident (exactly the #1091/#2704/#2708 class this whole design exists to be immune to,
+               reintroduced specifically for this case). Deduping the sentinel by RootPid instead is the
+               narrower, correct trade: BuildPgBlockingIncident already treats RootPid as the sentinel
+               case's usable identity (it is folded into that case's DedupKey below), and pid reuse inside
+               one rolling 1-hour window is a far smaller risk than guaranteed re-alerting on every sweep
+               for any persisting vanished-root block. */
+            var isNew = row.RootBackendId == 0
+                ? seenSentinelPids.Add(row.RootPid)
+                : seenRealBackendIds.Add(row.RootBackendId);
+
+            if (isNew)
             {
                 result.Add(row);
             }
