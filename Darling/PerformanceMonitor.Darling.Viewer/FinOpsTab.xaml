@@ -456,7 +456,7 @@
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
                                                 <Grid Margin="0,2" Height="22">
-                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/><ColumnDefinition Width="90"/></Grid.ColumnDefinitions>
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto" MinWidth="90"/></Grid.ColumnDefinitions>
                                                     <TextBlock Grid.Column="0" Text="{Binding DatabaseName}" VerticalAlignment="Center" FontSize="11.5" Foreground="{DynamicResource ForegroundBrush}" TextTrimming="CharacterEllipsis"/>
                                                     <Grid Grid.Column="1" Margin="4,2">
                                                         <Border CornerRadius="3" Background="#1AFFFFFF"/>
@@ -465,7 +465,7 @@
                                                             <Border Grid.Column="0" CornerRadius="3" Background="#3498DB"/>
                                                         </Grid>
                                                     </Grid>
-                                                    <TextBlock Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11.5" Foreground="{DynamicResource ForegroundBrush}">
+                                                    <TextBlock Grid.Column="2" Margin="0,0,4,0" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11.5" Foreground="{DynamicResource ForegroundBrush}">
                                                         <TextBlock.Text>
                                                             <MultiBinding StringFormat="{}{0:N0} / {1:N0} MB"><Binding Path="UsedMb"/><Binding Path="TotalMb"/></MultiBinding>
                                                         </TextBlock.Text>
