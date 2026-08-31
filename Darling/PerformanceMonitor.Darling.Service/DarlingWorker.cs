@@ -457,6 +457,11 @@ public sealed class DarlingWorker : BackgroundService
     private readonly ConcurrentDictionary<string, DateTime> _lastPgBlockingAlert = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _activePgBlockingAlert = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, int> _lastAlertedPgBlockingCount = new(StringComparer.Ordinal);
+    /* Long-Running Query is a LIVE-STATE check ("is one running right now"), not a rolling event count like
+       Deadlocks/Blocking above — so it needs only a cooldown timestamp and an active flag, the same shape
+       AlertEngine itself uses for its own SQL Server Long-Running Query check, not RollingCountAlertGate. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastPgLongRunningQueryAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _activePgLongRunningQueryAlert = new(StringComparer.Ordinal);
 
     /* #2716: none of the Postgres alerts' watermarks above survive a restart — AlertEngine seeds its
        own SQL Server twins of _lastAlertedPgDeadlockCount/_lastAlertedPgBlockingCount from
@@ -1765,7 +1770,7 @@ public sealed class DarlingWorker : BackgroundService
             if (DateTime.UtcNow >= server.NextAlertSweep)
             {
                 server.NextAlertSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
-                await EvaluateAlertsAsync(engine, server, stoppingToken);
+                await EvaluateAlertsAsync(engine, server, config, stoppingToken);
             }
 
             /* AN3: the scheduled analysis pipeline, per-server. The cadence, the enabled gate, and the notify
@@ -2771,7 +2776,8 @@ public sealed class DarlingWorker : BackgroundService
     /// (headless — suppression is an engine INPUT owned by interactive hosts). Failure-isolated:
     /// a failed sweep logs and retries on the next cadence tick, mirroring the collector loop.
     /// </summary>
-    private async Task EvaluateAlertsAsync(AlertEngine engine, ServerLoopState server, CancellationToken cancellationToken)
+    private async Task EvaluateAlertsAsync(
+        AlertEngine engine, ServerLoopState server, DarlingConfig config, CancellationToken cancellationToken)
     {
         var runtime = server.Runtime;
         if (runtime is null)
@@ -2800,7 +2806,7 @@ public sealed class DarlingWorker : BackgroundService
                PostgreSQL read. */
             if (runtime.Target.Engine == CollectorTargetEngine.PostgreSql)
             {
-                await EvaluatePostgresAlertsAsync(runtime, snapshot, cancellationToken);
+                await EvaluatePostgresAlertsAsync(runtime, snapshot, config, cancellationToken);
             }
         }
         catch (OperationCanceledException)
@@ -2821,7 +2827,7 @@ public sealed class DarlingWorker : BackgroundService
     /// history and obeys the same mute rules as every other one.</para>
     /// </summary>
     private async Task EvaluatePostgresAlertsAsync(
-        ServerRuntime runtime, AlertServerSnapshot snapshot, CancellationToken cancellationToken)
+        ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
     {
         if (_postgres is null || _alertDeliverer is null)
         {
@@ -2927,11 +2933,13 @@ public sealed class DarlingWorker : BackgroundService
                 runtime.Config.DisplayName, ex.Message);
         }
 
-        /* #2711: Deadlocks and Blocking, each independently failure-isolated (own try/catch inside),
-           so a broken read on one never costs the three predictors above or the other of this pair —
-           the same isolation AlertEngine gives its own CheckDeadlocksAsync/CheckBlockingAsync. */
+        /* #2711: Deadlocks, Blocking and Long-Running Query, each independently failure-isolated (own
+           try/catch inside), so a broken read on one never costs the three predictors above or either
+           sibling — the same isolation AlertEngine gives its own CheckDeadlocksAsync/CheckBlockingAsync/
+           CheckLongRunningQueriesAsync. */
         await EvaluatePgDeadlocksAsync(runtime, snapshot, cancellationToken);
         await EvaluatePgBlockingAsync(runtime, snapshot, cancellationToken);
+        await EvaluatePgLongRunningQueryAsync(runtime, snapshot, config, cancellationToken);
     }
 
     /// <summary>
@@ -3156,6 +3164,136 @@ public sealed class DarlingWorker : BackgroundService
                 runtime.Config.DisplayName, ex.Message);
         }
     }
+
+    /// <summary>
+    /// How far back "the most recent capture" is allowed to reach before it stops counting as "now", for the
+    /// Postgres Long-Running Query alert (#2711). See
+    /// <see cref="DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync"/>'s doc comment for why this
+    /// is the fleet's own 15-minute staleness convention rather than a tight multiple of the collector's
+    /// 1-minute configured cadence.
+    /// </summary>
+    private const int PgLongRunningQueryRecencyMinutes = 15;
+
+    /// <summary>
+    /// The live-state Postgres Long-Running Query alert (#2711): fires when the most recent
+    /// <c>pg_session_states</c> capture shows any session whose CURRENT query has run past
+    /// <see cref="IAlertEngineSettings.LongRunningQueryThresholdMinutes"/> — the SAME configured threshold SQL
+    /// Server's <c>AlertEngine.CheckLongRunningQueriesAsync</c> uses, read live off <paramref name="config"/>
+    /// rather than a separate Postgres-only constant, so changing the one setting changes behavior for both
+    /// engines the way one shared "how long is too long" preference should.
+    ///
+    /// <para><b>Boolean state + cooldown, not <see cref="RollingCountAlertGate"/>.</b> Unlike Deadlocks/Blocking
+    /// above, this is not a rolling count of discrete past events — it is "is a condition true right now",
+    /// exactly the shape AlertEngine's own SQL Server check already uses (an active flag plus a cooldown
+    /// timestamp). Reusing the rolling-count gate here would answer a question this alert does not ask.</para>
+    ///
+    /// <para>No query-text preview: <c>pg_session_states</c> deliberately stores none (see the collector's
+    /// class remarks), so the message identifies the session by pid/database/command tag instead of the
+    /// statement text SQL Server's equivalent shows.</para>
+    /// </summary>
+    private async Task EvaluatePgLongRunningQueryAsync(
+        ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
+    {
+        if (_postgres is null || _alertDeliverer is null)
+        {
+            return;
+        }
+
+        var alertSettings = new DarlingAlertSettings(config);
+
+        if (!alertSettings.LongRunningQueryEnabled)
+        {
+            return;
+        }
+
+        const string metricName = "Long-Running Query";
+        var key = snapshot.ServerKey;
+
+        try
+        {
+            var thresholdMinutes = alertSettings.LongRunningQueryThresholdMinutes;
+            var now = DateTime.UtcNow;
+
+            var rows = await DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync(
+                _postgres, runtime.ServerId, thresholdMs: thresholdMinutes * 60_000L, now,
+                PgLongRunningQueryRecencyMinutes, limit: alertSettings.LongRunningQueryMaxResults, cancellationToken);
+
+            var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
+            var wasActive = _activePgLongRunningQueryAlert.TryGetValue(key, out var activeBefore) && activeBefore;
+            _activePgLongRunningQueryAlert[key] = rows.Count > 0;
+
+            if (rows.Count > 0)
+            {
+                var cooldownElapsed = !_lastPgLongRunningQueryAlert.TryGetValue(key, out var last) || now - last >= cooldown;
+                if (!cooldownElapsed)
+                {
+                    return;
+                }
+
+                _lastPgLongRunningQueryAlert[key] = now;
+
+                var worst = rows[0];
+                var elapsedMinutes = worst.QueryDurationMs / 60_000;
+
+                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                {
+                    ServerName = snapshot.ServerName,
+                    MetricName = metricName,
+                    DatabaseName = worst.DatabaseName,
+                }) ?? false;
+
+                await _alertDeliverer.DeliverAsync(
+                    new AlertOutcome(
+                        key,
+                        snapshot.ServerName,
+                        metricName,
+                        $"{rows.Count} query(s), longest {elapsedMinutes}m",
+                        $"{thresholdMinutes}m",
+                        Context: new AlertContext
+                        {
+                            Incidents = rows.Select(BuildPgLongRunningQueryIncident).ToList(),
+                        },
+                        DetailText: null,
+                        NumericCurrentValue: elapsedMinutes,
+                        NumericThresholdValue: thresholdMinutes,
+                        Muted: muted,
+                        Severity: null,
+                        ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m — {worst.CommandTag ?? "(unknown)"}"
+                            + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
+                    cancellationToken);
+            }
+            else if (wasActive)
+            {
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Long-Running Queries Cleared",
+                    $"{snapshot.ServerName}: No queries over threshold");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("[{Server}] PostgreSQL long-running-query alert evaluation failed: {Message}",
+                runtime.Config.DisplayName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Pure mapping, pulled out of <see cref="EvaluatePgLongRunningQueryAsync"/> for the same testability
+    /// reason as <see cref="BuildPgDeadlockIncident"/>. Dedup key is the synthetic backend id (stable across
+    /// samples of the same backend, unlike a reused pid), matching <see cref="BuildPgBlockingIncident"/>'s
+    /// convention for the same underlying identity.
+    /// </summary>
+    internal static AlertIncident BuildPgLongRunningQueryIncident(
+        DarlingPgSessionStatesReader.LongRunningSessionRow row) =>
+        new(
+            row.BackendId.ToString(CultureInfo.InvariantCulture),
+            new[]
+            {
+                $"pid {row.Pid} running {row.QueryDurationMs / 60_000}m ({row.CommandTag ?? "(unknown)"})",
+            },
+            Database: row.DatabaseName);
 
     /// <summary>
     /// Writes a Postgres Deadlocks/Blocking resolution the same way <see cref="BuildAlertEngine"/>'s
