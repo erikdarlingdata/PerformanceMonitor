@@ -141,6 +141,8 @@ function toRunPanel(p) {
   if (p.unit != null && p.unit !== "") out.unit = p.unit;
   if (p.timeBucket != null && p.timeBucket !== "" && p.timeBucket !== "none") out.timeBucket = p.timeBucket;
   if (p.topN != null && p.topN !== "") out.topN = p.topN;
+  /* #2734 rank-then-bucket residual — forwarded or the stored "(other)" series silently vanishes here. */
+  if (p.includeOther === true) out.includeOther = true;
   if (Array.isArray(p.filters) && p.filters.length) out.filters = p.filters;
   if (Array.isArray(p.groupBy) && p.groupBy.length) out.groupBy = p.groupBy;
   /* The second measure (#1606) — passed through verbatim; the run endpoint validates coherence. */

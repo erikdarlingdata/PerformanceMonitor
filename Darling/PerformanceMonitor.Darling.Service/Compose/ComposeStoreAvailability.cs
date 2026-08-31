@@ -192,12 +192,14 @@ internal static class ComposeStoreAvailability
     /// beats erring toward a truncated chart that looks complete, and the reverse mistake is the bug this
     /// exists to fix.</para>
     ///
-    /// <para>TIME SERIES ONLY. A Ranked panel's LIMIT is the user's own topN — hitting it is the request
-    /// being honored, not truncation — and Scalar is a single row.</para>
+    /// <para>TIME-SERIES SHAPES ONLY — plain and the #2734 rank-then-bucket alike, whose row count is
+    /// series × buckets (the bound topN LIMIT lives in its rank CTE, not on the rows). A Ranked panel's
+    /// LIMIT is the user's own topN — hitting it is the request being honored, not truncation — and
+    /// Scalar is a single row.</para>
     /// </summary>
     internal static string? BuildRowCapNotice(PanelMode mode, int rowCount)
     {
-        if (mode != PanelMode.TimeSeries || rowCount < ComposeLimits.HardRowCap)
+        if (mode is not (PanelMode.TimeSeries or PanelMode.RankedTimeSeries) || rowCount < ComposeLimits.HardRowCap)
         {
             return null;
         }
