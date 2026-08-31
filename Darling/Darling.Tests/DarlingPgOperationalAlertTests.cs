@@ -171,6 +171,25 @@ public sealed class DarlingPgOperationalAlertTests
     }
 
     [Fact]
+    public void BuildPgBlockingIncident_GivesTheVanishedBlockerSentinelAUniqueDedupKey_NotABareZero()
+    {
+        /* IncidentCooldown.BuildKeys does incidents.Select(i => i.DedupKey).Distinct() to build one
+           cooldown key per fingerprint — two genuinely distinct sentinel (RootBackendId == 0) incidents
+           sharing the literal key "0" would collapse into one cooldown slot downstream, even though
+           WorstPgBlockingChainPerRoot correctly kept both as separate list entries (review finding this
+           test pins). */
+        var capturedAt = new DateTime(2026, 8, 31, 1, 2, 3, DateTimeKind.Utc);
+        var incidentA = DarlingWorker.BuildPgBlockingIncident(
+            BlockingRow(rootBackendId: 0, rootPid: 111, capturedAt: capturedAt));
+        var incidentB = DarlingWorker.BuildPgBlockingIncident(
+            BlockingRow(rootBackendId: 0, rootPid: 222, capturedAt: capturedAt));
+
+        Assert.NotEqual(incidentA.DedupKey, incidentB.DedupKey);
+        Assert.NotEqual("0", incidentA.DedupKey);
+        Assert.NotEqual("0", incidentB.DedupKey);
+    }
+
+    [Fact]
     public void BuildPgBlockingIncident_IncludesDatabaseRootPidVictimCountAndQuery()
     {
         var incident = DarlingWorker.BuildPgBlockingIncident(

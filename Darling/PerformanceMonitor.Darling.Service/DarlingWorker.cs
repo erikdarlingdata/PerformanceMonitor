@@ -3184,7 +3184,18 @@ public sealed class DarlingWorker : BackgroundService
     /// </summary>
     internal static AlertIncident BuildPgBlockingIncident(DarlingPgBlockingReader.PgBlockingChainRow row) =>
         new(
-            row.RootBackendId.ToString(CultureInfo.InvariantCulture),
+            /* The vanished-blocker sentinel (RootBackendId == 0, see WorstPgBlockingChainPerRoot's doc
+               comment) needs a DedupKey too, not just a place in the list: IncidentCooldown.BuildKeys
+               (PerformanceMonitor.Notifications/IncidentCooldown.cs) does incidents.Select(i =>
+               i.DedupKey).Distinct() to build one cooldown key per fingerprint, so two genuinely distinct
+               sentinel incidents both keyed "0" would collapse into one cooldown slot downstream — an
+               unrelated PRIOR vanished-root incident's cooldown silently suppressing a genuinely NEW one's
+               delivery, even though WorstPgBlockingChainPerRoot correctly kept both as separate list
+               entries. Folding in RootPid and CapturedAt makes the sentinel case's key unique per incident
+               the same way a real backend id already is on its own. */
+            row.RootBackendId == 0
+                ? string.Create(CultureInfo.InvariantCulture, $"0-pid{row.RootPid}-{row.CapturedAt:O}")
+                : row.RootBackendId.ToString(CultureInfo.InvariantCulture),
             new[]
             {
                 $"root pid {row.RootPid} blocking {row.TotalVictims} session(s)"
