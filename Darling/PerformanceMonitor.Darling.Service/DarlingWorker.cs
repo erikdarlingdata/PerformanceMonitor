@@ -3113,12 +3113,18 @@ public sealed class DarlingWorker : BackgroundService
             return;
         }
 
+        var alertSettings = new DarlingAlertSettings(config);
+
+        if (!alertSettings.LongRunningQueryEnabled)
+        {
+            return;
+        }
+
         const string metricName = "Long-Running Query";
         var key = snapshot.ServerKey;
 
         try
         {
-            var alertSettings = new DarlingAlertSettings(config);
             var thresholdMinutes = alertSettings.LongRunningQueryThresholdMinutes;
             var now = DateTime.UtcNow;
 
