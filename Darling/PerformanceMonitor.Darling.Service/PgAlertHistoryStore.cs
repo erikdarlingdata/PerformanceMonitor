@@ -112,9 +112,10 @@ AND   send_error IS NULL", "EmailAlert");
         ReadMaxAlertTimeAsync(serverId, metricName, dedupKey, @"
 AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
 
-    public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) =>
-        /* Unfiltered — any channel/result (the analysis cooldown is stamped unconditionally). */
-        ReadMaxAlertTimeAsync(serverId, metricName, dedupKey: null, extraFilter: "", logScope: "AnalysisNotify");
+    public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
+        /* Unfiltered — any channel/result (the analysis cooldown is stamped unconditionally). #2716
+           reuses the dedupKey filter to seed Postgres Tier-0-predictor cooldowns across a restart. */
+        ReadMaxAlertTimeAsync(serverId, metricName, dedupKey, extraFilter: "", logScope: "AnalysisNotify");
 
     private async Task<DateTime?> ReadMaxAlertTimeAsync(
         string serverId, string metricName, string? dedupKey, string extraFilter, string logScope)

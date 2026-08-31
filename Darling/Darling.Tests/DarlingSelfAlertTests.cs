@@ -120,7 +120,7 @@ public sealed class DarlingSelfAlertTests
         public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
 
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) =>
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
     }
 

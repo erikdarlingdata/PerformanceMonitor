@@ -65,8 +65,14 @@ public interface IAlertHistoryStore
     /// <summary>
     /// MAX(alert_time) UNFILTERED (any channel/result) — seeds the analysis
     /// per-finding cooldown across restart. Stamped unconditionally upstream.
+    /// <para>
+    /// When <paramref name="dedupKey"/> is non-null (#1154 per-fingerprint cooldown, reused by #2716 to
+    /// seed Darling's Postgres Tier-0-predictor cooldowns), the result is additionally restricted to rows
+    /// whose persisted <c>ContextJson</c> carries that #1140 dedup fingerprint. Null = the metric-level
+    /// seed (the pre-#1154 behavior, used by the non-fingerprinted fallback).
+    /// </para>
     /// </summary>
-    Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName);
+    Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null);
 }
 
 /// <summary>

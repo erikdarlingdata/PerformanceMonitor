@@ -120,7 +120,7 @@ public class WebhookCooldownSeedTests
                 return Task.FromResult<DateTime?>(null);
             return Task.FromResult(LastWebhookSent);
         }
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
     }
 
     private static AlertContext ContextWith(string dedupKey) => new()

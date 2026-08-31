@@ -336,6 +336,86 @@ WHERE server_id = $1 AND metric_name = $2", connection))
         }
     }
 
+    /// <summary>
+    /// #2716: the primitive Darling's Postgres Tier-0-predictor cooldown (wraparound/xmin/replication
+    /// slot — DarlingWorker's <c>_lastPostgresAlert</c>, keyed per server|metric|subject) restart-seeds
+    /// itself from. Those three alerts have no rolling-COUNT watermark to persist through
+    /// <see cref="IAlertStateStore"/> — they are a plain last-alerted TIME per subject — so the fix
+    /// reuses <see cref="IAlertHistoryStore.GetLastAlertTimeAsync"/>'s dedupKey filter (already proven
+    /// for the #1154 email/webhook cooldowns) instead of adding new schema. This proves the filter
+    /// actually isolates by subject rather than degenerating to the metric-level MAX: two subjects
+    /// alerted at different times on the SAME (server, metric) must each seed from their OWN row, not
+    /// the newer one's.
+    /// </summary>
+    [Fact]
+    public async Task PgAlertHistoryStore_GetLastAlertTimeAsync_FiltersByDedupKey_ForRestartSeeding()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert-history test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteTestRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var historyStore = new PgAlertHistoryStore(postgres);
+            const string metricName = "Wraparound Risk";
+
+            /* Real serializer, not hand-built JSON — the same path AlertOutcome.Context takes before
+               RecordAlertAsync ever sees it (AlertContextBuilders/AlertContextSerializer.Serialize). */
+            string ContextFor(string subject) =>
+                AlertContextSerializer.Serialize(new AlertContext
+                {
+                    Incidents = new List<AlertIncident> { new(subject, new[] { subject }) },
+                });
+
+            /* "walnut" alerted first (older), "cashew" alerted second (newer) — same server, same
+               metric, different subjects. An unfiltered MAX would report cashew's time for BOTH. */
+            await historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                TestServerKey, TestServerName, metricName,
+                "92%", "90%", 92, 90,
+                AlertSent: true, NotificationType: "tray", SendError: null,
+                Muted: false, DetailText: null, ContextJson: ContextFor("walnut")));
+
+            await Task.Delay(TimeSpan.FromMilliseconds(50), ct); /* force a distinguishable alert_time */
+
+            await historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                TestServerKey, TestServerName, metricName,
+                "95%", "90%", 95, 90,
+                AlertSent: true, NotificationType: "tray", SendError: null,
+                Muted: false, DetailText: null, ContextJson: ContextFor("cashew")));
+
+            var walnutSeed = await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName, dedupKey: "walnut");
+            var cashewSeed = await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName, dedupKey: "cashew");
+            var unfiltered = await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName);
+            var missingSubjectSeed = await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName, dedupKey: "pistachio");
+
+            Assert.NotNull(walnutSeed);
+            Assert.NotNull(cashewSeed);
+            /* The whole point of the fix: walnut's seed must be its OWN (older) time, not cashew's. */
+            Assert.True(walnutSeed < cashewSeed,
+                $"walnut ({walnutSeed:O}) must seed from its own row, strictly before cashew's ({cashewSeed:O})");
+            /* Unfiltered stays the pre-#2716 behavior: the newest row across all subjects. */
+            Assert.Equal(cashewSeed, unfiltered);
+            /* A subject with no history at all seeds nothing — a restart must not invent a cooldown. */
+            Assert.Null(missingSubjectSeed);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task EndToEnd_PgMuteRuleStore_CrudRoundTrip()
     {

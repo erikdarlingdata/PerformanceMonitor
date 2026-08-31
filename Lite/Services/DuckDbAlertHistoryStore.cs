@@ -249,8 +249,13 @@ AND   notification_type IN ('webhook', 'email+webhook')"
     /// email cooldown (which filters to successful sends), the analysis
     /// cooldown is stamped unconditionally, so the persisted equivalent
     /// is the latest row for that metric_name, period.
+    /// <para>
+    /// #2716: when <paramref name="dedupKey"/> is supplied, the same #1154 anchored-LIKE filter its
+    /// email/webhook siblings use is applied here too, reconstructing a per-fingerprint last-alerted
+    /// time rather than a metric-level one.
+    /// </para>
     /// </summary>
-    public async Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
+    public async Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null)
     {
         var sid = int.TryParse(serverId, out var s) ? s : 0;
         try
@@ -278,9 +283,12 @@ AND   notification_type IN ('webhook', 'email+webhook')"
 SELECT MAX(alert_time)
 FROM config_alert_log
 WHERE server_id = $1
-AND   metric_name = $2";
+AND   metric_name = $2"
+            + (dedupKey is null ? "" : "\nAND   context_json LIKE $3");
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+            if (dedupKey is not null)
+                command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = "%\"DedupKey\":\"" + dedupKey + "\"%" });
 
             var result = await command.ExecuteScalarAsync();
             if (result == null || result == DBNull.Value) return null;
