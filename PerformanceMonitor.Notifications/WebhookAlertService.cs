@@ -303,10 +303,6 @@ public class WebhookAlertService
     }
 
     /// <summary>
-    /// Builds an O365 MessageCard payload for Teams incoming webhooks.
-    /// The themeColor property renders as a colored accent bar at the top of the card.
-    /// </summary>
-    /// <summary>
     /// #2710: the Datadog-parity <c>resource_name</c> tag — the first incident's involved objects,
     /// joined. Mirrors the SAME "first incident is the correlation anchor" precedent
     /// <see cref="DerivePagerDutyDedupKey"/> already uses for an alert carrying more than one
@@ -335,6 +331,10 @@ public class WebhookAlertService
     private static string? DeriveResourceDatabase(AlertContext? context) =>
         context?.Incidents is { Count: > 0 } incidents ? incidents[0].Database : null;
 
+    /// <summary>
+    /// Builds an O365 MessageCard payload for Teams incoming webhooks.
+    /// The themeColor property renders as a colored accent bar at the top of the card.
+    /// </summary>
     internal static string BuildTeamsPayload(
         string metricName,
         string serverName,
