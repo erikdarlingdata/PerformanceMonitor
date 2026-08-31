@@ -462,6 +462,23 @@ public sealed class DarlingWorker : BackgroundService
        AlertEngine itself uses for its own SQL Server Long-Running Query check, not RollingCountAlertGate. */
     private readonly ConcurrentDictionary<string, DateTime> _lastPgLongRunningQueryAlert = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _activePgLongRunningQueryAlert = new(StringComparer.Ordinal);
+    /* #2711: Poison Wait is an ACCUMULATION check (how much wait time accrued in the read's own window),
+       the same shape as AlertEngine.CheckPoisonWaitsAsync for SQL Server — so it carries that method's
+       exact state kit rather than RollingCountAlertGate: a cooldown stamp, an active flag for the
+       Detected/Cleared edge, and the #2704 last-fired-on collection_time guard, without which a
+       cooldown-elapsed re-read of the SAME still-uncollected store row re-fires on data already reported
+       (the collector's delivered cadence and the alert cooldown are independent clocks). Keyed per
+       server|metric|subject like _lastPostgresAlert — the two poison events are different incidents with
+       different remedies, so one must not consume the other's cooldown (#1140). */
+    private readonly ConcurrentDictionary<string, DateTime> _lastPgPoisonWaitAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _activePgPoisonWaitAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastPgPoisonWaitCollectionTime = new(StringComparer.Ordinal);
+    /* #2716's restart-survival shape for the poison cooldown: seeded once per key from
+       IAlertHistoryStore.GetLastAlertTimeAsync (the subject IS the #1140 dedup fingerprint the alert
+       fires with), exactly like _postgresAlertHistorySeeded below. The seed also floors the #2704
+       collection-time guard: rows collected before the last recorded fire were, by definition, already
+       reported by the process that fired it. */
+    private readonly ConcurrentDictionary<string, bool> _pgPoisonWaitCooldownSeeded = new(StringComparer.Ordinal);
 
     /* #2716: none of the Postgres alerts' watermarks above survive a restart — AlertEngine seeds its
        own SQL Server twins of _lastAlertedPgDeadlockCount/_lastAlertedPgBlockingCount from
@@ -2952,13 +2969,14 @@ public sealed class DarlingWorker : BackgroundService
                 runtime.Config.DisplayName, ex.Message);
         }
 
-        /* #2711: Deadlocks, Blocking and Long-Running Query, each independently failure-isolated (own
-           try/catch inside), so a broken read on one never costs the three predictors above or either
-           sibling — the same isolation AlertEngine gives its own CheckDeadlocksAsync/CheckBlockingAsync/
-           CheckLongRunningQueriesAsync. */
+        /* #2711: Deadlocks, Blocking, Long-Running Query and Poison Wait, each independently
+           failure-isolated (own try/catch inside), so a broken read on one never costs the three
+           predictors above or any sibling — the same isolation AlertEngine gives its own
+           CheckDeadlocksAsync/CheckBlockingAsync/CheckLongRunningQueriesAsync/CheckPoisonWaitsAsync. */
         await EvaluatePgDeadlocksAsync(runtime, snapshot, cancellationToken);
         await EvaluatePgBlockingAsync(runtime, snapshot, cancellationToken);
         await EvaluatePgLongRunningQueryAsync(runtime, snapshot, config, cancellationToken);
+        await EvaluatePgPoisonWaitAsync(runtime, snapshot, config, cancellationToken);
     }
 
     /// <summary>
@@ -3313,6 +3331,192 @@ public sealed class DarlingWorker : BackgroundService
                 $"pid {row.Pid} running {row.QueryDurationMs / 60_000}m ({row.CommandTag ?? "(unknown)"})",
             },
             Database: row.DatabaseName);
+
+    /// <summary>
+    /// The Postgres Poison Wait analogue (#2711): fires when a poison wait event — the IPC
+    /// BtreePage/BufferIo pair, chosen from the issue's own fleet research — accumulated enough wait time
+    /// across <see cref="PostgresAlertEvaluator.PoisonWaitWindowMinutes"/> to average at least
+    /// <see cref="PostgresAlertEvaluator.PoisonWaitWarningAvgWaiters"/> backend(s) continuously stuck.
+    ///
+    /// <para><b>Gated on the SAME <see cref="IAlertEngineSettings.PoisonWaitEnabled"/> switch SQL Server's
+    /// <c>AlertEngine.CheckPoisonWaitsAsync</c> honors</b> — the #2711 Long-Running Query precedent: one
+    /// "poison wait alerts on/off" preference, both engines. <c>PoisonWaitThresholdMs</c> is deliberately
+    /// NOT reused: it is an avg-ms-per-wait bar, and the issue's research shows the Postgres poison events
+    /// average 1-2 ms per wait at six-figure volumes — a shape that bar can never see. The Postgres
+    /// threshold is a constant on <see cref="PostgresAlertEvaluator"/> for this first cut, the same
+    /// reasoning as <see cref="PgDeadlockCountThreshold"/>.</para>
+    ///
+    /// <para><b>Cooldown + active flag + the #2704 unrefreshed-source-row guard, per SUBJECT.</b> This is
+    /// an accumulation check like its SQL Server twin, so it inherits that method's exact state kit (see
+    /// the field block's doc comment), keyed per server|metric|subject per #1140 — the two poison events
+    /// are different incidents. The cooldown seeds from history once per key (#2716), and the seed also
+    /// floors the collection-time guard, so a restart cannot re-fire on a window the previous process
+    /// already reported.</para>
+    ///
+    /// <para>On a non-Aurora target the read returns no rows — the cumulative wait counters are
+    /// Aurora-only — and no rows is silence, the honest empty. Extending the poison definition to
+    /// self-hosted targets via <c>pg_wait_sampling</c> needs its own calibration (sampled counts, not
+    /// accumulated time) and its own fleet evidence first.</para>
+    /// </summary>
+    private async Task EvaluatePgPoisonWaitAsync(
+        ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
+    {
+        if (_postgres is null || _alertDeliverer is null)
+        {
+            return;
+        }
+
+        var alertSettings = new DarlingAlertSettings(config);
+        if (!alertSettings.PoisonWaitEnabled)
+        {
+            return;
+        }
+
+        const string metricName = PostgresAlertEvaluator.PoisonWaitMetric;
+        var serverKey = snapshot.ServerKey;
+
+        try
+        {
+            var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
+            var rows = await adapter.GetPoisonWaitPressureAsync(runtime.ServerId, cancellationToken);
+            var findings = PostgresAlertEvaluator.EvaluatePoisonWaits(rows);
+
+            var now = DateTime.UtcNow;
+            var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
+
+            /* Matched back by the evaluator's own subject builder so the guard below cannot drift from
+               the findings it protects. */
+            var newestCollectionBySubject = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            foreach (var row in rows)
+            {
+                newestCollectionBySubject[PostgresAlertEvaluator.PoisonWaitSubject(row)] = row.NewestCollectionTime;
+            }
+
+            var firingSubjects = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var finding in findings)
+            {
+                firingSubjects.Add(finding.Subject);
+
+                var cooldownKey = string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{serverKey}|{finding.MetricName}|{finding.Subject}");
+
+                /* The condition is TRUE regardless of whether this pass delivers — the active flag tracks
+                   the condition, not the delivery, or a fire suppressed by cooldown would produce a
+                   phantom Cleared next sweep. */
+                _activePgPoisonWaitAlert[cooldownKey] = true;
+
+                /* #2716: seed the cooldown from history once per key — finding.Subject is the #1140 dedup
+                   fingerprint this alert fires with, so GetLastAlertTimeAsync's #1154 filter reconstructs
+                   the per-subject stamp. The same seed floors the #2704 guard: rows collected before the
+                   last recorded fire were already reported by whichever process fired it. */
+                if (!_lastPgPoisonWaitAlert.ContainsKey(cooldownKey)
+                    && _historyStore is not null
+                    && _pgPoisonWaitCooldownSeeded.TryAdd(cooldownKey, true))
+                {
+                    var seeded = await _historyStore.GetLastAlertTimeAsync(
+                        serverKey, finding.MetricName, dedupKey: finding.Subject);
+                    if (seeded.HasValue)
+                    {
+                        _lastPgPoisonWaitAlert[cooldownKey] = seeded.Value;
+                        _lastPgPoisonWaitCollectionTime[cooldownKey] = seeded.Value;
+                    }
+                }
+
+                /* #2704: only a collection_time newer than the one last fired on counts as a fresh
+                   observation. The collector's delivered cadence and the alert cooldown are independent
+                   clocks — a cooldown-elapsed re-read of the SAME still-uncollected row is the identical
+                   accumulation surfacing twice, not a new observation of a standing condition. */
+                var newestCollection = newestCollectionBySubject.TryGetValue(finding.Subject, out var nc)
+                    ? nc
+                    : DateTime.MinValue;
+                var hasFreshCollection = !_lastPgPoisonWaitCollectionTime.TryGetValue(cooldownKey, out var lastCollection)
+                    || newestCollection > lastCollection;
+                if (!hasFreshCollection)
+                {
+                    continue;
+                }
+
+                if (_lastPgPoisonWaitAlert.TryGetValue(cooldownKey, out var last) && now - last < cooldown)
+                {
+                    continue;
+                }
+
+                /* Stamped even when muted, mirroring AlertEngine: a muted alert still consumes its
+                   cooldown, so unmuting does not produce a backlog. */
+                _lastPgPoisonWaitAlert[cooldownKey] = now;
+                _lastPgPoisonWaitCollectionTime[cooldownKey] = newestCollection;
+
+                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                {
+                    ServerName = snapshot.ServerName,
+                    MetricName = finding.MetricName,
+                    /* WaitType, not DatabaseName: wait events are instance-wide, and the SQL Server twin's
+                       mute rules key on the wait type — the parity metric name only helps if the mute
+                       dimension matches too. */
+                    WaitType = finding.Subject,
+                }) ?? false;
+
+                await _alertDeliverer.DeliverAsync(
+                    new AlertOutcome(
+                        serverKey,
+                        snapshot.ServerName,
+                        finding.MetricName,
+                        finding.CurrentValue,
+                        finding.ThresholdValue,
+                        /* The subject as the #1140 incident fingerprint, identity only — same shape and
+                           reasoning as the Tier 0 delivery loop above. */
+                        Context: new AlertContext
+                        {
+                            Incidents = new List<AlertIncident>
+                            {
+                                new(finding.Subject, new[] { finding.CurrentValue }),
+                            },
+                        },
+                        DetailText: null,
+                        finding.NumericCurrentValue,
+                        finding.NumericThresholdValue,
+                        Muted: muted,
+                        finding.Severity,
+                        finding.ShortMessage),
+                    cancellationToken);
+            }
+
+            /* The Cleared edge, per subject: previously active, no longer over the bar. Late by up to one
+               window (the rolling sums age out rather than reset), which is accepted — a Cleared that
+               arrives a few minutes conservative beats one that flaps with each sweep. */
+            var activePrefix = string.Create(
+                CultureInfo.InvariantCulture, $"{serverKey}|{metricName}|");
+            foreach (var entry in _activePgPoisonWaitAlert)
+            {
+                if (!entry.Value
+                    || !entry.Key.StartsWith(activePrefix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var subject = entry.Key[activePrefix.Length..];
+                if (firingSubjects.Contains(subject))
+                {
+                    continue;
+                }
+
+                _activePgPoisonWaitAlert[entry.Key] = false;
+                await NotifyPgResolutionAsync(serverKey, snapshot.ServerName, metricName, "Poison Waits Cleared",
+                    $"{snapshot.ServerName}: {subject} accumulated wait back below threshold");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("[{Server}] PostgreSQL poison wait alert evaluation failed: {Message}",
+                runtime.Config.DisplayName, ex.Message);
+        }
+    }
 
     /// <summary>
     /// Writes a Postgres Deadlocks/Blocking resolution the same way <see cref="BuildAlertEngine"/>'s
