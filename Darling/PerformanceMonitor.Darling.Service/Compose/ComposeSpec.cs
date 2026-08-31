@@ -224,10 +224,17 @@ public static class ComposeSpec
 
     /// <summary>The one mis-shape worth a targeted message instead of a generic did-you-mean: nesting the
     /// spec under a <c>panel</c> key is <c>run_custom_view_panel</c>'s RUN-SPEC wrapper leaking into a stored
-    /// definition — the natural guess, since that tool nests while a stored panel/cell is flat (#2733).</summary>
+    /// definition — the natural guess, since that tool nests while a stored panel/cell is flat (#2733). ONE
+    /// constant, because the same mis-shape is also named by the write path's v1 arm (a nested panel has no
+    /// <c>source</c>, so it never reaches the composed strict check) — two independently-worded copies would
+    /// drift on the next tweak.</summary>
+    internal const string RunSpecNestingHint =
+        "a stored panel is flat (the {\"panel\":{...}} wrapper belongs to run_custom_view_panel's spec); put the panel's keys (source, measure, ...) directly on this object.";
+
+    /// <summary>Targeted guidance per stray key — see <see cref="RunSpecNestingHint"/>.</summary>
     private static readonly IReadOnlyDictionary<string, string> s_panelKeyHints = new Dictionary<string, string>(StringComparer.Ordinal)
     {
-        ["panel"] = "a stored panel is flat — the {\"panel\":{...}} wrapper belongs to run_custom_view_panel's spec; put the panel's keys (source, measure, ...) directly on this object.",
+        ["panel"] = RunSpecNestingHint,
     };
 
     /// <summary>

@@ -969,8 +969,9 @@ public static class DarlingWebEndpoints
                        (#2733): the run-spec {"panel":{...}} wrapper, or a near-miss typo of read/source. */
                     if (panel["panel"] is JsonObject)
                     {
+                        /* The SAME constant the composed arm's key-hint uses — one wording, no drift. */
                         return DefinitionValidation.Fail(
-                            $"panel {i} nests its spec under 'panel' — a stored panel is flat (the {{\"panel\":{{...}}}} wrapper belongs to run_custom_view_panel's spec); put the panel's keys directly on the panel object.");
+                            $"panel {i} nests its spec under 'panel' — {ComposeSpec.RunSpecNestingHint}");
                     }
 
                     foreach (var property in panel)
