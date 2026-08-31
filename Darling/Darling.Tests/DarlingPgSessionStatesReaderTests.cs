@@ -34,6 +34,59 @@ public class DarlingPgSessionStatesReaderTests
 
     private static string CountsSql => DarlingPgSessionStatesReader.PgSessionStatesCaptureCountsSql;
 
+    private static string LongRunningSql => DarlingPgSessionStatesReader.CurrentLongRunningSessionsSql;
+
+    // ── #2711 Long-Running Query — the live-state read ──────────────────────────────────────────────
+
+    [Fact]
+    public void LongRunningSql_ScopesToOneServerOneThresholdAndOneRecencyFloor()
+    {
+        Assert.Contains("server_id = $1", LongRunningSql, StringComparison.Ordinal);
+        Assert.Contains("query_duration_ms >= $2", LongRunningSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $3", LongRunningSql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $4", LongRunningSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The mechanism this whole read exists for: "most recent" is computed via <c>max(collection_time)</c>
+    /// over the recency-bounded set and then JOINED back, rather than just filtering rows to
+    /// <c>collection_time >= $3</c> directly. Without the join, a session whose peak crossed the threshold in
+    /// an OLDER capture inside the recency window — but has since finished, so it is absent from the truly
+    /// latest capture — would still be reported as currently running. Verified against a real local
+    /// PostgreSQL 17 with exactly this shape (a superseded older-but-in-window row correctly excluded, a
+    /// short same-cycle row correctly excluded, only the genuinely-latest over-threshold row returned) before
+    /// this test was written; this pins the SQL shape that made that hold.
+    /// </summary>
+    [Fact]
+    public void LongRunningSql_FiltersToTheSingleLatestCapture_ViaMaxJoin_NotAWindowFilterAlone()
+    {
+        Assert.Contains("max(collection_time)", LongRunningSql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("s.collection_time = r.latest_capture", LongRunningSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LongRunningSql_TheRowLimitIsParameterisedRatherThanBakedIn()
+    {
+        Assert.DoesNotMatch(new Regex(@"LIMIT\s+\d+"), LongRunningSql);
+    }
+
+    [Fact]
+    public void LongRunningSql_ReadsOnlyItsOwnTable()
+    {
+        Assert.Contains("FROM pg_session_states", LongRunningSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_blocking_edges", LongRunningSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_deadlocks", LongRunningSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>No query text projected — the collector deliberately stores none (see its class remarks), so
+    /// a read that tried to select one would be selecting a column that does not exist.</summary>
+    [Fact]
+    public void LongRunningSql_ProjectsNoQueryText()
+    {
+        Assert.DoesNotContain("query_text", LongRunningSql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(" s.query", LongRunningSql, StringComparison.OrdinalIgnoreCase);
+    }
+
     // ── Scoping and parameterisation ─────────────────────────────────────────────────────────────
 
     [Fact]

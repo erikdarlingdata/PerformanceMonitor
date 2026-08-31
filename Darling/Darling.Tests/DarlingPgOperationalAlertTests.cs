@@ -262,4 +262,48 @@ public sealed class DarlingPgOperationalAlertTests
         Assert.Equal("root pid 42 blocking 2 session(s)", incident.InvolvedObjects[0]);
         Assert.Null(incident.Database);
     }
+
+    // ── Long-Running Query (#2711) ───────────────────────────────────────────────────────────────
+
+    private static DarlingPgSessionStatesReader.LongRunningSessionRow LongRunningRow(
+        long backendId = 1001, int pid = 100, string? databaseName = "eden", string? commandTag = "SELECT",
+        long queryDurationMs = 2_100_000) =>
+        new(backendId, pid, databaseName, "appuser", "myapp", commandTag, queryDurationMs);
+
+    [Fact]
+    public void BuildPgLongRunningQueryIncident_DedupKeyIsBackendId_NotPid()
+    {
+        /* Same reasoning as BuildPgBlockingIncident's dedup key: pids are reused, the synthetic backend id
+           is stable for the life of a backend. */
+        var incident = DarlingWorker.BuildPgLongRunningQueryIncident(LongRunningRow(backendId: 424242, pid: 99));
+
+        Assert.Equal("424242", incident.DedupKey);
+    }
+
+    [Fact]
+    public void BuildPgLongRunningQueryIncident_IncludesPidDurationAndCommandTag()
+    {
+        var incident = DarlingWorker.BuildPgLongRunningQueryIncident(
+            LongRunningRow(pid: 55, commandTag: "UPDATE", queryDurationMs: 42 * 60_000L));
+
+        Assert.Equal("pid 55 running 42m (UPDATE)", incident.InvolvedObjects[0]);
+    }
+
+    [Fact]
+    public void BuildPgLongRunningQueryIncident_FallsBackToUnknown_WhenCommandTagIsMissing()
+    {
+        /* pg_session_states substitutes NULL for command_tag under redaction (no pg_monitor grant) — the
+           incident text must not go blank or throw in that case. */
+        var incident = DarlingWorker.BuildPgLongRunningQueryIncident(LongRunningRow(commandTag: null));
+
+        Assert.Contains("(unknown)", incident.InvolvedObjects[0]);
+    }
+
+    [Fact]
+    public void BuildPgLongRunningQueryIncident_CarriesTheDatabaseName()
+    {
+        var incident = DarlingWorker.BuildPgLongRunningQueryIncident(LongRunningRow(databaseName: "sky"));
+
+        Assert.Equal("sky", incident.Database);
+    }
 }

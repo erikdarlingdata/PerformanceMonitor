@@ -330,6 +330,102 @@ public static class DarlingPgSessionStatesReader
         DateTime? FirstCaptureAt,
         DateTime? LastCaptureAt);
 
+    public sealed record LongRunningSessionRow(
+        long BackendId,
+        int Pid,
+        string? DatabaseName,
+        string? Username,
+        string? ApplicationName,
+        string? CommandTag,
+        long QueryDurationMs);
+
+    /// <summary>
+    /// The single most recent <c>pg_session_states</c> capture for this server, filtered to sessions whose
+    /// CURRENT query has been running at least <paramref name="thresholdMs"/> — the Postgres read behind the
+    /// #2711 Long-Running Query alert.
+    ///
+    /// <para><b>Why the single latest capture, not a window rollup.</b> <see cref="GetPgSessionStatesAsync"/>
+    /// above answers "what happened in this window" with peaks-per-backend, which is right for the Viewer's
+    /// own display but wrong for "is a long-running query happening RIGHT NOW": a session whose peak
+    /// <c>query_duration_ms</c> crossed the threshold ten minutes ago and has since finished must not still
+    /// read as active. Restricting to rows sharing the single most recent <c>collection_time</c> is what makes
+    /// this a live-state check rather than a history search — a still-running session reappears in EVERY
+    /// cycle with a monotonically growing duration, so it is present in that latest capture by construction;
+    /// a finished one is not.</para>
+    ///
+    /// <para><b><paramref name="recencyMinutes"/> exists because this table is an EXCEPTION table</b> (see the
+    /// collector's own doc comment) — a healthy instance with nothing over the collector's own 30s/10s floors
+    /// produces ZERO rows for a cycle, which is correct and must not be confused with "the collector stopped
+    /// running". Bounding "most recent" to a real window (rather than an unqualified <c>MAX(collection_time)</c>
+    /// that could resolve to a capture from hours ago) is what keeps an honest empty from silently going stale.
+    /// 15 minutes, matching the fleet's own <c>OfflineThreshold</c> staleness convention
+    /// (<see cref="PerformanceMonitor.Common.ServerHealthBands"/>) rather than a tight multiple of the
+    /// collector's 1-minute configured cadence — this fleet's delivered sweep cadence has been measured
+    /// running well behind its configured interval under load, and a recency bound tighter than the fleet's
+    /// own staleness definition would make the alert silently never fire on exactly the servers busy enough to
+    /// need it.</para>
+    ///
+    /// <para>No query text: this collector deliberately stores none (see its class remarks) to avoid
+    /// accumulating literal parameter values for a condition an ordinary application can cross, so the alert
+    /// this backs identifies a session by pid/database/command tag rather than a statement preview.</para>
+    ///
+    /// <para>$1 server_id, $2 threshold (ms), $3 recency floor (naive UTC), $4 row limit.</para>
+    /// </summary>
+    public const string CurrentLongRunningSessionsSql = """
+        WITH recent AS (
+            SELECT max(collection_time) AS latest_capture
+            FROM pg_session_states
+            WHERE server_id = $1
+            AND   collection_time >= $3
+        )
+        SELECT
+            s.backend_id,
+            s.pid,
+            s.database_name,
+            s.username,
+            s.application_name,
+            s.command_tag,
+            s.query_duration_ms
+        FROM pg_session_states AS s
+        JOIN recent AS r
+          ON  s.collection_time = r.latest_capture
+        WHERE s.server_id = $1
+        AND   s.query_duration_ms >= $2
+        ORDER BY s.query_duration_ms DESC, s.pid
+        LIMIT $4
+        """;
+
+    public static async Task<List<LongRunningSessionRow>> GetCurrentLongRunningSessionsAsync(
+        NpgsqlDataSource postgres, int serverId, long thresholdMs, DateTime nowUtc, int recencyMinutes, int limit,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var rows = new List<LongRunningSessionRow>();
+        await using var command = postgres.CreateCommand(CurrentLongRunningSessionsSql);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(thresholdMs);
+        /* SpecifyKind(Unspecified) at the BIND — see GetPgSessionStatesAsync's identical comment for why
+           Kind=Utc would silently shift this comparison against the naive columns it is measured against. */
+        command.Parameters.AddWithValue(
+            DateTime.SpecifyKind(nowUtc.AddMinutes(-recencyMinutes), DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(limit);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new LongRunningSessionRow(
+                reader.IsDBNull(0) ? 0 : reader.GetInt64(0),
+                reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? -1 : reader.GetInt64(6)));
+        }
+
+        return rows;
+    }
+
     public static async Task<PgSessionStatesCaptureCounts> GetPgSessionStatesCaptureCountsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
         CancellationToken cancellationToken = default)
