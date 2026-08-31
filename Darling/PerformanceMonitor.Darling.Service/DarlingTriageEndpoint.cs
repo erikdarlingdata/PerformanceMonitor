@@ -113,9 +113,13 @@ internal static class DarlingTriageEndpoint
     {
         var map = new Dictionary<string, IReadOnlyList<TriageSection>>(StringComparer.OrdinalIgnoreCase)
         {
+            /* "High CPU" fires for BOTH engines since #2719 (the PG alert reuses the same metric name and
+               threshold), so the section list carries both engines' CPU reads: the wrong-engine one answers
+               with its own not-collected envelope, which the page renders as an honest empty. */
             ["High CPU"] = new[]
             {
                 S("CPU utilization", "get_cpu_utilization", ("hours", "4")),
+                S("Instance CPU (Performance Insights)", "get_pg_cpu_utilization", ("hours", "4")),
                 S("Top queries by CPU", "get_top_queries_by_cpu", ("hours", "2"), ("top", "10")),
                 S("Scheduler pressure", "get_cpu_scheduler_pressure"),
             },
