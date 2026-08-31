@@ -26,6 +26,12 @@ internal enum DarlingRefusalGate
 
     /// <summary>The in-app source-address allowlist built from <c>network.allowFrom</c>. 403.</summary>
     SourceCidr,
+
+    /// <summary>The read-only seat's write gate (#2550): an authenticated OIDC viewer sent a mutating
+    /// request. 403. Its own gate (not <see cref="Token"/>) because the fix is a ROLE change at the IdP /
+    /// role mapping, not a credential — and the (gate, source) fold key should not let a viewer's blocked
+    /// writes hide a genuine token refusal from the same address.</summary>
+    ReadOnlySeat,
 }
 
 /// <summary>

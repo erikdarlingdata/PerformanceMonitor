@@ -19,6 +19,7 @@ using Microsoft.AspNetCore.Http;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -153,8 +154,10 @@ public static class DarlingWebEndpoints
 
     /// <summary>
     /// Maps the custom-views surface: the session capability probe, the read catalog the composer builds its
-    /// picker from, and the CRUD routes. Editing is available to any AUTHENTICATED seat — the same reach as the
-    /// rest of the web surface: over the network a caller has already passed the token→cookie + CIDR gate (the
+    /// picker from, and the CRUD routes. Editing is available to any authenticated seat that CAN edit — the
+    /// shared token and an OIDC admin; an OIDC viewer (#2550) is refused every mutation by the auth
+    /// middleware's group-level write gate BEFORE these routes run, which is why no handler here re-checks the
+    /// role: over the network a caller has already passed the token→cookie + CIDR gate AND the seat gate (the
     /// auth middleware runs before these routes), and on loopback the operator is on the host. The mutations are
     /// NOT restricted to loopback (network operation is the normal mode). Cross-site forgery is blocked by the
     /// always-on Host-header allowlist (anti-rebind), the SameSite=Strict session cookie, and the
@@ -167,10 +170,16 @@ public static class DarlingWebEndpoints
         var store = new CustomViewStore(postgres);
 
         /* A request that reaches this endpoint has already cleared the host's auth gate (network: token→cookie +
-           CIDR; loopback: on the host), so it is a trusted operator that may edit. The frontend reads this to
-           show/hide affordances; a failed probe fails closed to read-only in the UI. */
-        app.MapGet("/api/session", () =>
-            JsonNodeResult(new JsonObject { ["can_edit"] = true }));
+           CIDR; loopback: on the host). WHAT the seat may do now depends on WHO holds it (#2550): the shared
+           token and an OIDC admin may edit; an OIDC viewer is read-only, and the auth middleware refuses their
+           writes server-side regardless of what this probe told the UI. The frontend reads this to show/hide
+           affordances; a failed probe fails closed to read-only in the UI. `subject` is null for the shared
+           token (which genuinely has no identity), the signed-in principal otherwise. */
+        app.MapGet("/api/session", (HttpContext context) =>
+        {
+            var seat = DarlingWebSeat.FromContext(context);
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["subject"] = seat.Subject });
+        });
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
         app.MapGet("/api/catalog", () => JsonNodeResult(BuildCatalogNode()));
@@ -215,7 +224,8 @@ public static class DarlingWebEndpoints
             try
             {
                 var result = await store.CreateAsync(
-                    request.Name, request.Description, request.DefinitionJson, WebEditorPrincipal, context.RequestAborted);
+                    request.Name, request.Description, request.DefinitionJson,
+                    DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
                 return result switch
                 {
                     CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
@@ -260,7 +270,8 @@ public static class DarlingWebEndpoints
             try
             {
                 var result = await store.UpdateAsync(
-                    id, request.Name, request.Description, request.DefinitionJson, expectedVersion, WebEditorPrincipal, context.RequestAborted);
+                    id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
+                    DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
                 return result switch
                 {
                     CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
@@ -631,8 +642,10 @@ public static class DarlingWebEndpoints
         _ => JsonValue.Create(value.ToString()),
     };
 
-    /// <summary>The <c>updated_by</c> stamp for a web edit. The web surface has no per-user identity, so a
-    /// constant is honest — it marks the row as web-authored.</summary>
+    /// <summary>The <c>updated_by</c> stamp for a web edit by the SHARED-TOKEN seat, which genuinely has no
+    /// per-user identity — the constant marks the row as web-authored. Since #2550 an OIDC sign-in carries a
+    /// real subject, and <see cref="DarlingWebSeat.EditorPrincipal"/> stamps THAT instead; this constant is
+    /// the fallback it degrades to, never the only answer.</summary>
     internal const string WebEditorPrincipal = "web";
 
     /// <summary>The <c>updated_by</c> stamp for a custom view created/updated over MCP (the
