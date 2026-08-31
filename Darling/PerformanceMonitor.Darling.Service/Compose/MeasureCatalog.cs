@@ -146,11 +146,19 @@ public sealed record ComposeUnitFamily(string Name, IReadOnlyList<ComposeUnit> U
 /// <summary>
 /// One dimension a source can be filtered or grouped by. <see cref="Column"/> is the physical column
 /// (usually == <see cref="Name"/>); <see cref="Likeable"/> gates the <c>LIKE</c> operator;
-/// <see cref="ViaModuleJoin"/> marks the query_stats <c>object_name</c>, which is not a query_stats
-/// column at all but is stitched read-time from <c>procedure_stats</c> via the #1568 sql_handle join
-/// (window-bounded by the compiler).
+/// <see cref="ViaModuleJoin"/> marks the query_stats dimensions stitched read-time from
+/// <c>procedure_stats</c> via the #1568 sql_handle join (window-bounded by the compiler).
+///
+/// <para>A module-join dimension's misses are NULL (every ad-hoc statement), so the compiler never emits
+/// the bare joined column (#2737): it folds NULL into <see cref="FallbackColumn"/> when one is declared
+/// (<c>COALESCE(m.col, f.fallback)</c> — the <c>statement</c> dimension, which keeps ad-hoc statements
+/// distinct by query_hash), else into the <see cref="MeasureCatalog.AdHocLabel"/> sentinel — so the
+/// dimension's VALUE is never NULL, groups are always labeled, and every filter operator (eq/neq/like/…)
+/// acts on that value with ordinary text semantics. <see cref="FallbackColumn"/> must be a real payload
+/// column of <see cref="SourceTable"/> (pinned by test); it is only meaningful with
+/// <see cref="ViaModuleJoin"/>.</para>
 /// </summary>
-public sealed record ComposeDimension(string SourceTable, string Name, string Column, bool Likeable, bool ViaModuleJoin = false);
+public sealed record ComposeDimension(string SourceTable, string Name, string Column, bool Likeable, bool ViaModuleJoin = false, string? FallbackColumn = null);
 
 /// <summary>
 /// One event-annotation SOURCE (design D5): a collector event table whose rows can be overlaid as point
@@ -296,9 +304,22 @@ public static class MeasureCatalog
 
     /* ─────────────────────────── dimensions ─────────────────────────── */
 
+    /// <summary>The label the compiler folds a module-join NULL into (#2737): the value of
+    /// <c>object_name</c> for every ad-hoc statement, so the group is visibly "(ad hoc)" instead of a
+    /// null-named row, and <c>eq</c>/<c>neq</c> on this literal filter to/away-from the ad-hoc population.
+    /// Parenthesized so it cannot be an UNQUOTED identifier (a bracketed <c>[(ad hoc)]</c> module is
+    /// technically creatable and would merge with the bucket — accepted as vanishingly unlikely). It is
+    /// deliberately NOT the viewer's display literal (<c>ad hoc</c>) or query_store_stats' stored
+    /// <c>Adhoc</c>: those are a computed grid column and a collected value; this one is a filterable
+    /// sentinel where non-collision matters most. A compile-time constant emitted as a SQL literal —
+    /// never a caller string.</summary>
+    public const string AdHocLabel = "(ad hoc)";
+
     /// <summary>Every dimension a slice source can be filtered / grouped by. Keyed by (source, name).
-    /// <c>object_name</c> on query_stats is the ONLY <see cref="ComposeDimension.ViaModuleJoin"/> entry —
-    /// it is not a query_stats column; the compiler stitches it from procedure_stats (#1568).</summary>
+    /// <c>object_name</c> and <c>statement</c> on query_stats are the only
+    /// <see cref="ComposeDimension.ViaModuleJoin"/> entries — neither is a query_stats column; the
+    /// compiler stitches them from procedure_stats (#1568) and folds the join's NULL misses per the
+    /// <see cref="ComposeDimension"/> doc (#2737).</summary>
     public static readonly IReadOnlyList<ComposeDimension> Dimensions = new[]
     {
         new ComposeDimension("wait_stats", "wait_type", "wait_type", Likeable: true),
@@ -309,8 +330,15 @@ public static class MeasureCatalog
 
         new ComposeDimension("query_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("query_stats", "query_hash", "query_hash", Likeable: false),
-        /* #1568: not a query_stats column — stitched from procedure_stats.object_name via sql_handle. */
+        /* #1568: not a query_stats column — stitched from procedure_stats.object_name via sql_handle.
+           NULL misses (ad-hoc statements) fold into ONE AdHocLabel group per (database, bucket) — honest
+           and filterable, but still a blob; 'statement' below is the per-statement identity. */
         new ComposeDimension("query_stats", "object_name", "object_name", Likeable: true, ViaModuleJoin: true),
+        /* #2737: the fallback-identity twin of object_name — procedures keep their module name, ad-hoc
+           statements stay DISTINCT by query_hash instead of collapsing into the AdHocLabel bucket. This is
+           the "top statements" grouping; hash labels are ugly but resolvable (query_hash is itself a
+           dimension, and the stored query text keys on it). */
+        new ComposeDimension("query_stats", "statement", "object_name", Likeable: true, ViaModuleJoin: true, FallbackColumn: "query_hash"),
 
         new ComposeDimension("file_io_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("file_io_stats", "file_name", "file_name", Likeable: true),
@@ -466,7 +494,7 @@ public static class MeasureCatalog
 
     private static readonly string[] WaitDims = { "wait_type" };
     private static readonly string[] ProcDims = { "database_name", "schema_name", "object_name" };
-    private static readonly string[] QueryDims = { "database_name", "query_hash", "object_name" };
+    private static readonly string[] QueryDims = { "database_name", "query_hash", "object_name", "statement" };
     private static readonly string[] FileIoDims = { "database_name", "file_name" };
     private static readonly string[] LqcDims = { "database_name", "object_name", "result" };
     private static readonly string[] NoDims = Array.Empty<string>();

@@ -64,7 +64,9 @@ public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> 
 /// MIN/MAX on the gauge/per-event column; <c>percentile_cont</c> only on per-event); a ratio is
 /// <c>SUM(a)::float / NULLIF(SUM(b), 0)</c>.</item>
 /// <item>The #1568 <c>object_name</c> module join is bounded by the same window (the DoS fix over the
-/// viewer's currently-unbounded stitch).</item>
+/// viewer's currently-unbounded stitch), and its NULL misses are folded at <see cref="ColumnRef"/>
+/// (#2737) so ad-hoc rows are labeled and filterable rather than a null-named blob that
+/// <c>&lt;&gt; ALL</c> silently drops.</item>
 /// </list>
 /// The compiler assumes its input is a <see cref="PanelPlan"/> that <see cref="ComposeSpec.TryParsePanel"/>
 /// already validated; the only failure it can still surface is the window×resolution ceiling (which needs
@@ -433,10 +435,33 @@ public static class ComposeCompiler
         return new ComposeCompiled(sql.ToString(), p.Parameters, ComposeRoute.Raw);
     }
 
-    /// <summary>The qualified reference for a dimension column: <c>m.</c> for a module-join dimension,
-    /// <c>f.</c> for a fact column.</summary>
-    private static string ColumnRef(ComposeDimension dimension) =>
-        (dimension.ViaModuleJoin ? ModuleAlias : FactAlias) + "." + dimension.Column;
+    /// <summary>The qualified reference for a dimension column: <c>f.</c> for a fact column; for a
+    /// module-join dimension, the <c>m.</c> column with its NULL misses FOLDED (#2737) — never the bare
+    /// joined column.
+    ///
+    /// <para>The module LEFT JOIN misses every ad-hoc statement, and a bare <c>m.object_name</c> made
+    /// those NULLs the dimension's value: <c>GROUP BY</c> collapsed all ad-hoc SQL into one null-named
+    /// row, <c>neq</c> (<c>&lt;&gt; ALL</c>) silently excluded the whole ad-hoc population, and nothing
+    /// could filter TO it. Folding here — the ONE place both the grouped expression and every filter
+    /// compile through — gives the dimension a never-NULL value with ordinary text semantics for every
+    /// operator: <c>neq 'X'</c> now INCLUDES ad-hoc rows ("everything except X" means the rest of the
+    /// workload, not "every other procedure"), <c>eq/neq AdHocLabel</c> select/exclude the bucket
+    /// explicitly, and LIKE patterns match the label like any other value. The fallback is the
+    /// dimension's own <c>FallbackColumn</c> when declared (<c>statement</c> → per-hash identity), else
+    /// the AdHocLabel sentinel — a compile-time catalog constant emitted as a literal, never a caller
+    /// string.</para></summary>
+    private static string ColumnRef(ComposeDimension dimension)
+    {
+        if (!dimension.ViaModuleJoin)
+        {
+            return FactAlias + "." + dimension.Column;
+        }
+
+        var fallback = dimension.FallbackColumn is not null
+            ? FactAlias + "." + dimension.FallbackColumn
+            : "'" + MeasureCatalog.AdHocLabel + "'";
+        return $"COALESCE({ModuleAlias}.{dimension.Column}, {fallback})";
+    }
 
     /// <summary>The coarser of two buckets (None &lt; Minute &lt; Hour &lt; Day) — clamps a display grain up to a
     /// CAGG tier's own grain, since a rollup can never be rendered finer than it was materialized.</summary>
