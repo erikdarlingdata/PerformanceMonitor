@@ -906,6 +906,19 @@ public sealed class WebConfig
     public int Port { get; set; } = 5153;
 
     /// <summary>
+    /// The externally reachable base URL of this dashboard (#2710) — e.g. <c>http://10.0.0.5:5153</c> — used
+    /// only to build the triage-page link alert webhooks carry (<c>TriageLink.Build</c>). Empty (the default)
+    /// means alerts carry no link. It is configuration rather than derived from <see cref="Network"/>'s bind
+    /// address, because what the service binds is not necessarily what recipients can reach (a proxy, a DNS
+    /// name, TLS on a different host name). Deliberately FILE-authoritative like the rest of this block —
+    /// deployment plumbing, not an alert-tuning knob — so a store config reload (which overwrites only
+    /// <see cref="Enabled"/>/<see cref="Port"/> here) never resets it. An invalid value (not absolute
+    /// http/https) is treated as unset by the link builder rather than shipping a dead href.
+    /// </summary>
+    [JsonPropertyName("publicBaseUrl")]
+    public string PublicBaseUrl { get; set; } = "";
+
+    /// <summary>
     /// Opt-in network exposure for the web dashboard (darling-network-endpoints). Omit for the secure
     /// default = loopback-only HTTP. Managed-mode only; ignored in BYO with a caller warning. Any missing
     /// precondition (token / valid allowFrom / managed) keeps the dashboard loopback-only + LogCritical —
