@@ -76,6 +76,8 @@ public sealed class DarlingTriageEndpointTests
     {
         Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(AlertEngine.BlockingWatermarkMetric));
         Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(AlertEngine.DeadlockWatermarkMetric));
+        /* #2711: the PG evaluator fires the SAME "Poison Wait" name, exported as its own constant. */
+        Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(PostgresAlertEvaluator.PoisonWaitMetric));
     }
 
     [Fact]

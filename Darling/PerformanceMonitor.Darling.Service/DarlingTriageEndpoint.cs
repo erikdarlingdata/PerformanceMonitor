@@ -141,9 +141,12 @@ internal static class DarlingTriageEndpoint
                 S("Deadlock detail", "get_deadlock_detail", ("hours", "4"), ("limit", "3")),
                 S("Deadlock trend", "get_deadlock_trend", ("hours", "24")),
             },
+            /* "Poison Wait" fires for BOTH engines since #2711 (PostgresAlertEvaluator.PoisonWaitMetric reuses
+               the name and thresholds), so this carries both engines' wait reads - the #2719 High CPU shape. */
             ["Poison Wait"] = new[]
             {
                 S("Top waits", "get_wait_stats", ("hours", "4"), ("limit", "20")),
+                S("PostgreSQL waits", "get_pg_wait_stats", ("hours", "4"), ("limit", "20")),
                 S("Waiting tasks", "get_waiting_tasks", ("hours", "1"), ("limit", "25")),
             },
             ["Long-Running Query"] = new[]
