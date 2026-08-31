@@ -441,6 +441,32 @@ public sealed class DarlingWorker : BackgroundService
 
     private readonly ConcurrentDictionary<string, DateTime> _lastPostgresAlert = new(StringComparer.Ordinal);
 
+    /* #2711: Postgres Deadlocks/Blocking, mirroring AlertEngine's own field shape for the SQL Server
+       versions of these two alerts (RollingCountAlertGate + a watermark + an active flag + a
+       last-fired stamp) rather than the simpler single-timestamp cooldown the three Tier 0 predictors
+       above use. Deadlocks and blocking are ROLLING-WINDOW COUNTS (the same event can sit in the
+       window for the whole hour it takes to age out), which is exactly the shape #1091 fixed for SQL
+       Server: a plain "still above threshold" check re-fires the SAME already-reported event every
+       cooldown. RollingCountAlertGate is the shared, engine-agnostic fix for that, already proven and
+       already living in PerformanceMonitor.Alerting - reusing it here is what keeps this immune to the
+       #2704/#2708 class of bug (a cooldown timer with no memory of which data point it last fired on)
+       from day one, instead of needing its own follow-up fix later. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastPgDeadlockAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _activePgDeadlockAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _lastAlertedPgDeadlockCount = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastPgBlockingAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _activePgBlockingAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _lastAlertedPgBlockingCount = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Held for the same reason <see cref="_alertDeliverer"/> is: the Postgres Deadlocks/Blocking alerts
+    /// (#2711) need to write a resolution history row on the active→inactive transition, exactly like
+    /// <see cref="BuildAlertEngine"/>'s <c>resolutionCallback</c> does for the SQL Server families - a
+    /// resolution has no send channel (<see cref="AlertResolution"/>'s own doc comment), so it goes
+    /// straight to history rather than through <see cref="_alertDeliverer"/>.
+    /// </summary>
+    private PgAlertHistoryStore? _historyStore;
+
     private int _alertCooldownMinutes = 15;
 
     /* #1560: the live MCP enable/port seam — published to the MCP host's supervisor at startup and on
@@ -1172,6 +1198,11 @@ public sealed class DarlingWorker : BackgroundService
            lands in the same history and obeys the same mute rules as an engine-emitted one — the point
            of reusing it rather than building a second delivery path. */
         _alertDeliverer = deliverer;
+        /* #2711: the Postgres Deadlocks/Blocking resolution path writes history directly (see
+           _historyStore's doc comment) - same instance the engine's own resolutionCallback closure
+           over historyStore uses, so a restart-time history read sees both engines' rows regardless of
+           which wrote them. */
+        _historyStore = historyStore;
         /* Same instance the engine binds, so a mute-rule reload mutes the PostgreSQL predictors on the next
            sweep exactly as it mutes every SQL Server family. */
         _isAlertMuted = muteRuleService.IsAlertMuted;
@@ -2855,7 +2886,284 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogError("[{Server}] PostgreSQL alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
         }
+
+        /* #2711: Deadlocks and Blocking, each independently failure-isolated (own try/catch inside),
+           so a broken read on one never costs the three predictors above or the other of this pair —
+           the same isolation AlertEngine gives its own CheckDeadlocksAsync/CheckBlockingAsync. */
+        await EvaluatePgDeadlocksAsync(runtime, snapshot, cancellationToken);
+        await EvaluatePgBlockingAsync(runtime, snapshot, cancellationToken);
     }
+
+    /// <summary>
+    /// The rolling-1-hour-window Postgres Deadlocks alert (#2711), reusing <see cref="RollingCountAlertGate"/>
+    /// (shared with SQL Server's AlertEngine — see the field doc comment on <see cref="_lastPgDeadlockAlert"/>)
+    /// so a deadlock already reported cannot re-fire merely because it is still inside the window, and a new
+    /// one arriving mid-cooldown is not lost.
+    /// <para>Metric names are the EXACT SQL Server strings ("Deadlocks Detected"/"Deadlocks Cleared") rather
+    /// than Postgres-prefixed ones — deliberately, for parity: a mute rule, a history filter, or a dashboard
+    /// built against "Deadlocks Detected" should not have to know or care which engine a server runs, and
+    /// server_id never collides across engines so there is no ambiguity in doing so.</para>
+    /// </summary>
+    private async Task EvaluatePgDeadlocksAsync(
+        ServerRuntime runtime, AlertServerSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        if (_postgres is null || _alertDeliverer is null)
+        {
+            return;
+        }
+
+        const string metricName = "Deadlocks Detected";
+        var key = snapshot.ServerKey;
+
+        try
+        {
+            var now = DateTime.UtcNow;
+            var windowStart = now.AddHours(-AlertEngine.RollingCountWindowHours);
+
+            /* Already deduplicated by deadlock_hash (GROUP BY in DarlingPgDeadlockReader's own SQL) and
+               windowed on occurred_at, not collection_time — see that reader's doc comment for why
+               collection_time would put a report in the wrong window and move it every cycle. */
+            var rows = await DarlingPgDeadlockReader.GetDeadlocksAsync(
+                _postgres, runtime.ServerId, windowStart, now, limit: 50, cancellationToken);
+            var count = rows.Count;
+
+            var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
+            var watermark = _lastAlertedPgDeadlockCount.TryGetValue(key, out var wm) ? wm : 0;
+            var cooldownElapsed = !_lastPgDeadlockAlert.TryGetValue(key, out var last) || now - last >= cooldown;
+
+            var decision = RollingCountAlertGate.Evaluate(
+                count, PgDeadlockCountThreshold, watermark, cooldownElapsed, suppressed: false);
+            _lastAlertedPgDeadlockCount[key] = decision.Watermark;
+
+            var wasActive = _activePgDeadlockAlert.TryGetValue(key, out var activeBefore) && activeBefore;
+            _activePgDeadlockAlert[key] = decision.Active;
+
+            if (decision.Fire)
+            {
+                _lastPgDeadlockAlert[key] = now;
+
+                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                {
+                    ServerName = snapshot.ServerName,
+                    MetricName = metricName,
+                }) ?? false;
+
+                await _alertDeliverer.DeliverAsync(
+                    new AlertOutcome(
+                        key,
+                        snapshot.ServerName,
+                        metricName,
+                        count.ToString(CultureInfo.InvariantCulture),
+                        PgDeadlockCountThreshold.ToString(CultureInfo.InvariantCulture),
+                        Context: new AlertContext
+                        {
+                            Incidents = rows.Select(BuildPgDeadlockIncident).ToList(),
+                        },
+                        DetailText: null,
+                        NumericCurrentValue: count,
+                        NumericThresholdValue: PgDeadlockCountThreshold,
+                        Muted: muted,
+                        Severity: null,
+                        ShortMessage: $"{count} deadlock(s) in the last hour"),
+                    cancellationToken);
+            }
+            else if (!decision.Active && wasActive)
+            {
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Deadlocks Cleared",
+                    $"{snapshot.ServerName}: No deadlocks in the last hour");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("[{Server}] PostgreSQL deadlock alert evaluation failed: {Message}",
+                runtime.Config.DisplayName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The rolling-1-hour-window Postgres Blocking alert (#2711). Counts DISTINCT root blockers, not raw
+    /// chain rows — <see cref="DarlingPgBlockingReader.GetPgBlockingChainsAsync"/> returns one row per
+    /// (capture, root), so a single persistent blocker sampled every cycle for an hour would otherwise
+    /// inflate the count far past what an operator would call "how many blocking situations". Same
+    /// <see cref="RollingCountAlertGate"/> reuse and parity-named metrics as
+    /// <see cref="EvaluatePgDeadlocksAsync"/> — see its doc comment for why.
+    /// </summary>
+    private async Task EvaluatePgBlockingAsync(
+        ServerRuntime runtime, AlertServerSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        if (_postgres is null || _alertDeliverer is null)
+        {
+            return;
+        }
+
+        const string metricName = "Blocking Detected";
+        var key = snapshot.ServerKey;
+
+        try
+        {
+            var now = DateTime.UtcNow;
+            var windowStart = now.AddHours(-AlertEngine.RollingCountWindowHours);
+
+            var rows = await DarlingPgBlockingReader.GetPgBlockingChainsAsync(
+                _postgres, runtime.ServerId, windowStart, now, limit: 100, cancellationToken);
+
+            var worstPerRoot = WorstPgBlockingChainPerRoot(rows);
+            var count = worstPerRoot.Count;
+
+            var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
+            var watermark = _lastAlertedPgBlockingCount.TryGetValue(key, out var wm) ? wm : 0;
+            var cooldownElapsed = !_lastPgBlockingAlert.TryGetValue(key, out var last) || now - last >= cooldown;
+
+            var decision = RollingCountAlertGate.Evaluate(
+                count, PgBlockingCountThreshold, watermark, cooldownElapsed, suppressed: false);
+            _lastAlertedPgBlockingCount[key] = decision.Watermark;
+
+            var wasActive = _activePgBlockingAlert.TryGetValue(key, out var activeBefore) && activeBefore;
+            _activePgBlockingAlert[key] = decision.Active;
+
+            if (decision.Fire)
+            {
+                _lastPgBlockingAlert[key] = now;
+
+                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                {
+                    ServerName = snapshot.ServerName,
+                    MetricName = metricName,
+                }) ?? false;
+
+                await _alertDeliverer.DeliverAsync(
+                    new AlertOutcome(
+                        key,
+                        snapshot.ServerName,
+                        metricName,
+                        count.ToString(CultureInfo.InvariantCulture),
+                        PgBlockingCountThreshold.ToString(CultureInfo.InvariantCulture),
+                        Context: new AlertContext
+                        {
+                            Incidents = worstPerRoot.Select(BuildPgBlockingIncident).ToList(),
+                        },
+                        DetailText: null,
+                        NumericCurrentValue: count,
+                        NumericThresholdValue: PgBlockingCountThreshold,
+                        Muted: muted,
+                        Severity: null,
+                        ShortMessage: $"{count} blocking session(s)"),
+                    cancellationToken);
+            }
+            else if (!decision.Active && wasActive)
+            {
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Blocking Cleared",
+                    $"{snapshot.ServerName}: No active blocking");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("[{Server}] PostgreSQL blocking alert evaluation failed: {Message}",
+                runtime.Config.DisplayName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Writes a Postgres Deadlocks/Blocking resolution the same way <see cref="BuildAlertEngine"/>'s
+    /// <c>resolutionCallback</c> does for the SQL Server families: a log line via
+    /// <see cref="AlertFiringLog.Resolved"/> and a history row via
+    /// <see cref="DarlingSelfAlertEvaluator.BuildResolutionRecord"/> — never through
+    /// <see cref="_alertDeliverer"/>, because a resolution has no send channel
+    /// (<see cref="AlertResolution"/>'s own doc comment). Best-effort: a history-write failure here must
+    /// not be allowed to look like the alert itself failed, since the condition genuinely did clear.
+    /// </summary>
+    private async Task NotifyPgResolutionAsync(
+        string serverKey, string serverName, string metricName, string title, string message)
+    {
+        _logger.LogInformation("{Line}", AlertFiringLog.Resolved(serverName, metricName, message));
+
+        if (_historyStore is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(
+                new AlertResolution(serverKey, serverName, metricName, title, message)));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not record Postgres alert resolution for {Server}/{Metric}: {Message}",
+                serverName, metricName, ex.Message);
+        }
+    }
+
+    /// <summary>Rolling-window count threshold for the Postgres Deadlocks alert (#2711) — 1, matching SQL
+    /// Server's own observed default via <see cref="IAlertEngineSettings.DeadlockCountThreshold"/>. A
+    /// constant rather than a setting for this first cut, the same reasoning
+    /// <see cref="PostgresAlertEvaluator"/>'s own doc comment gives for its three thresholds: add
+    /// configuration when someone actually wants a different number, not speculatively.</summary>
+    private const int PgDeadlockCountThreshold = 1;
+
+    /// <summary>Rolling-window count threshold for the Postgres Blocking alert (#2711) — same reasoning
+    /// as <see cref="PgDeadlockCountThreshold"/>.</summary>
+    private const int PgBlockingCountThreshold = 1;
+
+    /// <summary>
+    /// Pure mapping, pulled out of <see cref="EvaluatePgDeadlocksAsync"/> so it is testable without a
+    /// Postgres connection or an <see cref="IAlertDeliverer"/> fake — the same "pure, testable seam"
+    /// reasoning <see cref="CadencePhaseOffset"/> already gets in this file. One <see cref="AlertIncident"/>
+    /// per distinct deadlock (rows arrive pre-deduplicated by <c>deadlock_hash</c>, see
+    /// <see cref="DarlingPgDeadlockReader.GetDeadlocksAsync"/>'s own doc comment), falling back to pid +
+    /// participant count when the victim's statement text was not resolvable (permissions, or a graph
+    /// shape the log parser did not recognise).
+    /// </summary>
+    internal static AlertIncident BuildPgDeadlockIncident(DarlingPgDeadlockReader.PgDeadlockRow row) =>
+        new(
+            row.DeadlockHash,
+            new[]
+            {
+                string.IsNullOrWhiteSpace(row.VictimStatement)
+                    ? $"victim pid {row.VictimPid}, {row.ParticipantCount} participant(s)"
+                    : row.VictimStatement!,
+            });
+
+    /// <summary>
+    /// Which root blocker each captured chain belongs to, worst sample first per root — pulled out of
+    /// <see cref="EvaluatePgBlockingAsync"/> for the same testability reason as
+    /// <see cref="BuildPgDeadlockIncident"/>.
+    /// <para><see cref="DarlingPgBlockingReader.GetPgBlockingChainsAsync"/> returns one row per (capture,
+    /// root) ordered worst-first (widest chain, then deepest, then most recent) — see that method's own
+    /// doc comment — so grouping by root and taking each group's FIRST row keeps the worst sample the
+    /// window saw for that blocker, without needing to re-sort. Without this dedup, a single persistent
+    /// blocker sampled every cycle for the whole rolling window would inflate the alert's count far past
+    /// what an operator would call "how many blocking situations", since blocking here is sampled state,
+    /// not an engine-recorded event log (same caveat the collector's own doc comment carries).</para>
+    /// </summary>
+    internal static List<DarlingPgBlockingReader.PgBlockingChainRow> WorstPgBlockingChainPerRoot(
+        IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> rows) =>
+        rows.GroupBy(r => r.RootBackendId).Select(g => g.First()).ToList();
+
+    /// <summary>
+    /// Pure mapping, pulled out of <see cref="EvaluatePgBlockingAsync"/> for the same testability reason as
+    /// <see cref="BuildPgDeadlockIncident"/>. The dedup key is the root's synthetic backend identity (stable
+    /// across samples of the same backend, unlike a reused pid — see the collector's own doc comment), not
+    /// the pid alone.
+    /// </summary>
+    internal static AlertIncident BuildPgBlockingIncident(DarlingPgBlockingReader.PgBlockingChainRow row) =>
+        new(
+            row.RootBackendId.ToString(CultureInfo.InvariantCulture),
+            new[]
+            {
+                $"root pid {row.RootPid} blocking {row.TotalVictims} session(s)"
+                    + (row.Databases.Length > 0 ? $" in [{string.Join(", ", row.Databases)}]" : string.Empty)
+                    + (string.IsNullOrWhiteSpace(row.RootQuery) ? string.Empty : $": {row.RootQuery}"),
+            },
+            Database: row.Databases.Length > 0 ? row.Databases[0] : null);
 
     /// <summary>
     /// The latest collected CPU sample for the snapshot — Lite's overview read
