@@ -823,7 +823,7 @@ public sealed class DarlingWebHostService : BackgroundService
                             return;
 
                         case WebRequestAction.HandleAuthFlow:
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals);
                             return;
 
                         case WebRequestAction.SetCookieAndRedirect:
@@ -1318,9 +1318,11 @@ public sealed class DarlingWebHostService : BackgroundService
         DarlingWebOidcClient? oidcClient,
         byte[] signingKey,
         byte[] transactionKey,
-        DarlingWebSeat currentSeat)
+        DarlingWebSeat currentSeat,
+        DarlingHttpRefusalLog refusals)
     {
         var path = context.Request.Path.Value ?? "/";
+        var remote = context.Connection.RemoteIpAddress;
 
         if (string.Equals(path, LogoutPath, StringComparison.OrdinalIgnoreCase))
         {
@@ -1341,8 +1343,10 @@ public sealed class DarlingWebHostService : BackgroundService
         if (oidcClient is null)
         {
             /* Unreachable through IsAuthFlowPath (the OIDC legs only qualify while a client exists), kept
-               as a fail-closed backstop rather than a NullReference away from a 500. */
-            context.Response.StatusCode = StatusCodes.Status404NotFound;
+               as a backstop rather than a NullReference away from a 500. The answer is the login page —
+               exactly what the non-flow pipeline serves an unauthenticated caller — not a bare 4xx, which
+               the #2479 report-before-refusing pin rightly refuses to allow silently. */
+            await WriteLoginPageAsync(context, oidcEnabled: false);
             return;
         }
 
@@ -1351,9 +1355,13 @@ public sealed class DarlingWebHostService : BackgroundService
             var discovery = await oidcClient.GetDiscoveryAsync(context.RequestAborted);
             if (discovery is null)
             {
-                _logger.LogWarning(
-                    "OIDC sign-in unavailable: the discovery document could not be fetched/parsed from {Authority} — serving the token login instead. The next sign-in attempt retries.",
-                    oidcClient.Options.Authority);
+                /* Through the rate-limited refusal log, not a bare LogWarning: this leg is reachable
+                   pre-credential by design, so during an IdP outage every hit would otherwise write a
+                   line — the #2479 flood, reintroduced on a new path. */
+                refusals.Report(
+                    _logger, "Web dashboard", DarlingRefusalGate.SignIn, StatusCodes.Status502BadGateway, remote,
+                    $"the OIDC discovery document could not be fetched/parsed from {oidcClient.Options.Authority} — the next sign-in attempt retries",
+                    DateTime.UtcNow);
                 await WriteSignInErrorAsync(context, StatusCodes.Status502BadGateway,
                     "Single sign-on is temporarily unavailable (the identity provider did not answer). Use the access token, or try again.");
                 return;
@@ -1404,16 +1412,17 @@ public sealed class DarlingWebHostService : BackgroundService
 
         /* ------- the callback: the IdP sent the browser back with ?code=&state= (or ?error=). ------- */
 
-        var remote = context.Connection.RemoteIpAddress;
-
         var providerError = context.Request.Query["error"].ToString();
         if (!string.IsNullOrEmpty(providerError))
         {
-            /* IdP-authored, but it rode a browser querystring here — sanitize like any other echoed input. */
-            _logger.LogWarning(
-                "OIDC sign-in refused by the provider: {Error} {Description}",
-                DarlingHttpRefusalLog.Sanitize(providerError),
-                DarlingHttpRefusalLog.Sanitize(context.Request.Query["error_description"].ToString(), 128));
+            /* IdP-authored in the honest case, but it rode a browser querystring here — anyone can put an
+               ?error= on this URL, which is exactly why it goes through the rate-limited refusal log,
+               sanitized like any other echoed input. */
+            refusals.Report(
+                _logger, "Web dashboard", DarlingRefusalGate.SignIn, StatusCodes.Status403Forbidden, remote,
+                $"the provider (or the querystring) reported '{DarlingHttpRefusalLog.Sanitize(providerError)}"
+                + $" {DarlingHttpRefusalLog.Sanitize(context.Request.Query["error_description"].ToString())}'",
+                DateTime.UtcNow);
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
                 "The identity provider refused the sign-in. Ask your administrator, or use the access token.");
             return;
@@ -1431,7 +1440,8 @@ public sealed class DarlingWebHostService : BackgroundService
         if (string.IsNullOrEmpty(code) || !hasTransaction
             || !string.Equals(presentedState, transaction!.State, StringComparison.Ordinal))
         {
-            ReportSignInRefusal(remote, "the callback carried no code, or its state did not match the sign-in this host started (expired/tampered transaction, or a cross-site forgery)");
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status400BadRequest,
+                "the callback carried no code, or its state did not match the sign-in this host started (expired/tampered transaction, or a cross-site forgery)");
             await WriteSignInErrorAsync(context, StatusCodes.Status400BadRequest,
                 "This sign-in attempt is stale or was not started by this dashboard. Start again from the login page.");
             return;
@@ -1440,7 +1450,8 @@ public sealed class DarlingWebHostService : BackgroundService
         var discoveryForExchange = await oidcClient.GetDiscoveryAsync(context.RequestAborted);
         if (discoveryForExchange is null)
         {
-            _logger.LogWarning("OIDC sign-in failed at the exchange: discovery is no longer available from {Authority}.", oidcClient.Options.Authority);
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status502BadGateway,
+                $"discovery is no longer available from {oidcClient.Options.Authority}, so the code exchange could not run");
             await WriteSignInErrorAsync(context, StatusCodes.Status502BadGateway,
                 "Single sign-on is temporarily unavailable (the identity provider did not answer). Use the access token, or try again.");
             return;
@@ -1450,7 +1461,10 @@ public sealed class DarlingWebHostService : BackgroundService
             discoveryForExchange.TokenEndpoint, code, transaction.RedirectUri, transaction.CodeVerifier, context.RequestAborted);
         if (exchange.IdToken is null)
         {
-            _logger.LogWarning("OIDC code exchange failed: {Error}", exchange.Error);
+            /* exchange.Error is IdP/transport-authored, never secret material (the client guarantees it),
+               but it still gets the sanitizer before a log line. */
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status502BadGateway,
+                $"the code exchange failed: {DarlingHttpRefusalLog.Sanitize(exchange.Error, 128)}");
             await WriteSignInErrorAsync(context, StatusCodes.Status502BadGateway,
                 "The identity provider rejected the sign-in exchange. Try again; if it persists, the service log names the provider's error.");
             return;
@@ -1463,7 +1477,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 payload, discoveryForExchange.Issuer, oidcClient.Options.ClientId, transaction.Nonce, DateTimeOffset.UtcNow);
         if (claimProblem is not null)
         {
-            ReportSignInRefusal(remote, $"the ID token failed validation: {claimProblem}");
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status403Forbidden, $"the ID token failed validation: {claimProblem}");
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
                 "The identity provider's answer did not validate. The service log has the specific check that failed.");
             return;
@@ -1472,7 +1486,7 @@ public sealed class DarlingWebHostService : BackgroundService
         var subject = DarlingWebOidc.ResolveSubject(payload!, oidcClient.Options.SubjectClaim);
         if (subject is null)
         {
-            ReportSignInRefusal(remote, oidcClient.Options.SubjectClaim is null
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status403Forbidden, oidcClient.Options.SubjectClaim is null
                 ? "the ID token carries none of the subject claims (preferred_username/email/sub)"
                 : $"the ID token does not carry the configured subjectClaim '{oidcClient.Options.SubjectClaim}' — refusing rather than falling back to a claim the operator did not choose");
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
@@ -1483,7 +1497,7 @@ public sealed class DarlingWebHostService : BackgroundService
         if (subject.Length > DarlingWebSeat.MaxSubjectLength)
         {
             /* The cookie's own rule (#2583): refuse, never truncate — truncation merges identities. */
-            ReportSignInRefusal(remote, $"the resolved subject is {subject.Length} characters (limit {DarlingWebSeat.MaxSubjectLength})");
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status403Forbidden, $"the resolved subject is {subject.Length} characters (limit {DarlingWebSeat.MaxSubjectLength})");
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
                 "Signed in at the provider, but the account identifier is too long for this dashboard's session. Configure a shorter subjectClaim.");
             return;
@@ -1517,10 +1531,13 @@ public sealed class DarlingWebHostService : BackgroundService
         await WriteSignedInLandingAsync(context, transaction.ReturnPath);
     }
 
-    /// <summary>Sign-in refusals share the refusal log's shape but not its object (they are per-flow, not
-    /// per-request-flood); a plain warning keeps the who/why in one greppable line.</summary>
-    private void ReportSignInRefusal(IPAddress? remote, string reason)
-        => _logger.LogWarning("OIDC sign-in refused for {Remote}: {Reason}", remote, reason);
+    /// <summary>Sign-in refusals go through the rate-limited refusal log (#2479): the flow endpoints are
+    /// reachable pre-credential by design, so an unthrottled warning per failed callback would hand a
+    /// scanner the log-flood the limiter exists to bound. The one deliberate exception is the
+    /// role-mapping denial, which stays a direct line naming the subject — it is the audit trail, and
+    /// reaching it costs a completed IdP handshake.</summary>
+    private void ReportSignInRefusal(DarlingHttpRefusalLog refusals, IPAddress? remote, int statusCode, string reason)
+        => refusals.Report(_logger, "Web dashboard", DarlingRefusalGate.SignIn, statusCode, remote, reason, DateTime.UtcNow);
 
     /// <summary>
     /// The post-sign-in landing page. An HTML page with a script navigation instead of a 302, and the
