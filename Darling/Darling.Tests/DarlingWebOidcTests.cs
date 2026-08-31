@@ -528,4 +528,21 @@ public sealed class DarlingWebOidcTests
     [InlineData("https://idp.example.com/other", "https://idp.example.com/realm", false)]
     public void IssuerMatchesAuthority_Matrix(string issuer, string authority, bool expected)
         => Assert.Equal(expected, DarlingWebOidc.IssuerMatchesAuthority(issuer, authority));
+
+    /// <summary>
+    /// The discovery document's endpoints are held to the authority's own scheme rule (review catch on
+    /// #2730): the token endpoint receives the client secret and the code, so a discovery answer naming an
+    /// http:// endpoint must not be able to point that POST at cleartext — the loopback-only-http exception
+    /// the operator's config is held to applies to the document too.
+    /// </summary>
+    [Theory]
+    [InlineData("https://idp.example.com/token", true)]
+    [InlineData("http://localhost:8080/default/token", true)]   // the local test-IdP exception
+    [InlineData("http://127.0.0.1:8080/token", true)]
+    [InlineData("http://idp.corp.local/token", false)]          // cleartext to a real host -> refused
+    [InlineData("ftp://idp.example.com/token", false)]
+    [InlineData("not-a-url", false)]
+    [InlineData("/relative/token", false)]
+    public void IsAcceptableEndpointUrl_Matrix(string url, bool expected)
+        => Assert.Equal(expected, DarlingWebOidc.IsAcceptableEndpointUrl(url));
 }

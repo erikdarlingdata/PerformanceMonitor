@@ -1286,10 +1286,19 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>
-    /// PURE open-redirect guard for the token-strip 302 target: forces a single-slash site-relative path. A
-    /// request path beginning <c>//</c> (or <c>/\</c>) is a protocol-relative URL the browser follows off-site,
-    /// so a crafted <c>//evil.com/?token=...</c> would 302 the operator away; any leading slash/backslash run is
-    /// collapsed to one <c>/</c>. Empty maps to <c>/</c>.
+    /// PURE open-redirect guard for the token-strip 302 target and the OIDC <c>?return=</c> landing (#2550):
+    /// forces a single-slash site-relative path. A request path beginning <c>//</c> (or <c>/\</c>) is a
+    /// protocol-relative URL the browser follows off-site, so a crafted <c>//evil.com/?token=...</c> would
+    /// 302 the operator away; any leading slash/backslash run is collapsed to one <c>/</c>. Empty maps to
+    /// <c>/</c>.
+    ///
+    /// <para><b>ASCII control characters are stripped from the WHOLE string first</b> (review catch on
+    /// #2730): the WHATWG URL parser removes tab/CR/LF from anywhere in a URL before parsing, and that
+    /// stripping applies to <c>location.replace()</c>, <c>&lt;a href&gt;</c>, and <c>Location</c> headers
+    /// alike — so <c>\t//evil.com</c> would sail past a leading-slash-only guard and become protocol-relative
+    /// IN THE BROWSER. Stripping before collapsing means the guard sees the same string the browser will.
+    /// All C0 controls go, not just the three the URL spec names: none has any business in a path, and
+    /// enumerating exactly the browser's list is how the next variant gets through.</para>
     /// </summary>
     internal static string SanitizeRedirectPath(string location)
     {
@@ -1298,13 +1307,23 @@ public sealed class DarlingWebHostService : BackgroundService
             return "/";
         }
 
+        Span<char> cleaned = location.Length <= 512 ? stackalloc char[location.Length] : new char[location.Length];
+        var length = 0;
+        foreach (var c in location)
+        {
+            if (c >= ' ' && c != '\x7f')
+            {
+                cleaned[length++] = c;
+            }
+        }
+
         var i = 0;
-        while (i < location.Length && (location[i] == '/' || location[i] == '\\'))
+        while (i < length && (cleaned[i] == '/' || cleaned[i] == '\\'))
         {
             i++;
         }
 
-        return "/" + location.Substring(i);
+        return "/" + new string(cleaned.Slice(i, length - i));
     }
 
     /* ---------------------------------------------------------------------------------------------------

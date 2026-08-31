@@ -559,6 +559,29 @@ internal static class DarlingWebOidc
     internal static bool IssuerMatchesAuthority(string issuer, string authority)
         => string.Equals(issuer.TrimEnd('/'), authority.TrimEnd('/'), StringComparison.Ordinal);
 
+    /// <summary>
+    /// The scheme rule <see cref="ValidateConfig"/> enforces on the authority, applied to a URL the
+    /// DISCOVERY DOCUMENT supplied (review catch on #2730): https, or http toward a loopback host. The
+    /// authorization endpoint is where the browser gets sent; the token endpoint is where the CLIENT SECRET
+    /// and the authorization code get POSTed — a discovery answer naming an http:// token endpoint would
+    /// quietly bypass the loopback-only-http restriction the operator's own config is held to, and ship the
+    /// secret in the clear.
+    /// </summary>
+    internal static bool IsAcceptableEndpointUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        if (uri.Scheme == Uri.UriSchemeHttps)
+        {
+            return true;
+        }
+
+        return uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback;
+    }
+
     internal static string Base64UrlEncode(byte[] bytes)
         => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
@@ -665,6 +688,15 @@ internal sealed class DarlingWebOidcClient : IDisposable
                response choose which issuer the ID-token check validates against. Not cached: a poisoned
                answer must not stick for the server's lifetime. */
             if (!DarlingWebOidc.IssuerMatchesAuthority(issuer, Options.Authority))
+            {
+                return null;
+            }
+
+            /* And the endpoints the document names are held to the SAME scheme rule as the authority
+               (see IsAcceptableEndpointUrl) — the token endpoint in particular receives the client secret
+               and the code, and the discovery response must not be able to point that POST at cleartext. */
+            if (!DarlingWebOidc.IsAcceptableEndpointUrl(authorizationEndpoint)
+                || !DarlingWebOidc.IsAcceptableEndpointUrl(tokenEndpoint))
             {
                 return null;
             }

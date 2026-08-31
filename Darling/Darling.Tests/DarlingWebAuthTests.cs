@@ -94,6 +94,15 @@ public sealed class DarlingWebAuthTests
     [InlineData("/\\evil.com", "/evil.com")]            // slash-backslash trick -> collapsed
     [InlineData("///a", "/a")]                          // longer leading run
     [InlineData("/fleet?x=1", "/fleet?x=1")]            // preserved query on a safe path
+    /* #2730 review catch: the WHATWG URL parser strips tab/CR/LF from ANYWHERE in a URL before parsing —
+       location.replace, <a href>, and Location headers alike — so "\t//evil.com" past a leading-slash-only
+       guard becomes protocol-relative IN THE BROWSER. The guard strips C0 controls first, so it sees the
+       same string the browser will. */
+    [InlineData("\t//evil.com", "/evil.com")]           // tab-prefixed protocol-relative -> neutralized
+    [InlineData("/\t/evil.com", "/evil.com")]           // embedded tab building a // after browser stripping
+    [InlineData("\n//evil.com", "/evil.com")]           // LF variant
+    [InlineData("/\r\n/evil.com", "/evil.com")]         // CRLF variant
+    [InlineData("/dead\tlocks", "/deadlocks")]          // controls are stripped, the rest survives
     public void SanitizeRedirectPath_ForcesSingleSlashSiteRelative(string input, string expected)
         => Assert.Equal(expected, DarlingWebHostService.SanitizeRedirectPath(input));
 
