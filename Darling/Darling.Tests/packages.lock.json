@@ -690,6 +690,7 @@
       "performancemonitor.darling.service": {
         "type": "Project",
         "dependencies": {
+          "AWSSDK.PI": "[4.0.100.11, )",
           "AWSSDK.RDS": "[4.0.104.4, )",
           "BlackwellSystems.Gcf": "[0.2.0, )",
           "Microsoft.Data.SqlClient": "[7.0.2, )",
@@ -752,6 +753,15 @@
           "PerformanceMonitor.Common": "[1.0.0, )",
           "PerformanceMonitor.PlanAnalysis": "[1.0.0, )",
           "ScottPlot.WPF": "[5.1.59, )"
+        }
+      },
+      "AWSSDK.PI": {
+        "type": "CentralTransitive",
+        "requested": "[4.0.100.11, )",
+        "resolved": "4.0.100.11",
+        "contentHash": "GWnX59Ik13CV6jJsCH25CiL60Uj2FxiMxntdBEpW6kdVOKdbl8Q00GxdaATw3Q/GtoxoFHOqGdcHiD24xlvFFQ==",
+        "dependencies": {
+          "AWSSDK.Core": "[4.0.102.1, 5.0.0)"
         }
       },
       "AWSSDK.RDS": {

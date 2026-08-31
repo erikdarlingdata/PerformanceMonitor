@@ -332,6 +332,31 @@ public sealed partial class ViewerDataService
         int serverId, int limit = 500, CancellationToken cancellationToken = default) =>
         DarlingPgServerConfigReader.GetCurrentConfigAsync(_dataSource, serverId, limit, cancellationToken);
 
+    /// <summary>Overview tab - instance-level CPU utilization for a managed PostgreSQL/Aurora target
+    /// (#2719), sourced from AWS Performance Insights rather than a database connection. Newest first, so
+    /// the most recent reading is the one an operator sees without scrolling.</summary>
+    public sealed record PgCpuUtilizationRow
+    {
+        public required string Time { get; init; }
+        public required double CpuPercent { get; init; }
+    }
+
+    public async Task<List<PgCpuUtilizationRow>> GetPgCpuUtilizationHistoryAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        var samples = await DarlingPgCpuUtilizationReader.GetHistoryAsync(
+            _dataSource, serverId, startUtc, endUtc, cancellationToken);
+
+        return samples
+            .OrderByDescending(s => s.SampleTimeUtc)
+            .Select(s => new PgCpuUtilizationRow
+            {
+                Time = ViewerTimeHelper.ForDisplay(s.SampleTimeUtc).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture),
+                CpuPercent = s.CpuPercent,
+            })
+            .ToList();
+    }
+
     /// <summary>Activity tab - PostgreSQL deadlocks reported in the window (#2661), one row per distinct
     /// report. Windowed on when the deadlock HAPPENED rather than when it was collected: the collector
     /// re-reads an overlapping log tail, so a report is found minutes later and found again for as long as
@@ -370,6 +395,15 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgKernelStatsReader.PgKernelStatRow>> GetPgKernelStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit, CancellationToken cancellationToken = default) =>
         DarlingPgKernelStatsReader.GetPgKernelStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>
+    /// Instance-level CPU from AWS Performance Insights (#2719). Aurora only — see
+    /// <see cref="PerformanceMonitor.Collectors.PgCpuUtilizationCollector"/>'s doc comment for why a
+    /// self-hosted target has no route to this at all.
+    /// </summary>
+    public Task<List<DarlingPgCpuUtilizationReader.CpuSample>> GetPgCpuUtilizationAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DarlingPgCpuUtilizationReader.GetHistoryAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
 
     /// <summary>
     /// Which columns are filtered on and how badly the planner estimated them (#2603). Newest per

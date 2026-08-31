@@ -588,6 +588,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                    concept, reported in microseconds, so the two engines cannot share a result shape
                    without lying about a unit or emitting mostly-null columns. */
                 .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
+                /* get_pg_cpu_utilization — instance-level CPU for a PostgreSQL/Aurora target (#2719),
+                   paired with the pg_cpu_utilization collector. Sourced from AWS Performance Insights
+                   rather than a database connection, so it sits beside the wait tools rather than the
+                   activity ones: a gauge over time, like SQL Server's own CPU read, not a ranked list. */
+                .WithGeminiCompatibleTools<DarlingMcpPgCpuUtilizationTools>()
                 /* get_pg_top_queries — PostgreSQL query shapes by total time, paired with the
                    pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
                    peak memory, neither of which the SQL Server tools have an equivalent for. */

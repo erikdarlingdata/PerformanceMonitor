@@ -62,6 +62,10 @@ public sealed class CrossAppMcpToolInventoryPinTests
            nothing for a Lite twin to read. If Lite ever gains a PostgreSQL target, port these and delete
            them from here; the ratchet only shrinks. */
         "get_pg_wait_stats",
+        /* #2719: instance CPU via AWS Performance Insights. Same reason again, and doubly so — this reads
+           the AWS RDS/Aurora SDK directly rather than a database connection at all, which Lite (a
+           standalone desktop app with no AWS credentials of its own) has no route to regardless of target. */
+        "get_pg_cpu_utilization",
         /* #2629: the stock-PostgreSQL counterparts. Same entry, same reason — Lite has no PostgreSQL
            target at all, so these are a SKU boundary rather than a porting to-do. */
         "get_pg_wait_sampling",
