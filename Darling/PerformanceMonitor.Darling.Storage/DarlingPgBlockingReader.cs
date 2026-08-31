@@ -81,9 +81,15 @@ public static class DarlingPgBlockingReader
     /// error on the first call, not a compile-time one, which is why this was found by running the text
     /// against a real instance rather than by reading it.</para>
     ///
-    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
+    /// <para>#2714: this is a complete SELECT statement (its own nested <c>WITH RECURSIVE</c>), factored out
+    /// so <see cref="PgBlockingChainsSql"/> (raw severity-ordered top-N — the MCP tool and the Viewer grid
+    /// both want to see an ongoing situation's repeated samples, not one row per root) and
+    /// <see cref="PgBlockingChainsDedupedByRootSql"/> (the alert-only variant that dedupes by root BEFORE the
+    /// row-count LIMIT) share ONE canonical copy of the CTE chain rather than two texts that can drift the
+    /// way the ladder-generator's fresh-store/upgrade pair once did. Embedded elsewhere by wrapping it in one
+    /// more set of parens as the body of an outer CTE.</para>
     /// </summary>
-    public const string PgBlockingChainsSql = """
+    private const string PgBlockingChainCandidatesSql = """
         WITH RECURSIVE edges AS (
             SELECT
                 collection_id,
@@ -272,16 +278,103 @@ public static class DarlingPgBlockingReader
           AND a.blocking_pid = d.blocking_pid
         LEFT JOIN recurrence AS c
           ON  c.blocking_backend_id = d.blocking_backend_id
-        ORDER BY s.total_victims DESC, s.max_depth DESC, d.collection_time DESC
+        """;
+
+    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
+    public const string PgBlockingChainsSql = PgBlockingChainCandidatesSql +
+        "\nORDER BY s.total_victims DESC, s.max_depth DESC, d.collection_time DESC\nLIMIT $4";
+
+    /// <summary>
+    /// #2714: the same candidate rows as <see cref="PgBlockingChainsSql"/>, but deduped to ONE row per
+    /// distinct root — the same sentinel-aware identity <c>DarlingWorker.WorstPgBlockingChainPerRoot</c>
+    /// already applies in C# (a vanished root's own pid, since its backend id fell back to the shared
+    /// sentinel 0; the real backend id otherwise) — BEFORE the row-count LIMIT is applied, not after.
+    ///
+    /// <para><b>Why this needs to exist at all.</b> <see cref="PgBlockingChainsSql"/> orders candidate rows
+    /// by severity (<c>total_victims DESC, max_depth DESC, collection_time DESC</c>) and applies LIMIT
+    /// across the whole window BEFORE any caller dedupes by root. A single severe, persistent blocker
+    /// sampled on most cycles of a rolling hour can occupy the entire LIMIT budget with repeat samples of
+    /// itself, pushing every sample of a second, genuinely distinct — merely less severe — root out of the
+    /// top N and out of the alert entirely. Raising the LIMIT only narrows the window this can happen in; it
+    /// does not fix the "ordered by severity before dedup" shape. Deduping in SQL, before LIMIT, is the only
+    /// way the row budget is actually spent on root diversity rather than repeat samples of one root.</para>
+    ///
+    /// <para>Kept as a query, not just a bigger raw LIMIT: dedupes by keeping each root's OWN worst sample
+    /// (<c>DISTINCT ON</c> ordered the same worst-first way as <see cref="PgBlockingChainsSql"/>), so the
+    /// alert's downstream per-root dedup in C# becomes a no-op safety net rather than the only thing standing
+    /// between a real distinct root and an undercount.</para>
+    ///
+    /// <para>This is deliberately a SEPARATE query from <see cref="PgBlockingChainsSql"/> rather than a
+    /// parameter that changes its shape — the MCP tool and the Viewer's blocking grid both call the raw
+    /// severity-ordered form and want to see an ongoing situation's repeated samples across the window, not
+    /// collapse them to one row per root. Changing the shared query's contract would have silently changed
+    /// what those two already-shipped call sites display.</para>
+    /// </summary>
+    public const string PgBlockingChainsDedupedByRootSql =
+        "WITH candidates AS (\n" +
+        PgBlockingChainCandidatesSql +
+        "\n),\n" +
+        """
+        keyed AS (
+            SELECT
+                candidates.*,
+                CASE WHEN root_backend_id = 0
+                     THEN 'pid:' || root_pid::text
+                     ELSE 'bid:' || root_backend_id::text
+                END AS root_key
+            FROM candidates
+        ),
+        deduped AS (
+            SELECT DISTINCT ON (root_key) *
+            FROM keyed
+            ORDER BY root_key, total_victims DESC, max_depth DESC, captured_at DESC
+        )
+        SELECT
+            captured_at,
+            root_backend_id,
+            root_pid,
+            databases,
+            root_username,
+            root_application_name,
+            root_state,
+            root_query,
+            root_is_idle_in_transaction,
+            root_xact_duration_ms,
+            root_query_duration_ms,
+            total_victims,
+            direct_victims,
+            max_depth,
+            worst_victim_wait_ms,
+            worst_victim_query,
+            samples_as_root,
+            query_text_may_be_truncated,
+            chain_may_be_truncated
+        FROM deduped
+        ORDER BY total_victims DESC, max_depth DESC, captured_at DESC
         LIMIT $4
         """;
 
-    public static async Task<List<PgBlockingChainRow>> GetPgBlockingChainsAsync(
+    public static Task<List<PgBlockingChainRow>> GetPgBlockingChainsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        RunPgBlockingChainsQueryAsync(
+            postgres, PgBlockingChainsSql, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>#2714: dedup-by-root-before-LIMIT variant — see <see cref="PgBlockingChainsDedupedByRootSql"/>
+    /// for why this exists as a separate call rather than a flag on <see cref="GetPgBlockingChainsAsync"/>.
+    /// </summary>
+    public static Task<List<PgBlockingChainRow>> GetPgBlockingChainsDedupedByRootAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken = default) =>
+        RunPgBlockingChainsQueryAsync(
+            postgres, PgBlockingChainsDedupedByRootSql, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    private static async Task<List<PgBlockingChainRow>> RunPgBlockingChainsQueryAsync(
+        NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken)
     {
         var rows = new List<PgBlockingChainRow>();
-        await using var command = postgres.CreateCommand(PgBlockingChainsSql);
+        await using var command = postgres.CreateCommand(sql);
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified), not the bare value. Npgsql does not reject Kind=Utc — it infers
            timestamptz, and PostgreSQL then zone-shifts the window against the store's NAIVE timestamp

@@ -3008,7 +3008,13 @@ public sealed class DarlingWorker : BackgroundService
             var now = DateTime.UtcNow;
             var windowStart = now.AddHours(-AlertEngine.RollingCountWindowHours);
 
-            var rows = await DarlingPgBlockingReader.GetPgBlockingChainsAsync(
+            /* #2714: deduped-by-root BEFORE the row-count LIMIT, not the raw severity-ordered read — a
+               single severe root sampled repeatedly across the rolling window could otherwise occupy the
+               entire LIMIT budget with repeat samples of itself, pushing a second, genuinely distinct root
+               out of the top N before WorstPgBlockingChainPerRoot below ever saw it. That method's own
+               per-root dedup is kept regardless, as a no-op safety net now that SQL already hands it one
+               row per root — never the only thing standing between a real distinct root and an undercount. */
+            var rows = await DarlingPgBlockingReader.GetPgBlockingChainsDedupedByRootAsync(
                 _postgres, runtime.ServerId, windowStart, now, limit: 100, cancellationToken);
 
             var worstPerRoot = WorstPgBlockingChainPerRoot(rows);
