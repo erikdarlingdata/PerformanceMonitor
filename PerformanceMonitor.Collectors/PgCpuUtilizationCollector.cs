@@ -58,6 +58,15 @@ public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<
 
     public override string? WatermarkColumn => "sample_time";
 
+    /// <summary>Aurora only, matching <c>PgWaitStatsCollector</c>'s own gate exactly — Performance Insights
+    /// reaches every monitored Aurora target today. A plain (non-Aurora) RDS Postgres instance would still
+    /// be tried at runtime by <c>RdsCpuIngestor</c> (it dispatches on <c>RdsEndpoint.TryParse</c> succeeding,
+    /// not on this flag), but nothing in the fleet is that shape, and gating on <c>IsAurora</c> alone is what
+    /// the engine-capability sweep (<c>CollectorEngineCapability.TargetsWithEngineKind</c>) already varies
+    /// correctly for PostgreSQL — unlike <c>CollectorTargetInfo.IsAwsRds</c>, which is documented as a
+    /// SQL-Server-only fact and is never varied for a Postgres target.</summary>
+    public override bool AppliesTo(CollectorTargetInfo target) => target.IsAurora;
+
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]

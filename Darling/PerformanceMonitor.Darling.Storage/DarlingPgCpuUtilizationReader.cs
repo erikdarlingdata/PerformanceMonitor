@@ -64,4 +64,43 @@ public static class DarlingPgCpuUtilizationReader
             reader.GetDouble(0),
             DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
     }
+
+    internal const string HistorySql = """
+        SELECT sample_time, cpu_percent
+        FROM pg_cpu_utilization
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   cpu_percent IS NOT NULL
+        ORDER BY sample_time
+        """;
+
+    public sealed record CpuSample(DateTime SampleTimeUtc, double CpuPercent);
+
+    /// <summary>The served-read side (#2629/#2719's own fix) — every reading in a window, for
+    /// <c>get_pg_cpu_utilization</c>. Windowed on <c>collection_time</c> (the ingestor's own cycle time)
+    /// rather than <c>sample_time</c> (PI's data-point time), matching <see cref="DarlingDataReader.GetCpuUtilizationAsync"/>'s
+    /// convention for the SQL Server twin: it is what every other windowed read here bounds on, and PI's
+    /// data points arrive already time-ordered with no ring-buffer clock skew to correct for.</summary>
+    public static async Task<System.Collections.Generic.List<CpuSample>> GetHistoryAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var samples = new System.Collections.Generic.List<CpuSample>();
+        await using var command = postgres.CreateCommand(HistorySql);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            samples.Add(new CpuSample(
+                DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                reader.GetDouble(1)));
+        }
+
+        return samples;
+    }
 }

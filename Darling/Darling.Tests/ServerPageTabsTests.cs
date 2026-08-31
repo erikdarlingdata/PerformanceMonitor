@@ -73,6 +73,7 @@ public sealed class ServerPageTabsTests
     private static readonly Dictionary<string, string> CollectorForRead = new(StringComparer.Ordinal)
     {
             ["get_pg_wait_stats"] = "pg_wait_stats",
+            ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
             ["get_pg_wait_sampling"] = "pg_wait_sampling",
             ["get_pg_kernel_stats"] = "pg_kernel_stats",
         ["get_pg_predicate_stats"] = "pg_predicate_stats",

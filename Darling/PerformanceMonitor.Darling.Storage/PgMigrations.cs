@@ -2362,6 +2362,25 @@ CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_identity
     /// it comes from parsing a log line, and the store's job is to record what was found rather than to
     /// assert it was always found.</para>
     /// </summary>
+    private const string V103Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_deadlocks (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    occurred_at timestamp,
+    victim_pid integer,
+    participant_count integer,
+    deadlock_hash text,
+    lock_modes text,
+    resources text,
+    victim_statement text,
+    graph_text text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_time
+    ON collect.pg_deadlocks(server_id, collection_time);";
+
     /// <summary>
     /// V106 — <c>collect.pg_cpu_utilization</c>, instance-level CPU for a managed PostgreSQL/Aurora target
     /// (#2719). Column-for-column identical to what <see cref="PgSchemaGenerator"/> generates from
@@ -2383,25 +2402,6 @@ CREATE TABLE IF NOT EXISTS collect.pg_cpu_utilization (
 
 CREATE INDEX IF NOT EXISTS idx_pg_cpu_utilization_time
     ON collect.pg_cpu_utilization(server_id, collection_time);";
-
-    private const string V103Sql = @"
-CREATE TABLE IF NOT EXISTS collect.pg_deadlocks (
-    collection_id bigint NOT NULL,
-    collection_time timestamp NOT NULL,
-    server_id integer NOT NULL,
-    server_name text NOT NULL,
-    occurred_at timestamp,
-    victim_pid integer,
-    participant_count integer,
-    deadlock_hash text,
-    lock_modes text,
-    resources text,
-    victim_statement text,
-    graph_text text
-);
-
-CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_time
-    ON collect.pg_deadlocks(server_id, collection_time);";
 
     /// <summary>
     /// V102 — <c>collect.pg_server_config</c>, the server's own configuration from <c>pg_settings</c>
