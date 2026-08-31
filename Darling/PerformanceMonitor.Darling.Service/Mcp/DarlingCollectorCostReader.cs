@@ -122,31 +122,40 @@ ORDER BY day";
     /// (#2674) — the self-alert's detection query. Per (server, collector): latest day's summed sql_ms vs
     /// the AVERAGE of the prior days in the window, returned only when the baseline is meaningful (>= floor,
     /// and at least 3 prior days so a new collector cannot trip it) and the latest exceeds it by the factor.
-    /// $1 = baseline window start (naive UTC), $2 = baseline floor ms, $3 = factor.</summary>
+    /// $1 = baseline window start (naive UTC), $2 = baseline floor ms, $3 = factor.
+    ///
+    /// <para><c>latest_metric_time</c> (#2707) is the newest raw hourly row folded into <c>latest_ms</c> —
+    /// the freshness anchor the self-alert needs to tell "this regression got worse" from "the hourly flush
+    /// hasn't landed a new row since I last looked", the same distinction #2704 draws with wait_stats'
+    /// collection_time. Without it, re-asking this query on a cooldown that outpaces the flush hands back the
+    /// exact same latest_ms twice, and the evaluator has no way to know the second answer isn't new.</para></summary>
     public const string RegressionSql = @"
 WITH daily AS
 (
-    SELECT cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time) AS day, sum(cc.total_sql_ms) AS sql_ms
+    SELECT cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time) AS day,
+           sum(cc.total_sql_ms) AS sql_ms, max(cc.metric_time) AS latest_metric_time_in_day
     FROM collect.collector_cost AS cc
     WHERE cc.metric_time >= $1
     GROUP BY cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time)
 ),
 ranked AS
 (
-    SELECT server_id, collector_name, day, sql_ms,
+    SELECT server_id, collector_name, day, sql_ms, latest_metric_time_in_day,
            max(day) OVER (PARTITION BY server_id, collector_name) AS latest_day
     FROM daily
 ),
 agg AS
 (
     SELECT server_id, collector_name,
-           max(sql_ms) FILTER (WHERE day = latest_day)  AS latest_ms,
-           avg(sql_ms) FILTER (WHERE day < latest_day)  AS baseline_ms,
-           count(*)    FILTER (WHERE day < latest_day)  AS baseline_days
+           max(sql_ms)                     FILTER (WHERE day = latest_day) AS latest_ms,
+           avg(sql_ms)                     FILTER (WHERE day < latest_day) AS baseline_ms,
+           count(*)                        FILTER (WHERE day < latest_day) AS baseline_days,
+           max(latest_metric_time_in_day)  FILTER (WHERE day = latest_day) AS latest_metric_time
     FROM ranked
     GROUP BY server_id, collector_name
 )
-SELECT a.server_id, COALESCE(s.display_name, s.server_name) AS server_name, a.collector_name, a.latest_ms, a.baseline_ms
+SELECT a.server_id, COALESCE(s.display_name, s.server_name) AS server_name, a.collector_name,
+       a.latest_ms, a.baseline_ms, a.latest_metric_time
 FROM agg AS a
 JOIN collect.servers AS s ON s.server_id = a.server_id
 WHERE a.baseline_days >= 3
@@ -159,7 +168,8 @@ ORDER BY (a.latest_ms - a.baseline_ms) DESC";
         string ServerName,
         string CollectorName,
         long LatestMs,
-        double BaselineMs);
+        double BaselineMs,
+        DateTime LatestMetricTime);
 
     public static async Task<List<CostRegression>> GetCostRegressionsAsync(
         NpgsqlDataSource postgres, DateTime baselineSinceUtc, long baselineFloorMs, double factor,
@@ -179,7 +189,8 @@ ORDER BY (a.latest_ms - a.baseline_ms) DESC";
                 reader.GetString(1),
                 reader.GetString(2),
                 reader.GetInt64(3),
-                reader.GetDouble(4)));
+                reader.GetDouble(4),
+                reader.GetDateTime(5)));
         }
 
         return rows;
