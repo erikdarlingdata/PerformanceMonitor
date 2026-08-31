@@ -53,7 +53,8 @@ public sealed class PlanForceBot
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
-    /// <summary>Exposed so the worker can skip the call entirely when the bot is off.</summary>
+    /// <summary>Whether the EVALUATION half runs. The review half deliberately does not consult
+    /// this — see <see cref="RunAfterAnalysisAsync"/>.</summary>
     public bool Enabled => _settings.Enabled;
 
     /// <summary>
@@ -70,10 +71,19 @@ public sealed class PlanForceBot
         IReadOnlyList<AnalysisFinding> findings,
         CancellationToken ct)
     {
-        if (!_settings.Enabled || runtime is null || currentConfig is null)
+        if (runtime is null || currentConfig is null)
         {
             return;
         }
+
+        /* Deliberately NOT gated on _settings.Enabled (#2731 review catch): the review half must
+           outlive the switch that armed the force, or disarming the bot would orphan every
+           outstanding live force from the self-review it was promised — pinned forever with nobody
+           watching. A disabled bot still reviews its OWN outstanding forces (one indexed read of a
+           table that is empty unless this deployment ever forced live), journals the verdicts, and
+           WITHHOLDS the unforce write — the gatesOpen check in ExecuteUnforceAsync includes Enabled —
+           so the operator gets one actionable journal row + log line per orphaned force, then quiet.
+           Only the EVALUATION half is Enabled-gated. */
 
         /* The engine seam (#2213's lesson): this bot speaks T-SQL to SqlClient connections and
            nothing else. PLAN_REGRESSION cannot fire for a PostgreSQL target today, but the gate
@@ -93,6 +103,11 @@ public sealed class PlanForceBot
             _logger.LogWarning(
                 "[{Server}] Force-plan bot review pass failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
+        }
+
+        if (!_settings.Enabled)
+        {
+            return;
         }
 
         try
@@ -216,9 +231,11 @@ public sealed class PlanForceBot
     {
         /* Pending rows exist only if this bot placed a live force, so in a never-armed deployment
            this is one indexed read of an empty table per analysis pass. The read still runs under
-           dry-run — a force placed while live must not escape review because someone flipped the
-           global switch back afterwards. */
-        var pending = await _store.GetPendingReviewsAsync(runtime.ServerId, ct);
+           dry-run AND under a disabled bot — a force placed while live must not escape review
+           because someone flipped a global switch back afterwards. The read also surfaces ORPHANED
+           INTENTS (a force whose completion journal write failed after the server was touched); the
+           verify read below answers what actually happened and the state machine closes them. */
+        var pending = await _store.GetPendingReviewsAsync(runtime.ServerId, DateTime.UtcNow, ct);
         if (pending.Count == 0)
         {
             return;
@@ -299,7 +316,7 @@ public sealed class PlanForceBot
            wanted to do and why it did not, and the operator acts by hand. The row still closes the
            review (and still counts into the failure-memory window), so a withheld verdict is not
            re-litigated every pass. */
-        var gatesOpen = !_settings.DryRun && currentConfig.PlanForceBotEnabled;
+        var gatesOpen = _settings.Enabled && !_settings.DryRun && currentConfig.PlanForceBotEnabled;
 
         if (!gatesOpen)
         {
@@ -311,7 +328,7 @@ public sealed class PlanForceBot
                 Decision = verdict.Reason,
                 Reasons = verdict.Reason,
                 Outcome = PgPlanForceActionStore.OutcomeLogged,
-                Detail = "write withheld (dry_run or server opt-in revoked); " + observedDetail,
+                Detail = "write withheld (bot disabled, dry_run, or server opt-in revoked); " + observedDetail,
                 RelatedActionId = force.ActionId,
             }, ct);
 

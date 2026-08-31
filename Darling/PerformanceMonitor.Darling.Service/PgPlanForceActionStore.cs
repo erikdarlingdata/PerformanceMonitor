@@ -51,7 +51,7 @@ public interface IPlanForceActionStore
     Task<ForcePlanBotHistory> GetQueryHistoryAsync(
         int serverId, string database, long queryId, ForcePlanBotSettings settings, DateTime nowUtc, CancellationToken ct);
 
-    Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(int serverId, CancellationToken ct);
+    Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(int serverId, DateTime nowUtc, CancellationToken ct);
 }
 
 /// <summary>
@@ -200,14 +200,28 @@ SELECT
             Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture));
     }
 
+    /// <summary>How long an 'attempting' intent row may stand alone before the review treats it as
+    /// an orphan — long enough for any live force + completion write to finish, short enough that a
+    /// force whose completion journal write failed is verified within the first checkpoint.</summary>
+    public const int OrphanedIntentGraceMinutes = 10;
+
     /// <summary>
-    /// Live forces still owed a review: succeeded force rows with no terminal follow-up row (an
-    /// unforce, or a review row whose decision closed it). OWN-FORCES-ONLY is structural here — the
-    /// read starts from rows this bot journaled, so an operator's hand-placed force can never
-    /// surface as something to unforce.
+    /// Live forces still owed a review, in two shapes:
+    /// <list type="bullet">
+    /// <item>succeeded completion rows with no terminal follow-up row (an unforce, or a review row
+    /// whose decision closed it) — the normal case;</item>
+    /// <item>ORPHANED INTENT rows (#2731 review catch): 'attempting' rows past the grace window that
+    /// no completion row ever referenced. The write may have landed on the server before the
+    /// completion journal write failed (a store blip, a crash between the two), and a force the
+    /// journal lost track of must not escape review — the verify read answers what actually
+    /// happened, and the state machine closes it either way (still forced → a real review;
+    /// not forced → no_longer_forced).</item>
+    /// </list>
+    /// OWN-FORCES-ONLY is structural here — the read starts from rows this bot journaled, so an
+    /// operator's hand-placed force can never surface as something to unforce.
     /// </summary>
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(
-        int serverId, CancellationToken ct)
+        int serverId, DateTime nowUtc, CancellationToken ct)
     {
         await using var connection = await _postgres.OpenConnectionAsync(ct);
         await using var command = new NpgsqlCommand(@"
@@ -218,7 +232,17 @@ SELECT pfa.action_id, pfa.action_time, pfa.server_id, pfa.server_name, pfa.datab
 FROM collect.plan_force_actions AS pfa
 WHERE pfa.server_id = $1
 AND   pfa.action = 'force'
-AND   pfa.outcome = 'succeeded'
+AND   (pfa.outcome = 'succeeded'
+       /* An intent whose completion row exists is accounted for (succeeded rows anchor their own
+          pending entry; failed rows need no review). Only an intent NOTHING references, past the
+          grace window, is an orphan. */
+       OR (pfa.outcome = 'attempting'
+           AND pfa.action_time < $2
+           AND NOT EXISTS (
+                 SELECT 1
+                 FROM collect.plan_force_actions AS completion
+                 WHERE completion.related_action_id = pfa.action_id
+                 AND   completion.action = 'force')))
 AND   NOT EXISTS (
         SELECT 1
         FROM collect.plan_force_actions AS closer
@@ -228,6 +252,8 @@ ORDER BY pfa.action_time
 LIMIT 16", connection);
 
         command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(
+            nowUtc.AddMinutes(-OrphanedIntentGraceMinutes), DateTimeKind.Unspecified));
 
         var rows = new List<PlanForceActionRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);

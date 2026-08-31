@@ -148,7 +148,7 @@ public sealed class PlanForceActionStoreTests
                 reasons: "", outcome: PgPlanForceActionStore.OutcomeSucceeded,
                 mode: PgPlanForceActionStore.ModeLive), ct);
 
-            var pending = await store.GetPendingReviewsAsync(TestServerId, ct);
+            var pending = await store.GetPendingReviewsAsync(TestServerId, now, ct);
             var pendingRow = Assert.Single(pending);
             Assert.Equal(forceId, pendingRow.ActionId);
 
@@ -157,7 +157,7 @@ public sealed class PlanForceActionStoreTests
                 reasons: "net_benefit_confirmed", outcome: PgPlanForceActionStore.OutcomeLogged,
                 mode: PgPlanForceActionStore.ModeLive, relatedActionId: forceId), ct);
 
-            Assert.Empty(await store.GetPendingReviewsAsync(TestServerId, ct));
+            Assert.Empty(await store.GetPendingReviewsAsync(TestServerId, now, ct));
 
             /* 5. A LIVE force writes an intent row and a completion row (both action='force', the
                completion pointing back via related_action_id). The daily budget must count that as
@@ -181,6 +181,33 @@ public sealed class PlanForceActionStoreTests
                path a server-scoped read never touches. */
             var fleetWide = await store.GetRecentActionsAsync(null, now.AddDays(-1), 100, ct);
             Assert.True(fleetWide.Count >= 5);
+
+            /* 7. Orphaned intents (#2731 round 3): an 'attempting' row whose completion journal
+               write never landed surfaces for review once past the grace window — a force the
+               journal lost track of must not escape review — while a FRESH intent (mid-force) and an
+               intent with a completion row do not. */
+            var freshIntent = await store.JournalAsync(Record(now.AddMinutes(-2),
+                action: PgPlanForceActionStore.ActionForce, decision: PgPlanForceActionStore.ActionForce,
+                reasons: "", outcome: PgPlanForceActionStore.OutcomeAttempting,
+                mode: PgPlanForceActionStore.ModeLive), ct);
+            var orphanIntent = await store.JournalAsync(Record(now.AddMinutes(-30),
+                action: PgPlanForceActionStore.ActionForce, decision: PgPlanForceActionStore.ActionForce,
+                reasons: "", outcome: PgPlanForceActionStore.OutcomeAttempting,
+                mode: PgPlanForceActionStore.ModeLive), ct);
+
+            var withOrphan = await store.GetPendingReviewsAsync(TestServerId, now, ct);
+            Assert.DoesNotContain(withOrphan, r => r.ActionId == freshIntent);
+            Assert.DoesNotContain(withOrphan, r => r.ActionId == intentId); /* has a completion row */
+            Assert.Contains(withOrphan, r => r.ActionId == orphanIntent);
+
+            /* A review row closes the orphan exactly like a completed force. */
+            await store.JournalAsync(Record(now,
+                action: PgPlanForceActionStore.ActionReview, decision: "no_longer_forced",
+                reasons: "no_longer_forced", outcome: PgPlanForceActionStore.OutcomeLogged,
+                mode: PgPlanForceActionStore.ModeLive, relatedActionId: orphanIntent), ct);
+            Assert.DoesNotContain(
+                await store.GetPendingReviewsAsync(TestServerId, now, ct),
+                r => r.ActionId == orphanIntent);
 
             bodySucceeded = true;
         }

@@ -51,7 +51,7 @@ public sealed class PlanForceBotTests
             int serverId, string database, long queryId, ForcePlanBotSettings settings, DateTime nowUtc, CancellationToken ct) =>
             Task.FromResult(History);
 
-        public Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(int serverId, CancellationToken ct) =>
+        public Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(int serverId, DateTime nowUtc, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<PlanForceActionRecord>>(Pending);
     }
 
@@ -138,7 +138,7 @@ public sealed class PlanForceBotTests
     /* ---------------- the gates that keep everything inert ---------------- */
 
     [Fact]
-    public async Task DisabledBot_TouchesNothing()
+    public async Task DisabledBot_EvaluatesNothing_AndTouchesNoServer()
     {
         var (bot, store, executor) = Build(ForcePlanBotSettings.Default);
 
@@ -147,6 +147,27 @@ public sealed class PlanForceBotTests
 
         Assert.Empty(store.Journaled);
         Assert.Empty(executor.Calls);
+    }
+
+    [Fact]
+    public async Task DisabledBot_StillReviewsItsOutstandingForces_WithTheWriteWithheld()
+    {
+        /* The #2731 round-3 catch: disarming the bot must not orphan a force it placed while armed.
+           Disabled means the verify READ still runs, the verdict is journaled, and the unforce write
+           is WITHHELD — one actionable journal row per orphaned force, never a silent forever-pin
+           and never a write from a disarmed bot. */
+        var (bot, store, executor) = Build(ForcePlanBotSettings.Default);
+        store.Pending.Add(PendingForce(DateTime.UtcNow.AddHours(-2)));
+        executor.VerifyResult = new PlanForceVerifyResult(true, 0, null, 100, 49000);
+
+        await bot.RunAfterAnalysisAsync(Runtime(), Config(optedIn: true),
+            Array.Empty<AnalysisFinding>(), CancellationToken.None);
+
+        Assert.Contains(executor.Calls, c => c.StartsWith("verify:", StringComparison.Ordinal));
+        Assert.DoesNotContain(executor.Calls, c => c.StartsWith("unforce:", StringComparison.Ordinal));
+        var row = store.Journaled.Single(r => r.Action == PgPlanForceActionStore.ActionUnforce);
+        Assert.Equal(PgPlanForceActionStore.OutcomeLogged, row.Outcome);
+        Assert.StartsWith("write withheld", row.Detail, StringComparison.Ordinal);
     }
 
     [Fact]

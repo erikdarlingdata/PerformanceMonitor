@@ -333,9 +333,9 @@ public sealed class DarlingWorker : BackgroundService
     private NpgsqlDataSource? _postgres;
 
     /* #2138 phase 1: the auto force-plan bot, constructed by RunCollectionLoopAsync alongside the
-       analysis pieces. Null until then, and PERMANENTLY null-behaving when forcePlanBot.enabled is
-       false (the shipped default) — the scheduled-analysis hook checks Enabled before wiring it into
-       a pass, so a disabled bot costs nothing. */
+       analysis pieces. Null until then. Wired into every scheduled pass even when disabled: the
+       disabled cost is one indexed pending-review read of the (normally empty) journal, and that
+       read is what keeps an outstanding live force under review after the bot is disarmed. */
     private PlanForceBot? _planForceBot;
 
     /* The live control-plane state (Stage 1): the last-seen config_version reload beacon and the
@@ -3834,11 +3834,13 @@ LIMIT 1", connection);
 
         /* #2138: the force-plan bot rides the scheduled pass's findings — same evidence the operator
            sees, no second analysis. server.Config (not runtime.Config) so a store-reload change to
-           the per-server opt-in is honored on the next pass. The hook is only wired when the bot is
-           enabled, so the shipped default adds nothing to the pass. */
+           the per-server opt-in is honored on the next pass. Wired whenever the bot exists — NOT
+           gated on Enabled — because the bot's review half must outlive the switch that armed a
+           force (see RunAfterAnalysisAsync); a disabled bot's whole pass is one indexed read of a
+           journal that is empty unless this deployment ever forced live. */
         var planForceBot = _planForceBot;
         Func<IReadOnlyList<AnalysisFinding>, Task>? postPassHook =
-            planForceBot is { Enabled: true }
+            planForceBot is not null
                 ? findings => planForceBot.RunAfterAnalysisAsync(runtime, server.Config, findings, stoppingToken)
                 : null;
 
