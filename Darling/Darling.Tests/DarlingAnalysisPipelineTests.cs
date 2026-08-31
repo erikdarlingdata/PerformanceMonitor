@@ -563,5 +563,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity { get; init; } = 1.5;
         public int AnalysisNotifyCooldownMinutes { get; init; } = 360;
+        public string TriageBaseUrl { get; init; } = "";
     }
 }

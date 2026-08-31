@@ -15,7 +15,7 @@
  * "Story:/Severity:/Confidence:" findings render as labeled fields).
  */
 
-import { el, mount, readTool, loadingStrip, errorStrip, emptyStrip, disclosure } from "../util.js";
+import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, disclosure } from "../util.js";
 import { VIZ } from "../panels.js";
 
 const ALERT_COLUMNS = [
@@ -26,7 +26,17 @@ const ALERT_COLUMNS = [
   { key: "threshold_value", label: "Threshold", format: "num1" },
   { key: "status", label: "Status", render: (a) => statusCell(a) },
   { key: "detail_text", label: "Detail", render: (a) => detailCell(a) },
+  { key: "triage", label: "Triage", render: (a) => triageCell(a) },
 ];
+
+/* Deep-link into the #2710 triage page for this row — the SAME route the alert webhooks link to, anchored at
+ * this row's own firing instant, so the in-app path and the delivered link land on an identical page. */
+function triageCell(a) {
+  return el("a", {
+    href: "#/triage" + buildQuery({ server: a.server_name, metric: a.metric_name, at: a.alert_time }),
+    text: "Open",
+  });
+}
 
 /* Channel (always tray) + Sent + Muted + Delivery Error collapse into one glyph+text status cell (B2). */
 function statusCell(a) {

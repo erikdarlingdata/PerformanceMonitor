@@ -282,6 +282,12 @@
     "enabled": false,
     "port": 5153,
 
+    // The base URL RECIPIENTS can reach this dashboard on (e.g. "http://10.0.0.5:5153"). Set it and every
+    // alert webhook (Teams/Slack/PagerDuty/generic {{triage_url}}) carries a per-alert triage-page link;
+    // leave it empty (the default) and alerts carry no link. Not derived from network.listen on purpose:
+    // what the service binds is not necessarily what recipients can reach (DNS name, proxy, TLS host).
+    "publicBaseUrl": "",
+
     // Uncomment to expose the dashboard on the LAN (a comma already follows "port" above):
     // "network": {
     //   "listen": "192.168.1.205",                     // specific bind IP preferred; "0.0.0.0" = all interfaces.
