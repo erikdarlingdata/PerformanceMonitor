@@ -147,10 +147,10 @@ ranked AS
 agg AS
 (
     SELECT server_id, collector_name,
-           max(sql_ms) FILTER (WHERE day = latest_day)                  AS latest_ms,
-           avg(sql_ms) FILTER (WHERE day < latest_day)                  AS baseline_ms,
-           count(*)    FILTER (WHERE day < latest_day)                  AS baseline_days,
-           max(latest_metric_time_in_day) FILTER (WHERE day = latest_day) AS latest_metric_time
+           max(sql_ms)                     FILTER (WHERE day = latest_day) AS latest_ms,
+           avg(sql_ms)                     FILTER (WHERE day < latest_day) AS baseline_ms,
+           count(*)                        FILTER (WHERE day < latest_day) AS baseline_days,
+           max(latest_metric_time_in_day)  FILTER (WHERE day = latest_day) AS latest_metric_time
     FROM ranked
     GROUP BY server_id, collector_name
 )
