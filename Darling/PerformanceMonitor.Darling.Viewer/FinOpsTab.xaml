@@ -452,11 +452,11 @@
                                     </GroupBox>
                                 </Grid>
                                 <GroupBox Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10" Foreground="{DynamicResource ForegroundBrush}">
-                                    <ItemsControl x:Name="FinOpsDbSizeChart" Margin="8,4,8,4">
+                                    <ItemsControl x:Name="FinOpsDbSizeChart" Margin="8,4,8,4" Grid.IsSharedSizeScope="True">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
                                                 <Grid Margin="0,2" Height="22">
-                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto" MinWidth="90"/></Grid.ColumnDefinitions>
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto" MinWidth="90" SharedSizeGroup="DbSizeLabel"/></Grid.ColumnDefinitions>
                                                     <TextBlock Grid.Column="0" Text="{Binding DatabaseName}" VerticalAlignment="Center" FontSize="11.5" Foreground="{DynamicResource ForegroundBrush}" TextTrimming="CharacterEllipsis"/>
                                                     <Grid Grid.Column="1" Margin="4,2">
                                                         <Border CornerRadius="3" Background="#1AFFFFFF"/>
