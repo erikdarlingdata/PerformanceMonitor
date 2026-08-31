@@ -119,6 +119,12 @@ public static class DarlingManagedRoles
                    all: an unclassified column stays invisible to `viewer` rather than being exposed by
                    default, so the live security gate fails until someone decides which side it is on. */
                 "engine", "port",
+                /* V107 (#2138): whether the force-plan bot may write to this server. Non-secret — an
+                   arm/disarm STATE, exactly as sensitive as is_enabled beside it, and the viewer has to
+                   be able to SHOW which servers are armed for the opt-in to be auditable at all. The
+                   fail-closed gate is why it must be named here: unclassified stays invisible to
+                   `viewer` and the live security test fails until someone decides which side it is on. */
+                "plan_force_bot_enabled",
             },
             SecretColumns: new[] { "encrypted_password" }),
 
