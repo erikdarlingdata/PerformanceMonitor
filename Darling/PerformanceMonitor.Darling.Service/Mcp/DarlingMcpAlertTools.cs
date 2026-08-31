@@ -41,7 +41,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// row carrying its server), or name a server to scope to it. get_alert_settings reports the single global
 /// alert-settings row the service hot-swaps in (the viewer's Settings-window desired state); SMTP/webhook
 /// delivery credentials are managed separately and are not exposed here (the least-privilege mcp role cannot
-/// read the secret columns anyway).</para>
+/// read the secret columns anyway) — configure them in the standalone PerformanceMonitor Darling Viewer app's
+/// Settings window (Notifications section), pointed at this store's connection string. The Viewer's Postgres
+/// connection is not hardcoded to localhost, so it can configure a remote headless box exactly as well as a
+/// local one.</para>
 ///
 /// <para><b>Writes route through the EXISTING authority, never a parallel copy.</b> update_alert_settings is a
 /// PARTIAL update of the single <c>config_alert_settings</c> row (id=1) — the caller reads via get_alert_settings,
@@ -124,7 +127,7 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode, and the scheduled-analysis cadence. This is the single global settings row the service hot-swaps in. SMTP/webhook delivery credentials are managed separately and are not reported here.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode, and the scheduled-analysis cadence. This is the single global settings row the service hot-swaps in. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
     public static async Task<string> GetAlertSettings(
         NpgsqlDataSource postgres)
     {
@@ -319,7 +322,10 @@ public sealed class DarlingMcpAlertTools
         "the Viewer's Settings window enforces — thresholds in range, cpu.mode 'sql'|'total', delivery.mode " +
         "'Summary'|'PerEvent', counts within their bounds; an out-of-range value or an unknown field returns " +
         "{status:\"invalid\", ...} and writes NOTHING. On success the running service hot-reloads the change within " +
-        "one collection sweep. SMTP/webhook delivery credentials are managed separately and cannot be set here. " +
+        "one collection sweep. SMTP/webhook delivery credentials are managed separately and cannot be set here " +
+        "— configure them in the standalone Darling Viewer app's Settings window (Notifications section), which " +
+        "connects to this store (including remotely, not just localhost) rather than requiring desktop access to " +
+        "this specific box. " +
         "Returns {status:\"updated\", updated_fields:[...], settings:{...}} with the full new settings, or " +
         "{status:\"unavailable\"} when the settings row has not been seeded yet.")]
     public static async Task<string> UpdateAlertSettings(
