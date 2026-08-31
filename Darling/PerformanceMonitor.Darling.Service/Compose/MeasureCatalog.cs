@@ -69,6 +69,15 @@ public enum MeasureRatioMode
     /// <see cref="ComposeMeasure.WeightColumn"/> (the interval's execution weight) — not numerator/denominator
     /// measures, because the pre-aggregated averages are deliberately NOT exposed as summable scalar measures.</summary>
     Weighted,
+
+    /// <summary><c>SUM(value * weight)</c> — <see cref="Weighted"/>'s numerator with NO denominator: the window
+    /// TOTAL of a pre-aggregated per-interval average times its weight (e.g. Query Store total CPU =
+    /// SUM(<c>avg_cpu_time_us</c> * <c>execution_count</c>), each interval's total consumption). Rides the Ratio
+    /// kind — not a Scalar — because its aggregation is part of the definition, exactly like a ratio's
+    /// (<see cref="ComposeMeasure.ValidAggs"/> is empty), and because its operands are the same RAW
+    /// <see cref="ComposeMeasure.WeightedValueColumn"/> / <see cref="ComposeMeasure.WeightColumn"/> pair,
+    /// not numerator/denominator measures (#2732).</summary>
+    WeightedSum,
 }
 
 /// <summary>The fixed aggregation vocabulary. <c>percentile_cont</c> is legal ONLY on
@@ -193,15 +202,17 @@ public sealed record ComposeMeasure
     /// pre-aggregated per-interval average.</summary>
     public MeasureRatioMode RatioMode { get; init; } = MeasureRatioMode.Sum;
 
-    /// <summary>For a <see cref="MeasureRatioMode.Weighted"/> ratio: the raw source column that is itself a
-    /// pre-aggregated per-interval AVERAGE (e.g. Query Store <c>avg_duration_us</c>), whose execution-weighted
-    /// mean is computed as <c>SUM(value * weight) / SUM(weight)</c>. A real payload column of the source
-    /// (pinned by test); null for every other kind/mode.</summary>
+    /// <summary>For a <see cref="MeasureRatioMode.Weighted"/> or <see cref="MeasureRatioMode.WeightedSum"/>
+    /// ratio: the raw source column that is itself a pre-aggregated per-interval AVERAGE (e.g. Query Store
+    /// <c>avg_duration_us</c>), whose execution-weighted mean is computed as <c>SUM(value * weight) /
+    /// SUM(weight)</c> (Weighted) or whose window total as <c>SUM(value * weight)</c> (WeightedSum). A real
+    /// payload column of the source (pinned by test); null for every other kind/mode.</summary>
     public string? WeightedValueColumn { get; init; }
 
-    /// <summary>For a <see cref="MeasureRatioMode.Weighted"/> ratio: the raw source column each interval's
-    /// <see cref="WeightedValueColumn"/> is weighted by (the interval's execution count, e.g.
-    /// <c>execution_count</c>). A real payload column of the source (pinned by test); null otherwise.</summary>
+    /// <summary>For a <see cref="MeasureRatioMode.Weighted"/> or <see cref="MeasureRatioMode.WeightedSum"/>
+    /// ratio: the raw source column each interval's <see cref="WeightedValueColumn"/> is weighted by (the
+    /// interval's execution count, e.g. <c>execution_count</c>). A real payload column of the source (pinned
+    /// by test); null otherwise.</summary>
     public string? WeightColumn { get; init; }
 
     public required string NativeUnit { get; init; }
@@ -1089,6 +1100,27 @@ public static class MeasureCatalog
             Kind = MeasureKind.Ratio, RatioMode = MeasureRatioMode.Weighted,
             WeightedValueColumn = "avg_cpu_time_us", WeightColumn = "execution_count",
             NativeUnit = "us", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            ValidAggs = NoAggs, AllowedDimensions = QueryStoreDims,
+        },
+        /* TOTAL consumption over the window (#2732): SUM(avg * execution_count) — the Weighted ratios'
+           numerator with no denominator (MeasureRatioMode.WeightedSum), since avg * execution_count IS the
+           interval's total. This is what "what consumed the most CPU" ranks by — a per-execution average
+           would rank a query that ran once at 30s over one that burned an hour at 200ms a call. Default
+           unit 's' rather than 'ms': a window total across a whole store runs to seconds-to-hours. */
+        new ComposeMeasure
+        {
+            Key = "qs_total_duration_us", DisplayName = "Query Store total duration", Category = CatQueryStore, SourceTable = "query_store_stats",
+            Kind = MeasureKind.Ratio, RatioMode = MeasureRatioMode.WeightedSum,
+            WeightedValueColumn = "avg_duration_us", WeightColumn = "execution_count",
+            NativeUnit = "us", DefaultUnit = "s", UnitFamily = FamilyDuration,
+            ValidAggs = NoAggs, AllowedDimensions = QueryStoreDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "qs_total_cpu_us", DisplayName = "Query Store total CPU time", Category = CatQueryStore, SourceTable = "query_store_stats",
+            Kind = MeasureKind.Ratio, RatioMode = MeasureRatioMode.WeightedSum,
+            WeightedValueColumn = "avg_cpu_time_us", WeightColumn = "execution_count",
+            NativeUnit = "us", DefaultUnit = "s", UnitFamily = FamilyDuration,
             ValidAggs = NoAggs, AllowedDimensions = QueryStoreDims,
         },
 

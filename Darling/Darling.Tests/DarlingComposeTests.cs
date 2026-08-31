@@ -88,9 +88,9 @@ public sealed class DarlingComposeTests
     [Fact]
     public void EveryRatioMeasure_ReferencesRealSameSourceScalars()
     {
-        /* Sum/Avg ratios divide two scalar measures; Weighted ratios instead reference RAW source columns
-           (WeightedValueColumn + WeightColumn), pinned separately by WeightedRatio_Columns_AreRealPayloadColumns. */
-        foreach (var ratio in MeasureCatalog.Measures.Where(m => m.Kind == MeasureKind.Ratio && m.RatioMode != MeasureRatioMode.Weighted))
+        /* Sum/Avg ratios divide two scalar measures; Weighted/WeightedSum ratios instead reference RAW source
+           columns (WeightedValueColumn + WeightColumn), pinned separately by WeightedRatio_Columns_AreRealPayloadColumns. */
+        foreach (var ratio in MeasureCatalog.Measures.Where(m => m.Kind == MeasureKind.Ratio && m.RatioMode is MeasureRatioMode.Sum or MeasureRatioMode.Avg))
         {
             var numerator = MeasureCatalog.Measure(ratio.NumeratorKey);
             var denominator = MeasureCatalog.Measure(ratio.DenominatorKey);
@@ -108,13 +108,14 @@ public sealed class DarlingComposeTests
     {
         var payload = PayloadColumnsByTable();
         var weighted = MeasureCatalog.Measures
-            .Where(m => m.Kind == MeasureKind.Ratio && m.RatioMode == MeasureRatioMode.Weighted).ToList();
+            .Where(m => m.Kind == MeasureKind.Ratio && m.RatioMode is MeasureRatioMode.Weighted or MeasureRatioMode.WeightedSum).ToList();
         Assert.NotEmpty(weighted);
         foreach (var ratio in weighted)
         {
             var columns = payload[ratio.SourceTable];
-            /* A Weighted ratio's two operands are raw columns of its own source (the pre-aggregated average and
-               its execution weight), so both must be real payload columns — the compiler emits them directly. */
+            /* A Weighted/WeightedSum ratio's two operands are raw columns of its own source (the pre-aggregated
+               average and its execution weight), so both must be real payload columns — the compiler emits them
+               directly. */
             Assert.True(ratio.WeightedValueColumn is not null && columns.Contains(ratio.WeightedValueColumn),
                 $"weighted ratio '{ratio.Key}' value column '{ratio.WeightedValueColumn}' is not a payload column of '{ratio.SourceTable}'.");
             Assert.True(ratio.WeightColumn is not null && columns.Contains(ratio.WeightColumn),
@@ -520,6 +521,21 @@ public sealed class DarlingComposeTests
         Assert.True(error is null, error);
         Assert.Contains("FROM collect.query_store_stats_corrected_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains("SUM(f.duration_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0)", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_QueryStore_WeightedSum_RoutesToCagg_ReadsTheWeightedSumColumnAlone()
+    {
+        /* #2732: the total remaps to the reshaped CAGG's pre-multiplied product-sum DIRECTLY — the corrected
+           rollups materialize SUM(avg * execution_count) as cpu_us_weighted_sum, so the total re-aggregates
+           additively with no denominator and no NULLIF. */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_corrected_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(f.cpu_us_weighted_sum) AS double precision)", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("NULLIF", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("avg_cpu_time_us", compiled.Sql, StringComparison.Ordinal); /* not the raw column */
     }
 
     [Fact]
@@ -1158,6 +1174,22 @@ public sealed class DarlingComposeTests
         Assert.Contains("/ 1000.0", sql, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("qs_total_duration_us", "avg_duration_us")]
+    [InlineData("qs_total_cpu_us", "avg_cpu_time_us")]
+    public void Compile_WeightedSum_IsProductSum_WithNoDenominator(string measureKey, string valueColumn)
+    {
+        /* #2732: the window TOTAL — the Weighted ratios' numerator alone, SUM(avg * execution_count), since
+           avg * execution_count is each interval's total consumption. No NULLIF anywhere: there is no division. */
+        var sql = Compile(ValidPlan($"{{\"source\":\"query_store_stats\",\"ratio\":\"{measureKey}\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}"));
+        Assert.Contains($"CAST(SUM(f.{valueColumn} * f.execution_count) AS double precision)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("NULLIF", sql, StringComparison.Ordinal);
+        Assert.Contains("collect.query_store_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
+        /* native µs displayed as the default s — a window total across a store runs to seconds-to-hours. */
+        Assert.Contains("/ 1000000.0", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_QueryStoreRawRoute_DedupsPerIntervalBeforeAggregating()
     {
@@ -1244,6 +1276,35 @@ public sealed class DarlingComposeTests
             var reason = RejectReason($"{{\"source\":\"query_store_stats\",\"measure\":\"{key}\",\"aggregate\":\"sum\",\"viz\":\"table\"}}");
             Assert.Contains("reference it as 'ratio'", reason, StringComparison.OrdinalIgnoreCase);
         }
+    }
+
+    [Fact]
+    public void WeightedSumQsTotals_ValidateAsRatios_AndRejectMeasureReference()
+    {
+        /* #2732: the totals ride the Ratio kind (their aggregation is the definition, like a ratio's), so the
+           spec/wire seam needs no new special case — referenced as 'ratio', aggregate fixed, default unit 's'. */
+        foreach (var key in new[] { "qs_total_duration_us", "qs_total_cpu_us" })
+        {
+            var plan = ValidPlan($"{{\"source\":\"query_store_stats\",\"ratio\":\"{key}\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}");
+            Assert.Equal(MeasureKind.Ratio, plan.Measure.Kind);
+            Assert.Equal(MeasureRatioMode.WeightedSum, plan.Measure.RatioMode);
+            Assert.Equal("s", plan.Unit);
+
+            var reason = RejectReason($"{{\"source\":\"query_store_stats\",\"measure\":\"{key}\",\"aggregate\":\"sum\",\"viz\":\"table\"}}");
+            Assert.Contains("reference it as 'ratio'", reason, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void WeightedSumQsTotals_SupportRankedMode_TopQueryHashByTotalCpu()
+    {
+        /* The panel the issue exists for: "top query_hash by total CPU" — ranked mode, ORDER BY value DESC.
+           A per-execution average would rank a one-shot 30s query over one that burned an hour at 200ms/call. */
+        var sql = Compile(ValidPlan(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"topN\":10,\"groupBy\":[\"query_hash\"],\"viz\":\"table\"}"));
+        Assert.Contains("CAST(SUM(f.avg_cpu_time_us * f.execution_count) AS double precision)", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY value DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $", sql, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── D3: per-panel thresholds (render-only) ─────────────────────────── */
@@ -2349,6 +2410,77 @@ public sealed class ComposeQueryStoreLivePostgresTests
             }
 
             Assert.Equal(41.0, total, 3);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task ComposedQueryStoreTotalCpuPanel_RunsOnPostgres_AndSumsTheProductOverDedupedIntervals()
+    {
+        /* #2732: the WeightedSum raw route — SUM(avg_cpu_time_us * execution_count) — must ride the same #1841
+           dedup wrapper as everything else on this source. Every row carries avg_cpu_time_us = 500, so the
+           deduped total is 500 * 41 = 20500 µs; an un-deduped product-sum would read 500 * 53 = 26500. */
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live compose Query Store test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteAsync(connection, TestContext.Current.CancellationToken);
+
+        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var bucket = end.AddHours(-2);
+        var firstExecA = bucket.AddMinutes(1);
+        var firstExecB = bucket.AddMinutes(2);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The dedup test's fixture: interval A re-collected three times flat at 1, interval B twice while
+               it grew 10 -> 40. Deduped executions = 41. */
+            foreach (var minute in new[] { 5, 10, 15 })
+            {
+                await InsertAsync(connection, bucket.AddMinutes(minute), queryId: 1, planId: 11, firstExecA, execCount: 1);
+            }
+
+            await InsertAsync(connection, bucket.AddMinutes(5), queryId: 2, planId: 22, firstExecB, execCount: 10);
+            await InsertAsync(connection, bucket.AddMinutes(10), queryId: 2, planId: 22, firstExecB, execCount: 40);
+
+            /* unit 'us' (not the 's' default) so the expected value stays integral. */
+            var (plan, parseError) = ComposeSpec.TryParsePanel(
+                (JsonObject)JsonNode.Parse("{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"unit\":\"us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}")!,
+                []);
+            Assert.True(parseError is null, parseError);
+
+            var (compiled, compileError) = ComposeCompiler.Compile(
+                plan!,
+                new ComposeRunContext([ServerName], end.AddHours(-3), end, ComposeRunContext.NoVariables,
+                    RollupAvailability.All, end, RollupCoverage.Unknown));
+            Assert.True(compileError is null, compileError);
+            Assert.False(compiled!.Route.IsCagg, "the window must stay on the raw route for this test to mean anything");
+
+            await using var command = new NpgsqlCommand(compiled.Sql, connection);
+            foreach (var parameter in compiled.Parameters)
+            {
+                command.Parameters.Add(parameter);
+            }
+
+            var total = 0.0;
+            await using (var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken))
+            {
+                while (await reader.ReadAsync(TestContext.Current.CancellationToken))
+                {
+                    total += reader.GetDouble(reader.GetOrdinal("value"));
+                }
+            }
+
+            Assert.Equal(20500.0, total, 3);
 
             bodySucceeded = true;
         }
