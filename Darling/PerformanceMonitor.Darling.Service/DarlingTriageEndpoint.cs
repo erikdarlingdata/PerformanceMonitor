@@ -67,16 +67,51 @@ internal static class DarlingTriageEndpoint
     }
 
     /// <summary>
+    /// The resolution-title → firing-metric aliases (review catch on this PR): the active→inactive edge
+    /// records <c>resolution.Title</c> — not the firing metric — into <c>config_alert_log.metric_name</c>
+    /// (<c>DarlingSelfAlertEvaluator</c>'s resolution write), and the Alert History page's Triage link makes
+    /// every one of those rows a reachable entry point. Without these keys a "CPU Resolved" row landed on the
+    /// thin fallback, losing exactly the CPU drill-down that would confirm the recovery. Each alias maps to
+    /// the SAME section list as its firing metric — confirming a recovery asks the same questions as
+    /// investigating the firing, one window later. The AG and Server Unreachable/Restored families need no
+    /// entry here: their recovery edges deliver under their own metric names, mapped directly below; Failed
+    /// Agent Job has no resolution edge at all. Declared ABOVE <see cref="SectionsByMetric"/> deliberately:
+    /// static field initializers run in declaration order, and the map builder reads this list.
+    /// </summary>
+    internal static readonly IReadOnlyList<(string Alias, string Canonical)> ResolutionAliases = new[]
+    {
+        ("CPU Resolved", "High CPU"),
+        ("Blocking Cleared", "Blocking Detected"),
+        ("Blocking Wait Cleared", "Blocking Wait Time"),
+        ("Deadlocks Cleared", "Deadlocks Detected"),
+        ("Poison Waits Cleared", "Poison Wait"),
+        ("Long-Running Queries Cleared", "Long-Running Query"),
+        ("tempdb Space Resolved", "tempdb Space"),
+        ("Volume Free Space Resolved", "Volume Free Space"),
+        ("Version Store (PVS) Resolved", "Version Store (PVS)"),
+        ("Database File Growth Resolved", "Database File Growth"),
+        ("Long-Running Jobs Cleared", "Long-Running Job"),
+        ("Database State Resolved", "Database State"),
+        ("Forced Plan Failing Resolved", "Forced Plan Failing"),
+    };
+
+    /// <summary>
     /// The alert-type → relevant-reads mapping, keyed by the EXACT <c>MetricName</c> the alert engine fires
     /// (the same string the history row and the mute rules key on — <c>AlertEngine</c> /
-    /// <c>DarlingSelfAlertEvaluator</c> / <c>PostgresAlertEvaluator</c> literals). Hours are lookback BEFORE
-    /// the firing instant (the per-request <c>as_of</c> anchors each window's END there), sized per signal:
-    /// short for point-in-time state (active queries), a day for trends whose shape is the finding. A metric
-    /// not listed here — a self-alert, or a metric added later — falls back to <see cref="DefaultSections"/>
-    /// rather than failing, and the pinned test only guards that every read named HERE really dispatches.
+    /// <c>DarlingSelfAlertEvaluator</c> / <c>PostgresAlertEvaluator</c> literals), plus the
+    /// <see cref="ResolutionAliases"/> — see there for why a RESOLUTION row needs its own key. Hours are
+    /// lookback BEFORE the firing instant (the per-request <c>as_of</c> anchors each window's END there),
+    /// sized per signal: short for point-in-time state (active queries), a day for trends whose shape is the
+    /// finding. A metric not listed here — a self-alert, or a metric added later — falls back to
+    /// <see cref="DefaultSections"/> rather than failing, and the pinned test only guards that every read
+    /// named HERE really dispatches.
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, IReadOnlyList<TriageSection>> SectionsByMetric =
-        new Dictionary<string, IReadOnlyList<TriageSection>>(StringComparer.OrdinalIgnoreCase)
+        BuildSectionsByMetric();
+
+    private static Dictionary<string, IReadOnlyList<TriageSection>> BuildSectionsByMetric()
+    {
+        var map = new Dictionary<string, IReadOnlyList<TriageSection>>(StringComparer.OrdinalIgnoreCase)
         {
             ["High CPU"] = new[]
             {
@@ -188,6 +223,17 @@ internal static class DarlingTriageEndpoint
                 S("Replication stats", "get_pg_replication_stats", ("hours", "24"), ("limit", "25")),
             },
         };
+
+        /* Alias AFTER the literals so each resolution title shares its firing metric's exact list — a
+           canonical named here but absent above is a construction error, and failing the process at type
+           initialization is louder than any test. */
+        foreach (var (alias, canonical) in ResolutionAliases)
+        {
+            map[alias] = map[canonical];
+        }
+
+        return map;
+    }
 
     private static TriageSection[] AgSections() => new[]
     {

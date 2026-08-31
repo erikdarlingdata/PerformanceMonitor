@@ -92,6 +92,23 @@ public sealed class DarlingTriageEndpointTests
         Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor("high cpu"));
     }
 
+    /// <summary>Review catch: resolution rows record <c>resolution.Title</c> — not the firing metric — into
+    /// <c>metric_name</c>, and the Alert History Triage link makes every one of them an entry point. Each
+    /// alias must land on the SAME section list as its firing metric, so a "CPU Resolved" click-through
+    /// carries the CPU drill-down that confirms the recovery instead of the thin fallback.</summary>
+    [Fact]
+    public void EveryResolutionAlias_SharesItsFiringMetricsSections()
+    {
+        Assert.NotEmpty(DarlingTriageEndpoint.ResolutionAliases);
+        foreach (var (alias, canonical) in DarlingTriageEndpoint.ResolutionAliases)
+        {
+            Assert.True(DarlingTriageEndpoint.SectionsByMetric.ContainsKey(canonical),
+                $"resolution alias '{alias}' names a canonical metric '{canonical}' with no mapping");
+            Assert.Same(DarlingTriageEndpoint.SectionsFor(canonical), DarlingTriageEndpoint.SectionsFor(alias));
+            Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(alias));
+        }
+    }
+
     /* ---------------- ResolveAnchor (the firing-instant → as_of glue) ---------------- */
 
     [Fact]
