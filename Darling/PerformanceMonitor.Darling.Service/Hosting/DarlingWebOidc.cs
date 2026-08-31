@@ -52,7 +52,8 @@ internal static class DarlingWebOidc
 
     /// <summary>The subject-claim fallback chain when <c>subjectClaim</c> is unset, in order. Chosen for
     /// attribution: <c>updated_by</c> stamped with an opaque <c>sub</c> GUID answers "who changed this
-    /// dashboard" no better than the <c>web</c> constant did.</summary>
+    /// dashboard" no better than the <c>web</c> constant did. The <c>email</c> step is additionally gated on
+    /// <c>email_verified</c> — see <see cref="ResolveSubject"/>.</summary>
     internal static readonly string[] DefaultSubjectClaims = { "preferred_username", "email", "sub" };
 
     /// <summary>Clock-skew allowance on exp/nbf. IdP and host clocks genuinely drift; five minutes is the
@@ -326,7 +327,15 @@ internal static class DarlingWebOidc
     /// <summary>
     /// The seat's identity: the configured claim when <paramref name="subjectClaim"/> is set (REQUIRED then —
     /// a token without it returns null and the caller refuses, rather than silently stamping something the
-    /// operator didn't ask for), else the first non-empty of <see cref="DefaultSubjectClaims"/>.
+    /// operator didn't ask for), else the first usable of <see cref="DefaultSubjectClaims"/>.
+    ///
+    /// <para><b>The default chain's <c>email</c> step requires <c>email_verified</c> to be true</b> (review
+    /// catch on #2730): an IdP that lets users self-assert an address would otherwise let an
+    /// authenticated-but-unverified user present a real operator's email and be STAMPED as them in
+    /// <c>updated_by</c> and the audit log — identity theft by claim, one directory setting away. An
+    /// unverified email falls through to the opaque-but-honest <c>sub</c>. An operator who EXPLICITLY sets
+    /// <c>subjectClaim: "email"</c> is stating they trust their directory's addresses, and that explicit
+    /// choice is honored without the gate.</para>
     /// </summary>
     internal static string? ResolveSubject(JsonObject payload, string? subjectClaim)
     {
@@ -335,17 +344,27 @@ internal static class DarlingWebOidc
             return NonEmptyStringClaim(payload, subjectClaim.Trim());
         }
 
-        foreach (var claim in DefaultSubjectClaims)
+        var preferredUsername = NonEmptyStringClaim(payload, "preferred_username");
+        if (preferredUsername is not null)
         {
-            var value = NonEmptyStringClaim(payload, claim);
-            if (value is not null)
-            {
-                return value;
-            }
+            return preferredUsername;
         }
 
-        return null;
+        var email = NonEmptyStringClaim(payload, "email");
+        if (email is not null && IsEmailVerified(payload))
+        {
+            return email;
+        }
+
+        return NonEmptyStringClaim(payload, "sub");
     }
+
+    /// <summary>OIDC's <c>email_verified</c> is a JSON boolean, but real providers have shipped it as the
+    /// string "true"; both are accepted. Absent or anything else = not verified.</summary>
+    private static bool IsEmailVerified(JsonObject payload)
+        => payload["email_verified"] is JsonValue value
+           && ((value.TryGetValue<bool>(out var b) && b)
+               || (value.TryGetValue<string>(out var s) && string.Equals(s, "true", StringComparison.OrdinalIgnoreCase)));
 
     private static string? NonEmptyStringClaim(JsonObject payload, string claim)
         => payload[claim] is JsonValue value && value.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s)
@@ -530,6 +549,16 @@ internal static class DarlingWebOidc
     /// <summary>A fresh state/nonce value: 32 random bytes, base64url.</summary>
     internal static string CreateFlowValue() => Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
 
+    /// <summary>
+    /// OIDC Discovery 1.0 §4.3: the discovery document's <c>issuer</c> MUST be identical to the URL the
+    /// configuration was retrieved from (review catch on #2730) — without this check, whatever answers the
+    /// well-known URL could name ANY issuer and the ID-token <c>iss</c> comparison would dutifully validate
+    /// against the attacker's own claim, turning the one cross-input check into a self-affirmation. Ordinal
+    /// except for a tolerated trailing slash, which real providers genuinely disagree on.
+    /// </summary>
+    internal static bool IssuerMatchesAuthority(string issuer, string authority)
+        => string.Equals(issuer.TrimEnd('/'), authority.TrimEnd('/'), StringComparison.Ordinal);
+
     internal static string Base64UrlEncode(byte[] bytes)
         => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
@@ -627,6 +656,15 @@ internal sealed class DarlingWebOidcClient : IDisposable
             if (string.IsNullOrWhiteSpace(issuer)
                 || string.IsNullOrWhiteSpace(authorizationEndpoint)
                 || string.IsNullOrWhiteSpace(tokenEndpoint))
+            {
+                return null;
+            }
+
+            /* OIDC Discovery §4.3 (see IssuerMatchesAuthority): a document whose issuer is not the
+               authority it was fetched from is refused outright — accepting it would let the discovery
+               response choose which issuer the ID-token check validates against. Not cached: a poisoned
+               answer must not stick for the server's lifetime. */
+            if (!DarlingWebOidc.IssuerMatchesAuthority(issuer, Options.Authority))
             {
                 return null;
             }

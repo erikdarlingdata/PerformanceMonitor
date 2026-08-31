@@ -307,13 +307,37 @@ public sealed class DarlingWebOidcTests
         var full = new JsonObject { ["preferred_username"] = "erik@example.com", ["email"] = "e2@example.com", ["sub"] = "guid" };
         Assert.Equal("erik@example.com", DarlingWebOidc.ResolveSubject(full, null));
 
-        var emailOnly = new JsonObject { ["email"] = "e2@example.com", ["sub"] = "guid" };
+        var emailOnly = new JsonObject { ["email"] = "e2@example.com", ["email_verified"] = true, ["sub"] = "guid" };
         Assert.Equal("e2@example.com", DarlingWebOidc.ResolveSubject(emailOnly, null));
 
         var subOnly = new JsonObject { ["sub"] = "guid" };
         Assert.Equal("guid", DarlingWebOidc.ResolveSubject(subOnly, null));
 
         Assert.Null(DarlingWebOidc.ResolveSubject(new JsonObject(), null));
+    }
+
+    /// <summary>
+    /// Review catch on #2730: the default chain's email step trusts an address only when the IdP says it
+    /// VERIFIED it. An IdP that lets users self-assert an email would otherwise let an authenticated
+    /// stranger present a real operator's address and be stamped as them in updated_by and the audit log.
+    /// An unverified email falls through to the opaque-but-honest sub; an operator who EXPLICITLY configures
+    /// subjectClaim=email has stated they trust their directory, and that choice is honored ungated.
+    /// </summary>
+    [Fact]
+    public void ResolveSubject_DefaultChainEmail_RequiresEmailVerified()
+    {
+        var unverified = new JsonObject { ["email"] = "victim@example.com", ["sub"] = "guid" };
+        Assert.Equal("guid", DarlingWebOidc.ResolveSubject(unverified, null));
+
+        var explicitlyFalse = new JsonObject { ["email"] = "victim@example.com", ["email_verified"] = false, ["sub"] = "guid" };
+        Assert.Equal("guid", DarlingWebOidc.ResolveSubject(explicitlyFalse, null));
+
+        /* OIDC says boolean; real providers have shipped the string form. Both count as verified. */
+        var stringTrue = new JsonObject { ["email"] = "e@example.com", ["email_verified"] = "true", ["sub"] = "guid" };
+        Assert.Equal("e@example.com", DarlingWebOidc.ResolveSubject(stringTrue, null));
+
+        /* The explicit operator choice bypasses the gate. */
+        Assert.Equal("victim@example.com", DarlingWebOidc.ResolveSubject(unverified, "email"));
     }
 
     /// <summary>A CONFIGURED subjectClaim is required, not preferred: falling back would stamp updated_by
@@ -490,4 +514,18 @@ public sealed class DarlingWebOidcTests
         Assert.Equal(derived, DarlingWebOidc.DeriveTransactionKey(SessionKey));
         Assert.NotEqual(SessionKey, derived);
     }
+
+    /* ---- DISCOVERY: the issuer must BE the authority (OIDC Discovery §4.3, review catch on #2730) ----
+       Without this rule, whatever answers the well-known URL could name any issuer it likes, and the
+       ID-token 'iss' check would validate against the attacker's own claim. */
+
+    [Theory]
+    [InlineData("https://idp.example.com/realm", "https://idp.example.com/realm", true)]
+    [InlineData("https://idp.example.com/realm/", "https://idp.example.com/realm", true)]  // trailing slash tolerated…
+    [InlineData("https://idp.example.com/realm", "https://idp.example.com/realm/", true)]  // …in either direction
+    [InlineData("https://evil.example.com", "https://idp.example.com/realm", false)]       // a substituted issuer is refused
+    [InlineData("https://IDP.example.com/realm", "https://idp.example.com/realm", false)]  // ordinal: issuers are compared as identifiers
+    [InlineData("https://idp.example.com/other", "https://idp.example.com/realm", false)]
+    public void IssuerMatchesAuthority_Matrix(string issuer, string authority, bool expected)
+        => Assert.Equal(expected, DarlingWebOidc.IssuerMatchesAuthority(issuer, authority));
 }
