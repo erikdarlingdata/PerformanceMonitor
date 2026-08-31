@@ -116,6 +116,17 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitAlert = new();
+
+    /* The collection_time of the wait_stats row(s) last actually fired on. Read adapters answer
+       "what's the newest poison-wait row within the last 10 minutes", which is independent of
+       whether it is NEW since the previous ask — at fleet load the collector's delivered cadence
+       can lag the alert cooldown (PerformanceMonitor's own dogfooding on prod-pos-use2-monitor-01
+       caught byte-identical duplicate alerts ~5-7 minutes apart), so the cooldown elapsing is not
+       proof a fresh observation exists. Poison wait is deliberately NOT level-triggered like CPU
+       (which resamples live every sweep): a delta is one collector cycle's computation, and
+       reading it twice is the same event surfacing twice, not two observations of a standing
+       condition. Gate re-fire on BOTH the cooldown AND a newer collection_time than last fired. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitCollectionTime = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLongRunningQueryAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastTempDbSpaceAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLowDiskAlert = new();
@@ -860,7 +871,17 @@ public sealed class AlertEngine
             if (triggered.Count > 0)
             {
                 _activePoisonWaitAlert[key] = true;                                 /* :282 */
-                if (!suppressed && CooldownElapsed(_lastPoisonWaitAlert, key, now, alertCooldown)) /* :283 */
+
+                /* The read adapter's own window can hand back the SAME wait_stats row(s) across
+                   multiple sweeps when the collector lags the cooldown — see the field's own
+                   doc comment. Only a collection_time newer than the one last fired on counts as
+                   a fresh observation; a cooldown-elapsed re-ask against an unrefreshed row must
+                   wait for the NEXT sweep rather than re-fire on data it already reported. */
+                var newestCollectionTime = triggered.Max(w => w.CollectionTime);
+                bool hasFreshCollection = !_lastPoisonWaitCollectionTime.TryGetValue(key, out var lastCollectionTime)
+                    || newestCollectionTime > lastCollectionTime;
+
+                if (!suppressed && hasFreshCollection && CooldownElapsed(_lastPoisonWaitAlert, key, now, alertCooldown)) /* :283 */
                 {
                     var worst = triggered[0];                                       /* :285 */
                     var allWaitNames = string.Join(", ", triggered.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)")); /* :286 */
@@ -870,6 +891,7 @@ public sealed class AlertEngine
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Poison Wait", WaitType = worst.WaitType };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[key] = now;                                /* :294 */
+                    _lastPoisonWaitCollectionTime[key] = newestCollectionTime;
 
                     var poisonContext = AlertContextBuilders.BuildPoisonWaitContext(triggered); /* :307 */
                     var detailText = AlertContextBuilders.ContextToDetailText(poisonContext);   /* :308 */
