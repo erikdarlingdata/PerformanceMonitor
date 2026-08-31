@@ -76,6 +76,15 @@ public sealed record ComposeVariable(string Name, string Dimension, string? Defa
     public const string ServerDimension = "server";
 }
 
+/// <summary>A parsed, validated <c>range</c> — exactly ONE shape populated: relative (<see cref="Hours"/>),
+/// or absolute (<see cref="WindowStart"/>/<see cref="WindowEnd"/>, #2735's per-cell pinned window, naive UTC).
+/// Produced only by <see cref="ComposeSpec.ParseRange"/>, so a value in hand is within the window ceiling.</summary>
+public sealed record ComposeRange(int? Hours, DateTime? WindowStart, DateTime? WindowEnd)
+{
+    /// <summary>True for the absolute shape (a pinned window); false for the relative one.</summary>
+    public bool IsAbsolute => WindowStart is not null;
+}
+
 /// <summary>A panel filter's value — exactly one of a literal set (one value, or many for a multi-select
 /// <c>eq</c>/<c>neq</c>) or a reference to a declared <see cref="ComposeVariable"/>. Either way it is
 /// resolved to bound parameters at compile time; a value is NEVER interpolated into SQL.</summary>
@@ -226,10 +235,13 @@ public static class ComposeSpec
         "name", "dimension", "default",
     };
 
-    /// <summary>The keys a <c>range</c> object may carry (<see cref="ParseRange"/>).</summary>
+    /// <summary>The keys a <c>range</c> object may carry (<see cref="ParseRange"/>): the relative shape's
+    /// <c>hours</c>, and the absolute shape's <c>windowStart</c>/<c>windowEnd</c> (#2735 — cell-level only;
+    /// the parser itself rejects the absolute shape where it is not allowed, so ONE key set serves both
+    /// call sites without letting a root range smuggle a window through the strict-key walk).</summary>
     public static readonly IReadOnlySet<string> RangeKeys = new HashSet<string>(StringComparer.Ordinal)
     {
-        "hours",
+        "hours", "windowStart", "windowEnd",
     };
 
     /// <summary>The keys the object form of <c>viz</c> may carry (<see cref="ParseViz"/>).</summary>
@@ -247,10 +259,13 @@ public static class ComposeSpec
     internal const string RunSpecNestingHint =
         "a stored panel is flat (the {\"panel\":{...}} wrapper belongs to run_custom_view_panel's spec); put the panel's keys (source, measure, ...) directly on this object.";
 
-    /// <summary>Targeted guidance per stray key — see <see cref="RunSpecNestingHint"/>.</summary>
+    /// <summary>Targeted guidance per stray key — see <see cref="RunSpecNestingHint"/>. The <c>range</c> hint
+    /// only ever fires on a DASHBOARD panel: a notebook panel cell's extras allow the key (#2735), so a cell
+    /// carrying one never reaches the hint.</summary>
     private static readonly IReadOnlyDictionary<string, string> s_panelKeyHints = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["panel"] = RunSpecNestingHint,
+        ["range"] = "a per-panel window pin belongs to a notebook panel cell; a dashboard panel follows the view-level range.",
     };
 
     /// <summary>
@@ -449,9 +464,20 @@ public static class ComposeSpec
 
     /* ─────────────────────────── range ─────────────────────────── */
 
-    /// <summary>Validates a definition/run <c>range</c> object (absent = the caller's default). Only
-    /// <c>{hours}</c> is understood today; hours must be a positive int within the window ceiling.</summary>
-    public static (int? Hours, string? Error) ParseRange(JsonNode? node)
+    /// <summary>
+    /// Validates a definition <c>range</c> object into one of its two shapes (absent = the caller's default,
+    /// i.e. inherit): RELATIVE <c>{hours}</c> (a positive int within the window ceiling), or — only where
+    /// <paramref name="allowAbsolute"/> says so — ABSOLUTE <c>{windowStart, windowEnd}</c> (#2735, the
+    /// notebook panel cell's pinned window; ISO-8601 UTC through the SAME <see cref="TryParseUtcInstant"/>
+    /// the run path's <c>windowStart</c>/<c>windowEnd</c> go through, so a range that stores is a window that
+    /// runs). Exactly one shape may be present — both at once is ambiguous and rejected. The absolute pair
+    /// must be start&lt;end within the <see cref="ComposeLimits.MaxWindowHours"/> ceiling; there is
+    /// deliberately NO clamp-to-now here (the write path is PURE — no clock; the run path clamps a future
+    /// end at run time). The view-level range stays relative-only: an absolute window at the root would
+    /// silently fall back to the renderer's 24h default, the exact silently-wrong-window failure this
+    /// feature exists to close.
+    /// </summary>
+    public static (ComposeRange? Range, string? Error) ParseRange(JsonNode? node, bool allowAbsolute = false)
     {
         if (node is null)
         {
@@ -461,6 +487,43 @@ public static class ComposeSpec
         if (node is not JsonObject obj)
         {
             return (null, "range must be an object.");
+        }
+
+        var hasStart = obj["windowStart"] is not null;
+        var hasEnd = obj["windowEnd"] is not null;
+        if (hasStart || hasEnd)
+        {
+            if (!allowAbsolute)
+            {
+                return (null, "an absolute range (windowStart/windowEnd) is only supported on a notebook panel cell; a view-level range is relative ({\"hours\": n}).");
+            }
+
+            if (obj["hours"] is not null)
+            {
+                return (null, "range must be either relative ({hours}) or absolute ({windowStart, windowEnd}), not both.");
+            }
+
+            if (!hasStart || !hasEnd)
+            {
+                return (null, "range.windowStart and range.windowEnd must be provided together.");
+            }
+
+            if (!TryParseUtcInstant(obj["windowStart"], out var start) || !TryParseUtcInstant(obj["windowEnd"], out var end))
+            {
+                return (null, "range.windowStart/windowEnd must be ISO-8601 timestamps (UTC; a trailing Z and fractional seconds are fine).");
+            }
+
+            if (start >= end)
+            {
+                return (null, "range.windowStart must be earlier than range.windowEnd.");
+            }
+
+            if ((end - start) > TimeSpan.FromHours(ComposeLimits.MaxWindowHours))
+            {
+                return (null, $"range spans more than the {ComposeLimits.MaxWindowHours / 24}-day ceiling; narrow it.");
+            }
+
+            return (new ComposeRange(null, start, end), null);
         }
 
         if (obj["hours"] is not JsonValue hoursValue || !hoursValue.TryGetValue<int>(out var hours))
@@ -473,7 +536,32 @@ public static class ComposeSpec
             return (null, $"range.hours must be between 1 and {ComposeLimits.MaxWindowHours}.");
         }
 
-        return (hours, null);
+        return (new ComposeRange(hours, null, null), null);
+    }
+
+    /// <summary>Parses an absolute window bound (#1606 run path, #2735 stored cell range): ISO-8601, treated
+    /// as UTC whether or not it carries a Z (JS <c>toISOString()</c> sends ms+Z; the store is naive UTC),
+    /// normalized to Kind-Unspecified naive UTC like every other Darling read binding. ONE parser for both
+    /// surfaces, so a stored cell window and a run window can never drift on what "a timestamp" means.</summary>
+    internal static bool TryParseUtcInstant(JsonNode? node, out DateTime value)
+    {
+        value = default;
+        if (node is not JsonValue jsonValue || !jsonValue.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (!DateTime.TryParse(
+                text,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            return false;
+        }
+
+        value = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
+        return true;
     }
 
     /* ─────────────────────────── panels ─────────────────────────── */

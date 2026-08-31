@@ -220,6 +220,11 @@ function validateNotebookDefinition(def, catalog) {
       if (cell.source == null) {
         return "Cell " + n + " (panel) is missing a 'source'.";
       }
+      /* The per-cell window pin (#2735) — structural only; the server's ParseRange owns the real rules
+         (shape exclusivity, ISO-8601 windows, the ceiling). */
+      if (cell.range != null && (typeof cell.range !== "object" || Array.isArray(cell.range))) {
+        return "Cell " + n + " 'range' must be an object.";
+      }
       const composeErr = validateComposedPanelSpec(cell, "Cell " + n, sets);
       if (composeErr) return composeErr;
       continue;

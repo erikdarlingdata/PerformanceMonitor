@@ -421,7 +421,7 @@ public static class DarlingWebEndpoints
                 return ComposeRunOutcome.BadRequest("windowStart and windowEnd must be provided together.");
             }
 
-            if (!TryParseUtcInstant(body["windowStart"], out start) || !TryParseUtcInstant(body["windowEnd"], out end))
+            if (!ComposeSpec.TryParseUtcInstant(body["windowStart"], out start) || !ComposeSpec.TryParseUtcInstant(body["windowEnd"], out end))
             {
                 return ComposeRunOutcome.BadRequest("windowStart/windowEnd must be ISO-8601 timestamps (UTC; a trailing Z and fractional seconds are fine).");
             }
@@ -501,29 +501,9 @@ public static class DarlingWebEndpoints
     /// <summary>Default compose-run window (hours) when the request omits one.</summary>
     private const int DefaultComposeHours = 24;
 
-    /// <summary>Parses an absolute run-window bound (#1606): ISO-8601, treated as UTC whether or not it
-    /// carries a Z (JS <c>toISOString()</c> sends ms+Z; the store is naive UTC), normalized to
-    /// Kind-Unspecified naive UTC like every other Darling read binding.</summary>
-    private static bool TryParseUtcInstant(JsonNode? node, out DateTime value)
-    {
-        value = default;
-        if (node is not JsonValue jsonValue || !jsonValue.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        if (!DateTime.TryParse(
-                text,
-                System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
-                out var parsed))
-        {
-            return false;
-        }
-
-        value = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
-        return true;
-    }
+    /* The absolute-instant parser lives in ComposeSpec.TryParseUtcInstant (#2735): the run path's
+       windowStart/windowEnd and a stored cell range's windowStart/windowEnd are the SAME vocabulary, so
+       they share one parser and can never drift on what "a timestamp" means. */
 
     /// <summary>Resolves the run's server scope (Erik's Decision 1): the top-level <c>server</c> (a name or an
     /// array of names), else the <c>$server</c> variable value. Absent / "All" / empty ⇒ null (the whole fleet,
@@ -758,10 +738,11 @@ public static class DarlingWebEndpoints
 
     /// <summary>The extra keys a notebook PANEL cell carries: the cell discriminator plus the composed
     /// presentation keys minus <c>span</c> (a notebook cell has no width — the notebook composer's
-    /// <c>cellToDesc</c> drops it).</summary>
+    /// <c>cellToDesc</c> drops it), plus the per-cell <c>range</c> window pin (#2735) — validated by
+    /// <see cref="ComposeSpec.ParseRange"/> in the cell arm below, NOT a free presentation key.</summary>
     private static readonly IReadOnlySet<string> s_notebookPanelCellExtraKeys = new HashSet<string>(StringComparer.Ordinal)
     {
-        "type", "title", "hours",
+        "type", "title", "hours", "range",
     };
 
     /// <summary>Targeted guidance for the dashboard root's most likely mis-shape: <c>cells</c> without
@@ -1050,7 +1031,9 @@ public static class DarlingWebEndpoints
     /// <item><c>panel</c> — a v2 COMPOSED panel validated by <see cref="ComposeSpec.TryParsePanel"/> against the
     /// notebook's declared variables (the EXACT authority a dashboard's composed panel routes through), so a
     /// notebook panel cell carries all the v2 safety — catalog-resolved identifiers, bound values, caps — and can
-    /// always compile.</item>
+    /// always compile. It may also carry its own <c>range</c> (#2735) — relative <c>{hours}</c> or absolute
+    /// <c>{windowStart, windowEnd}</c> — pinning that cell's window over the view scope (absent = inherit),
+    /// validated by <see cref="ComposeSpec.ParseRange"/> so a stored pin is always a runnable window.</item>
     /// </list>
     /// An unknown cell <c>type</c>, a missing/oversize markdown <c>text</c>, an invalid panel cell, or an over-cap
     /// cell count is rejected (400), naming the offending cell by index. Unknown KEYS are errors too (#2733) —
@@ -1152,6 +1135,25 @@ public static class DarlingWebEndpoints
                     if (panelError is not null)
                     {
                         return DefinitionValidation.Fail($"cell {i}: {panelError}");
+                    }
+
+                    /* The per-cell window pin (#2735): an optional 'range' — relative ({hours}) or absolute
+                       ({windowStart, windowEnd}, the shape the run path already accepts) — that the renderer
+                       applies over the view scope for THIS cell only; absent means inherit the view window.
+                       Only a notebook cell gets the absolute form: a comparison document pins different
+                       windows to different cells, which is exactly what one view-level range cannot say.
+                       Parse first, then the strict sub-key walk (the root convention), so a structural error
+                       keeps its message and the walk only ever names a genuinely stray key. */
+                    var (_, cellRangeError) = ComposeSpec.ParseRange(cell["range"], allowAbsolute: true);
+                    if (cellRangeError is not null)
+                    {
+                        return DefinitionValidation.Fail($"cell {i}: {cellRangeError}");
+                    }
+
+                    if (cell["range"] is JsonObject cellRangeObject
+                        && ComposeSpec.UnknownKeyError(cellRangeObject, ComposeSpec.RangeKeys, $"cell {i} range") is string cellRangeKeyError)
+                    {
+                        return DefinitionValidation.Fail(cellRangeKeyError);
                     }
 
                     break;

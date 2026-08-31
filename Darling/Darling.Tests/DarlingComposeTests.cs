@@ -2211,6 +2211,143 @@ public sealed class DarlingComposeTests
         Assert.DoesNotContain("unknown source", reason, StringComparison.OrdinalIgnoreCase);
     }
 
+    /* ─────────────────────────── #2735: per-cell window pins ─────────────────────────── */
+
+    /* A notebook is a comparison document, and one view-level window cannot say "cell 2 is Friday A, cell 3
+       is Friday B". A panel cell may now carry its own `range` — relative ({hours}) or absolute
+       ({windowStart, windowEnd}, the shape the run path already accepts per-run) — which the renderer applies
+       over the view scope for that cell only; absent = inherit (unchanged behavior). Every acceptance case
+       here was proven RED against the pre-fix validator: #2739's strict keys rejected the cell key as
+       "panel has unknown key 'range'", and ParseRange rejected the absolute shape as "range.hours must be
+       an integer" — the silently-ignored-then-rejected path the two issues cross-linked. */
+
+    [Fact]
+    public void ParseRange_ParsesTheAbsoluteShape_ToNaiveUtcInstants()
+    {
+        var (range, error) = ComposeSpec.ParseRange(
+            JsonNode.Parse("{\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}"),
+            allowAbsolute: true);
+
+        Assert.Null(error);
+        Assert.NotNull(range);
+        Assert.True(range!.IsAbsolute);
+        Assert.Null(range.Hours);
+        Assert.Equal(new DateTime(2026, 8, 21, 0, 0, 0), range.WindowStart);
+        Assert.Equal(new DateTime(2026, 8, 22, 0, 0, 0), range.WindowEnd);
+        /* Naive UTC, Kind-Unspecified — the store-binding rule every Darling read follows (a Kind=Utc value
+           would infer timestamptz through Npgsql and silently zone-shift). */
+        Assert.Equal(DateTimeKind.Unspecified, range.WindowStart!.Value.Kind);
+    }
+
+    [Fact]
+    public void ParseRange_StillParsesTheRelativeShape_AndAbsentMeansInherit()
+    {
+        var (relative, relativeError) = ComposeSpec.ParseRange(JsonNode.Parse("{\"hours\":48}"), allowAbsolute: true);
+        Assert.Null(relativeError);
+        Assert.Equal(48, relative!.Hours);
+        Assert.False(relative.IsAbsolute);
+
+        /* The inherit pin: an ABSENT range parses to null with no error — the cell follows the view window. */
+        var (inherited, inheritedError) = ComposeSpec.ParseRange(null, allowAbsolute: true);
+        Assert.Null(inherited);
+        Assert.Null(inheritedError);
+    }
+
+    [Theory]
+    [InlineData("{\"windowStart\":\"2026-08-21T00:00:00Z\"}", "together")]
+    [InlineData("{\"windowStart\":\"not-a-date\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}", "ISO-8601")]
+    [InlineData("{\"windowStart\":\"2026-08-22T00:00:00Z\",\"windowEnd\":\"2026-08-21T00:00:00Z\"}", "earlier")]
+    [InlineData("{\"windowStart\":\"2025-01-01T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}", "ceiling")]
+    [InlineData("{\"hours\":24,\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}", "not both")]
+    public void ParseRange_RejectsAMalformedAbsoluteRange(string json, string expectedFragment)
+    {
+        var (range, error) = ComposeSpec.ParseRange(JsonNode.Parse(json), allowAbsolute: true);
+        Assert.Null(range);
+        Assert.Contains(expectedFragment, error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseRange_RejectsTheAbsoluteShape_WhereOnlyRelativeIsAllowed()
+    {
+        /* The view-level range stays relative-only: an absolute window at the root would silently fall back
+           to the renderer's 24h default — the exact silently-wrong-window failure #2735 exists to close —
+           so the rejection points the author at the place the shape IS legal. */
+        var (range, error) = ComposeSpec.ParseRange(
+            JsonNode.Parse("{\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}"));
+        Assert.Null(range);
+        Assert.Contains("notebook panel cell", error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_AcceptsAPinnedNotebookCell_BothShapes()
+    {
+        /* The issue's two-Friday side-by-side, stored as LIVE panels: two absolutely-pinned cells, one
+           relatively-pinned cell, one live cell — plus the title/hours presentation extras, so this doubles
+           as the notebook cell's key-universe sync guard (the dashboard twin is
+           ValidateDefinition_AcceptsEveryDeclaredComposedKey_AtOnce). RED before the fix: #2739's strict
+           keys failed this with "cell 1: panel has unknown key 'range'". */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"range\":{\"hours\":24},\"cells\":[" +
+            "{\"type\":\"markdown\",\"text\":\"# Two-Friday side-by-side\"}," +
+            "{\"type\":\"panel\",\"title\":\"Friday A\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}}," +
+            "{\"type\":\"panel\",\"title\":\"Friday B\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"windowStart\":\"2026-08-28T00:00:00Z\",\"windowEnd\":\"2026-08-29T00:00:00Z\"}}," +
+            "{\"type\":\"panel\",\"title\":\"Relative pin\",\"hours\":48,\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"hours\":48}}," +
+            "{\"type\":\"panel\",\"title\":\"Live (inherits)\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}");
+        Assert.True(result.IsValid, result.Error);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsABadIsoCellRange_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"panel\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"windowStart\":\"nope\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("ISO-8601", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsATypodCellRangeSubKey_WithADidYouMean()
+    {
+        /* The #2739 discipline extended into the cell's range object: a typo'd sub-key must be named as
+           itself, never silently ignored into a different window. */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"panel\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"hours\":24,\"windwoEnd\":\"x\"}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("windwoEnd", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("did you mean 'windowEnd'", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsAnAbsoluteRange_AtTheNotebookRoot()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"range\":{\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}," +
+            "\"cells\":[{\"type\":\"markdown\",\"text\":\"x\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("notebook panel cell", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsARangeOnADashboardPanel_PointingAtNotebookCells()
+    {
+        /* A dashboard panel follows the view-level range (per-panel pins are a notebook concept); the stray
+           key gets a targeted hint instead of a bare rejection, so the author lands on the right surface. */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"hours\":48}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("unknown key 'range'", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("notebook panel cell", result.Error!, StringComparison.Ordinal);
+    }
+
     /* ─────────────────────────── D7: list-summary kind (badge/route) ─────────────────────────── */
 
     [Theory]
