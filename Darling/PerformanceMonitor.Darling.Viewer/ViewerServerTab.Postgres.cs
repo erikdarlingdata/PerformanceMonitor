@@ -157,6 +157,32 @@ public partial class ViewerServerTab
 
         await LoadPgExtensionsAsync(startUtc, endUtc);
         await LoadPgServerConfigAsync();
+        await LoadPgCpuUtilizationAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// The instance-level CPU gauge (#2719), beneath configuration because it is the same kind of fact one
+    /// layer further in: extensions say what this server CAN do, settings say what it was told to do, and
+    /// this says what it is doing right now. Read via AWS Performance Insights rather than a database
+    /// connection — an empty grid here means the ingestor hasn't run yet, not that the collector is gated
+    /// off for this engine, though <see cref="PgCollectorIsGatedOff"/> is still consulted first for
+    /// consistency with every other panel on this tab.
+    /// </summary>
+    private async Task LoadPgCpuUtilizationAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_cpu_utilization"))
+        {
+            PgCpuGrid.ItemsSource = null;
+            PgCpuNote.Text = PanelNote("pg_cpu_utilization", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgCpuUtilizationHistoryAsync(_server.ServerId, startUtc, endUtc);
+
+        PgCpuGrid.ItemsSource = rows;
+        PgCpuNote.Text = PanelNote("pg_cpu_utilization", rows.Count,
+            "This collector samples AWS Performance Insights on a 5-minute cadence, so a server added "
+            + "recently may have nothing here yet.");
     }
 
     /// <summary>

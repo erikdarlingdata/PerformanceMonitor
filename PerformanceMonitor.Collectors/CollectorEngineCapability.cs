@@ -161,6 +161,7 @@ public static class CollectorEngineCapability
                to be told nothing was holding its horizon back, which is a confident all-clear about a
                mechanism that engine does not have. */
             ["pg_wait_stats"] = "the aurora_stat_system_waits() cumulative wait counters",
+            ["pg_cpu_utilization"] = "AWS Performance Insights' os.cpuUtilization.total.avg instance CPU reading",
             ["pg_statement_stats"] = "the aurora_stat_statements() per-statement history",
             ["pg_wait_sampling"] = "the pg_wait_sampling extension's sampled wait profile",
             ["pg_kernel_stats"] = "the pg_stat_kcache extension's per-statement OS CPU and device I/O",

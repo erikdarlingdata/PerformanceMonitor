@@ -463,6 +463,13 @@ public sealed class DarlingWorker : BackgroundService
     private readonly ConcurrentDictionary<string, DateTime> _lastPgLongRunningQueryAlert = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _activePgLongRunningQueryAlert = new(StringComparer.Ordinal);
 
+    /* #2719: same LIVE-STATE shape as Long-Running Query above — CPU is a continuous gauge, so a cooldown
+       timestamp and an active flag are enough; it does not need RollingCountAlertGate, which exists for
+       rolling-WINDOW COUNTS (Deadlocks/Blocking) where the same event can sit in the window across several
+       sweeps. Mirrors AlertEngine's own _activeCpuAlert/_lastCpuAlert shape for SQL Server's High CPU. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastPgCpuAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _activePgCpuAlert = new(StringComparer.Ordinal);
+
     /* #2716: none of the Postgres alerts' watermarks above survive a restart — AlertEngine seeds its
        own SQL Server twins of _lastAlertedPgDeadlockCount/_lastAlertedPgBlockingCount from
        IAlertStateStore on each server's first post-restart sweep (EnsureWatermarksSeededAsync), but
@@ -2959,6 +2966,97 @@ public sealed class DarlingWorker : BackgroundService
         await EvaluatePgDeadlocksAsync(runtime, snapshot, cancellationToken);
         await EvaluatePgBlockingAsync(runtime, snapshot, cancellationToken);
         await EvaluatePgLongRunningQueryAsync(runtime, snapshot, config, cancellationToken);
+        await EvaluatePgCpuAsync(runtime, snapshot, config, cancellationToken);
+    }
+
+    /// <summary>
+    /// The Postgres High CPU alert (#2719), reading the <c>pg_cpu_utilization</c> table
+    /// <see cref="DarlingCollectorRunner.IngestPgCpuAsync"/> fills from AWS Performance Insights. Reuses
+    /// <see cref="DarlingAlertSettings.CpuEnabled"/>/<see cref="DarlingAlertSettings.CpuThresholdPercent"/> —
+    /// the SAME knobs SQL Server's <c>AlertEngine.CheckCpuAsync</c> reads — rather than a Postgres-specific
+    /// pair, so one threshold means the same thing on both engines and an operator tuning it does not have to
+    /// find and change it twice. <see cref="DarlingAlertSettings.CpuAlertMode"/> is NOT read: that knob
+    /// distinguishes "total server" from "just sqlserver.exe", a SQL-Server-only distinction PI's
+    /// <c>os.cpuUtilization.total.avg</c> has no equivalent split for — it is already the one instance-level
+    /// number this engine has.
+    /// </summary>
+    private async Task EvaluatePgCpuAsync(
+        ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
+    {
+        if (_postgres is null || _alertDeliverer is null)
+        {
+            return;
+        }
+
+        var alertSettings = new DarlingAlertSettings(config);
+
+        if (!alertSettings.CpuEnabled)
+        {
+            return;
+        }
+
+        const string metricName = "High CPU";
+        var key = snapshot.ServerKey;
+
+        try
+        {
+            var now = DateTime.UtcNow;
+            var reading = await DarlingPgCpuUtilizationReader.GetLatestAsync(_postgres, runtime.ServerId, now, cancellationToken);
+
+            var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
+            var wasActive = _activePgCpuAlert.TryGetValue(key, out var activeBefore) && activeBefore;
+            var exceeded = reading is not null && reading.CpuPercent >= alertSettings.CpuThresholdPercent;
+            _activePgCpuAlert[key] = exceeded;
+
+            if (exceeded)
+            {
+                var cooldownElapsed = !_lastPgCpuAlert.TryGetValue(key, out var last) || now - last >= cooldown;
+                if (!cooldownElapsed)
+                {
+                    return;
+                }
+
+                _lastPgCpuAlert[key] = now;
+
+                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                {
+                    ServerName = snapshot.ServerName,
+                    MetricName = metricName,
+                }) ?? false;
+
+                await _alertDeliverer.DeliverAsync(
+                    new AlertOutcome(
+                        key,
+                        snapshot.ServerName,
+                        metricName,
+                        $"{reading!.CpuPercent:F0}%",
+                        $"{alertSettings.CpuThresholdPercent}%",
+                        Context: null,
+                        DetailText: $"  Total CPU: {reading.CpuPercent:F0}%\n  Threshold: {alertSettings.CpuThresholdPercent}%",
+                        NumericCurrentValue: reading.CpuPercent,
+                        NumericThresholdValue: alertSettings.CpuThresholdPercent,
+                        Muted: muted,
+                        Severity: null,
+                        ShortMessage: $"Total CPU at {reading.CpuPercent:F0}% (threshold: {alertSettings.CpuThresholdPercent}%)"),
+                    cancellationToken);
+            }
+            else if (wasActive)
+            {
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "CPU Resolved",
+                    reading is null
+                        ? $"{snapshot.ServerName}: CPU back below threshold"
+                        : $"{snapshot.ServerName}: Total CPU back to {reading.CpuPercent:F0}%");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("[{Server}] PostgreSQL CPU alert evaluation failed: {Message}",
+                runtime.Config.DisplayName, ex.Message);
+        }
     }
 
     /// <summary>
@@ -5352,6 +5450,24 @@ LIMIT 1";
                 fanout: null, _logger, cancellationToken);
             return 0;
         }
+        catch (PiMetricsUnavailableException ex) when (ex.IsAuthorizationFailure)
+        {
+            /* #2719, same shape as the RdsLogUnavailableException handler above and for the same reason:
+               the AWS call was DENIED, so no CPU reading was pulled this cycle, and that must read as
+               PERMISSIONS rather than a SUCCESS row claiming PI was read and simply had nothing new. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the RDS/PI API refused the call",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0,
+                $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
+                + "not a database grant: instance CPU on managed PostgreSQL reads AWS Performance Insights, "
+                + "so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters and "
+                + "pi:GetResourceMetrics on the target instance. Nothing was read this cycle — this is NOT "
+                + "'CPU is idle'.",
+                fanout: null, _logger, cancellationToken);
+            return 0;
+        }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
         {
             /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside
@@ -5603,6 +5719,12 @@ LIMIT 1";
         ["pg_replication_stats"] = (r, s, ct) => r.RunAsync(PgReplicationStatsCollector.Instance, s, ct),
         ["pg_buffer_usage"] = (r, s, ct) => r.RunAsync(PgBufferUsageCollector.Instance, s, ct),
         ["pg_index_bloat"] = (r, s, ct) => r.RunAsync(PgIndexBloatCollector.Instance, s, ct),
+        /* ONE TRANSPORT, unconditionally — unlike pg_deadlocks/pg_plan_capture above, there is no
+           pg_read_file-shaped fallback for a self-hosted target, because PostgreSQL exposes no
+           instance-level CPU signal at all (#2719, see PgCpuUtilizationCollector's doc comment). A
+           self-hosted host resolves to nothing in IngestPgCpuAsync's RdsEndpoint.TryParse and the ingestor
+           no-ops, the same "not this transport" answer RdsLogSource itself gives a non-RDS host. */
+        ["pg_cpu_utilization"] = (r, s, ct) => r.IngestPgCpuAsync(s, ct),
     };
 
     /// <summary>
