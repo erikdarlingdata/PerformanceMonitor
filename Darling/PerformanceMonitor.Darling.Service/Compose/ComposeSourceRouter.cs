@@ -98,10 +98,11 @@ public static class ComposeCaggCatalog
     {
         /* object_name is coverable via the module_map join (the query_stats CAGG carries sql_handle) — the
            compiler joins collect.module_map for it on a CAGG route. It stays a ViaModuleJoin dimension, so the raw
-           path still uses the live #1568 procedure_stats CTE. */
+           path still uses the live #1568 procedure_stats CTE. statement (#2737) rides the same join plus the
+           CAGG's own query_hash fallback column, so it is coverable for exactly the same reason. */
         ["query_stats"] = new(
             "query_stats", "query_stats_hourly", "query_stats_daily",
-            new HashSet<string>(StringComparer.Ordinal) { "database_name", "query_hash", "object_name" }),
+            new HashSet<string>(StringComparer.Ordinal) { "database_name", "query_hash", "object_name", "statement" }),
 
         ["procedure_stats"] = new(
             "procedure_stats", "procedure_stats_hourly", "procedure_stats_daily",
