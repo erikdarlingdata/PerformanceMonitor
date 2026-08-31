@@ -169,6 +169,15 @@ internal sealed class DarlingSelfAlertEvaluator
        alerts — so a cheap collector, or a new one, cannot trip it. */
     private readonly ConcurrentDictionary<string, string> _activeCostRegression = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCostRegressionAlert = new();
+
+    /// <summary>#2707: the <c>collect.collector_cost</c> row this key last fired on, keyed the same as
+    /// <see cref="_lastCostRegressionAlert"/>. This evaluator is meant to run once per hourly store-metrics
+    /// tick, but if that tick's cadence ever outpaces the cooldown — or the hourly flush itself lags a tick —
+    /// re-asking <see cref="Mcp.DarlingCollectorCostReader.GetCostRegressionsAsync"/> hands back the exact
+    /// same <c>latest_ms</c> computed from the exact same underlying hourly rows, and a cooldown-elapsed check
+    /// alone cannot tell that answer from a genuinely new one. Mirrors #2704's
+    /// <c>PoisonWaitDelta.CollectionTime</c> fix for the identical shape of bug.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastCostRegressionDataPoint = new();
     private const double CostRegressionFactor = 2.0;
     private const long CostRegressionBaselineFloorMs = 1000;
     private static readonly TimeSpan CostRegressionBaselineWindow = TimeSpan.FromDays(14);
@@ -626,9 +635,17 @@ internal sealed class DarlingSelfAlertEvaluator
             current.Add(key);
             _activeCostRegression[key] = regression.ServerName;
 
-            if (CooldownElapsed(_lastCostRegressionAlert, key, now))
+            /* #2707: the reader's own latest_metric_time is the newest collect.collector_cost row folded
+               into LatestMs — a cooldown-elapsed re-ask against a hourly flush that hasn't landed a new row
+               yet must wait for that row rather than re-fire on a total it already reported. Same shape as
+               #2704's collection-time gate on Poison Wait. */
+            bool hasFreshDataPoint = !_lastCostRegressionDataPoint.TryGetValue(key, out var lastDataPoint)
+                || regression.LatestMetricTime > lastDataPoint;
+
+            if (hasFreshDataPoint && CooldownElapsed(_lastCostRegressionAlert, key, now))
             {
                 _lastCostRegressionAlert[key] = now;
+                _lastCostRegressionDataPoint[key] = regression.LatestMetricTime;
                 var ratio = regression.BaselineMs > 0 ? regression.LatestMs / regression.BaselineMs : 0;
                 await FireAsync(
                     key, regression.ServerName, "Collector Cost Regression",
@@ -652,6 +669,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (!current.Contains(key) && _activeCostRegression.TryRemove(key, out var serverName))
             {
                 _lastCostRegressionAlert.TryRemove(key, out _);
+                _lastCostRegressionDataPoint.TryRemove(key, out _);
                 var parts = key.Split(':', 3);
                 var collector = parts.Length == 3 ? parts[2] : key;
                 await RecordResolutionAsync(new AlertResolution(

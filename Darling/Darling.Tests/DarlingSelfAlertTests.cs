@@ -2463,9 +2463,12 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     }
     /* ---------------- #2674 collector-cost regression self-alert ---------------- */
 
+    private static readonly DateTime DefaultRegressionMetricTime = new(2026, 7, 1, 11, 0, 0, DateTimeKind.Utc);
+
     private static PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression Regression(
-        long latestMs = 8000, double baselineMs = 2000.0, int serverId = 7, string collector = "query_store") =>
-        new(serverId, "prod-multi-19", collector, latestMs, baselineMs);
+        long latestMs = 8000, double baselineMs = 2000.0, int serverId = 7, string collector = "query_store",
+        DateTime? latestMetricTime = null) =>
+        new(serverId, "prod-multi-19", collector, latestMs, baselineMs, latestMetricTime ?? DefaultRegressionMetricTime);
 
     [Fact]
     public async Task CollectorCostRegression_FiresOnEntry_SuppressedWithinCooldown_ResolvesWhenGone()
@@ -2502,6 +2505,33 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             Regression(collector: "procedure_stats")
         }, Ct);
 
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>#2707: a cooldown-elapsed re-ask against the SAME collect.collector_cost row (unchanged
+    /// LatestMetricTime) must not re-fire — the exact shape of #2704's Poison Wait bug, here caused by the
+    /// hourly flush lagging the evaluator's own cooldown instead of a collector lagging an alert loop. A
+    /// genuinely new hourly row (LatestMetricTime advanced), still regressed, must still fire.</summary>
+    [Fact]
+    public async Task CollectorCostRegression_DoesNotRefire_OnTheSameMetricTime_EvenAfterCooldownElapses()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 1) fires once on entry. */
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* 2) cooldown elapses, but the reader hands back the SAME underlying hourly row (LatestMetricTime
+           unchanged) — the flush hasn't landed a new one yet. Must not re-fire. */
+        h.Now = h.Now.AddMinutes(10);
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* 3) a genuinely new hourly row lands (LatestMetricTime advanced), still regressed -> fires again. */
+        h.Now = h.Now.AddMinutes(10);
+        await e.ApplyCostRegressionsAsync(
+            new[] { Regression(latestMetricTime: DefaultRegressionMetricTime.AddHours(1)) }, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 }
