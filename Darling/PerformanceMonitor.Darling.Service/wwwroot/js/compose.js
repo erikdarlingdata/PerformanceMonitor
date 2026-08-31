@@ -38,11 +38,68 @@ const MAX_SERIES = 8;
 export function renderComposedPanelCard(panelSpec, scope) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (panelSpec.span === 2 ? " span-2" : "") }, [
-    el("h3", {}, [panelSpec.title || measureLabel(panelSpec)]),
+    el("h3", {}, [panelSpec.title || measureLabel(panelSpec), pinBadge(panelSpec)]),
     body,
   ]);
   driveComposedPanel(body, panelSpec, scope);
   return panel;
+}
+
+/** A panel spec's per-cell window pin (#2735), normalized: {windowStart, windowEnd} (absolute) or {hours}
+ *  (relative), or null when the spec carries no usable `range` (= live: it follows the view scope). Kept
+ *  tolerant on purpose — this is the READ path, and a malformed stored range must degrade to "live", never
+ *  crash the card (the write path already rejects one). */
+export function cellRange(spec) {
+  const r = spec && spec.range;
+  if (!r || typeof r !== "object" || Array.isArray(r)) return null;
+  if (typeof r.windowStart === "string" && typeof r.windowEnd === "string" && r.windowStart && r.windowEnd) {
+    return { windowStart: r.windowStart, windowEnd: r.windowEnd };
+  }
+  if (typeof r.hours === "number" && r.hours >= 1) return { hours: r.hours };
+  return null;
+}
+
+/**
+ * The pinned-window badge (#2735): shown in the card header of any panel whose spec carries its own `range`,
+ * so it is always visible WHICH cells are pinned to their own window and which are live on the scope bar —
+ * without it, the scope bar's time range would silently lie for pinned cells. Server scope still applies to
+ * pinned cells (the pin is a window, not a server), which the tooltip spells out.
+ */
+function pinBadge(panelSpec) {
+  const range = cellRange(panelSpec);
+  if (!range) return null;
+  const label = pinRangeLabel(range);
+  return el("span", {
+    class: "pin-badge",
+    title:
+      "This cell is pinned to its own time window (" + label + "), so the scope bar's time range does not " +
+      "apply to it. The server scope still does.",
+    text: "Pinned: " + label,
+  });
+}
+
+/** A normalized pin's display label ("last 2 days" / "8/21/26, 12:00 AM → 8/22/26, 12:00 AM") — shared with
+ *  the notebook editor's pin strip so the two surfaces describe a pin identically. */
+export function pinRangeLabel(range) {
+  return range.windowStart ? pinWindowLabel(range.windowStart, range.windowEnd) : "last " + pinHoursLabel(range.hours);
+}
+
+/** The badge's window text for an absolute pin — compact local date+time, "start → end". */
+function pinWindowLabel(startIso, endIso) {
+  const from = new Date(startIso);
+  const to = new Date(endIso);
+  if (isNaN(from.getTime()) || isNaN(to.getTime())) return "custom window";
+  const opts = { dateStyle: "short", timeStyle: "short" };
+  return from.toLocaleString(undefined, opts) + " → " + to.toLocaleString(undefined, opts);
+}
+
+/** The badge's window text for a relative pin (whole days render as days, mirroring the range picker's labels). */
+function pinHoursLabel(hours) {
+  if (hours % 24 === 0 && hours >= 24) {
+    const d = hours / 24;
+    return d + (d === 1 ? " day" : " days");
+  }
+  return hours + (hours === 1 ? " hour" : " hours");
 }
 
 /**
@@ -114,12 +171,14 @@ export function runCompose(panelSpec, scope, zoom = null) {
   return apiSend("POST", "/api/compose/run", buildRunBody(panelSpec, scope, zoom));
 }
 
-/** Build the /api/compose/run body from a panel spec + scope (a per-panel `hours` overrides the view range). */
+/** Build the /api/compose/run body from a panel spec + scope (a per-panel `hours` or `range` overrides the
+ *  view range). */
 function buildRunBody(panelSpec, scope, zoom = null) {
   const body = { panel: toRunPanel(panelSpec) };
   /* Brush-zoom (#1606): an absolute window wins over `hours` server-side; hours still rides along
      untouched so clearing the zoom needs no special casing. */
-  if (zoom && zoom.startIso && zoom.endIso) {
+  const zoomed = !!(zoom && zoom.startIso && zoom.endIso);
+  if (zoomed) {
     body.windowStart = zoom.startIso;
     body.windowEnd = zoom.endIso;
   }
@@ -129,6 +188,21 @@ function buildRunBody(panelSpec, scope, zoom = null) {
   if (s.server != null) body.server = s.server;
   if (s.hours != null) body.hours = s.hours;
   if (panelSpec.hours != null) body.hours = panelSpec.hours;
+  /* The per-cell window pin (#2735): a notebook panel cell's own `range` wins over the view scope (and over
+     the legacy per-panel `hours` above). A transient brush-zoom still wins over the pin — it is the viewer's
+     explicit request on THIS panel, and clearing it pops back to the pinned window, exactly the zoom-over-
+     hours precedence a live panel has. */
+  const range = cellRange(panelSpec);
+  if (range) {
+    if (range.windowStart) {
+      if (!zoomed) {
+        body.windowStart = range.windowStart;
+        body.windowEnd = range.windowEnd;
+      }
+    } else {
+      body.hours = range.hours;
+    }
+  }
   return body;
 }
 

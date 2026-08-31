@@ -97,7 +97,11 @@ public sealed class DarlingMcpCustomViewTools
         "'overlay' second measure (scatter's y axis, or a dual-axis line/area). Unknown keys are ERRORS at every " +
         "level (root, panel, cell, filter, overlay), with a did-you-mean for a near-miss — a typo'd key can never " +
         "silently validate as a different panel. Note a notebook panel cell is FLAT (the cell object carries " +
-        "'type':'panel' plus the panel's own keys); only run_custom_view_panel's spec nests under 'panel'.")]
+        "'type':'panel' plus the panel's own keys); only run_custom_view_panel's spec nests under 'panel'. A " +
+        "notebook panel cell may also carry its own 'range' — {\"hours\":n} or {\"windowStart\",\"windowEnd\"} " +
+        "(ISO-8601 UTC, one shape only) — pinning that cell's window over the notebook's view-level range so a " +
+        "comparison document (say, two Fridays side by side) stays a LIVE view; absent means the cell follows the " +
+        "view window. The view-level 'range' itself stays relative ({\"hours\":n} only).")]
     public static Task<string> ValidateCustomView(
         [Description("The view definition JSON to validate (NOT persisted).")] string definition)
     {

@@ -22,6 +22,7 @@
 
 import { el, mount } from "./util.js";
 import { renderMarkdown } from "./markdown.js";
+import { cellRange, pinRangeLabel } from "./compose.js";
 import {
   buildComposedPanelBody,
   buildViewScopeSection,
@@ -128,11 +129,18 @@ function notebookToModel(view) {
 }
 
 /* A stored cell -> the editor's cell model. A markdown cell keeps its text; a panel cell's composed spec is parsed
-   by the SAME descToComposedPanel the dashboard composer uses (it reads only the composed keys, ignoring `type`). */
+   by the SAME descToComposedPanel the dashboard composer uses (it reads only the composed keys, ignoring `type`).
+   The per-cell window pin (#2735) rides on the CELL model — not the shared panel model editor.js owns — so the
+   dashboard composer's desc round-trip stays untouched. */
 function cellToModel(c) {
   if (!c || typeof c !== "object" || Array.isArray(c)) return null;
   if (c.type === "markdown") return markdownCellModel(typeof c.text === "string" ? c.text : "");
-  if (c.type === "panel") return { type: "panel", panel: descToComposedPanel(c) };
+  if (c.type === "panel") {
+    const m = { type: "panel", panel: descToComposedPanel(c) };
+    const range = cellRange(c);
+    if (range) m.range = range;
+    return m;
+  }
   return null;
 }
 
@@ -157,11 +165,15 @@ function modelToNotebookDefinition(model) {
 }
 
 /* A cell model -> its stored form. A panel cell serializes through the shared composedPanelToDesc, then drops
-   `span` — a notebook is a single-column document, so a panel cell is always full width. */
+   `span` — a notebook is a single-column document, so a panel cell is always full width. The per-cell window
+   pin (#2735) is re-attached from the cell model: dropping it here would silently unpin every pinned cell on
+   any unrelated editor save. */
 function cellToStored(cell) {
   if (cell.type === "markdown") return { type: "markdown", text: cell.text || "" };
   const { span, ...desc } = composedPanelToDesc(cell.panel);
-  return { type: "panel", ...desc };
+  const stored = { type: "panel", ...desc };
+  if (cell.range) stored.range = { ...cell.range };
+  return stored;
 }
 
 /** The reason SAVE is blocked (name/cells + each panel cell's composed prerequisites), or null when savable. */
@@ -401,7 +413,27 @@ function buildPanelCellEditor(cell, index, ctx) {
     onChange: () => ctx.refreshSaveState(),
     showWidth: false,
   });
-  return el("div", { class: "notebook-cell panel-cell card" }, [cellHead(index, ctx, "Panel"), body]);
+  return el("div", { class: "notebook-cell panel-cell card" }, [cellHead(index, ctx, "Panel"), pinnedWindowStrip(cell, ctx), body]);
+}
+
+/* The per-cell window pin (#2735) in the EDITOR. The composer has no authoring UI for a pin yet (pins are
+   authored over MCP or by import); a loaded pin must still be VISIBLE and removable here — carrying it
+   silently would make the editor lie about what the cell renders, and dropping it (what the round-trip did
+   before it learned the key) destroyed the pin on every unrelated save. The live preview runs on the
+   notebook's own scope, not the pin — the strip says which window the saved cell will actually render. */
+function pinnedWindowStrip(cell, ctx) {
+  const range = cellRange(cell);
+  if (!range) return null;
+  const unpin = el("button", { class: "btn small", type: "button", text: "Unpin", "aria-label": "Remove this cell's pinned time window" });
+  unpin.addEventListener("click", () => {
+    delete cell.range;
+    ctx.rebuildCells();
+  });
+  return el("div", { class: "cell-pin-strip" }, [
+    el("span", { class: "pin-badge", text: "Pinned: " + pinRangeLabel(range) }),
+    el("span", { class: "muted", text: "This cell keeps its own time window; the notebook's time range does not apply to it." }),
+    unpin,
+  ]);
 }
 
 function notebookBackHead(id) {

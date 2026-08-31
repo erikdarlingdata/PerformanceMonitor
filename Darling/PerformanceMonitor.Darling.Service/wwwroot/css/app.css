@@ -846,6 +846,37 @@ pre.code {
 /* A notebook entry in the sidebar view list gets a small document glyph so it reads apart from a dashboard view. */
 .view-item.is-notebook::before { content: "▤ "; color: var(--muted); }
 
+/* The pinned-window pill on a panel cell carrying its own `range` (#2735) — amber, because it marks a place
+   where the scope bar's TIME range deliberately does not apply (the server scope still does). Sits in the
+   panel card's h3 beside the title; no text-transform, the window text is data. */
+.pin-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  background: rgba(255, 213, 79, 0.12);
+  color: var(--warn);
+  border: 1px solid rgba(255, 213, 79, 0.35);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* The notebook EDITOR's pin strip (#2735): the pin badge + what it means + the Unpin affordance, shown on a
+   panel cell that carries a pinned window (there is no authoring UI for a pin yet — MCP/import create them). */
+.cell-pin-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.5rem;
+  font-size: 0.78rem;
+}
+.cell-pin-strip .pin-badge { margin-left: 0; }
+
 /* ─────────────────────────── availability groups (#991) ─────────────────────────── */
 
 /* One card per (reporting server, AG). Full width rather than tiled in .grid: each card carries a database table
