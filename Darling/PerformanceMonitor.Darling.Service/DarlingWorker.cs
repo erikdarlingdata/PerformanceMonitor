@@ -2153,6 +2153,16 @@ public sealed class DarlingWorker : BackgroundService
     private readonly ConcurrentDictionary<int, QueryStoreServerGate> _queryStoreGates = new();
 
     /// <summary>
+    /// #2717: one <see cref="DetachedCollectorGate"/> per (server, collector) for every collector fired
+    /// detached from <see cref="RunDueCollectorsAsync"/>'s sequential body other than query_store (which
+    /// keeps its own <see cref="_queryStoreGates"/> because it has a second, orthogonal job — mutual
+    /// exclusion against the separate first-contact backfill loop — that a generic gate does not need to
+    /// solve). Keyed by collector name as well as server id so two DIFFERENT detached collectors on the
+    /// same server never contend for one slot.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string CollectorName), DetachedCollectorGate> _detachedCollectorGates = new();
+
+    /// <summary>
     /// #2219: whether this is the PostgreSQL statement-stats collector, whose success is what triggers a text
     /// refresh. Compared against the collector's OWN declared name rather than a literal, so renaming it cannot
     /// silently unhook the text path — the same reasoning as <see cref="IsQueryStoreCollector"/>.
@@ -2167,6 +2177,15 @@ public sealed class DarlingWorker : BackgroundService
     /// </summary>
     internal static bool IsQueryStoreCollector(string collectorName) =>
         string.Equals(collectorName, QueryStoreCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #2717: whether a dispatched collector name is plan_correction — the second collector detached from
+    /// the sequential body for the same bimodal-cost reason query_store was in #2701. Compared against the
+    /// collector's OWN declared name rather than a literal, for the same renaming-safety reason as
+    /// <see cref="IsQueryStoreCollector"/>.
+    /// </summary>
+    internal static bool IsPlanCorrectionCollector(string collectorName) =>
+        string.Equals(collectorName, PlanCorrectionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// #2219: refreshes this PostgreSQL server's statement text if it is due, and swallows everything if not.
@@ -4483,11 +4502,22 @@ LIMIT 1", connection);
                    overlapping — and query_store's own window is watermark-driven (#1960), so a detached run
                    that outlives this sweep resumes correctly from its own gate rather than dropping rows.
                    RunOneAsync's catch-all already contains every fault but cancellation, so
-                   RunDetachedQueryStoreAsync exists only to keep a shutdown-time
-                   OperationCanceledException from surfacing as an unobserved task exception. */
-                if (IsQueryStoreCollector(name))
+                   RunDetachedAsync exists only to keep a shutdown-time OperationCanceledException from
+                   surfacing as an unobserved task exception. */
+                /* #2717: plan_correction gets the identical treatment for the identical reason. Its own
+                   SQL is already correctly seek-based (#2687) and averages ~1 second, but on a server
+                   whose Query Store carries the same leaflogix-class distinct-plan-population signature
+                   already root-caused for query_store on multi-03/AYR, it can spike to 20+ seconds — the
+                   same bimodal shape, just a smaller worst case. Detached the same way, through the
+                   generic DetachedCollectorGate (#2717) rather than query_store's own gate, which has an
+                   orthogonal second job (excluding the backfill loop) this collector does not share.
+                   plan_correction's recommendation-set read is DMV-driven with no persisted watermark, but
+                   sys.dm_db_tuning_recommendations is re-read whole on every successful pass regardless —
+                   a skipped tick simply re-reads the same (or since-refreshed) live set next time, the
+                   same "defers, does not drop" property #1960 gives query_store's watermark. */
+                if (IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name))
                 {
-                    _ = RunDetachedQueryStoreAsync(server, runner, name, cancellationToken);
+                    _ = RunDetachedAsync(server, runner, name, cancellationToken);
                 }
                 else
                 {
@@ -5224,6 +5254,30 @@ LIMIT 1";
             return 0;
         }
 
+        /* #2717: the generic sibling of the gate above, for collectors detached from the sequential body
+           for the same bimodal-cost reason as query_store but with no second loop to exclude — see
+           DetachedCollectorGate's own doc comment. Keyed by (server, collector name), so a future third
+           collector detached this way needs only its own IsXCollector check added to this condition; the
+           dictionary already generalizes. A held gate here means a previous detached tick for THIS
+           collector on THIS server has not finished — skip is safe because every collector detached this
+           way is picked specifically for having no wall-clock-derived window (plan_correction re-reads
+           the live DMV set whole on every pass, so a skip just re-reads it, possibly refreshed, next time).
+           NotGated (mirroring QueryStoreServerGate's) collapses this to a single null check below — a
+           future third collector needs only its own IsXCollector check added to this one condition,
+           never a second one to keep in sync. */
+        using var detachedGate = IsPlanCorrectionCollector(collectorName)
+            ? _detachedCollectorGates.GetOrAdd((runtime.ServerId, collectorName), static _ => new DetachedCollectorGate()).TryAcquire()
+            : DetachedCollectorGate.NotGated;
+
+        if (detachedGate is null)
+        {
+            _logger.LogInformation(
+                "  [{Server}] {Collector} skipped this tick — a previous detached run has not finished (#2717). " +
+                "Re-reads the live set next tick; no rows are lost.",
+                server.Config.DisplayName, collectorName);
+            return 0;
+        }
+
         try
         {
             var result = await run(runner, runtime, cancellationToken);
@@ -5424,13 +5478,14 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// #2700: fire-and-forget wrapper around <see cref="RunOneAsync"/> for query_store, the one collector
-    /// split off <see cref="RunDueCollectorsAsync"/>'s sequential body — see that call site for why.
-    /// RunOneAsync's own catch-all already contains every fault but cancellation, so this wrapper exists
-    /// only to keep a shutdown-time <see cref="OperationCanceledException"/> from surfacing as an
-    /// unobserved task exception, the same containment every other fire-and-track body in this file gets.
+    /// #2717 generalized this from query_store's own name (<c>RunDetachedQueryStoreAsync</c>): shared by
+    /// every collector fired detached from <see cref="RunDueCollectorsAsync"/>'s sequential body — see
+    /// the two call sites for why each one qualifies. <see cref="RunOneAsync"/>'s own catch-all already
+    /// contains every fault but cancellation, so this wrapper exists only to keep a shutdown-time
+    /// <see cref="OperationCanceledException"/> from surfacing as an unobserved task exception, the same
+    /// containment every other fire-and-track body in this file gets.
     /// </summary>
-    private async Task RunDetachedQueryStoreAsync(
+    private async Task RunDetachedAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, CancellationToken cancellationToken)
     {
         try
@@ -5439,8 +5494,11 @@ LIMIT 1";
         }
         catch (OperationCanceledException)
         {
-            /* Shutdown — expected, and safe to abandon: query_store's window is watermark-driven (#1960),
-               so an in-flight run dropped here resumes from the same boundary on the next start. */
+            /* Shutdown — expected, and safe to abandon: every collector detached this way is picked
+               specifically for having no wall-clock-derived window (query_store's is watermark-driven,
+               #1960; plan_correction re-reads the live DMV set whole on every pass), so a run dropped
+               here resumes correctly — from the same watermark, or by re-reading the current set — on
+               the next start. */
         }
     }
 
