@@ -310,5 +310,13 @@ public static class CollectorScheduleDefaults
            with anything that changes minute to minute. Bloat accumulates over days, so a finer grain would
            pay repeatedly for an answer that had not moved. */
         ["pg_index_bloat"] = new(1440, 90),
+        /* #2719 instance CPU. FIVE MINUTES, deliberately looser than the 1-minute cadence the SQL Server
+           ring-buffer route uses for cpu_utilization. That route reads a local DMV for free; this one is an
+           outbound AWS Performance Insights API call per server per cycle, and a fleet of ~50 Aurora
+           instances at 1-minute cadence is 72,000 GetResourceMetrics calls a day for a signal a High CPU
+           alert does not need sub-minute resolution to catch. Each call still asks PI for the last several
+           1-minute data points (mirroring the ring buffer's own TOP(60) resilience), so a missed cycle is
+           backfilled rather than lost. 30-day retention matches cpu_utilization. */
+        ["pg_cpu_utilization"] = new(5, 30),
     };
 }
