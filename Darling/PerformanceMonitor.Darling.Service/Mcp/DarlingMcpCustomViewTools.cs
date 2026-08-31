@@ -275,7 +275,12 @@ public sealed class DarlingMcpCustomViewTools
         "allowedDimensions (plus the universal 'server' axis), and a 'viz' coherent with the mode (line/area/" +
         "stacked/stacked-bar for time series; bar/pie/scatter for ranked; stat for a single value; table for any). " +
         "An optional 'overlay' {measure, aggregate?, unit?} adds a SECOND same-source measure: REQUIRED on scatter " +
-        "(the y axis; the primary ranks the points), or a dual right-hand axis on an UNGROUPED line/area. Static " +
+        "(the y axis; the primary ranks the points), or a dual right-hand axis on an UNGROUPED line/area. " +
+        "On query_stats, 'object_name' is stitched from procedure_stats, so ad-hoc SQL has no module: those rows " +
+        "carry the literal '(ad hoc)' — one labeled bucket per database, selectable/excludable with eq/neq " +
+        "'(ad hoc)' — and a neq on a procedure name INCLUDES the ad-hoc rows (the dimension's value is never " +
+        "null). For a true top-statements panel group by 'statement' instead: procedures keep their module name " +
+        "and ad-hoc statements stay distinct by query_hash. Static " +
         "reference data — no server or time window needed; it reads no monitored server and no collected data.")]
     public static Task<string> DescribeCustomViewCatalog()
     {

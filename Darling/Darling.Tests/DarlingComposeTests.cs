@@ -140,6 +140,30 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
+    public void ModuleFallbackColumns_AreRealSourceColumns_AndOnlyOnModuleJoinDimensions()
+    {
+        var payload = PayloadColumnsByTable();
+        var withFallback = MeasureCatalog.Dimensions.Where(d => d.FallbackColumn is not null).ToList();
+        /* The statement dimension (#2737) exists — this pin must not pass vacuously. */
+        Assert.NotEmpty(withFallback);
+        foreach (var dimension in MeasureCatalog.Dimensions)
+        {
+            if (dimension.FallbackColumn is null)
+            {
+                continue;
+            }
+
+            /* The fallback is emitted as f.<column> against the FACT source (not the module side), so it
+               must be a real payload column of the dimension's own table — and a fallback only means
+               anything on a module-join dimension, whose join can miss. */
+            Assert.True(dimension.ViaModuleJoin,
+                $"dimension '{dimension.SourceTable}.{dimension.Name}' declares a FallbackColumn without ViaModuleJoin — the compiler would never use it.");
+            Assert.True(payload[dimension.SourceTable].Contains(dimension.FallbackColumn),
+                $"dimension '{dimension.SourceTable}.{dimension.Name}' fallback column '{dimension.FallbackColumn}' is not a payload column of '{dimension.SourceTable}'.");
+        }
+    }
+
+    [Fact]
     public void EveryMeasureAllowedDimension_IsADeclaredDimensionOfItsSource()
     {
         foreach (var measure in MeasureCatalog.Measures)
@@ -437,6 +461,65 @@ public sealed class DarlingComposeTests
         Assert.DoesNotContain("ROW_NUMBER()", sql, StringComparison.Ordinal);
     }
 
+    /* ─────────────── #2737: the module join's NULL misses (the ad-hoc population) ─────────────── */
+
+    [Fact]
+    public void Compile_ObjectNameGroupBy_LabelsTheAdHocBucket()
+    {
+        /* The module LEFT JOIN misses every ad-hoc statement; a bare m.object_name folded them all into ONE
+           null-named row per (database, bucket) — usually the row that wins the ranking, labeled nothing. The
+           dimension compiles COALESCEd to the sentinel so the bucket is visibly "(ad hoc)". */
+        var sql = Compile(ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}"));
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)') AS object_name", sql, StringComparison.Ordinal);
+        var groupBy = sql.Substring(sql.IndexOf("GROUP BY", StringComparison.Ordinal));
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)')", groupBy, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_ObjectNameNeq_IsNullSafe_SoAdHocRowsSurviveTheFilter()
+    {
+        /* The DECISION (#2737): neq 'X' INCLUDES ad-hoc rows. NULL fails "<> ALL", so the bare column made
+           "everything except this procedure" silently mean "every OTHER procedure" — the ad-hoc population
+           vanished from the result with nothing on screen saying so. Compiling the filter against the folded
+           expression means the compared value is never NULL: "not X" is the rest of the workload, and the old
+           procedures-only read is still available EXPLICITLY as neq '(ad hoc)' + neq 'X'. */
+        var sql = Compile(ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+            "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"dbo.usp_Payment\"}]}"));
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)') <> ALL(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("m.object_name <> ALL(", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_ObjectNameEqTheAdHocSentinel_SelectsTheBucket_AsABoundParameter()
+    {
+        /* Filtering TO the ad-hoc population is eq '(ad hoc)' — no new operator: the sentinel IS the
+           dimension's value for ad-hoc rows. The label rides as a bound parameter VALUE like any other
+           filter literal; only the compiler's own catalog constant is ever emitted as a SQL literal. */
+        var plan = ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+            "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"eq\",\"value\":\"(ad hoc)\"}]}");
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        Assert.True(error is null, error);
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)') = ANY(", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains(compiled.Parameters, p => p.Value is string[] values && values.Contains(MeasureCatalog.AdHocLabel));
+    }
+
+    [Fact]
+    public void Compile_StatementGroupBy_KeepsAdHocDistinctByQueryHash()
+    {
+        /* The fallback-identity dimension (#2737): the real "top statements" panel. Procedures keep their
+           module name; the join's misses fall back to the fact row's OWN query_hash instead of one shared
+           label, so ad-hoc statements rank individually. Uses the same #1568 module CTE on the raw route. */
+        var sql = Compile(ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"statement\"],\"viz\":\"bar\"}"));
+        Assert.Contains("COALESCE(m.object_name, f.query_hash) AS statement", sql, StringComparison.Ordinal);
+        Assert.Contains("ROW_NUMBER()", sql, StringComparison.Ordinal);
+        Assert.Contains("procedure_stats", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_RankedShape_OrdersByValueDescWithBoundLimit()
     {
@@ -604,6 +687,24 @@ public sealed class DarlingComposeTests
         Assert.Contains("LEFT JOIN collect.module_map AS m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name", compiled.Sql, StringComparison.Ordinal);
         Assert.Contains("m.object_name", compiled.Sql, StringComparison.Ordinal);        /* attribution from the map */
         Assert.DoesNotContain("ROW_NUMBER()", compiled.Sql, StringComparison.Ordinal);   /* not the raw #1568 CTE */
+        /* #2737: the module_map join's misses are NULL exactly like the CTE's — the fold applies on BOTH routes. */
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)') AS object_name", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_Statement_RoutesToCagg_WithTheHashFallback()
+    {
+        /* statement is CAGG-coverable for the same reason object_name is (#2737): the query_stats CAGG carries
+           sql_handle for the module_map join AND query_hash for the fallback identity. Without the router
+           coverage entry every statement panel would silently pin to raw (4d retention) and read empty on
+           older windows. */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"statement\"],\"viz\":\"bar\"}",
+            daysOld: 120, servers: new[] { "PROD-01" });
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN collect.module_map AS m", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(m.object_name, f.query_hash) AS statement", compiled.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2659,5 +2760,169 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connectio
         command.Parameters.AddWithValue(1000L);
         command.Parameters.AddWithValue(500L);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+}
+
+/// <summary>
+/// Gated (DARLING_TEST_PG) execution of the #2737 ad-hoc fold against real Postgres. The string pins above
+/// prove the SHAPE; only a live run proves the SEMANTICS — that COALESCE inside a <c>&lt;&gt; ALL</c> really
+/// keeps the ad-hoc rows a bare NULL comparison dropped, that the bucket groups under one label, and that the
+/// statement fallback keeps ad-hoc rows distinct per hash. Fixture: one named module (sql_handle 0xH1 →
+/// usp_ComposeNamed, 100 µs) beside two ad-hoc statements (0xH2/0xH3 with distinct hashes, 200 + 300 µs) —
+/// deliberately a MIXED sample, since a one-situation fixture can never expose a cross-population defect.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class ComposeAdHocModuleLivePostgresTests
+{
+    private const int ServerId = -973708;
+    private const string ServerName = "compose-adhoc-fold";
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task ComposedObjectNamePanels_LabelFilterAndSplitTheAdHocPopulation()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live ad-hoc fold test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteAsync(connection, ct);
+
+        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var collectionTime = end.AddHours(-1);
+
+        var bodySucceeded = false;
+        try
+        {
+            await using (var insertProc = new NpgsqlCommand(@"
+INSERT INTO collect.procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle, delta_worker_time, delta_execution_count)
+VALUES (1, $1, $2, $3, 'ComposeDb', 'dbo', 'usp_ComposeNamed', '0xH1', 100, 1)", connection))
+            {
+                insertProc.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
+                insertProc.Parameters.AddWithValue(ServerId);
+                insertProc.Parameters.AddWithValue(ServerName);
+                await insertProc.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var insertQueries = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, delta_worker_time, delta_execution_count)
+VALUES (1, $1, $2, $3, 'ComposeDb', '0xHASHP', '0xH1', 100, 1),
+       (1, $1, $2, $3, 'ComposeDb', '0xHASHA', '0xH2', 200, 1),
+       (1, $1, $2, $3, 'ComposeDb', '0xHASHB', '0xH3', 300, 1)", connection))
+            {
+                insertQueries.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
+                insertQueries.Parameters.AddWithValue(ServerId);
+                insertQueries.Parameters.AddWithValue(ServerName);
+                await insertQueries.ExecuteNonQueryAsync(ct);
+            }
+
+            /* The labeled bucket: the named module attributes alone; BOTH ad-hoc statements land in one
+               visible "(ad hoc)" row carrying their combined weight (unit us keeps expectations integral). */
+            var byObject = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}",
+                "object_name", ct);
+            Assert.Equal(100.0, ValueOf(byObject, "usp_ComposeNamed"), 3);
+            Assert.Equal(500.0, ValueOf(byObject, MeasureCatalog.AdHocLabel), 3);
+            Assert.Equal(2, byObject.Count);
+
+            /* The #2737 neq trap, run for real: before the fold this read 0 — NULL fails "<> ALL", so
+               excluding ONE procedure silently excluded the whole ad-hoc population with it. */
+            var neqNamed = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+                "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"usp_ComposeNamed\"}]}",
+                "database_name", ct);
+            Assert.Equal(500.0, ValueOf(neqNamed, "ComposeDb"), 3);
+
+            /* Filtering TO and AWAY FROM the bucket — the explicit reads the null row never allowed. */
+            var eqAdHoc = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+                "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"eq\",\"value\":\"(ad hoc)\"}]}",
+                "database_name", ct);
+            Assert.Equal(500.0, ValueOf(eqAdHoc, "ComposeDb"), 3);
+
+            var neqAdHoc = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+                "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"(ad hoc)\"}]}",
+                "database_name", ct);
+            Assert.Equal(100.0, ValueOf(neqAdHoc, "ComposeDb"), 3);
+
+            /* The statement fallback identity: the named module keeps its name, the ad-hoc statements stay
+               DISTINCT by hash instead of pooling — the actual "top statements" panel. */
+            var byStatement = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"statement\"],\"viz\":\"bar\"}",
+                "statement", ct);
+            Assert.Equal(100.0, ValueOf(byStatement, "usp_ComposeNamed"), 3);
+            Assert.Equal(200.0, ValueOf(byStatement, "0xHASHA"), 3);
+            Assert.Equal(300.0, ValueOf(byStatement, "0xHASHB"), 3);
+            Assert.Equal(3, byStatement.Count);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The row's value for <paramref name="key"/>, failing with the WHOLE result rendered when the
+    /// row is missing — a bare KeyNotFoundException would hide which groups actually came back.</summary>
+    private static double ValueOf(Dictionary<string, double> rows, string key)
+    {
+        Assert.True(rows.TryGetValue(key, out var value),
+            $"expected a '{key}' row; got: {string.Join(", ", rows.Select(r => $"{r.Key}={r.Value}"))}");
+        return value;
+    }
+
+    /// <summary>Parses, compiles, and RUNS one panel (3-hour window ending <paramref name="endUtc"/>, scoped
+    /// to the fixture server — well inside the raw horizon, so this exercises the #1568 CTE route), returning
+    /// dimension value → value. The compiled artifact itself is what executes — never a retyped copy.</summary>
+    private static async Task<Dictionary<string, double>> RunGroupedAsync(
+        NpgsqlConnection connection, DateTime endUtc, string panelJson, string dimensionName, CancellationToken ct)
+    {
+        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panelJson)!, []);
+        Assert.True(parseError is null, parseError);
+
+        var (compiled, compileError) = ComposeCompiler.Compile(
+            plan!,
+            new ComposeRunContext([ServerName], endUtc.AddHours(-3), endUtc, ComposeRunContext.NoVariables,
+                RollupAvailability.All, endUtc, RollupCoverage.Unknown));
+        Assert.True(compileError is null, compileError);
+        Assert.False(compiled!.Route.IsCagg, "the window must stay on the raw route so the #1568 CTE path is what runs");
+
+        await using var command = new NpgsqlCommand(compiled.Sql, connection);
+        foreach (var parameter in compiled.Parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        var rows = new Dictionary<string, double>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows[reader.GetString(reader.GetOrdinal(dimensionName))] = reader.GetDouble(reader.GetOrdinal("value"));
+        }
+
+        return rows;
+    }
+
+    private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using (var deleteQueries = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE server_id = $1", connection))
+        {
+            deleteQueries.Parameters.AddWithValue(ServerId);
+            await deleteQueries.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var deleteProcs = new NpgsqlCommand("DELETE FROM collect.procedure_stats WHERE server_id = $1", connection))
+        {
+            deleteProcs.Parameters.AddWithValue(ServerId);
+            await deleteProcs.ExecuteNonQueryAsync(ct);
+        }
     }
 }
