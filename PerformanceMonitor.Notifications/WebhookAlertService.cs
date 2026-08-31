@@ -137,24 +137,34 @@ public class WebhookAlertService
 
             bool sent = false;
 
+            /* #2710: the triage-page link, computed ONCE for the whole fan-out so all four channels carry
+               the SAME URL for the same firing. Keyed by (server, metric, now, dedup key) rather than an
+               alert-history id, because the history row is written AFTER delivery — the page resolves the
+               row on read. Null (base URL unset/invalid) means every channel omits the link; delivery is
+               never gated on it. The dedup key uses the same serverId-else-serverName identity the generic
+               channel's {{dedup_key}} token uses, so link, token, and PagerDuty all correlate. */
+            var triageUrl = TriageLink.Build(
+                _settings.TriageBaseUrl, serverName, metricName, DateTime.UtcNow,
+                DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context));
+
             if (_settings.TeamsWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.TeamsWebhookUrl))
             {
-                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context);
+                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl);
             }
 
             if (_settings.SlackWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.SlackWebhookUrl))
             {
-                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context);
+                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl);
             }
 
             if (_settings.GenericWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.GenericWebhookUrl))
             {
-                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context);
+                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl);
             }
 
             if (_settings.PagerDutyEnabled && !string.IsNullOrWhiteSpace(_settings.PagerDutyRoutingKey))
             {
-                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context);
+                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl);
             }
 
             if (sent)
@@ -265,11 +275,12 @@ public class WebhookAlertService
         string serverName,
         string currentValue,
         string thresholdValue,
-        AlertContext? context)
+        AlertContext? context,
+        string? triageUrl)
     {
         try
         {
-            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context);
+            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl);
             var error = await PostWebhookAsync(_settings.TeamsWebhookUrl, payload, _settings.TeamsProxyAddress);
 
             if (error != null)
@@ -344,6 +355,9 @@ public class WebhookAlertService
     /// <summary>
     /// Builds an O365 MessageCard payload for Teams incoming webhooks.
     /// The themeColor property renders as a colored accent bar at the top of the card.
+    /// <para>#2710: a non-null <paramref name="triageUrl"/> adds a <c>potentialAction</c> OpenUri button —
+    /// the MessageCard-native link affordance — pointing at the computed triage page. Null (base URL unset,
+    /// or a test send) renders exactly the pre-#2710 card.</para>
     /// </summary>
     internal static string BuildTeamsPayload(
         string metricName,
@@ -352,7 +366,8 @@ public class WebhookAlertService
         string thresholdValue,
         AlertBranding branding,
         bool isTest = false,
-        AlertContext? context = null)
+        AlertContext? context = null,
+        string? triageUrl = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var themeColor = hexColor.TrimStart('#');
@@ -449,16 +464,41 @@ public class WebhookAlertService
             sections.Add(new { text = branding.SnoozeHint });
         }
 
-        var card = new
-        {
-            @type = "MessageCard",
-            @context = "http://schema.org/extensions",
-            themeColor,
-            summary = isTest
-                ? "[SQL Monitor] Test Notification"
-                : $"[SQL Monitor] {badgeText}: {metricName} on {serverName}",
-            sections
-        };
+        var summary = isTest
+            ? "[SQL Monitor] Test Notification"
+            : $"[SQL Monitor] {badgeText}: {metricName} on {serverName}";
+
+        /* #2710: the OpenUri action carries its schema keys as REAL "@type" (a Dictionary, because a C#
+           @-identifier only escapes the keyword — the existing card's `@type` serializes as "type", a
+           looseness Teams tolerates on the envelope but potentialAction is stricter about). Two shapes
+           rather than a nullable property, because System.Text.Json serializes a null member and a
+           "potentialAction": null key is exactly the kind of half-present field connectors choke on. */
+        object card = triageUrl is null
+            ? new
+            {
+                @type = "MessageCard",
+                @context = "http://schema.org/extensions",
+                themeColor,
+                summary,
+                sections
+            }
+            : new
+            {
+                @type = "MessageCard",
+                @context = "http://schema.org/extensions",
+                themeColor,
+                summary,
+                sections,
+                potentialAction = new object[]
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["@type"] = "OpenUri",
+                        ["name"] = "Open triage page",
+                        ["targets"] = new object[] { new { os = "default", uri = triageUrl } }
+                    }
+                }
+            };
 
         return JsonSerializer.Serialize(card, s_jsonOptions);
     }
@@ -472,11 +512,12 @@ public class WebhookAlertService
         string serverName,
         string currentValue,
         string thresholdValue,
-        AlertContext? context)
+        AlertContext? context,
+        string? triageUrl)
     {
         try
         {
-            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context);
+            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl);
             var error = await PostWebhookAsync(_settings.SlackWebhookUrl, payload, _settings.SlackProxyAddress);
 
             if (error != null)
@@ -512,6 +553,9 @@ public class WebhookAlertService
     /// <summary>
     /// Builds a Slack incoming webhook payload with a colored attachment sidebar.
     /// Uses Slack Block Kit for rich formatting.
+    /// <para>#2710: a non-null <paramref name="triageUrl"/> adds an actions block with a LINK button (a url
+    /// button needs no interactivity config on the webhook, unlike an action_id button) pointing at the
+    /// computed triage page, placed above the "Sent by" context footer. Null renders the pre-#2710 payload.</para>
     /// </summary>
     internal static string BuildSlackPayload(
         string metricName,
@@ -520,7 +564,8 @@ public class WebhookAlertService
         string thresholdValue,
         AlertBranding branding,
         bool isTest = false,
-        AlertContext? context = null)
+        AlertContext? context = null,
+        string? triageUrl = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var utcNow = DateTime.UtcNow;
@@ -596,6 +641,25 @@ public class WebhookAlertService
             }
         }
 
+        /* #2710: the triage-page link button, above the footer so it reads as part of the alert rather than
+           the boilerplate. A url button opens the link directly with no Slack app interactivity required. */
+        if (triageUrl is not null)
+        {
+            blocks.Add(new
+            {
+                type = "actions",
+                elements = new object[]
+                {
+                    new
+                    {
+                        type = "button",
+                        text = new { type = "plain_text", text = "Open triage page", emoji = false },
+                        url = triageUrl
+                    }
+                }
+            });
+        }
+
         var contextElements = new List<object>
         {
             new { type = "mrkdwn", text = $"Sent by {branding.EditionName}" }
@@ -632,7 +696,8 @@ public class WebhookAlertService
         string currentValue,
         string thresholdValue,
         string serverId,
-        AlertContext? context)
+        AlertContext? context,
+        string? triageUrl)
     {
         try
         {
@@ -647,7 +712,8 @@ public class WebhookAlertService
 
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId);
+                context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId,
+                triageUrl: triageUrl);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
@@ -721,7 +787,10 @@ public class WebhookAlertService
     /// alert carries no fingerprintable incident — a template author already has the same data via
     /// <c>{{incidents_json}}</c>, but these two save hand-parsing JSON for the common case of one
     /// Datadog-shaped <c>resource_name:</c> tag. Same "first incident" derivation as every other channel
-    /// here (<see cref="DeriveResourceName"/> / <see cref="DeriveResourceDatabase"/>).
+    /// here (<see cref="DeriveResourceName"/> / <see cref="DeriveResourceDatabase"/>). <c>{{triage_url}}</c>
+    /// is likewise an ordinary escaped string — the SAME computed triage-page link the Teams/Slack/PagerDuty
+    /// channels carry (<see cref="TriageLink.Build"/>), empty when no <see cref="IAlertSettings.TriageBaseUrl"/>
+    /// is configured, so a template using it stays well-formed either way.
     /// </para>
     /// </summary>
     internal static string BuildGenericPayload(
@@ -733,7 +802,8 @@ public class WebhookAlertService
         bool isTest = false,
         AlertContext? context = null,
         string? bodyTemplate = null,
-        string serverId = "")
+        string serverId = "",
+        string? triageUrl = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
@@ -768,6 +838,7 @@ public class WebhookAlertService
             ["dedup_key"] = EscapeForJson(dedupKey),
             ["resource_name"] = EscapeForJson(DeriveResourceName(context) ?? ""),
             ["database"] = EscapeForJson(DeriveResourceDatabase(context) ?? ""),
+            ["triage_url"] = EscapeForJson(triageUrl ?? ""),
         };
 
         /* Single pass: a MatchEvaluator's output is NOT re-scanned, so a value that itself contains the
@@ -780,7 +851,7 @@ public class WebhookAlertService
     /* context_json before context: alternation is ordered, and while the closing \}\} would force a
        backtrack to the right answer anyway, longest-first means correctness never leans on it. */
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
-        new(@"\{\{(metric|server|value|threshold|severity|context_json|incidents_json|dedup_key|resource_name|database|context|timestamp)\}\}",
+        new(@"\{\{(metric|server|value|threshold|severity|context_json|incidents_json|dedup_key|resource_name|database|triage_url|context|timestamp)\}\}",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
@@ -1075,7 +1146,8 @@ public class WebhookAlertService
         string currentValue,
         string thresholdValue,
         string serverId,
-        AlertContext? context)
+        AlertContext? context,
+        string? triageUrl)
     {
         try
         {
@@ -1086,7 +1158,7 @@ public class WebhookAlertService
 
             var payload = BuildPagerDutyPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey);
+                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
             var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress);
@@ -1125,6 +1197,10 @@ public class WebhookAlertService
     /// Builds a PagerDuty Events API v2 payload. Always sends event_action: "trigger" (no resolve wiring —
     /// matches Teams/Slack/Generic which also don't deliver "Cleared" notifications). The dedup_key correlates
     /// repeated triggers for the same ongoing incident into one PagerDuty alert.
+    /// <para>#2710: a non-null <paramref name="triageUrl"/> rides in BOTH the Events v2 <c>links</c> array
+    /// (which PD renders as a first-class link on the alert) and <c>custom_details["Triage"]</c> (so an
+    /// integration reading only the details table still gets it). Null renders the pre-#2710 payload — no
+    /// empty <c>links</c> key is ever sent.</para>
     /// </summary>
     internal static string BuildPagerDutyPayload(
         string metricName,
@@ -1136,7 +1212,8 @@ public class WebhookAlertService
         bool isTest = false,
         AlertContext? context = null,
         string? dedupKey = null,
-        string? serverId = null)
+        string? serverId = null,
+        string? triageUrl = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var severity = MapToPagerDutySeverity(badgeText);
@@ -1152,18 +1229,22 @@ public class WebhookAlertService
             ? branding.EditionName
             : serverName;
 
-        var customDetails = BuildPagerDutyCustomDetails(isTest, branding, context);
+        var customDetails = BuildPagerDutyCustomDetails(isTest, branding, context, triageUrl);
 
         /* Derive dedup_key from the incident fingerprint when not explicitly provided, falling back to a
            stable metric+server key. This ensures PagerDuty correlates repeated alerts for the same incident. */
         var effectiveDedupKey = dedupKey ?? DerivePagerDutyDedupKey(serverId ?? serverName, metricName, context);
 
-        var payload = new
+        /* A string-keyed dictionary rather than the previous anonymous type, so the #2710 links array can be
+           present-or-absent (Events v2 accepts links: [] but an absent key is the honest "no link" shape and
+           keeps the linkless payload byte-identical to pre-#2710). Insertion order is preserved by
+           Dictionary in practice but nothing here depends on key order. */
+        var payload = new Dictionary<string, object>
         {
-            routing_key = routingKey,
-            event_action = "trigger",
-            dedup_key = effectiveDedupKey,
-            payload = new
+            ["routing_key"] = routingKey,
+            ["event_action"] = "trigger",
+            ["dedup_key"] = effectiveDedupKey,
+            ["payload"] = new
             {
                 summary,
                 source,
@@ -1172,8 +1253,13 @@ public class WebhookAlertService
                 component = "SQL Server Performance Monitor",
                 custom_details = customDetails
             },
-            client = branding.EditionName
+            ["client"] = branding.EditionName
         };
+
+        if (triageUrl is not null)
+        {
+            payload["links"] = new object[] { new { href = triageUrl, text = "Open triage page" } };
+        }
 
         return JsonSerializer.Serialize(payload, s_jsonOptions);
     }
@@ -1201,7 +1287,8 @@ public class WebhookAlertService
     private static Dictionary<string, object> BuildPagerDutyCustomDetails(
         bool isTest,
         AlertBranding branding,
-        AlertContext? context)
+        AlertContext? context,
+        string? triageUrl = null)
     {
         var details = new Dictionary<string, object>();
 
@@ -1215,13 +1302,16 @@ public class WebhookAlertService
         /* #2710: Datadog-parity tags, added before the empty-Details early return so an alert type
            that ever carries Incidents without a matching Details item (none do today — Apply and
            BuildDeadlockContext always render one alongside — but nothing enforces that pairing)
-           still gets them. */
+           still gets them. The triage link rides here TOO (not only in the top-level links array),
+           because custom_details is what PD's table view and most downstream integrations read. */
         var resourceName = DeriveResourceName(context);
         if (resourceName is not null)
             details["Resource"] = resourceName;
         var database = DeriveResourceDatabase(context);
         if (!string.IsNullOrEmpty(database))
             details["Database"] = database;
+        if (triageUrl is not null)
+            details["Triage"] = triageUrl;
 
         if (context?.Details is null || context.Details.Count == 0)
         {

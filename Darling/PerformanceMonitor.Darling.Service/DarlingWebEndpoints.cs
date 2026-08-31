@@ -147,6 +147,10 @@ public static class DarlingWebEndpoints
         }
 
         MapCustomViews(app, postgres);
+
+        /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
+           through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
+        DarlingTriageEndpoint.Map(app, postgres, analysis);
     }
 
     /* ─────────────────────────── #1563 custom views: session, catalog, CRUD ─────────────────────────── */
