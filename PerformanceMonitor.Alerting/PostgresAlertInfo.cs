@@ -99,6 +99,31 @@ public sealed record PostgresXminHorizonAlertInfo(
     string? Detail);
 
 /// <summary>
+/// Accumulated pressure for one poison wait event over the alert's evaluation window (#2711).
+/// <para>Deltas rather than levels, unlike the three Tier 0 records above: the question this alert asks is
+/// "how much wait time did this event accrue recently", which only the summed per-interval deltas can
+/// answer — the cumulative counters never reset and a level read of them means "since instance start".</para>
+/// </summary>
+/// <param name="WaitType">The wait class as the collector stored it (e.g. "IPC") — kept for display in the
+/// server's own casing, which differs between Aurora majors.</param>
+/// <param name="WaitEvent">The wait event within that class (e.g. "BtreePage").</param>
+/// <param name="AccumulatedWaitMs">Total wait time accrued across the window, from summed
+/// <c>delta_wait_time_us</c>. Safe against instance restarts and counter resets:
+/// <c>CollectorDeltaCalculator</c> returns 0 for first sightings, resets and gap re-baselines, so this sum
+/// can undercount after a disruption but can never spike from one.</param>
+/// <param name="AccumulatedWaits">Total completed waits across the window — context for the message, not a
+/// threshold input; the per-wait average is exactly the number this alert must NOT judge by.</param>
+/// <param name="NewestCollectionTime">The newest contributing store row's own collection_time — the
+/// collector's clock, not the alert sweep's, so the host can refuse to re-fire on a row it has already
+/// reported (the #2704 unrefreshed-source-row guard).</param>
+public sealed record PostgresPoisonWaitAlertInfo(
+    string WaitType,
+    string WaitEvent,
+    long AccumulatedWaitMs,
+    long AccumulatedWaits,
+    DateTime NewestCollectionTime);
+
+/// <summary>
 /// One replication slot's retention risk.
 /// </summary>
 /// <param name="SlotName">The slot.</param>

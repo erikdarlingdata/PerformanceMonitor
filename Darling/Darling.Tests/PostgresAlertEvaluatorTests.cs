@@ -382,4 +382,159 @@ public class PostgresAlertEvaluatorTests
         Assert.Equal(2, findings.Select(f => f.Subject).Distinct().Count());
         Assert.All(findings, f => Assert.False(string.IsNullOrWhiteSpace(f.Subject)));
     }
+
+    /* ---------------- poison waits (#2711) ---------------- */
+
+    private static PostgresPoisonWaitAlertInfo Poison(
+        long accumulatedMs,
+        string waitEvent = "BtreePage",
+        long waits = 100_000,
+        string waitType = "IPC")
+        => new(waitType, waitEvent, accumulatedMs, waits, new DateTime(2026, 8, 31, 0, 0, 0));
+
+    /// <summary>
+    /// The defining departure from the SQL Server shape, straight from the #2711 fleet research: the
+    /// Postgres poison events average 1-2 ms per wait at six-figure volumes, so an avg-ms-per-wait bar
+    /// (SQL Server's PoisonWaitThresholdMs, default 500) would NEVER see them. Accumulated time is what
+    /// identifies the poison state — 600 seconds of wait across 300,000 two-millisecond waits is one
+    /// backend continuously stuck for the whole window, and it must fire despite a 2 ms per-wait average.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitFiresOnAccumulatedTimeNotPerWaitAverage()
+    {
+        var finding = PostgresAlertEvaluator.EvaluatePoisonWait(Poison(600_000, waits: 300_000));
+
+        Assert.NotNull(finding);
+        Assert.Equal(AlertSeverityLevel.Warning, finding!.Severity);
+        Assert.Equal("IPC:BtreePage", finding.Subject);
+    }
+
+    /// <summary>
+    /// The boundaries: Warning at an average of one backend continuously stuck across the window
+    /// (600,000 ms over 10 minutes), Critical at ten. Exactly-at fires; one below does not.
+    /// </summary>
+    [Theory]
+    [InlineData(599_999, null)]
+    [InlineData(600_000, "Warning")]
+    [InlineData(5_999_999, "Warning")]
+    [InlineData(6_000_000, "Critical")]
+    public void PoisonWaitGradesAtTheDocumentedBoundaries(long accumulatedMs, string? expected)
+    {
+        var finding = PostgresAlertEvaluator.EvaluatePoisonWait(Poison(accumulatedMs));
+
+        if (expected is null)
+        {
+            Assert.Null(finding);
+            return;
+        }
+
+        Assert.Equal(Enum.Parse<AlertSeverityLevel>(expected), finding!.Severity);
+    }
+
+    /// <summary>
+    /// The fleet-quiet pin. The WORST server in the #2711 research (segments-multitenant) accumulated
+    /// 538,850 ms of IPC:BtreePage over 24 hours — a 10-minute share of ~3,742 ms — and even a burst
+    /// packing that entire day's wait into a single hour (~89,808 ms per 10 minutes) must stay silent.
+    /// Nothing measured on the fleet to date may fire this alert; it exists for a categorically worse
+    /// state, the same near-zero-baseline trait that defines the SQL Server poison set.
+    /// </summary>
+    [Theory]
+    [InlineData(3_742)]
+    [InlineData(89_808)]
+    public void PoisonWaitStaysSilentOnTheWorstFleetBaselineObserved(long accumulatedMs)
+    {
+        Assert.Null(PostgresAlertEvaluator.EvaluatePoisonWait(Poison(accumulatedMs, waits: 250_000)));
+    }
+
+    /// <summary>
+    /// Per event, not summed across the poison set: BtreePage and BufferIo are different incidents with
+    /// different remedies, so one over the bar fires alone and one under it cannot ride along — and the
+    /// host's per-subject cooldown (#1140) depends on each being its own finding.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitEventsAreJudgedIndependently()
+    {
+        var findings = PostgresAlertEvaluator.EvaluatePoisonWaits(new[]
+        {
+            Poison(700_000, waitEvent: "BtreePage"),
+            Poison(500_000, waitEvent: "BufferIo"),
+        });
+
+        var finding = Assert.Single(findings);
+        Assert.Equal("IPC:BtreePage", finding.Subject);
+    }
+
+    /// <summary>Worst-first, the same contract as <see cref="FindingsAreOrderedWorstFirst"/>.</summary>
+    [Fact]
+    public void PoisonWaitFindingsAreOrderedWorstFirst()
+    {
+        var findings = PostgresAlertEvaluator.EvaluatePoisonWaits(new[]
+        {
+            Poison(600_000, waitEvent: "BtreePage"),      // Warning
+            Poison(6_000_000, waitEvent: "BufferIo"),     // Critical
+        });
+
+        Assert.Equal(2, findings.Count);
+        Assert.Equal(AlertSeverityLevel.Critical, findings[0].Severity);
+        Assert.Equal("IPC:BufferIo", findings[0].Subject);
+    }
+
+    /// <summary>Null and empty are both the healthy silence — and the only possible answer on a
+    /// non-Aurora target, where the cumulative wait counters do not exist.</summary>
+    [Fact]
+    public void PoisonWaitNoDataIsSilentRatherThanThrowing()
+    {
+        Assert.Empty(PostgresAlertEvaluator.EvaluatePoisonWaits(null));
+        Assert.Empty(PostgresAlertEvaluator.EvaluatePoisonWaits(Array.Empty<PostgresPoisonWaitAlertInfo>()));
+    }
+
+    /// <summary>
+    /// Deliberately the EXACT SQL Server metric string, NOT "PostgreSQL "-prefixed like the Tier 0 trio —
+    /// the #2711 Deadlocks/Blocking parity reasoning: mute rules, history filters and the shared
+    /// PoisonWaitEnabled switch are engine-agnostic. Pinned separately from
+    /// <see cref="MetricNamesArePinnedAndDistinct"/> because that test's prefix assertion is exactly the
+    /// convention this name must not follow.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitMetricIsTheSqlServerParityString()
+    {
+        Assert.Equal("Poison Wait", PostgresAlertEvaluator.PoisonWaitMetric);
+        Assert.DoesNotContain(PostgresAlertEvaluator.PoisonWaitMetric, new[]
+        {
+            PostgresAlertEvaluator.WraparoundMetric,
+            PostgresAlertEvaluator.XminHorizonMetric,
+            PostgresAlertEvaluator.SlotRetentionMetric,
+        });
+    }
+
+    /// <summary>
+    /// The two events need completely different fixes, so the message carries the right one — matched
+    /// case-insensitively because wait-event name casing differs between Aurora majors (the same trap
+    /// the collector documents for AutoVacuumMain/AutovacuumMain).
+    /// </summary>
+    [Theory]
+    [InlineData("BtreePage", "index")]
+    [InlineData("BTREEPAGE", "index")]
+    [InlineData("BufferIo", "in-flight page reads")]
+    [InlineData("bufferio", "in-flight page reads")]
+    [InlineData("SomethingElse", "pg_stat_activity")]
+    public void PoisonWaitMessageCarriesTheRemedyForItsEvent(string waitEvent, string fragment)
+    {
+        Assert.Contains(fragment, PostgresAlertEvaluator.PoisonWaitRemedyFor(waitEvent), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// One subject definition for evaluator and host: the host matches read rows back to findings by this
+    /// string for the #2704 collection-time guard, so a drifted twin would silently disconnect the guard.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitSubjectIsTheTypeColonEventPairInStoredCasing()
+    {
+        var row = Poison(700_000);
+
+        Assert.Equal("IPC:BtreePage", PostgresAlertEvaluator.PoisonWaitSubject(row));
+        Assert.Equal(
+            PostgresAlertEvaluator.PoisonWaitSubject(row),
+            PostgresAlertEvaluator.EvaluatePoisonWait(row)!.Subject);
+    }
 }
