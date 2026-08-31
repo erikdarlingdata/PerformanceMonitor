@@ -545,4 +545,17 @@ public sealed class DarlingWebOidcTests
     [InlineData("/relative/token", false)]
     public void IsAcceptableEndpointUrl_Matrix(string url, bool expected)
         => Assert.Equal(expected, DarlingWebOidc.IsAcceptableEndpointUrl(url));
+
+    /// <summary>A subject with control characters in it could forge lines in the audit trail these
+    /// sign-ins feed (review catch on #2730); the sign-in refuses it, the same decision as the length
+    /// cap \u2014 refusing is recoverable, laundering-then-attributing is not.</summary>
+    [Theory]
+    [InlineData("erik@example.com", false)]
+    [InlineData("yasm\u00edn.o'brien@example.com", false)]  // non-ASCII is fine \u2014 only CONTROLS are hostile
+    [InlineData("evil\r\nOIDC sign-in: admin@example.com as admin", true)]
+    [InlineData("tab\tseparated", true)]
+    [InlineData("nul\u0000byte", true)]
+    [InlineData("del\u007fchar", true)]
+    public void SubjectCarriesControlCharacters_Matrix(string subject, bool expected)
+        => Assert.Equal(expected, DarlingWebOidc.SubjectCarriesControlCharacters(subject));
 }

@@ -550,6 +550,27 @@ internal static class DarlingWebOidc
     internal static string CreateFlowValue() => Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
 
     /// <summary>
+    /// True when a resolved subject carries ASCII control characters (review catch on #2730). No legitimate
+    /// <c>preferred_username</c>/<c>email</c>/<c>sub</c> contains one, and a subject with CR/LF in it could
+    /// forge lines in the very audit trail this feature adds — so the sign-in REFUSES it, the same
+    /// decision as the length cap: refusing a hostile identity is recoverable, laundering it into something
+    /// printable and then attributing writes to the laundered form is not. The audit log lines additionally
+    /// sanitize on output as defense in depth.
+    /// </summary>
+    internal static bool SubjectCarriesControlCharacters(string subject)
+    {
+        foreach (var c in subject)
+        {
+            if (c < ' ' || c == '\x7f')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// OIDC Discovery 1.0 §4.3: the discovery document's <c>issuer</c> MUST be identical to the URL the
     /// configuration was retrieved from (review catch on #2730) — without this check, whatever answers the
     /// well-known URL could name ANY issuer and the ID-token <c>iss</c> comparison would dutifully validate

@@ -1351,7 +1351,8 @@ public sealed class DarlingWebHostService : BackgroundService
                is show someone the login page. */
             if (currentSeat.Subject is not null)
             {
-                _logger.LogInformation("Web dashboard sign-out: {Subject}", currentSeat.Subject);
+                _logger.LogInformation("Web dashboard sign-out: {Subject}",
+                    DarlingHttpRefusalLog.Sanitize(currentSeat.Subject, DarlingWebSeat.MaxSubjectLength));
             }
 
             context.Response.Cookies.Delete(SessionCookieName, new CookieOptions { Path = "/" });
@@ -1522,6 +1523,18 @@ public sealed class DarlingWebHostService : BackgroundService
             return;
         }
 
+        if (DarlingWebOidc.SubjectCarriesControlCharacters(subject))
+        {
+            /* Same shape as the length cap (review catch on #2730): a subject with CR/LF in it could forge
+               lines in the audit trail these sign-ins feed, and no legitimate identifier carries controls —
+               refuse the seat rather than launder the name and attribute writes to the laundered form. */
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status403Forbidden,
+                "the resolved subject contains ASCII control characters, which no legitimate identifier does");
+            await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
+                "Signed in at the provider, but the account identifier is not usable by this dashboard. Configure a different subjectClaim.");
+            return;
+        }
+
         var role = DarlingWebOidc.MapRole(
             oidcClient.Options.RoleClaim is null
                 ? Array.Empty<string>()
@@ -1534,7 +1547,7 @@ public sealed class DarlingWebHostService : BackgroundService
                this line is the audit trail for "someone signed in who shouldn't reach the dashboard". */
             _logger.LogWarning(
                 "OIDC sign-in refused: {Subject} authenticated at the provider but matches neither adminRoles nor viewerRoles in claim '{RoleClaim}'.",
-                subject, oidcClient.Options.RoleClaim);
+                DarlingHttpRefusalLog.Sanitize(subject, DarlingWebSeat.MaxSubjectLength), oidcClient.Options.RoleClaim);
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
                 "Your account is not granted a seat on this dashboard. Ask your administrator to add you to a mapped role.");
             return;
@@ -1545,7 +1558,8 @@ public sealed class DarlingWebHostService : BackgroundService
         /* Per-user identity in the service log — the #2550 counterpart of the updated_by stamp. */
         _logger.LogInformation(
             "OIDC sign-in: {Subject} as {Role} from {Remote}",
-            subject, role == WebOidcRole.Admin ? "admin (edit)" : "viewer (read-only)", remote);
+            DarlingHttpRefusalLog.Sanitize(subject, DarlingWebSeat.MaxSubjectLength),
+            role == WebOidcRole.Admin ? "admin (edit)" : "viewer (read-only)", remote);
 
         await WriteSignedInLandingAsync(context, transaction.ReturnPath);
     }
