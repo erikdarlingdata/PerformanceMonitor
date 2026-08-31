@@ -146,10 +146,19 @@ public static class QueryStoreTrendRouting
     /// points at or ABOVE it. <c>bucket &lt; $4</c> is load-bearing rather than decorative: a refresh can
     /// materialize another bucket between the route probe and this read, and without the predicate that
     /// bucket would be served by BOTH regions. The raw interval arm keeps whole intervals on one side —
-    /// an interval STARTING below $4 belongs to the rollup region even if its closing snapshots land above
-    /// the watermark (they were partially materialized there), so the seam's residual is the partial-value
-    /// undercount of at most the straddling intervals, the same class as #1849's own hour-boundary
-    /// disclosure, not a double count.</para>
+    /// an interval STARTING below $4 belongs to the rollup region even when its later snapshots land above
+    /// the watermark. Those later snapshots are visible to NEITHER arm until the next refresh materializes
+    /// their bucket, so a watermark-straddling interval is served at its last MATERIALIZED value and its
+    /// accrual since then lags the read by the refresh cadence — a visibility LAG bounded by the refresh
+    /// policy, never a loss (the rows sit in current-collection-hour buckets the invalidation engine will
+    /// materialize, at the same collection-hour placement #1849 gives all history). The lag is the
+    /// deliberate side of a trade: admitting those rows into the raw arm by <c>collection_time</c> instead
+    /// would serve the same interval TWICE — its partial value inside a materialized bucket PLUS a raw
+    /// point placed at an interval start inside the rollup region — and a double count cannot be disclosed
+    /// away, while a bounded lag can be and is. With hourly Query Store intervals the lag touches only the
+    /// intervals open across the watermark, for one refresh cycle; a database running
+    /// <c>INTERVAL_LENGTH_MINUTES = 1440</c> keeps its one open interval lagged until its buckets
+    /// materialize, which is the #1849 collection-hour semantics this route already discloses.</para>
     ///
     /// <para><b>The raw arms are bounded to the tail they actually serve — the ±slab is gone here.</b>
     /// The chunk-exclusion floor is <c>GREATEST($2, $4) - 1 hour</c> (a snapshot cannot precede its
