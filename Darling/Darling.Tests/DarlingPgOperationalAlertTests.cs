@@ -128,6 +128,24 @@ public sealed class DarlingPgOperationalAlertTests
     }
 
     [Fact]
+    public void WorstPgBlockingChainPerRoot_NeverCollapsesTheVanishedBlockerSentinel_EvenAcrossUnrelatedIncidents()
+    {
+        /* RootBackendId == 0 is PgBlockingCollector's coalesce(blocker.backend_id, 0) sentinel — the root's
+           own row had already left pg_stat_activity by capture time. Two GENUINELY DIFFERENT blocking
+           situations that both happen to hit this case in the same window must both survive; a plain
+           GroupBy-by-RootBackendId would wrongly merge them (the review finding this test pins). */
+        var unrelatedIncidentOne = BlockingRow(rootBackendId: 0, rootPid: 111, databases: new[] { "eden" });
+        var unrelatedIncidentTwo = BlockingRow(rootBackendId: 0, rootPid: 222, databases: new[] { "sky" });
+        var rows = new[] { unrelatedIncidentOne, unrelatedIncidentTwo };
+
+        var worst = DarlingWorker.WorstPgBlockingChainPerRoot(rows);
+
+        Assert.Equal(2, worst.Count);
+        Assert.Contains(worst, r => r.RootPid == 111);
+        Assert.Contains(worst, r => r.RootPid == 222);
+    }
+
+    [Fact]
     public void WorstPgBlockingChainPerRoot_KeepsTheFirstSampleAsTheReaderAlreadyOrderedItWorstFirst()
     {
         /* GetPgBlockingChainsAsync orders worst-first (widest chain, then deepest, then most recent) — this
@@ -169,6 +187,30 @@ public sealed class DarlingPgOperationalAlertTests
             BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 2, databases: new[] { "eden" }, rootQuery: null));
 
         Assert.Equal("root pid 42 blocking 2 session(s) in [eden]", incident.InvolvedObjects[0]);
+    }
+
+    [Fact]
+    public void BuildPgBlockingIncident_CollapsesMultiLineRootQuery_ToASingleLinePreview()
+    {
+        /* Every other query-text field this codebase puts on an AlertIncident goes through
+           AlertContextBuilders.TruncateText first (review finding this test pins) — Postgres root queries
+           are commonly multi-line formatted DML with no length cap of their own. */
+        var incident = DarlingWorker.BuildPgBlockingIncident(
+            BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 1, databases: Array.Empty<string>(),
+                rootQuery: "UPDATE t\nSET x = 1\nWHERE y = 2"));
+
+        Assert.DoesNotContain('\n', incident.InvolvedObjects[0]);
+        Assert.Contains("UPDATE t SET x = 1 WHERE y = 2", incident.InvolvedObjects[0]);
+    }
+
+    [Fact]
+    public void BuildPgDeadlockIncident_CollapsesMultiLineVictimStatement_ToASingleLinePreview()
+    {
+        var incident = DarlingWorker.BuildPgDeadlockIncident(
+            DeadlockRow("hash-4", victimStatement: "DELETE FROM t\nWHERE id = 1"));
+
+        Assert.DoesNotContain('\n', incident.InvolvedObjects[0]);
+        Assert.Equal("DELETE FROM t WHERE id = 1", incident.InvolvedObjects[0]);
     }
 
     [Fact]

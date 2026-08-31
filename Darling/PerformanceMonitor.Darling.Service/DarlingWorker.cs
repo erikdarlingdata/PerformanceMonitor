@@ -3127,9 +3127,15 @@ public sealed class DarlingWorker : BackgroundService
             row.DeadlockHash,
             new[]
             {
+                /* AlertContextBuilders.TruncateText, not the raw statement: every other query-text field
+                   this codebase puts on an AlertIncident (Blocked Query/Blocking Query/Victim SQL/Query,
+                   AlertContextBuilders.cs:80,82,165,491,561) goes through it first, and deadlock victim
+                   statements are commonly multi-line formatted DML with no SQL-Server-style length cap —
+                   without this, a multi-line statement breaks the one-line-per-incident rendering and an
+                   unbounded one can bloat the stored context past what Slack/Teams will accept. */
                 string.IsNullOrWhiteSpace(row.VictimStatement)
                     ? $"victim pid {row.VictimPid}, {row.ParticipantCount} participant(s)"
-                    : row.VictimStatement!,
+                    : AlertContextBuilders.TruncateText(row.VictimStatement!),
             });
 
     /// <summary>
@@ -3138,15 +3144,37 @@ public sealed class DarlingWorker : BackgroundService
     /// <see cref="BuildPgDeadlockIncident"/>.
     /// <para><see cref="DarlingPgBlockingReader.GetPgBlockingChainsAsync"/> returns one row per (capture,
     /// root) ordered worst-first (widest chain, then deepest, then most recent) — see that method's own
-    /// doc comment — so grouping by root and taking each group's FIRST row keeps the worst sample the
-    /// window saw for that blocker, without needing to re-sort. Without this dedup, a single persistent
-    /// blocker sampled every cycle for the whole rolling window would inflate the alert's count far past
-    /// what an operator would call "how many blocking situations", since blocking here is sampled state,
-    /// not an engine-recorded event log (same caveat the collector's own doc comment carries).</para>
+    /// doc comment — so keeping the FIRST row seen per root keeps the worst sample the window saw for that
+    /// blocker, without needing to re-sort. Without this dedup, a single persistent blocker sampled every
+    /// cycle for the whole rolling window would inflate the alert's count far past what an operator would
+    /// call "how many blocking situations", since blocking here is sampled state, not an engine-recorded
+    /// event log (same caveat the collector's own doc comment carries).</para>
+    /// <para><b><c>RootBackendId == 0</c> is the vanished-blocker sentinel and is NEVER deduped against
+    /// another zero.</b> <c>PgBlockingCollector</c> writes <c>coalesce(blocker.backend_id, 0)</c> when the
+    /// root's own row had already left <c>pg_stat_activity</c> by capture time, and
+    /// <c>DarlingPgBlockingReader</c>'s own <c>recurrence</c> CTE already excludes
+    /// <c>blocking_backend_id &lt;&gt; 0</c> for the identical reason: grouping on the sentinel would count
+    /// unrelated one-off incidents in different captures as repeat appearances of one backend. A plain
+    /// GroupBy-by-RootBackendId would collapse two genuinely different vanished-root blocking situations
+    /// into one entry and merge their fingerprints — a real undercounting bug review caught before this
+    /// was reused as an alert count rather than a display grouping.</para>
     /// </summary>
     internal static List<DarlingPgBlockingReader.PgBlockingChainRow> WorstPgBlockingChainPerRoot(
-        IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> rows) =>
-        rows.GroupBy(r => r.RootBackendId).Select(g => g.First()).ToList();
+        IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> rows)
+    {
+        var result = new List<DarlingPgBlockingReader.PgBlockingChainRow>();
+        var seenRootBackendIds = new HashSet<long>();
+
+        foreach (var row in rows)
+        {
+            if (row.RootBackendId == 0 || seenRootBackendIds.Add(row.RootBackendId))
+            {
+                result.Add(row);
+            }
+        }
+
+        return result;
+    }
 
     /// <summary>
     /// Pure mapping, pulled out of <see cref="EvaluatePgBlockingAsync"/> for the same testability reason as
@@ -3161,7 +3189,11 @@ public sealed class DarlingWorker : BackgroundService
             {
                 $"root pid {row.RootPid} blocking {row.TotalVictims} session(s)"
                     + (row.Databases.Length > 0 ? $" in [{string.Join(", ", row.Databases)}]" : string.Empty)
-                    + (string.IsNullOrWhiteSpace(row.RootQuery) ? string.Empty : $": {row.RootQuery}"),
+                    /* AlertContextBuilders.TruncateText — same reasoning as BuildPgDeadlockIncident's
+                       VictimStatement: root queries are commonly multi-line and otherwise unbounded. */
+                    + (string.IsNullOrWhiteSpace(row.RootQuery)
+                        ? string.Empty
+                        : $": {AlertContextBuilders.TruncateText(row.RootQuery!)}"),
             },
             Database: row.Databases.Length > 0 ? row.Databases[0] : null);
 
