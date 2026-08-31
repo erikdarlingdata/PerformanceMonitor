@@ -191,6 +191,40 @@ public class PagerDutyWebhookTests
         Assert.True(customDetails.TryGetProperty("Blocking Chain — Blocking SPID", out _));
     }
 
+    /* ---------------- Datadog-parity tags (#2710) ---------------- */
+
+    [Fact]
+    public void BuildPagerDutyPayload_Incident_AddsResourceAndDatabaseToCustomDetails()
+    {
+        var context = new AlertContext();
+        AlertIncidentRenderer.Apply(context, new[]
+        {
+            new AlertIncident("k1", new[] { "SalesDB.dbo.Orders" }, Database: "SalesDB"),
+            new AlertIncident("k2", new[] { "OtherDb.dbo.Widgets" }, Database: "OtherDb"),
+        });
+
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "Deadlocks Detected", "SRV1", "2", "n/a", Branding, "key", context: context);
+
+        var customDetails = JsonDocument.Parse(payload).RootElement.GetProperty("payload").GetProperty("custom_details");
+
+        /* First incident wins, the same anchor DerivePagerDutyDedupKey already uses. */
+        Assert.Equal("SalesDB.dbo.Orders", customDetails.GetProperty("Resource").GetString());
+        Assert.Equal("SalesDB", customDetails.GetProperty("Database").GetString());
+    }
+
+    [Fact]
+    public void BuildPagerDutyPayload_NoIncident_OmitsResourceAndDatabase()
+    {
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "High CPU", "SRV1", "97%", "90%", Branding, "key");
+
+        var customDetails = JsonDocument.Parse(payload).RootElement.GetProperty("payload").GetProperty("custom_details");
+
+        Assert.False(customDetails.TryGetProperty("Resource", out _));
+        Assert.False(customDetails.TryGetProperty("Database", out _));
+    }
+
     /* ---------------- EU region endpoint ---------------- */
 
     [Fact]

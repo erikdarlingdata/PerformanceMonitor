@@ -303,6 +303,45 @@ public class WebhookAlertService
     }
 
     /// <summary>
+    /// #2710: the Datadog-parity <c>resource_name</c> tag — the first incident's involved objects,
+    /// joined. Mirrors the SAME "first incident is the correlation anchor" precedent
+    /// <see cref="DerivePagerDutyDedupKey"/> already uses for an alert carrying more than one
+    /// fingerprint: whichever incident PagerDuty's dedup_key names is also the one a human reading
+    /// the tag should look at first. Null when the alert carries no fingerprintable incident (alert
+    /// type not wired to #1140's <see cref="AlertContext.Incidents"/>, or the objects were
+    /// unresolved) — a top-level tag naming nothing would read worse than the tag being absent.
+    /// <see cref="AlertFingerprint.ForObjects"/>'s callers filter out blank objects before they ever
+    /// reach here, but a caller of the sibling <see cref="AlertFingerprint.ForKey"/> overload can pass
+    /// an unfiltered blank display object (review catch: <c>AlertContextBuilders.VolumeFreeSpaceIncidents</c>
+    /// / <c>AnomalousJobIncidents</c> pass the raw mount point / job name) — so the join is checked
+    /// for blank the same way <see cref="AlertFingerprint.ForKey"/> already checks <c>Database</c>,
+    /// rather than trusting every caller to have pre-filtered.
+    /// </summary>
+    private static string? DeriveResourceName(AlertContext? context)
+    {
+        if (context?.Incidents is not { Count: > 0 } incidents)
+            return null;
+
+        var objects = incidents[0].InvolvedObjects;
+        if (objects.Count == 0)
+            return null;
+
+        var joined = string.Join(", ", objects);
+        return string.IsNullOrWhiteSpace(joined) ? null : joined;
+    }
+
+    /// <summary>
+    /// #2710: the Datadog-parity <c>env</c>-adjacent database scope — the first incident's
+    /// <see cref="AlertIncident.Database"/>, the SAME incident <see cref="DeriveResourceName"/>
+    /// reads (kept as its own tag rather than folded into resource_name: per #2361's doc comment on
+    /// <see cref="AlertIncident.Database"/>, it is WHERE the resource lives, not what it is). Null on
+    /// every alert type <see cref="AlertIncident.Database"/> already documents as unscoped (a volume
+    /// or a job is not database-scoped) or with no incident at all.
+    /// </summary>
+    private static string? DeriveResourceDatabase(AlertContext? context) =>
+        context?.Incidents is { Count: > 0 } incidents ? incidents[0].Database : null;
+
+    /// <summary>
     /// Builds an O365 MessageCard payload for Teams incoming webhooks.
     /// The themeColor property renders as a colored accent bar at the top of the card.
     /// </summary>
@@ -330,6 +369,12 @@ public class WebhookAlertService
         else
         {
             facts.Add(new { name = "Server", value = serverName });
+            var resourceName = DeriveResourceName(context);
+            if (resourceName is not null)
+                facts.Add(new { name = "Resource", value = resourceName });
+            var database = DeriveResourceDatabase(context);
+            if (!string.IsNullOrEmpty(database))
+                facts.Add(new { name = "Database", value = database });
             facts.Add(new { name = "Current Value", value = currentValue });
             facts.Add(new { name = "Threshold", value = thresholdValue });
             facts.Add(new { name = "Time (UTC)", value = utcNow.ToString("yyyy-MM-dd HH:mm:ss") });
@@ -504,6 +549,12 @@ public class WebhookAlertService
         else
         {
             fields.Add(new { type = "mrkdwn", text = $"*Server:*\n{serverName}" });
+            var resourceName = DeriveResourceName(context);
+            if (resourceName is not null)
+                fields.Add(new { type = "mrkdwn", text = $"*Resource:*\n{resourceName}" });
+            var database = DeriveResourceDatabase(context);
+            if (!string.IsNullOrEmpty(database))
+                fields.Add(new { type = "mrkdwn", text = $"*Database:*\n{database}" });
             fields.Add(new { type = "mrkdwn", text = $"*Current Value:*\n{currentValue}" });
             fields.Add(new { type = "mrkdwn", text = $"*Threshold:*\n{thresholdValue}" });
             fields.Add(new { type = "mrkdwn", text = $"*Time (UTC):*\n{utcNow:yyyy-MM-dd HH:mm:ss}" });
@@ -665,6 +716,13 @@ public class WebhookAlertService
     /// A template that quotes a raw token anyway produces malformed JSON and is caught by the caller's
     /// well-formedness check, surfacing as a config error rather than a silent bad post.
     /// </para>
+    /// <para>
+    /// #2710: <c>{{resource_name}}</c> / <c>{{database}}</c> are ordinary escaped strings, empty when the
+    /// alert carries no fingerprintable incident — a template author already has the same data via
+    /// <c>{{incidents_json}}</c>, but these two save hand-parsing JSON for the common case of one
+    /// Datadog-shaped <c>resource_name:</c> tag. Same "first incident" derivation as every other channel
+    /// here (<see cref="DeriveResourceName"/> / <see cref="DeriveResourceDatabase"/>).
+    /// </para>
     /// </summary>
     internal static string BuildGenericPayload(
         string metricName,
@@ -708,6 +766,8 @@ public class WebhookAlertService
             ["context_json"] = context is null ? "{}" : AlertContextSerializer.Serialize(RedactForWebhook(context)),
             ["incidents_json"] = AlertContextSerializer.SerializeIncidents(context),
             ["dedup_key"] = EscapeForJson(dedupKey),
+            ["resource_name"] = EscapeForJson(DeriveResourceName(context) ?? ""),
+            ["database"] = EscapeForJson(DeriveResourceDatabase(context) ?? ""),
         };
 
         /* Single pass: a MatchEvaluator's output is NOT re-scanned, so a value that itself contains the
@@ -720,7 +780,7 @@ public class WebhookAlertService
     /* context_json before context: alternation is ordered, and while the closing \}\} would force a
        backtrack to the right answer anyway, longest-first means correctness never leans on it. */
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
-        new(@"\{\{(metric|server|value|threshold|severity|context_json|incidents_json|dedup_key|context|timestamp)\}\}",
+        new(@"\{\{(metric|server|value|threshold|severity|context_json|incidents_json|dedup_key|resource_name|database|context|timestamp)\}\}",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
@@ -1151,6 +1211,17 @@ public class WebhookAlertService
             details["Sent by"] = branding.EditionName;
             return details;
         }
+
+        /* #2710: Datadog-parity tags, added before the empty-Details early return so an alert type
+           that ever carries Incidents without a matching Details item (none do today — Apply and
+           BuildDeadlockContext always render one alongside — but nothing enforces that pairing)
+           still gets them. */
+        var resourceName = DeriveResourceName(context);
+        if (resourceName is not null)
+            details["Resource"] = resourceName;
+        var database = DeriveResourceDatabase(context);
+        if (!string.IsNullOrEmpty(database))
+            details["Database"] = database;
 
         if (context?.Details is null || context.Details.Count == 0)
         {
