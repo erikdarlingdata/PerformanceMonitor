@@ -154,11 +154,17 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
     /// not fire on an event it cannot name.</para>
     /// <para>The sums are cast to bigint because PostgreSQL's SUM(bigint) returns numeric, which Npgsql
     /// surfaces as decimal and GetInt64 refuses at runtime — invisible to every compile-time check.</para>
+    /// <para>GROUPED on <c>lower()</c>, with <c>MAX()</c> picking a representative stored casing for
+    /// display: a window straddling an Aurora major upgrade can hold BOTH casings of one event, and
+    /// grouping on the raw names would silently split its accumulation across two rows — each possibly
+    /// under a bar the combined value clears. The cost of MAX() is that the alert subject can flip casing
+    /// once, at upgrade time, changing that subject's dedup fingerprint for one fire — a visible one-off,
+    /// versus an invisible undercount at the exact moment an upgrade makes contention most likely.</para>
     /// </summary>
     internal const string PoisonWaitSql = """
         SELECT
-            wait_type,
-            wait_event,
+            MAX(wait_type) AS wait_type,
+            MAX(wait_event) AS wait_event,
             (SUM(delta_wait_time_us) / 1000)::bigint AS accumulated_wait_ms,
             SUM(delta_waits)::bigint AS accumulated_waits,
             MAX(collection_time) AS newest_collection_time
@@ -167,7 +173,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
         AND   collection_time >= $2
         AND   lower(wait_type) = 'ipc'
         AND   lower(wait_event) IN ('btreepage', 'bufferio')
-        GROUP BY wait_type, wait_event
+        GROUP BY lower(wait_type), lower(wait_event)
         """;
 
     public async Task<List<PostgresPoisonWaitAlertInfo>> GetPoisonWaitPressureAsync(
