@@ -1798,10 +1798,19 @@ public partial class MainWindow : Window
     /// Opens the viewer's full Settings window (the faithful port of Lite's SettingsWindow). It self-persists
     /// the application settings (MCP, alerts, notifications, SMTP, webhooks, analysis) to
     /// <see cref="_appSettingsStore"/> and secrets to Windows Credential Manager; the folded-in viewer
-    /// preferences (default time range + auto-refresh) come back via <see cref="SettingsWindow.Result"/> on a
-    /// successful Save, so we save them and update the in-memory copy that seeds newly-opened server tabs.
-    /// Already-open tabs keep their own toolbar state (the simple, predictable rule). The store connection is
-    /// passed through for "Manage Mute Rules" (null before the store is connected disables that button).
+    /// preferences (default time range + auto-refresh) come back via <see cref="SettingsWindow.Result"/>, so we
+    /// save them and update the in-memory copy that seeds newly-opened server tabs. Already-open tabs keep
+    /// their own toolbar state (the simple, predictable rule). The store connection is passed through for
+    /// "Manage Mute Rules" (null before the store is connected disables that button).
+    ///
+    /// <para>#2715: persisting <see cref="SettingsWindow.Result"/> depends ONLY on whether Save produced one
+    /// (<see cref="ShouldPersistViewerPreferences"/>), never on <c>ShowDialog()</c>'s own return value. Default
+    /// Time Range and Auto-refresh interval are purely local, per-user preferences with no relationship to the
+    /// shared Postgres/TimescaleDB control-plane store the SAME Save click also writes; gating their local file
+    /// write on that unrelated write's outcome meant a read-only seat's <see cref="ViewerReadOnlyException"/>
+    /// (or any other store-write failure) silently discarded a local preference change it had nothing to do
+    /// with. <see cref="SettingsWindow.Result"/> is captured before the store write is even attempted, so this
+    /// is safe unconditionally.</para>
     /// </summary>
     private void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
@@ -1809,9 +1818,10 @@ public partial class MainWindow : Window
         /* The schedule editor edits CONFIG, so it must see every server — a filtered sidebar must never
            mean you cannot edit the schedule of a server it happens to be hiding. */
         var settings = new SettingsWindow(_preferences, _appSettingsStore, _dataService, _fleet.All) { Owner = this };
-        if (settings.ShowDialog() == true && settings.Result is not null)
+        settings.ShowDialog();
+        if (ShouldPersistViewerPreferences(settings.Result))
         {
-            _preferences = settings.Result;
+            _preferences = settings.Result!;
             if (!_preferencesStore.Save(_preferences))
             {
                 WarnSettingNotSaved("default time range and auto-refresh", _preferencesStore.FilePath);
@@ -1850,6 +1860,22 @@ public partial class MainWindow : Window
             _ = LoadVisibleTabAsync();
         }
     }
+
+    /// <summary>
+    /// Whether a <see cref="SettingsWindow"/> session's <see cref="SettingsWindow.Result"/> should be written
+    /// to the viewer's local <see cref="ViewerPreferencesStore"/> (#2715). <see cref="SettingsWindow.Result"/>
+    /// (Default Time Range + Auto-refresh interval) is a purely local, per-user preference — a small JSON file
+    /// in the viewer's own app-data folder — entirely unrelated to the shared Postgres/TimescaleDB control-plane
+    /// store the SAME Settings-window Save also writes (alert engine, notifications, service flags). The window
+    /// builds <see cref="SettingsWindow.Result"/> BEFORE attempting that unrelated store write, so whether it is
+    /// non-null depends only on the operator having clicked Save and it getting past the (unrelated) cleartext-
+    /// webhook confirmation — never on whether the store write succeeded, and never on read-only status. Pure,
+    /// so it is unit-testable without an STA window: the fix for #2715 is exactly this predicate replacing the
+    /// old <c>ShowDialog() == true &amp;&amp; Result is not null</c> gate, whose <c>ShowDialog() == true</c> half
+    /// tied a local-only preference's persistence to a read-only seat's <see cref="ViewerReadOnlyException"/> on
+    /// the store write for completely unrelated settings.
+    /// </summary>
+    internal static bool ShouldPersistViewerPreferences(ViewerPreferences? result) => result is not null;
 
     // ── About ────────────────────────────────────────────────────────────────────────
 
