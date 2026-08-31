@@ -15,12 +15,20 @@ using Microsoft.Data.SqlClient;
 
 namespace PerformanceMonitor.Darling.Service;
 
-/// <summary>One write's outcome — success, or the error text the journal records.</summary>
-public sealed record PlanForceExecutionResult(bool Succeeded, string? Error)
+/// <summary>
+/// One write's outcome — success, or the error text the journal records. <see cref="Note"/> rides a
+/// SUCCESS that did less than the verb implies (an evict that found nothing cached), so the journal
+/// can say what happened without the row counting as a failure: failure outcomes feed
+/// <see cref="PerformanceMonitor.Analysis.ForcePlanBotHistory.RecentFailedForces"/>' cooldown window,
+/// and a plan that aged out on its own must never cool a query down.
+/// </summary>
+public sealed record PlanForceExecutionResult(bool Succeeded, string? Error, string? Note = null)
 {
     public static PlanForceExecutionResult Success { get; } = new(true, null);
 
     public static PlanForceExecutionResult Failed(string error) => new(false, error);
+
+    public static PlanForceExecutionResult NoOp(string note) => new(true, null, note);
 }
 
 /// <summary>The verify read's answer — the inputs <c>ForcePlanSelfReview.Evaluate</c> judges.</summary>
@@ -165,8 +173,10 @@ DBCC FREEPROCCACHE(@handle) WITH NO_INFOMSGS;";
             if (handles.Count == 0)
             {
                 /* Nothing cached under that hash is a legitimate outcome (the plan aged out on its
-                   own), not a failure — the journal records it and the caller decides what it means. */
-                return PlanForceExecutionResult.Failed("no cached plans matched the hash — nothing to evict");
+                   own, which is the GOAL state), not a failure: a failed-outcome row here would feed
+                   the failure-memory window and cool the query down for succeeding. NoOp says what
+                   happened without saying it went wrong (the review-bot catch on #2731). */
+                return PlanForceExecutionResult.NoOp("no cached plans matched the hash — nothing to evict");
             }
 
             foreach (var handle in handles)

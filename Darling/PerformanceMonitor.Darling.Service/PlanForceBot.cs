@@ -36,13 +36,13 @@ public sealed class PlanForceBot
        pathological drill-down can never turn one analysis pass into a journal flood. */
     internal const int MaxTargetsPerPass = 10;
 
-    private readonly PgPlanForceActionStore _store;
+    private readonly IPlanForceActionStore _store;
     private readonly ForcePlanBotSettings _settings;
     private readonly Func<string, IPlanForceExecutor> _executorFactory;
     private readonly ILogger _logger;
 
     public PlanForceBot(
-        PgPlanForceActionStore store,
+        IPlanForceActionStore store,
         ForcePlanBotSettings settings,
         Func<string, IPlanForceExecutor> executorFactory,
         ILogger logger)

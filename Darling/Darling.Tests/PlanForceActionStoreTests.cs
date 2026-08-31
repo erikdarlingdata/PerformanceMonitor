@@ -82,7 +82,13 @@ public sealed class PlanForceActionStoreTests
         var ct = TestContext.Current.CancellationToken;
         var now = DateTime.UtcNow;
 
-        await CleanupAsync(postgres);
+        /* Pre-clean through the same #1902 helper the teardown uses (bodySucceeded: true so a failure
+           here surfaces as its own error): a prior ABORTED run on a long-lived dev store may have left
+           rows under this server id, and count-shaped assertions below would misread them as bugs. */
+        await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded: true,
+            (cleanup, cleanupCt) => DeleteRowsAsync(cleanup, cleanupCt));
+
+        var bodySucceeded = false;
         try
         {
             /* 1. A shadow-mode decision round-trips with every field intact. */
@@ -175,10 +181,13 @@ public sealed class PlanForceActionStoreTests
                path a server-scoped read never touches. */
             var fleetWide = await store.GetRecentActionsAsync(null, now.AddDays(-1), 100, ct);
             Assert.True(fleetWide.Count >= 5);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await CleanupAsync(postgres);
+            await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded,
+                (cleanup, cleanupCt) => DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
 
@@ -210,12 +219,11 @@ public sealed class PlanForceActionStoreTests
             Detail: null,
             RelatedActionId: relatedActionId);
 
-    private static async Task CleanupAsync(NpgsqlDataSource postgres)
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
-        await using var connection = await postgres.OpenConnectionAsync();
         await using var command = new NpgsqlCommand(
             "DELETE FROM collect.plan_force_actions WHERE server_id = $1", connection);
         command.Parameters.AddWithValue(TestServerId);
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync(ct);
     }
 }

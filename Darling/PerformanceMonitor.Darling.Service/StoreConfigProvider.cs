@@ -1462,7 +1462,7 @@ ORDER BY name", connection);
                the DBNull guard is for a store mid-migration rather than an expected path — and a null there
                falls back to the derivation, which is exactly what it did before this column was read at all. */
             StoredServerId = reader.IsDBNull(15) ? null : reader.GetInt32(15),
-            /* V106 (#2138): write-gate 2 for the force-plan bot. NOT NULL DEFAULT FALSE in the table, so the
+            /* V107 (#2138): write-gate 2 for the force-plan bot. NOT NULL DEFAULT FALSE in the table, so the
                DBNull guard is for a store mid-migration — and it reads as NOT opted in, because a write
                authorization must fail CLOSED when the store cannot answer. */
             PlanForceBotEnabled = !reader.IsDBNull(16) && reader.GetBoolean(16),

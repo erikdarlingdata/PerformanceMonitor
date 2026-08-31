@@ -39,13 +39,29 @@ public sealed record PlanForceActionRecord(
     long? RelatedActionId);
 
 /// <summary>
+/// The slice of the journal the BOT consumes — a seam so the orchestrator is testable with an
+/// in-memory fake (the write-gate re-checks in <c>PlanForceBot</c> are exactly the logic that must
+/// be provable without a live store). The audit read (<c>GetRecentActionsAsync</c>) stays on the
+/// concrete class: it serves future read surfaces, not the bot.
+/// </summary>
+public interface IPlanForceActionStore
+{
+    Task<long> JournalAsync(PlanForceActionRecord record, CancellationToken ct);
+
+    Task<ForcePlanBotHistory> GetQueryHistoryAsync(
+        int serverId, string database, long queryId, ForcePlanBotSettings settings, DateTime nowUtc, CancellationToken ct);
+
+    Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(int serverId, CancellationToken ct);
+}
+
+/// <summary>
 /// The force-plan bot's journal over V107 <c>collect.plan_force_actions</c> (#2138). Append-only on
 /// purpose: an audit trail the bot could UPDATE would be an audit of nothing, so outcomes and
 /// reviews are their own rows pointing back through <c>related_action_id</c>. The history read is
 /// WINDOWED — it counts failures inside the cooldown horizon rather than ever — because that is
 /// what makes the policy's give-up state self-healing (see <see cref="ForcePlanBotHistory"/>).
 /// </summary>
-public sealed class PgPlanForceActionStore
+public sealed class PgPlanForceActionStore : IPlanForceActionStore
 {
     /* The journal's action vocabulary. Strings rather than an enum at the wire so the table stays
        readable in psql and a future Lite twin shares the exact values. */
