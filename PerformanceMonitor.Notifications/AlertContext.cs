@@ -327,18 +327,64 @@ public static class AlertContextSerializer
     /// <summary>
     /// True when the persisted <paramref name="contextJson"/> carries the given #1140 dedup fingerprint
     /// (#1154 per-fingerprint cooldown seed). Anchored substring match on the serialized
-    /// <c>"DedupKey":"&lt;hex&gt;"</c> property — safe because the key is lowercase SHA-256 hex (no JSON
-    /// escaping, no collision with any other serialized field) and <see cref="Serialize"/> emits PascalCase
-    /// with default options. Returns false on null/blank input — the Dashboard scan visits many rows whose
-    /// <c>ContextJson</c> is null (tray/muted/server-reachability rows), and an un-guarded match would NRE.
-    /// Centralizes the JSON shape so the Dashboard store cannot drift; the Lite store re-states the same
-    /// anchor in its SQL <c>LIKE</c> for push-down and is guarded by a store round-trip test.
+    /// <c>"DedupKey":"&lt;value&gt;"</c> property. Originally documented as safe only for lowercase
+    /// SHA-256 hex fingerprints (no JSON escaping, no collision with any other serialized field) — #2716
+    /// added a caller (Postgres Tier-0-predictor cooldown seeding) that passes a raw, human-readable
+    /// database/slot name instead of a hash, which a bare string-concatenation match gets wrong for any
+    /// name containing a quote, backslash, or non-ASCII character (the value <see cref="Serialize"/>
+    /// actually emits is JSON-escaped; the naively-built search pattern was not). Fixed at the root via
+    /// <see cref="BuildDedupKeyJsonFragment"/> rather than by keeping this hex-only and pushing an
+    /// escaping obligation onto every caller — so it is now correct for ANY dedup key, hashed or not.
+    /// Returns false on null/blank input — the Dashboard scan visits many rows whose <c>ContextJson</c> is
+    /// null (tray/muted/server-reachability rows), and an un-guarded match would NRE. Centralizes the JSON
+    /// shape so the Dashboard store cannot drift; the Lite/Darling stores re-state the same anchor in
+    /// their SQL <c>LIKE</c> via <see cref="BuildDedupKeyLikePattern"/> for push-down and are guarded by a
+    /// store round-trip test.
     /// </summary>
     public static bool ContextJsonContainsDedupKey(string? contextJson, string? dedupKey)
     {
         if (string.IsNullOrEmpty(contextJson) || string.IsNullOrEmpty(dedupKey))
             return false;
-        return contextJson.Contains("\"DedupKey\":\"" + dedupKey + "\"", StringComparison.Ordinal);
+        return contextJson.Contains(BuildDedupKeyJsonFragment(dedupKey), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The exact JSON fragment <see cref="Serialize"/> would produce for this dedup key's
+    /// <c>"DedupKey":"..."</c> property — computed by round-tripping <paramref name="dedupKey"/> through
+    /// <see cref="JsonSerializer.Serialize{TValue}(TValue, System.Text.Json.JsonSerializerOptions?)"/>
+    /// itself (default options, the same ones <see cref="Serialize"/> uses) rather than hand-rolling the
+    /// escaping rules, so this can never drift from what actually gets written. A hex fingerprint
+    /// round-trips unchanged; a raw name with a quote, backslash, or non-ASCII character comes back
+    /// correctly escaped the same way the persisted value was.
+    /// </summary>
+    public static string BuildDedupKeyJsonFragment(string dedupKey)
+    {
+        var quoted = JsonSerializer.Serialize(dedupKey);
+        // JsonSerializer.Serialize(string) always returns a quoted JSON string literal (e.g. "café"),
+        // so stripping exactly one leading and one trailing quote yields the escaped inner content.
+        var escaped = quoted.Substring(1, quoted.Length - 2);
+        return "\"DedupKey\":\"" + escaped + "\"";
+    }
+
+    /// <summary>
+    /// The full <c>LIKE</c> pattern (with <c>%</c> wildcards) a SQL store should use to find
+    /// <paramref name="dedupKey"/> inside a persisted <c>ContextJson</c> column — pair with
+    /// <c>ESCAPE '\'</c> on the query. Starts from the same JSON-escaped fragment
+    /// <see cref="BuildDedupKeyJsonFragment"/> computes, then additionally escapes the three characters
+    /// <c>LIKE</c> itself treats specially (<c>\</c>, <c>%</c>, <c>_</c>) so a database/slot name
+    /// containing an underscore (e.g. <c>orders_db</c>) matches only itself instead of also matching
+    /// <c>ordersXdb</c> for any character X. Escaping the backslash FIRST is load-bearing: it must run
+    /// before the <c>%</c>/<c>_</c> escaping so the backslashes those two insert are not themselves
+    /// re-escaped.
+    /// </summary>
+    public static string BuildDedupKeyLikePattern(string dedupKey)
+    {
+        var fragment = BuildDedupKeyJsonFragment(dedupKey);
+        var likeSafe = fragment
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("%", "\\%", StringComparison.Ordinal)
+            .Replace("_", "\\_", StringComparison.Ordinal);
+        return "%" + likeSafe + "%";
     }
 
     public static string Serialize(AlertContext context)

@@ -130,14 +130,17 @@ FROM config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2" + extraFilter
                 /* #1154: the per-fingerprint filter — Lite's anchored LIKE on the serialized
-                   "DedupKey":"<hex>" property (the hex key has no LIKE wildcards; NULL
-                   context_json rows fail the match). */
-                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3"), connection);
+                   "DedupKey":"<value>" property. #2716 added a caller whose dedupKey is a raw,
+                   human-readable name rather than a hash, so the pattern is built (and any LIKE/JSON
+                   special characters escaped) by AlertContextSerializer.BuildDedupKeyLikePattern
+                   rather than hand-concatenated here — see its doc comment for why. NULL context_json
+                   rows fail the match either way. */
+                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'"), connection);
             command.Parameters.AddWithValue(sid);
             command.Parameters.AddWithValue(metricName);
             if (dedupKey is not null)
             {
-                command.Parameters.AddWithValue("%\"DedupKey\":\"" + dedupKey + "\"%");
+                command.Parameters.AddWithValue(AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey));
             }
 
             var result = await command.ExecuteScalarAsync();
