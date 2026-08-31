@@ -94,7 +94,10 @@ public sealed class DarlingMcpCustomViewTools
         "generated definition until it is valid. The definition is a dashboard {\"panels\":[...]} or a notebook " +
         "{\"kind\":\"notebook\",\"cells\":[...]}; a composed panel names a catalog 'source' + 'measure'|'ratio', an " +
         "'aggregate', an optional 'timeBucket' or 'topN', 'filters', 'groupBy', 'unit', 'viz', and optionally an " +
-        "'overlay' second measure (scatter's y axis, or a dual-axis line/area).")]
+        "'overlay' second measure (scatter's y axis, or a dual-axis line/area). Unknown keys are ERRORS at every " +
+        "level (root, panel, cell, filter, overlay), with a did-you-mean for a near-miss — a typo'd key can never " +
+        "silently validate as a different panel. Note a notebook panel cell is FLAT (the cell object carries " +
+        "'type':'panel' plus the panel's own keys); only run_custom_view_panel's spec nests under 'panel'.")]
     public static Task<string> ValidateCustomView(
         [Description("The view definition JSON to validate (NOT persisted).")] string definition)
     {

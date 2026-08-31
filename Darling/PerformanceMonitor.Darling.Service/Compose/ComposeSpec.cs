@@ -170,6 +170,207 @@ public static class ComposeSpec
     /// <summary>Set form of <see cref="ComposeVizList"/> for O(1) membership.</summary>
     public static readonly IReadOnlySet<string> KnownComposeViz = new HashSet<string>(ComposeVizList, StringComparer.Ordinal);
 
+    /* ─────────────────────────── unknown keys (#2733) ─────────────────────────── */
+
+    /* The write path is STRICT about keys; the parse/run path is not. TryParsePanel positive-reads the keys
+       it knows and defaults every optional one on absence, so a typo'd key ("filter", "Filters") used to
+       yield a syntactically-valid DIFFERENT panel that validated {valid:true} — a dropped filter silently
+       widening a query to the whole fleet (#2733). The write-time validators (ValidateDefinition /
+       ValidateNotebookDefinition) now reject any key outside these sets BEFORE parsing, naming the stray and
+       suggesting the near-miss. The sets live HERE, beside the parser that reads them, and cannot drift
+       silently in either direction: a key listed but not parsed is caught by the every-key acceptance test,
+       and a key parsed but not listed can never reach the parser through the write path — the new feature's
+       own first write-path test rejects it. TryParsePanel itself stays lenient ON PURPOSE: the run/read path
+       must keep rendering definitions that stored before the strictness existed. */
+
+    /// <summary>The composed-panel key universe: exactly the keys <see cref="TryParsePanel"/> reads. The
+    /// write path rejects anything else (plus the caller's presentation extras — title/span/hours — which the
+    /// frontend owns and the parser never sees).</summary>
+    public static readonly IReadOnlySet<string> ComposedPanelKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "source", "measure", "ratio", "aggregate", "unit", "timeBucket", "topN", "viz",
+        "filters", "groupBy", "overlay", "thresholds", "annotations",
+    };
+
+    /// <summary>The keys a panel filter object may carry (<see cref="ParseFilters"/>).</summary>
+    public static readonly IReadOnlySet<string> ComposedFilterKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "dimension", "op", "value",
+    };
+
+    /// <summary>The keys an overlay object may carry (the #1606 second measure).</summary>
+    public static readonly IReadOnlySet<string> ComposedOverlayKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "measure", "aggregate", "unit",
+    };
+
+    /// <summary>The keys a view-level variable object may carry (<see cref="ParseVariables"/>).</summary>
+    public static readonly IReadOnlySet<string> VariableKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "name", "dimension", "default",
+    };
+
+    /// <summary>The keys a <c>range</c> object may carry (<see cref="ParseRange"/>).</summary>
+    public static readonly IReadOnlySet<string> RangeKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "hours",
+    };
+
+    /// <summary>The keys the object form of <c>viz</c> may carry (<see cref="ParseViz"/>).</summary>
+    private static readonly IReadOnlySet<string> s_vizObjectKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type",
+    };
+
+    /// <summary>The one mis-shape worth a targeted message instead of a generic did-you-mean: nesting the
+    /// spec under a <c>panel</c> key is <c>run_custom_view_panel</c>'s RUN-SPEC wrapper leaking into a stored
+    /// definition — the natural guess, since that tool nests while a stored panel/cell is flat (#2733). ONE
+    /// constant, because the same mis-shape is also named by the write path's v1 arm (a nested panel has no
+    /// <c>source</c>, so it never reaches the composed strict check) — two independently-worded copies would
+    /// drift on the next tweak.</summary>
+    internal const string RunSpecNestingHint =
+        "a stored panel is flat (the {\"panel\":{...}} wrapper belongs to run_custom_view_panel's spec); put the panel's keys (source, measure, ...) directly on this object.";
+
+    /// <summary>Targeted guidance per stray key — see <see cref="RunSpecNestingHint"/>.</summary>
+    private static readonly IReadOnlyDictionary<string, string> s_panelKeyHints = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["panel"] = RunSpecNestingHint,
+    };
+
+    /// <summary>
+    /// The first unknown key in <paramref name="obj"/> as a caller-facing error, or null when every key is in
+    /// <paramref name="knownKeys"/> (or <paramref name="extraAllowedKeys"/>). <paramref name="path"/> names the
+    /// object in the error ("panel", "overlay", "filter 0", ...). A stray key close to a known one gets a
+    /// did-you-mean; a key in <paramref name="keyHints"/> gets its targeted guidance instead. Write-path only
+    /// by design — see the strictness note above.
+    /// </summary>
+    public static string? UnknownKeyError(
+        JsonObject obj,
+        IReadOnlySet<string> knownKeys,
+        string path,
+        IReadOnlySet<string>? extraAllowedKeys = null,
+        IReadOnlyDictionary<string, string>? keyHints = null)
+    {
+        foreach (var property in obj)
+        {
+            var key = property.Key;
+            if (knownKeys.Contains(key) || (extraAllowedKeys?.Contains(key) ?? false))
+            {
+                continue;
+            }
+
+            if (keyHints is not null && keyHints.TryGetValue(key, out var hint))
+            {
+                return $"{path} has unknown key '{key}' — {hint}";
+            }
+
+            var candidates = extraAllowedKeys is null ? knownKeys : knownKeys.Concat(extraAllowedKeys);
+            return NearestKnownKey(key, candidates) is string suggestion
+                ? $"{path} has unknown key '{key}' — did you mean '{suggestion}'?"
+                : $"{path} has unknown key '{key}'.";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The write-time strict-key walk over one COMPOSED panel: the panel object itself (against
+    /// <see cref="ComposedPanelKeys"/> + the caller's presentation extras), the object form of <c>viz</c>,
+    /// each filter object, and the overlay object. Returns the first stray-key error, or null. Only the
+    /// shapes the parser understands are walked — a filters value that is not an array (say) is left for
+    /// <see cref="TryParsePanel"/> to reject with its structural message.
+    /// </summary>
+    public static string? UnknownComposedPanelKeyError(JsonObject panel, IReadOnlySet<string>? extraAllowedKeys = null)
+    {
+        if (UnknownKeyError(panel, ComposedPanelKeys, "panel", extraAllowedKeys, s_panelKeyHints) is string topError)
+        {
+            return topError;
+        }
+
+        if (panel["viz"] is JsonObject vizObject
+            && UnknownKeyError(vizObject, s_vizObjectKeys, "panel.viz") is string vizError)
+        {
+            return vizError;
+        }
+
+        if (panel["filters"] is JsonArray filters)
+        {
+            for (var i = 0; i < filters.Count; i++)
+            {
+                if (filters[i] is JsonObject filterObject
+                    && UnknownKeyError(filterObject, ComposedFilterKeys, $"filter {i}") is string filterError)
+                {
+                    return filterError;
+                }
+            }
+        }
+
+        if (panel["overlay"] is JsonObject overlayObject
+            && UnknownKeyError(overlayObject, ComposedOverlayKeys, "overlay") is string overlayError)
+        {
+            return overlayError;
+        }
+
+        return null;
+    }
+
+    /// <summary>The known key nearest to <paramref name="unknown"/> when it is plausibly a typo — a
+    /// case-insensitive match ("Filters"), or within edit distance 2 ("filter", "defalut") — else null.</summary>
+    internal static string? NearestKnownKey(string unknown, IEnumerable<string> candidates)
+    {
+        string? best = null;
+        var bestDistance = int.MaxValue;
+        foreach (var candidate in candidates)
+        {
+            if (string.Equals(unknown, candidate, StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+
+            var distance = EditDistance(unknown, candidate);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = candidate;
+            }
+        }
+
+        return bestDistance <= 2 ? best : null;
+    }
+
+    /// <summary>Case-insensitive Levenshtein distance — keys are short, so the O(len²) two-row form is fine.</summary>
+    private static int EditDistance(string a, string b)
+    {
+        if (Math.Abs(a.Length - b.Length) > 2)
+        {
+            /* Distance is at least the length difference; past the suggestion threshold, skip the work. */
+            return int.MaxValue;
+        }
+
+        var previous = new int[b.Length + 1];
+        var current = new int[b.Length + 1];
+        for (var j = 0; j <= b.Length; j++)
+        {
+            previous[j] = j;
+        }
+
+        for (var i = 1; i <= a.Length; i++)
+        {
+            current[0] = i;
+            for (var j = 1; j <= b.Length; j++)
+            {
+                var substitution = char.ToLowerInvariant(a[i - 1]) == char.ToLowerInvariant(b[j - 1]) ? 0 : 1;
+                current[j] = Math.Min(
+                    Math.Min(current[j - 1] + 1, previous[j] + 1),
+                    previous[j - 1] + substitution);
+            }
+
+            (previous, current) = (current, previous);
+        }
+
+        return previous[b.Length];
+    }
+
     /* ─────────────────────────── variables ─────────────────────────── */
 
     /// <summary>The set of dimension names a variable may be typed as: every catalog dimension name plus
@@ -272,7 +473,15 @@ public static class ComposeSpec
     public static (PanelPlan? Plan, string? Error) TryParsePanel(JsonObject panel, IReadOnlyCollection<string> declaredVariables)
     {
         var source = Str(panel, "source");
-        if (string.IsNullOrEmpty(source) || !MeasureCatalog.IsKnownSource(source))
+        if (string.IsNullOrEmpty(source))
+        {
+            /* Say "missing", not "unknown source ''" — the misdirecting error #2733 was reported on: a
+               mis-shaped object (the panel nested under a 'panel' key, say) has no source at all, and
+               quoting an empty string sent the author hunting the catalog instead of the shape. */
+            return (null, "panel is missing 'source'.");
+        }
+
+        if (!MeasureCatalog.IsKnownSource(source))
         {
             return (null, $"panel references unknown source '{source}'.");
         }
