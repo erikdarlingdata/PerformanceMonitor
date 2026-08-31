@@ -350,7 +350,12 @@ public static class ComposeCompiler
             sql.Append("    SELECT ").Append(string.Join(", ", rankSelects)).Append('\n');
             AppendFactBody("    ");
             sql.Append("    GROUP BY ").Append(string.Join(", ", plan.GroupBy.Select(ColumnRef))).Append('\n');
-            sql.Append("    ORDER BY value DESC\n");
+            /* NULLS LAST, because Postgres's DESC default is NULLS FIRST: a group whose aggregate is NULL
+               (every in-window row's delta column NULL — a counter's first-ever collection, say) would
+               otherwise outrank every REAL winner and silently occupy a series slot. Worse here than in
+               the plain Ranked arm below (where the NULL row is at least visible): this ordering decides
+               MEMBERSHIP for the whole chart. */
+            sql.Append("    ORDER BY value DESC NULLS LAST\n");
             sql.Append("    LIMIT ").Append(p.AddInt(plan.TopN)).Append('\n');
             sql.Append(")\n");
         }
@@ -440,7 +445,10 @@ public static class ComposeCompiler
                 sql.Append("ORDER BY bucket");
                 break;
             case PanelMode.Ranked:
-                sql.Append("ORDER BY value DESC\n");
+                /* NULLS LAST for the same reason as the rank CTE above: DESC's default NULLS FIRST put a
+                   NULL-aggregate group at the TOP of the ranking, ahead of every real value — and under
+                   the LIMIT it evicted a legitimate member. */
+                sql.Append("ORDER BY value DESC NULLS LAST\n");
                 sql.Append("LIMIT ").Append(p.AddInt(plan.TopN));
                 break;
             default: /* Scalar — a single aggregate row. */

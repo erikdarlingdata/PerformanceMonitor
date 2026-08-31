@@ -581,7 +581,10 @@ public sealed class DarlingComposeTests
     public void Compile_RankedShape_OrdersByValueDescWithBoundLimit()
     {
         var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}"));
-        Assert.Contains("ORDER BY value DESC", sql, StringComparison.Ordinal);
+        /* NULLS LAST pins the #2743 review fix: DESC's default NULLS FIRST ranked a NULL-aggregate group
+           at the top, and under the LIMIT it evicted a legitimate member. The bare form must stay gone. */
+        Assert.Contains("ORDER BY value DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY value DESC\n", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $", sql, StringComparison.Ordinal);
     }
 
@@ -595,7 +598,9 @@ public sealed class DarlingComposeTests
         /* The rank pass: the Ranked query minus the time column, as a CTE — window-total ordering with the
            bound topN LIMIT ($3 here: window $1/$2, then topN; no scope, no filters). */
         Assert.StartsWith("WITH topn AS (", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY value DESC", sql, StringComparison.Ordinal);
+        /* NULLS LAST, because DESC's Postgres default is NULLS FIRST and this ordering decides series
+           MEMBERSHIP — a NULL-aggregate group must never evict a real winner (#2743 review). */
+        Assert.Contains("ORDER BY value DESC NULLS LAST", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
 
         /* The series pass buckets ONLY the winners: membership is IS NOT DISTINCT FROM (a NULL group key
