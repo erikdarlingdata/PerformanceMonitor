@@ -17,18 +17,41 @@ namespace PerformanceMonitor.Darling.Analysis;
 
 public sealed partial class PgFactCollector
 {
+    /* #2705: max_dop on v_query_stats is sys.dm_exec_query_stats' lifetime-max for the plan's time in
+       cache (QueryStatExtremes.cs's doctrine — same semantics as max/min_cpu_ms), so a plan compiled
+       before 'max degree of parallelism' was lowered keeps reporting the old higher DOP until it is
+       evicted or recompiled. get_top_queries_by_cpu's tool description has always carried this caveat
+       for a human reader; this fact collector had no equivalent guard and fed the raw lifetime value
+       into a QUERY_HIGH_DOP finding at full confidence. current_maxdop applies the same provable-tell
+       reasoning QueryStatExtremes uses for CPU/elapsed: a max_dop reading that EXCEEDS what the
+       server's current maxdop setting can produce right now is impossible under today's configuration,
+       so it provably predates whatever change set that configuration and must not be counted. A
+       current_maxdop of 0 (unlimited) or unknown (no server_config row yet) makes no configuration
+       impossible, so the count is unchanged in both of those cases. */
     public const string QueryStatsSql = @"
+WITH current_maxdop AS
+(
+    SELECT value_in_use
+    FROM server_config
+    WHERE server_id = $1
+    AND   configuration_name = 'max degree of parallelism'
+    ORDER BY capture_time DESC
+    LIMIT 1
+)
 SELECT
-    SUM(delta_spills) AS total_spills,
-    COUNT(CASE WHEN max_dop > 8 THEN 1 END) AS high_dop_queries,
-    COUNT(CASE WHEN delta_spills > 0 THEN 1 END) AS spilling_queries,
-    SUM(delta_execution_count) AS total_executions,
-    SUM(delta_worker_time) AS total_cpu_time_us
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   delta_execution_count > 0";
+    SUM(v.delta_spills) AS total_spills,
+    COUNT(CASE WHEN v.max_dop > 8
+                AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
+               THEN 1 END) AS high_dop_queries,
+    COUNT(CASE WHEN v.delta_spills > 0 THEN 1 END) AS spilling_queries,
+    SUM(v.delta_execution_count) AS total_executions,
+    SUM(v.delta_worker_time) AS total_cpu_time_us
+FROM v_query_stats AS v
+LEFT JOIN current_maxdop AS m ON true
+WHERE v.server_id = $1
+AND   v.collection_time >= $2
+AND   v.collection_time <= $3
+AND   v.delta_execution_count > 0";
 
     /// <summary>
     /// Collects query-level aggregate facts from query_stats.
