@@ -1007,6 +1007,52 @@ public sealed class AlertEngineTests
         Assert.Equal("SRV-A: Poison wait avg below threshold", resolution.Message); /* :330 */
     }
 
+    [Fact]
+    public async Task PoisonWait_DoesNotRefire_OnTheSameCollectionTime_EvenAfterCooldownElapses()
+    {
+        /* The read adapter's own "newest row within 10 minutes" window can hand back the SAME
+           wait_stats row across multiple sweeps when the collector's delivered cadence lags the
+           alert cooldown — observed live as byte-identical "Poison Wait" alerts ~5-7 minutes
+           apart on the same server. Cooldown elapsing is not proof a fresh observation exists;
+           re-firing on an unrefreshed collection_time reports the same event twice. */
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        var firstCollection = new DateTime(2026, 8, 31, 6, 0, 0, DateTimeKind.Utc);
+        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta
+        {
+            WaitType = "RESOURCE_SEMAPHORE_QUERY_COMPILE",
+            DeltaMs = 113997,
+            DeltaTasks = 134,
+            AvgMsPerWait = 850.7,
+            CollectionTime = firstCollection
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Cooldown (5 min default) elapses, but the collector has not produced a new row yet —
+           the adapter still hands back the identical collection_time. Must NOT re-fire. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* A genuinely new collection — even with the identical wait-type/value shape — is a
+           fresh observation of the condition and must fire. */
+        h.Now = h.Now.AddMinutes(6);
+        h.Adapter.PoisonWaits.Clear();
+        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta
+        {
+            WaitType = "RESOURCE_SEMAPHORE_QUERY_COMPILE",
+            DeltaMs = 113997,
+            DeltaTasks = 134,
+            AvgMsPerWait = 850.7,
+            CollectionTime = firstCollection.AddMinutes(7)
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
     /* ---------------- long-running queries ---------------- */
 
     [Fact]

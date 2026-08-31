@@ -292,7 +292,8 @@ SELECT
     delta_waiting_tasks AS delta_tasks,
     CASE WHEN delta_waiting_tasks > 0
     THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks
-    ELSE 0 END AS avg_ms_per_wait
+    ELSE 0 END AS avg_ms_per_wait,
+    collection_time
 FROM wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
@@ -321,7 +322,8 @@ LIMIT 3";
                     WaitType = reader.GetString(0),
                     DeltaMs = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                     DeltaTasks = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                    AvgMsPerWait = reader.IsDBNull(3) ? 0 : reader.GetDouble(3)
+                    AvgMsPerWait = reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
+                    CollectionTime = reader.GetDateTime(4)
                 });
             }
         }
