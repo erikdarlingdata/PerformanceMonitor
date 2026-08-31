@@ -2986,11 +2986,13 @@ public sealed class DarlingWorker : BackgroundService
 
     /// <summary>
     /// The rolling-1-hour-window Postgres Blocking alert (#2711). Counts DISTINCT root blockers, not raw
-    /// chain rows — <see cref="DarlingPgBlockingReader.GetPgBlockingChainsAsync"/> returns one row per
-    /// (capture, root), so a single persistent blocker sampled every cycle for an hour would otherwise
-    /// inflate the count far past what an operator would call "how many blocking situations". Same
-    /// <see cref="RollingCountAlertGate"/> reuse and parity-named metrics as
-    /// <see cref="EvaluatePgDeadlocksAsync"/> — see its doc comment for why.
+    /// chain rows — <see cref="DarlingPgBlockingReader.GetPgBlockingChainsDedupedByRootAsync"/> (#2714) already
+    /// dedupes by root INSIDE the query, before its own LIMIT, so a single persistent blocker sampled every
+    /// cycle for an hour cannot crowd a distinct root out of the row budget the way the raw, severity-ordered
+    /// <see cref="DarlingPgBlockingReader.GetPgBlockingChainsAsync"/> could. <see cref="WorstPgBlockingChainPerRoot"/>
+    /// below still runs — see its own doc comment for why a second, C#-side dedup remains worth keeping even
+    /// though the query no longer needs it to arrive at "one row per root". Same <see cref="RollingCountAlertGate"/>
+    /// reuse and parity-named metrics as <see cref="EvaluatePgDeadlocksAsync"/> — see its doc comment for why.
     /// </summary>
     private async Task EvaluatePgBlockingAsync(
         ServerRuntime runtime, AlertServerSnapshot snapshot, CancellationToken cancellationToken)
@@ -3152,13 +3154,17 @@ public sealed class DarlingWorker : BackgroundService
     /// Which root blocker each captured chain belongs to, worst sample first per root — pulled out of
     /// <see cref="EvaluatePgBlockingAsync"/> for the same testability reason as
     /// <see cref="BuildPgDeadlockIncident"/>.
-    /// <para><see cref="DarlingPgBlockingReader.GetPgBlockingChainsAsync"/> returns one row per (capture,
-    /// root) ordered worst-first (widest chain, then deepest, then most recent) — see that method's own
-    /// doc comment — so keeping the FIRST row seen per root keeps the worst sample the window saw for that
-    /// blocker, without needing to re-sort. Without this dedup, a single persistent blocker sampled every
-    /// cycle for the whole rolling window would inflate the alert's count far past what an operator would
-    /// call "how many blocking situations", since blocking here is sampled state, not an engine-recorded
-    /// event log (same caveat the collector's own doc comment carries).</para>
+    /// <para><see cref="EvaluatePgBlockingAsync"/> feeds this from
+    /// <see cref="DarlingPgBlockingReader.GetPgBlockingChainsDedupedByRootAsync"/> (#2714), which already
+    /// dedupes by root INSIDE the query, ordered worst-first (widest chain, then deepest, then most recent) —
+    /// see that method's own doc comment. So the rows arriving here are typically already at most one per
+    /// root, and this method's own
+    /// "keep the FIRST row seen per root" dedup is now a no-op safety net rather than the only thing standing
+    /// between a real distinct root and an undercount — kept because the sentinel-identity handling below
+    /// (<c>RootBackendId == 0</c>) is still load-bearing regardless of which reader supplies the rows, and
+    /// because nothing stops a future call site from wiring this to the raw, non-deduped
+    /// <see cref="DarlingPgBlockingReader.GetPgBlockingChainsAsync"/> again (guarded by
+    /// <c>EvaluatePgBlockingAsync_CallsTheDedupedByRootReader_NotTheRawOne</c>).</para>
     /// <para><b><c>RootBackendId == 0</c> is the vanished-blocker sentinel, and it needs its OWN identity to
     /// dedupe against, not the raw backend id.</b> <c>PgBlockingCollector</c> writes
     /// <c>coalesce(blocker.backend_id, 0)</c> when the root's own row had already left

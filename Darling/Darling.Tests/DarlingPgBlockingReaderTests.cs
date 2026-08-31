@@ -416,7 +416,7 @@ public class DarlingPgBlockingReaderTests
             "query_text_may_be_truncated", "chain_may_be_truncated",
         ];
 
-        var finalSelectStart = DedupedByRootSql.LastIndexOf("SELECT\n", StringComparison.Ordinal);
+        var finalSelectStart = DedupedByRootSql.LastIndexOf("SELECT", StringComparison.Ordinal);
         Assert.True(finalSelectStart >= 0, "expected a final SELECT projecting the deduped rows");
         var finalSelect = DedupedByRootSql[finalSelectStart..];
 
@@ -508,6 +508,7 @@ public sealed class PgBlockingChainsDedupedByRootLivePostgresTests
 
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             var now = DateTime.UtcNow;
@@ -550,10 +551,14 @@ public sealed class PgBlockingChainsDedupedByRootLivePostgresTests
             Assert.Equal(2, deduped.Count);
             Assert.Contains(deduped, row => row.RootBackendId == RootABackendId && row.TotalVictims == 3);
             Assert.Contains(deduped, row => row.RootBackendId == RootBBackendId && row.TotalVictims == 1);
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, ct);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+            });
         }
     }
 
