@@ -241,6 +241,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingTrendReader.QueryDurationTrendSql))]
     [InlineData(nameof(DarlingTrendReader.ProcedureDurationTrendSql))]
     [InlineData(nameof(DarlingTrendReader.QueryStoreDurationTrendSql))]
+    [InlineData(nameof(DarlingTrendReader.QueryStoreDurationTrendRollupSql))]
     [InlineData(nameof(DarlingTrendReader.HasAnyQueryStatSql))]
     [InlineData(nameof(DarlingTrendReader.HasAnyProcedureStatSql))]
     [InlineData(nameof(DarlingTrendReader.HasAnyQueryStoreStatSql))]
@@ -266,6 +267,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         nameof(DarlingTrendReader.QueryDurationTrendSql) => DarlingTrendReader.QueryDurationTrendSql,
         nameof(DarlingTrendReader.ProcedureDurationTrendSql) => DarlingTrendReader.ProcedureDurationTrendSql,
         nameof(DarlingTrendReader.QueryStoreDurationTrendSql) => DarlingTrendReader.QueryStoreDurationTrendSql,
+        nameof(DarlingTrendReader.QueryStoreDurationTrendRollupSql) => DarlingTrendReader.QueryStoreDurationTrendRollupSql,
         nameof(DarlingTrendReader.HasAnyQueryStatSql) => DarlingTrendReader.HasAnyQueryStatSql,
         nameof(DarlingTrendReader.HasAnyProcedureStatSql) => DarlingTrendReader.HasAnyProcedureStatSql,
         nameof(DarlingTrendReader.HasAnyQueryStoreStatSql) => DarlingTrendReader.HasAnyQueryStoreStatSql,

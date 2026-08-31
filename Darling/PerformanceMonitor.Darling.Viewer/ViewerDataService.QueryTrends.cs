@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -116,6 +117,12 @@ public sealed partial class ViewerDataService
     /// be reconstructed, so they keep the pre-tier-2 treatment exactly: un-deduped, at collection_time,
     /// still overstating. The arms split on <c>interval_start_time_utc IS NULL</c>, which partitions the
     /// rows with no overlap and no gap. Mirrors Lite's GetQueryStoreDurationTrendAsync.</para>
+    /// <para><b>#2736: this is now the FALLBACK, not the read.</b> The rank-over-raw below costs the whole
+    /// slab regardless of the window; on stores with a materialized
+    /// <c>query_store_stats_corrected_hourly</c> the read routes through
+    /// <see cref="QueryStoreDurationTrendRollupSql"/> and this shape runs only where it is affordable
+    /// (no rollup: plain PostgreSQL, or nothing materialized yet). Its ±slab stays untouched on purpose —
+    /// see <see cref="QueryStoreTrendRouting"/>.</para>
     /// </summary>
     public const string QueryStoreDurationTrendSql = """
         WITH placed AS
@@ -191,6 +198,21 @@ public sealed partial class ViewerDataService
         ORDER BY point_time
         """;
 
+    /// <summary>
+    /// The rollup-routed Query Store duration trend (#2736): the materialized window portion served from
+    /// <c>query_store_stats_corrected_hourly</c> as a rollup scan, the unmaterialized tail from the raw arms
+    /// with tail-tight bounds instead of the fixed ±slab. Built by
+    /// <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> — the SAME builder the MCP reader's twin
+    /// uses, so the browser and the desktop viewer cannot disagree about the same hour; this copy carries
+    /// the #1319 database filter as $5 (the corrected hourly groups by database_name, so the filter
+    /// survives the routing). Chosen per read by <see cref="QueryStoreTrendRouting.ResolveAsync"/>; a store
+    /// without the rollup (plain PostgreSQL, or nothing materialized yet) keeps
+    /// <see cref="QueryStoreDurationTrendSql"/> byte for byte.
+    /// $1 server_id, $2/$3 window, $4 the raw boundary (naive UTC), $5 database filter.
+    /// </summary>
+    public static readonly string QueryStoreDurationTrendRollupSql =
+        QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true);
+
     /// <summary>Execution-count trend: executions/sec per collection snapshot from query_stats.</summary>
     public const string ExecutionCountTrendSql = """
         WITH raw AS
@@ -223,10 +245,42 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
         => ReadDurationTrendAsync(ProcedureDurationTrendSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
 
-    /// <summary>Query Store duration trend over the window.</summary>
-    public Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(
+    /// <summary>
+    /// Query Store duration trend over the window — routed through the corrected rollup where the store has
+    /// one (#2736; see <see cref="QueryStoreDurationTrendRollupSql"/>). The raw-only read is kept unchanged
+    /// as the fallback for stores without a materialized rollup, where it is affordable.
+    /// </summary>
+    public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
-        => ReadDurationTrendAsync(QueryStoreDurationTrendSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
+    {
+        var route = await QueryStoreTrendRouting.ResolveAsync(_dataSource, cancellationToken);
+        if (!route.UseRollup)
+        {
+            return await ReadDurationTrendAsync(QueryStoreDurationTrendSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
+        }
+
+        var items = new List<QueryTrendPoint>();
+
+        await using var command = _dataSource.CreateCommand(QueryStoreDurationTrendRollupSql);
+        AddServerWindowParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(route.RawStartUtc, DateTimeKind.Unspecified),
+        });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new QueryTrendPoint
+            {
+                CollectionTime = reader.GetDateTime(0),
+                Value = reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1)),
+                ExecutionCount = reader.IsDBNull(2) ? 0 : (long)Convert.ToDouble(reader.GetValue(2)),
+            });
+        }
+
+        return items;
+    }
 
     /// <summary>
     /// Shared reader for the three duration trends (same column shape: collection_time,
