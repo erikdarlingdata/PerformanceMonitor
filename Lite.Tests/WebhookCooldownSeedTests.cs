@@ -100,6 +100,7 @@ public class WebhookCooldownSeedTests
         public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity => 1.5;
         public int AnalysisNotifyCooldownMinutes => 360;
+        public string TriageBaseUrl => "";
     }
 
     private sealed class FakeHistoryStore : IAlertHistoryStore
