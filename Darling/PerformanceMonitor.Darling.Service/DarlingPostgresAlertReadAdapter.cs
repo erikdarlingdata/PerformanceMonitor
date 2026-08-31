@@ -16,9 +16,12 @@ using PerformanceMonitor.Alerting;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// Darling's <see cref="IPostgresAlertReadAdapter"/> — the three Tier 0 predictors read out of the store.
-/// <para>Every query takes the LATEST reading per subject rather than an aggregate, because all three are
-/// levels rather than rates: the question is "where does this stand now", not "how much accumulated".</para>
+/// Darling's <see cref="IPostgresAlertReadAdapter"/> — the three Tier 0 predictors plus the poison wait
+/// pressure read (#2711), out of the store.
+/// <para>The Tier 0 queries take the LATEST reading per subject rather than an aggregate, because those
+/// three are levels rather than rates: the question is "where does this stand now", not "how much
+/// accumulated". The poison wait read is the deliberate exception — accumulation IS its question; see
+/// <see cref="PoisonWaitSql"/>.</para>
 /// </summary>
 public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
 {
@@ -137,6 +140,66 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
         FROM latest AS l
         JOIN earliest AS e ON e.slot_name = l.slot_name
         """;
+
+    /// <summary>
+    /// Summed per-interval deltas for the poison wait pair over the evaluator's own window (#2711).
+    /// <para>Deltas, not levels — the one aggregate in this adapter, because the poison condition is
+    /// defined by recent accrual and the cumulative counters never reset. Summing <c>delta_wait_time_us</c>
+    /// is restart-safe: <c>CollectorDeltaCalculator</c> writes 0 for first sightings, counter resets and
+    /// gap re-baselines, so a disruption can only undercount, never spike.</para>
+    /// <para>Matched by NAME, lower-cased, not by the numeric event id: the ids are Aurora's own internal
+    /// enumeration with no published stability contract to hardcode against, and name CASING is what
+    /// actually differs between Aurora majors (the reason the collector keys its delta series on the id).
+    /// A NULL name — an event the lookup could not decode — cannot match, which is correct: an alert must
+    /// not fire on an event it cannot name.</para>
+    /// <para>The sums are cast to bigint because PostgreSQL's SUM(bigint) returns numeric, which Npgsql
+    /// surfaces as decimal and GetInt64 refuses at runtime — invisible to every compile-time check.</para>
+    /// <para>GROUPED on <c>lower()</c>, with <c>MAX()</c> picking a representative stored casing for
+    /// display: a window straddling an Aurora major upgrade can hold BOTH casings of one event, and
+    /// grouping on the raw names would silently split its accumulation across two rows — each possibly
+    /// under a bar the combined value clears. The cost of MAX() is that the alert subject can flip casing
+    /// once, at upgrade time, changing that subject's dedup fingerprint for one fire — a visible one-off,
+    /// versus an invisible undercount at the exact moment an upgrade makes contention most likely.</para>
+    /// </summary>
+    internal const string PoisonWaitSql = """
+        SELECT
+            MAX(wait_type) AS wait_type,
+            MAX(wait_event) AS wait_event,
+            (SUM(delta_wait_time_us) / 1000)::bigint AS accumulated_wait_ms,
+            SUM(delta_waits)::bigint AS accumulated_waits,
+            MAX(collection_time) AS newest_collection_time
+        FROM pg_wait_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   lower(wait_type) = 'ipc'
+        AND   lower(wait_event) IN ('btreepage', 'bufferio')
+        GROUP BY lower(wait_type), lower(wait_event)
+        """;
+
+    public async Task<List<PostgresPoisonWaitAlertInfo>> GetPoisonWaitPressureAsync(
+        int serverId, CancellationToken cancellationToken = default)
+    {
+        var rows = new List<PostgresPoisonWaitAlertInfo>();
+        await using var command = _postgres.CreateCommand(PoisonWaitSql);
+        command.Parameters.AddWithValue(serverId);
+        /* The evaluator's window, not this adapter's 2-hour Freshness: the window IS the denominator the
+           threshold normalizes against, so read and evaluation must agree on it or the "average backends
+           stuck" arithmetic silently means something else. */
+        command.Parameters.AddWithValue(
+            NaiveUtcNow().AddMinutes(-PostgresAlertEvaluator.PoisonWaitWindowMinutes));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new PostgresPoisonWaitAlertInfo(
+                reader.IsDBNull(0) ? "(unknown)" : reader.GetString(0),
+                reader.IsDBNull(1) ? "(unknown)" : reader.GetString(1),
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                reader.IsDBNull(4) ? DateTime.MinValue : reader.GetDateTime(4)));
+        }
+
+        return rows;
+    }
 
     public async Task<List<PostgresWraparoundAlertInfo>> GetWraparoundRiskAsync(
         int serverId, CancellationToken cancellationToken = default)
