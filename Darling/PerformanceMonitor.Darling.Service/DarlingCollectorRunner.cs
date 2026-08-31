@@ -199,6 +199,11 @@ public sealed class DarlingCollectorRunner
        collectors' SQL queries already read that tail independently rather than sharing a cursor. */
     private RdsDeadlockIngestor? _rdsDeadlocks;
 
+    /* Own ingestor for the same "one instance per transport" reason as the two above — see
+       RdsCpuIngestor's own doc comment for why it does NOT need the marker-survival treatment
+       _rdsPlans/_rdsDeadlocks get: its resume watermark lives in the store, not in this field. */
+    private RdsCpuIngestor? _rdsCpu;
+
     /// <summary>
     /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
     ///
@@ -251,6 +256,35 @@ public sealed class DarlingCollectorRunner
 
         return new CollectorRunResult(rows, 0, elapsedMs,
             rows == 0 ? "no new deadlocks in the RDS log window" : null);
+    }
+
+    /// <summary>
+    /// Instance CPU for Aurora and RDS Postgres, read from the AWS Performance Insights API (#2719) — the
+    /// third "reach the target a different way" collector alongside <see cref="IngestRdsPlansAsync"/> and
+    /// <see cref="IngestRdsDeadlocksAsync"/>, and unlike either of those, the ONLY route: PostgreSQL exposes
+    /// no instance-level CPU signal at all, so there is no <c>pg_read_file</c>-style fallback for a
+    /// self-hosted target to fall back to (see <see cref="PgCpuUtilizationCollector"/>'s doc comment).
+    /// Reported as a normal <see cref="CollectorRunResult"/> for the same reason the other two are.
+    /// </summary>
+    public async Task<CollectorRunResult> IngestPgCpuAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
+    {
+        _rdsCpu ??= new RdsCpuIngestor(_postgres, logger: _logger);
+
+        var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        var started = Stopwatch.GetTimestamp();
+
+        var rows = await _rdsCpu.IngestAsync(
+            server.ServerId, server.StorageName, host, cancellationToken);
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        /* Counted as STORAGE time rather than SQL time, matching the other two RDS-API ingestors: no query
+           ran against the monitored server, and filing an HTTPS round trip under sql_duration_ms would make
+           one target's numbers mean something different from every other target's. */
+        return new CollectorRunResult(rows, 0, elapsedMs,
+            rows == 0 ? "no new Performance Insights CPU samples this cycle" : null);
     }
 
     public async Task<CollectorRunResult> RunAsync<TRow>(

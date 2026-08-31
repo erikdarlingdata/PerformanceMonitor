@@ -1362,6 +1362,25 @@ export const POSTGRES_TABS = [
         1,
         "No freeze-headroom samples in this window."
       ),
+      /* #2719: Aurora only. get_pg_cpu_utilization reads AWS Performance Insights' os.cpuUtilization.total.avg
+         over the RDS/PI API, which self-hosted PostgreSQL has no route to at all — not gated by major version
+         or by an extension the way the rest of this tab's panels are, but by the target being Amazon Aurora in
+         the first place. On a stock PostgreSQL target the panel is permanently empty and says so in its own
+         words, the same treatment the Waits tab gives get_pg_wait_stats. */
+      line(
+        "Instance CPU",
+        "get_pg_cpu_utilization",
+        { server, hours: ctx.hours },
+        "samples",
+        "sample_time",
+        PG_CPU_SERIES,
+        {
+          subtitle: ctx.label + ", Amazon Aurora only (AWS Performance Insights)",
+          format: "pct",
+          unit: "%",
+          emptyText: "No CPU samples in this window. This is an Amazon Aurora feature — on a stock PostgreSQL target this panel is permanently empty.",
+        }
+      ),
       stat(
         "xmin Horizon",
         "get_pg_xmin_horizon",
@@ -2166,6 +2185,8 @@ const CPU_SERIES = [
   { key: "other_process_cpu", label: "Other %" },
   { key: "total_cpu", label: "Total %" },
 ];
+
+const PG_CPU_SERIES = [{ key: "cpu_percent", label: "CPU %" }];
 
 const MEMORY_SERIES = [
   { key: "total_server_memory_mb", label: "Total Server" },

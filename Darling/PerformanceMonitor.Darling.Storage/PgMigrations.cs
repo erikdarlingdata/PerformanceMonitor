@@ -162,6 +162,7 @@ public static class PgMigrations
         new Migration(103, "pg-deadlocks", V103Sql),
         new Migration(104, "pg-deadlock-identity-index", V104Sql),
         new Migration(105, "collector-cost", V105Sql),
+        new Migration(106, "pg-cpu-utilization", V106Sql),
     };
 
     /// <summary>
@@ -2379,6 +2380,28 @@ CREATE TABLE IF NOT EXISTS collect.pg_deadlocks (
 
 CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_time
     ON collect.pg_deadlocks(server_id, collection_time);";
+
+    /// <summary>
+    /// V106 — <c>collect.pg_cpu_utilization</c>, instance-level CPU for a managed PostgreSQL/Aurora target
+    /// (#2719). Column-for-column identical to what <see cref="PgSchemaGenerator"/> generates from
+    /// <see cref="PgCpuUtilizationCollector.PayloadColumns"/> — pinned by
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>, same as every other
+    /// rung above. See <see cref="PgCpuUtilizationCollector"/>'s own doc comment for why this collector has
+    /// no SQL route at all: every row here arrives through the RDS/Performance Insights API, never a
+    /// database connection.
+    /// </summary>
+    private const string V106Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_cpu_utilization (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    sample_time timestamp,
+    cpu_percent double precision
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_cpu_utilization_time
+    ON collect.pg_cpu_utilization(server_id, collection_time);";
 
     /// <summary>
     /// V102 — <c>collect.pg_server_config</c>, the server's own configuration from <c>pg_settings</c>
