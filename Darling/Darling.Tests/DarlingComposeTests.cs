@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -2499,6 +2500,59 @@ public sealed class DarlingComposeTests
         Assert.Contains("d.includeOther = true;", editor, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The residual label is a CROSS-LANGUAGE constant: the compiler emits it into the rows, and the frontend has
+    /// to recognize that exact string to keep the series out of the drill path and out of the MAX_SERIES
+    /// competition (#2743 review). A mirrored literal drifts silently — rename it on one side and the residual
+    /// quietly becomes drillable-into-nothing again, and starts evicting a real top-N winner — so the copy is
+    /// pinned to the source of truth here.
+    /// </summary>
+    [Fact]
+    public void TheOtherSeriesLabel_IsMirroredInTheFrontend()
+    {
+        var composeJs = FrontendSource("compose.js");
+        Assert.Contains(
+            $"const OTHER_SERIES_LABEL = \"{ComposeCompiler.OtherSeriesLabel}\";",
+            composeJs,
+            StringComparison.Ordinal);
+
+        /* And the residual must be held out of BOTH places a synthetic series would otherwise be mistaken for a
+           real one: the drill path and the series cap. */
+        Assert.Contains("drills.set(key, null);", composeJs, StringComparison.Ordinal);
+        Assert.Contains("const realKeys = order.filter((k) => !residual.has(k));", composeJs, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The composer's default Top N for a top-N-over-time panel must not exceed what the chart will actually draw
+    /// (#2743 review): the mode's whole promise is "exactly these N", and compose.js draws at most MAX_SERIES, so
+    /// a larger default would silently hide winners the author never chose to hide. Two files, one number.
+    /// </summary>
+    [Fact]
+    public void TheEditorsTopSeriesDefault_DoesNotExceedWhatTheChartDraws()
+    {
+        var maxSeries = int.Parse(
+            Regex.Match(FrontendSource("compose.js"), @"const MAX_SERIES = (?<n>\d+);").Groups["n"].Value,
+            CultureInfo.InvariantCulture);
+        var editorCeiling = int.Parse(
+            Regex.Match(FrontendSource("editor.js"), @"const MAX_TIME_SERIES = (?<n>\d+);").Groups["n"].Value,
+            CultureInfo.InvariantCulture);
+
+        Assert.Equal(maxSeries, editorCeiling);
+        Assert.Contains(
+            "if (v === \"topseries\") p.topN = clampInt(p.topN, 1, MAX_TIME_SERIES, MAX_TIME_SERIES);",
+            FrontendSource("editor.js"),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>One wwwroot/js source file, read from the repo beside this test.</summary>
+    private static string FrontendSource(string fileName, [CallerFilePath] string thisFile = "")
+    {
+        var path = Path.GetFullPath(Path.Combine(
+            Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Service", "wwwroot", "js", fileName));
+        Assert.True(File.Exists(path), $"{fileName} not found at {path} (did the frontend move?)");
+        return File.ReadAllText(path);
+    }
+
     /// <summary>The shape keys declared in <c>SHAPE_LABELS</c> (wwwroot/js/editor.js) — the composer's whole
     /// mode vocabulary, shared with notebook.js, which imports both round-trip functions from it.</summary>
     private static string[] EditorShapeKeys()
@@ -2511,13 +2565,7 @@ public sealed class DarlingComposeTests
             .ToArray();
     }
 
-    private static string EditorSource([CallerFilePath] string thisFile = "")
-    {
-        var editorJs = Path.GetFullPath(Path.Combine(
-            Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "editor.js"));
-        Assert.True(File.Exists(editorJs), $"editor.js not found at {editorJs} (did the frontend move?)");
-        return File.ReadAllText(editorJs);
-    }
+    private static string EditorSource() => FrontendSource("editor.js");
 
     /// <summary>Every <c>key:</c> declared in <c>NOTEBOOK_TEMPLATES</c> (wwwroot/js/notebook.js), sorted.
     /// <c>key:</c> appears nowhere else in that file, so a plain line scan is unambiguous.</summary>

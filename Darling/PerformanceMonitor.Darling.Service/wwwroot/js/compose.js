@@ -28,6 +28,11 @@ import { getCatalog } from "./views-api.js";
 /** The most series a time chart draws before pooling the rest into a "+N more" note (readability + palette size). */
 const MAX_SERIES = 8;
 
+/** The #2734 residual series label — MIRRORS ComposeCompiler.OtherSeriesLabel (pinned by
+ *  TheOtherSeriesLabel_IsMirroredInTheFrontend). It is a display artifact of the compiler's CASE fold, NOT a value
+ *  any fact row carries, which is why it is never drillable and never competes for a real winner's slot below. */
+const OTHER_SERIES_LABEL = "(other)";
+
 /* ─────────────────────────── panel card + fill ─────────────────────────── */
 
 /**
@@ -306,7 +311,17 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           onZoom,
         })
       );
-      if (hidden > 0) nodes.push(el("div", { class: "chart-note", text: `+${hidden} more series not shown.` }));
+      if (hidden > 0) {
+        /* On a rank-then-bucket panel the hidden series are members the author explicitly ASKED to rank, not
+           incidental low-priority groups, so the note has to say which promise the chart is not keeping. */
+        const rankedMode = panelSpec.topN != null && panelSpec.topN !== "" && panelSpec.timeBucket;
+        nodes.push(el("div", {
+          class: "chart-note",
+          text: rankedMode
+            ? `+${hidden} of the top ${panelSpec.topN} not shown — a chart draws at most ${MAX_SERIES} series. Lower Top N to see them all.`
+            : `+${hidden} more series not shown.`,
+        }));
+      }
       break;
     }
     case "bar":
@@ -365,6 +380,7 @@ export function pivotTimeSeries(rows, groupDims, label) {
   const drills = new Map(); // seriesKey -> drill keys [{dimension, value}] (design D6)
   const byBucket = new Map(); // bucket -> point object
   const order = []; // seriesKey first-seen order (stable colors)
+  const residual = new Set(); // seriesKeys that are the #2734 synthetic "(other)" fold
 
   for (const r of rows) {
     /* "s:"-prefixed so a group value equal to "bucket"/"value" can never collide with a point object's own keys. */
@@ -373,6 +389,18 @@ export function pivotTimeSeries(rows, groupDims, label) {
       labels.set(key, comboLabel(r, groupDims));
       drills.set(key, buildDrillKeys(r, groupDims));
       totals.set(key, 0);
+      /* Read residual-ness off the ROW's dimension values, never by re-parsing the joined label — a real value
+         containing the label's " / " separator would otherwise be mistaken for a residual combo. */
+      if (isResidualRow(r, groupDims)) {
+        residual.add(key);
+        /* The #2734 residual is synthetic — the compiler's CASE fold, not a stored value — so an eq filter on it
+           matches nothing and a drill would always land on an empty panel. Non-drillable for exactly the reason a
+           "(none)" bucket already is. Suppressed HERE, not in buildDrillKeys, because only the whole-row fold is
+           the residual: a real member that merely happens to be NAMED "(other)" on one of several dimensions is a
+           stored value the server can filter to, and it keeps its drill. (#2737's "(ad hoc)" likewise stays
+           drillable — the server COALESCEs the real column to it, so filtering to it works.) */
+        drills.set(key, null);
+      }
       order.push(key);
     }
     const v = numOrNull(r.value);
@@ -385,12 +413,24 @@ export function pivotTimeSeries(rows, groupDims, label) {
     pt[key] = v;
   }
 
-  let keptKeys = order;
+  /* The #2734 residual is "everything else", so it is routinely the largest-magnitude series — under a plain
+     magnitude cut it would evict a member the author EXPLICITLY ranked, replacing a real winner with a synthetic
+     bucket. It is held out of the competition instead: real members fill the cap on their own merits, and the
+     residual rides along in its own slot (it is what keeps the visible buckets summing to the window total, so
+     dropping it would make a partial chart look complete). */
+  const residualKeys = order.filter((k) => residual.has(k));
+  const realKeys = order.filter((k) => !residual.has(k));
+
+  let keptReal = realKeys;
   let hidden = 0;
-  if (order.length > MAX_SERIES) {
-    keptKeys = [...order].sort((a, b) => totals.get(b) - totals.get(a)).slice(0, MAX_SERIES);
-    hidden = order.length - keptKeys.length;
+  if (realKeys.length > MAX_SERIES) {
+    keptReal = [...realKeys].sort((a, b) => totals.get(b) - totals.get(a)).slice(0, MAX_SERIES);
+    hidden = realKeys.length - keptReal.length;
   }
+
+  /* Preserve first-seen order for stable colors, then append the residual last (it reads as the backdrop). */
+  const keptSet = new Set(keptReal);
+  const keptKeys = order.filter((k) => keptSet.has(k)).concat(residualKeys);
 
   const series = keptKeys.map((key, i) => ({
     key,
@@ -399,6 +439,13 @@ export function pivotTimeSeries(rows, groupDims, label) {
     drill: drills.get(key),
   }));
   return { points: [...byBucket.values()], series, hidden };
+}
+
+/** Whether a row is the #2734 synthetic residual: the compiler's CASE fold sets EVERY group dimension to the
+ *  sentinel at once, so a real member that merely happens to be named "(other)" on one of several dimensions is
+ *  not mistaken for it. */
+function isResidualRow(row, dims) {
+  return dims.length > 0 && dims.every((d) => row[d] === OTHER_SERIES_LABEL);
 }
 
 /** Shape RANKED rows into charts.js's items[] ({label, value, color, drill}); the category is the group-by combo,

@@ -52,6 +52,10 @@ const DEFAULT_RANGE_HOURS = 24;
 /** The default chart per composed-panel shape (a working chart the instant a measure is picked). */
 const DEFAULT_VIZ_FOR_SHAPE = { timeseries: "line", topseries: "line", ranked: "bar", scalar: "stat" };
 
+/** The most series compose.js's time charts draw (its MAX_SERIES) — the ceiling a top-N-over-time panel
+ *  defaults to, so the shape's "show exactly these N" promise holds out of the box. */
+const MAX_TIME_SERIES = 8;
+
 /** The most event-annotation sources a time-series panel may overlay (design D5) — mirrors the server's
  *  ComposeLimits.MaxAnnotations so the composer caps at the same number the run endpoint accepts. */
 const MAX_ANNOTATIONS = 4;
@@ -1072,7 +1076,11 @@ export function buildComposedPanelBody(p, opts) {
         if (p.shape === v) return;
         p.shape = v;
         if ((v === "timeseries" || v === "topseries") && !p.timeBucket) p.timeBucket = "auto";
-        if ((v === "ranked" || v === "topseries") && !p.topN) p.topN = 10;
+        if (v === "ranked" && !p.topN) p.topN = 10;
+        /* A top-N SERIES panel promises to show exactly its N, and a time chart draws at most MAX_SERIES (8)
+           of them — so this shape defaults to that ceiling rather than Ranked's 10, which would hide two of
+           the winners the mode exists to show before the author changed anything. */
+        if (v === "topseries") p.topN = clampInt(p.topN, 1, MAX_TIME_SERIES, MAX_TIME_SERIES);
         if (v === "scalar") p.groupBy = [];
         if (!vizShapeCompatible(p.viz, p.shape)) p.viz = DEFAULT_VIZ_FOR_SHAPE[p.shape];
         onStructural();
