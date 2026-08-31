@@ -164,4 +164,21 @@ public class AlertIncidentRenderTests
         Assert.DoesNotContain("\"name\":\"Resource\"", teams);
         Assert.DoesNotContain("Resource:", slack);
     }
+
+    /// <summary>
+    /// Review catch (#2710): a caller can pass a blank display object through
+    /// <see cref="AlertFingerprint.ForKey"/> without going through the object-filtering
+    /// <see cref="AlertFingerprint.ForObjects"/> callers get — the joined resource_name must not
+    /// render as a labeled-but-empty tag in that case, the exact failure the design otherwise avoids
+    /// by omitting the tag entirely on a null.
+    /// </summary>
+    [Fact]
+    public void ResourceName_Absent_WhenInvolvedObjectsIsBlank()
+    {
+        var ctx = new AlertContext();
+        AlertIncidentRenderer.Apply(ctx, new[] { new AlertIncident("k", new[] { "" }) });
+
+        var teams = WebhookAlertService.BuildTeamsPayload("Low Disk Space", "S1", "5%", "10%", Branding, context: ctx);
+        Assert.DoesNotContain("\"name\":\"Resource\"", teams);
+    }
 }

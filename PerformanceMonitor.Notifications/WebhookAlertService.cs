@@ -310,6 +310,12 @@ public class WebhookAlertService
     /// the tag should look at first. Null when the alert carries no fingerprintable incident (alert
     /// type not wired to #1140's <see cref="AlertContext.Incidents"/>, or the objects were
     /// unresolved) — a top-level tag naming nothing would read worse than the tag being absent.
+    /// <see cref="AlertFingerprint.ForObjects"/>'s callers filter out blank objects before they ever
+    /// reach here, but a caller of the sibling <see cref="AlertFingerprint.ForKey"/> overload can pass
+    /// an unfiltered blank display object (review catch: <c>AlertContextBuilders.VolumeFreeSpaceIncidents</c>
+    /// / <c>AnomalousJobIncidents</c> pass the raw mount point / job name) — so the join is checked
+    /// for blank the same way <see cref="AlertFingerprint.ForKey"/> already checks <c>Database</c>,
+    /// rather than trusting every caller to have pre-filtered.
     /// </summary>
     private static string? DeriveResourceName(AlertContext? context)
     {
@@ -317,7 +323,11 @@ public class WebhookAlertService
             return null;
 
         var objects = incidents[0].InvolvedObjects;
-        return objects.Count > 0 ? string.Join(", ", objects) : null;
+        if (objects.Count == 0)
+            return null;
+
+        var joined = string.Join(", ", objects);
+        return string.IsNullOrWhiteSpace(joined) ? null : joined;
     }
 
     /// <summary>
