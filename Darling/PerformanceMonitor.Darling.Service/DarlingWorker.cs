@@ -3083,7 +3083,11 @@ public sealed class DarlingWorker : BackgroundService
     private async Task NotifyPgResolutionAsync(
         string serverKey, string serverName, string metricName, string title, string message)
     {
-        _logger.LogInformation("{Line}", AlertFiringLog.Resolved(serverName, metricName, message));
+        /* title, not metricName: AlertFiringLog deliberately uses different strings for Fired ("Deadlocks
+           Detected") vs Resolved ("Deadlocks Cleared") so the pair is distinguishable without reading the
+           log level — every other call site (the resolutionCallback closure above,
+           DarlingSelfAlertEvaluator) passes the title-like value here. */
+        _logger.LogInformation("{Line}", AlertFiringLog.Resolved(serverName, title, message));
 
         if (_historyStore is null)
         {
