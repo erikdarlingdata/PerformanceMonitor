@@ -73,6 +73,27 @@ public sealed class DetachedCollectorGate
     public IDisposable? TryAcquire() =>
         Interlocked.CompareExchange(ref _taken, 1, 0) == 0 ? new Lease(this) : null;
 
+    /// <summary>
+    /// A lease that guards nothing, for a caller whose collector is not gated at all.
+    ///
+    /// <para>Exists so <c>null</c> from <see cref="TryAcquire"/> keeps exactly ONE meaning — "a previous
+    /// detached run holds this (server, collector) slot, skip" — at a call site that decides whether to
+    /// gate and whether it got the gate in the same expression. Without it, "not gated" and "gate busy"
+    /// would both be null and every such site would need to re-test the predicate to tell a skip from a
+    /// pass-through; getting that wrong silently skips a collector nobody meant to gate. Same reasoning as
+    /// <see cref="QueryStoreServerGate.NotGated"/>, which this mirrors.</para>
+    /// </summary>
+    public static IDisposable NotGated { get; } = new NoOpLease();
+
+    private sealed class NoOpLease : IDisposable
+    {
+        public void Dispose()
+        {
+            /* Nothing held, nothing to release — and safe to dispose repeatedly, since it is a shared
+               singleton that every non-gated collector run disposes. */
+        }
+    }
+
     private sealed class Lease : IDisposable
     {
         private DetachedCollectorGate? _gate;

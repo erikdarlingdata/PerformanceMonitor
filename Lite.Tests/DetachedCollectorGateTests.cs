@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -152,5 +154,72 @@ public sealed class DetachedCollectorGateTests
             }
         }
         while (Interlocked.CompareExchange(ref target, candidate, initial) != initial);
+    }
+
+    /// <summary>
+    /// <c>NotGated</c> is a distinct, non-null, safely re-disposable sentinel — same reasoning as
+    /// <see cref="QueryStoreServerGate.NotGated"/>, which this mirrors. It is what lets a call site decide
+    /// "am I gated?" and "did I get the gate?" in one expression while keeping <c>null</c> meaning only
+    /// "skip" — conflating the two would silently skip a collector nobody meant to gate.
+    /// </summary>
+    [Fact]
+    public void NotGatedIsANonNullNoOpSentinel()
+    {
+        Assert.NotNull(DetachedCollectorGate.NotGated);
+
+        DetachedCollectorGate.NotGated.Dispose();
+        DetachedCollectorGate.NotGated.Dispose();
+
+        /* Still usable afterwards: it is a shared singleton every non-gated collector run disposes. */
+        Assert.NotNull(DetachedCollectorGate.NotGated);
+        Assert.Same(DetachedCollectorGate.NotGated, DetachedCollectorGate.NotGated);
+    }
+
+    /* ──────────────── the WIRING, pinned at the source ────────────────
+
+       Behavioral coverage cannot reach this: a call site that re-tests IsPlanCorrectionCollector in a second
+       `if` instead of using NotGated builds and passes every test above, and only drifts from its sibling gate
+       the day a third collector is added to one check and not the other — exactly the review nit on #2720.
+       So the call site is asserted textually, per the QueryStoreServerGateTests idiom. */
+
+    private static string ReadRepoFile(string relativePath, [CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        var parts = relativePath.Split('/');
+        while (dir is not null && !File.Exists(Path.Combine(new[] { dir }.Concat(parts).ToArray())))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return File.ReadAllText(Path.Combine(new[] { dir! }.Concat(parts).ToArray()));
+    }
+
+    /// <summary>
+    /// DARLING: the gate-acquisition call site uses <c>NotGated</c> rather than re-testing
+    /// IsPlanCorrectionCollector in a second condition — tested by asserting the predicate appears exactly
+    /// once at that call site. Two occurrences is the regression: it means "not gated" and "gate busy" are
+    /// being told apart by re-testing the predicate instead of by the sentinel, which is precisely the
+    /// two-sites-must-stay-in-sync failure mode NotGated exists to remove.
+    /// </summary>
+    [Fact]
+    public void Darling_GateAcquisitionTestsThePredicateExactlyOnce()
+    {
+        var worker = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
+
+        Assert.Contains("DetachedCollectorGate.NotGated", worker, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(worker, "IsPlanCorrectionCollector(collectorName)"));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 }

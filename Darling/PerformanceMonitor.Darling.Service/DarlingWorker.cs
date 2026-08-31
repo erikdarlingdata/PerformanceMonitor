@@ -5033,12 +5033,15 @@ LIMIT 1";
            dictionary already generalizes. A held gate here means a previous detached tick for THIS
            collector on THIS server has not finished — skip is safe because every collector detached this
            way is picked specifically for having no wall-clock-derived window (plan_correction re-reads
-           the live DMV set whole on every pass, so a skip just re-reads it, possibly refreshed, next time). */
+           the live DMV set whole on every pass, so a skip just re-reads it, possibly refreshed, next time).
+           NotGated (mirroring QueryStoreServerGate's) collapses this to a single null check below — a
+           future third collector needs only its own IsXCollector check added to this one condition,
+           never a second one to keep in sync. */
         using var detachedGate = IsPlanCorrectionCollector(collectorName)
             ? _detachedCollectorGates.GetOrAdd((runtime.ServerId, collectorName), static _ => new DetachedCollectorGate()).TryAcquire()
-            : null;
+            : DetachedCollectorGate.NotGated;
 
-        if (IsPlanCorrectionCollector(collectorName) && detachedGate is null)
+        if (detachedGate is null)
         {
             _logger.LogInformation(
                 "  [{Server}] {Collector} skipped this tick — a previous detached run has not finished (#2717). " +
