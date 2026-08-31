@@ -93,6 +93,7 @@ public static class CollectorCatalog
         PgReplicationStatsCollector.Instance,
         PgBufferUsageCollector.Instance,
         PgIndexBloatCollector.Instance,
+        PgCpuUtilizationCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
