@@ -470,6 +470,13 @@ public static class ComposeCompiler
                 native = $"(CAST(SUM({FactAlias}.{measure.WeightedValueColumn} * {FactAlias}.{measure.WeightColumn}) AS double precision) " +
                          $"/ NULLIF(SUM({FactAlias}.{measure.WeightColumn}), 0))";
             }
+            else if (measure.RatioMode == MeasureRatioMode.WeightedSum)
+            {
+                /* WeightedSum (#2732): the Weighted numerator with no denominator — SUM(value * weight) is the
+                   window TOTAL, because avg * execution_count is each interval's total consumption. No NULLIF:
+                   there is no division, and SUM over zero rows is already NULL. */
+                native = $"CAST(SUM({FactAlias}.{measure.WeightedValueColumn} * {FactAlias}.{measure.WeightColumn}) AS double precision)";
+            }
             else
             {
                 var numerator = MeasureCatalog.Measure(measure.NumeratorKey)!;
