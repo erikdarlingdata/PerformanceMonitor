@@ -137,14 +137,21 @@ public sealed class PlanCorrectionCollector : CollectorDefinitionBase<PlanCorrec
     /// </para>
     ///
     /// <para>
-    /// #2759/#2760: neither statement carries OPTION(RECOMPILE) anymore. Both are static literal T-SQL
-    /// with no runtime parameters — nothing here for RECOMPILE to protect against parameter sniffing —
-    /// and sys.dm_db_tuning_recommendations has no statistics (see below), so a cached plan's cardinality
-    /// guess is the same fixed heuristic a fresh compile would produce; there is no plan-quality benefit
-    /// to buy back. Live evidence on prod-pos-use1-multi-45/Demo: 5,004ms avg duration, 4,237ms avg CPU
-    /// (85%), 381 logical reads, 18 rows — a compile-cost signature, not an execution-cost one, on a
-    /// query that runs per database, per server, every cycle. Caching the plan removes that repeated
-    /// compile cost fleet-wide with no functional change.
+    /// OPTION(RECOMPILE) on the staging SELECT INTO and the shipping SELECT is for PLAN CACHE HYGIENE,
+    /// not performance. This body runs once per database, per server, every cycle; caching a plan for
+    /// each of those would accumulate cache bulk across the fleet for a query whose plan nobody will
+    /// ever reuse. RECOMPILE keeps them out of cache entirely, and that costs effectively nothing:
+    /// measured post-#2764 with SET STATISTICS TIME ON, compile is ~84ms CPU TOTAL across all five
+    /// statements (50 + 13 + 6 + 4 + 11), and that number is a ceiling — it was taken on an emulated
+    /// container, so real hardware compiles faster. Do not remove these to "save" compile time.
+    /// </para>
+    ///
+    /// <para>
+    /// Correcting the record, because it was wrong once and cost a round trip: #2760 removed both hints
+    /// on the theory that ~4,237ms of avg CPU seen on prod-pos-use1-multi-45/Demo was compile cost. That
+    /// attribution was never verified — it was inferred from a CPU-heavy/low-read/low-row telemetry
+    /// signature. The cost was the LIVE Query Store catalog-view joins that #2764 then replaced with
+    /// staged temps. Removing RECOMPILE never addressed it; staging did.
     /// </para>
     ///
     /// <para>
@@ -265,7 +272,8 @@ CROSS APPLY
                 TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanAbortedCount') AS bigint),
                 TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanErrorCount') AS bigint)
             )
-) AS pfd;
+) AS pfd
+OPTION(RECOMPILE);
 
 /*Stage the Query Store side too (#2764, the rest of the sp_QuickieStore rule). Each temp pulls only
   the rows the recommendation set actually names, keyed off #pm_plan_correction_recs, so the live
@@ -396,7 +404,8 @@ LEFT JOIN #pm_plan_correction_query_text AS qsqt
 LEFT JOIN #pm_plan_correction_plans AS qsp
   ON qsp.query_id = r.query_id
   AND qsp.plan_id = r.last_good_plan_id
-ORDER BY r.score DESC, r.recommendation_name;
+ORDER BY r.score DESC, r.recommendation_name
+OPTION(RECOMPILE);
 
 DROP TABLE #pm_plan_correction_query_text;
 DROP TABLE #pm_plan_correction_queries;
