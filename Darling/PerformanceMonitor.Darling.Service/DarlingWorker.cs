@@ -24,6 +24,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
@@ -330,6 +331,11 @@ public sealed class DarlingWorker : BackgroundService
 
     /* Set once by ExecuteAsync before the loop starts; the observability writes need it. */
     private NpgsqlDataSource? _postgres;
+
+    /* #2138 phase 1: the auto force-plan bot, constructed by RunCollectionLoopAsync alongside the
+       analysis pieces. Null until then. It holds no executor and this build ships none, so its whole
+       output is journal rows — see PlanForceBot and PlanForceNoWritePathTests. */
+    private PlanForceBot? _planForceBot;
 
     /* The live control-plane state (Stage 1): the last-seen config_version reload beacon and the
        current sparse per-collector schedule overrides. Both updated on startup and on each reload;
@@ -1310,6 +1316,17 @@ public sealed class DarlingWorker : BackgroundService
             alertSettings,
             finding => finding.ServerId.ToString(CultureInfo.InvariantCulture),
             _loggerFactory.CreateLogger<AnalysisNotificationService>());
+
+        /* #2138 phase 1: the auto force-plan bot, hooked onto the SCHEDULED analysis pass only (the
+           interactive analyze_now command deliberately does not trigger it — an operator poking a
+           server should not spend the bot's blast-radius budget). Settings are file-level and OFF by
+           default. The bot is constructed with the JOURNAL and nothing else — no executor, no
+           connection factory — because phase 1 has no write path at all; the store it writes to is
+           the monitoring store, never a monitored server. */
+        _planForceBot = new PlanForceBot(
+            new PgPlanForceActionStore(postgres),
+            config.ForcePlanBot.ToSettings(),
+            _loggerFactory.CreateLogger<PlanForceBot>());
 
         /* Command plane (Stage 2): the executor claims/executes/reports config_command rows on its OWN
            5-second loop, concurrent with the collection sweep, so a slow command never stalls collection.
@@ -4018,10 +4035,20 @@ LIMIT 1", connection);
             return;
         }
 
+        /* #2138: the force-plan bot rides the scheduled pass's findings — same evidence the operator
+           sees, no second analysis. server.Config (not runtime.Config) so a store-reload change to
+           the per-server opt-in is honored on the next pass. A disabled bot returns immediately, so
+           hooking it unconditionally costs a delegate allocation and a bool test. */
+        var planForceBot = _planForceBot;
+        Func<IReadOnlyList<AnalysisFinding>, Task>? postPassHook =
+            planForceBot is not null
+                ? findings => planForceBot.RunAfterAnalysisAsync(runtime, server.Config, findings, stoppingToken)
+                : null;
+
         /* The scheduled caller discards the outcome — the analyze_now command maps it to a result. */
         await RunAnalysisPassAsync(
             runtime.ServerId, runtime.StorageName, server.Config.DisplayName,
-            planFetcher, notificationService, notifyFindings, stoppingToken);
+            planFetcher, notificationService, notifyFindings, postPassHook, stoppingToken);
     }
 
     /// <summary>Terminal states of one analysis pass — surfaced to the analyze_now command result.</summary>
@@ -4047,6 +4074,7 @@ LIMIT 1", connection);
         PgPlanFetcher planFetcher,
         AnalysisNotificationService notificationService,
         bool notifyFindings,
+        Func<IReadOnlyList<AnalysisFinding>, Task>? postPassHook,
         CancellationToken stoppingToken)
     {
         if (!_analysisInFlight.TryAdd(serverId, new AnalysisPassState(DateTime.UtcNow)))
@@ -4173,6 +4201,22 @@ LIMIT 1", connection);
             if (notifyFindings)
             {
                 await notificationService.NotifyAsync(findings);
+            }
+
+            /* #2138: the force-plan bot's post-analysis pass (scheduled runs only — the analyze_now
+               command passes null). Failure-isolated twice over: the bot isolates its own seams, and
+               this wrap keeps any residue from reclassifying a perfectly good analysis pass. */
+            if (postPassHook is not null)
+            {
+                try
+                {
+                    await postPassHook(findings);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(
+                        "[{Server}] Post-analysis force-plan bot pass failed: {Message}", displayName, ex.Message);
+                }
             }
 
             /* Persist the pass's insufficient-data determination (V19 marker) so the Viewer's
@@ -4312,9 +4356,11 @@ LIMIT 1", connection);
                 }));
         }
 
+        /* postPassHook: null — analyze_now is an interactive diagnostic, and the force-plan bot only
+           rides the SCHEDULED cadence so an operator poking a server cannot spend its action budget. */
         var result = await RunAnalysisPassAsync(
             serverId, server.Config.StorageName, server.Config.DisplayName,
-            planFetcher, notificationService, config.Analysis.NotificationsEnabled, cancellationToken);
+            planFetcher, notificationService, config.Analysis.NotificationsEnabled, postPassHook: null, cancellationToken);
 
         return result.Status switch
         {

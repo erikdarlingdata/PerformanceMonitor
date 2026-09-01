@@ -97,7 +97,8 @@ public sealed record ComposeFilterValue(IReadOnlyList<string>? Literals, string?
 /// that resolves to bound parameters.</summary>
 public sealed record ComposeFilter(ComposeDimension Dimension, ComposeFilterOp Op, ComposeFilterValue Value);
 
-/// <summary>Which shape the compiler emits — chosen by the presence of a time bucket vs. a topN.</summary>
+/// <summary>Which shape the compiler emits — chosen by which of timeBucket / topN the panel sets
+/// (both together = <see cref="RankedTimeSeries"/>, #2734).</summary>
 public enum PanelMode
 {
     /// <summary>Bucketed over time: <c>date_trunc</c> + GROUP BY bucket [+ dims], ordered by bucket.</summary>
@@ -108,6 +109,14 @@ public enum PanelMode
 
     /// <summary>A single aggregate over the whole window (one row) — the stat tile.</summary>
     Scalar,
+
+    /// <summary>Rank-then-bucket (#2734, <c>timeBucket</c> + <c>topN</c> together): the top-N groupBy
+    /// members by the aggregate over the WHOLE window, then the bucketed series for exactly those members
+    /// — "the hourly trend of the top N consumers". Window-total ranking is the deliberate semantic
+    /// (stable series membership, readable lines); PER-BUCKET re-ranking ("who was hot at 3am") answers a
+    /// different question, churns membership bucket to bucket, and is a NON-GOAL rejected on purpose, not
+    /// by omission.</summary>
+    RankedTimeSeries,
 }
 
 /// <summary>
@@ -132,6 +141,13 @@ public sealed record PanelPlan
     public PanelMode Mode { get; init; }
     public ComposeTimeBucket TimeBucket { get; init; }
     public int TopN { get; init; }
+
+    /// <summary>Whether a <see cref="PanelMode.RankedTimeSeries"/> panel folds the non-top-N remainder
+    /// into one residual "(other)" series (#2734; default OFF). ON, the chart's series sum to the window
+    /// total at every bucket; OFF, the panel silently under-reports the total by whatever the excluded
+    /// members did — the author chooses which honesty they want. Only ever true in RankedTimeSeries mode
+    /// (parse rejects it elsewhere, so the compiler never has to ask).</summary>
+    public bool IncludeOther { get; init; }
     public required IReadOnlyList<ComposeFilter> Filters { get; init; }
     public required IReadOnlyList<ComposeDimension> GroupBy { get; init; }
     public required string Viz { get; init; }
@@ -142,8 +158,8 @@ public sealed record PanelPlan
 
     /// <summary>Optional event-annotation sources to overlay as markers on a TIME-SERIES panel (design D5):
     /// 0-<see cref="ComposeLimits.MaxAnnotations"/> catalog-resolved sources. Only ever non-empty for a
-    /// <see cref="PanelMode.TimeSeries"/> panel (a marker overlay needs a time axis — parse rejects them
-    /// otherwise). They do NOT change the measure query: each is compiled to its own bounded event query by
+    /// <see cref="PanelMode.TimeSeries"/> / <see cref="PanelMode.RankedTimeSeries"/> panel (a marker
+    /// overlay needs a time axis — parse rejects them otherwise). They do NOT change the measure query: each is compiled to its own bounded event query by
     /// <see cref="ComposeCompiler.CompileAnnotations"/> and returned alongside the panel's rows.</summary>
     public IReadOnlyList<ComposeAnnotationSource> Annotations { get; init; } = Array.Empty<ComposeAnnotationSource>();
 
@@ -197,7 +213,7 @@ public static class ComposeSpec
     /// frontend owns and the parser never sees).</summary>
     public static readonly IReadOnlySet<string> ComposedPanelKeys = new HashSet<string>(StringComparer.Ordinal)
     {
-        "source", "measure", "ratio", "aggregate", "unit", "timeBucket", "topN", "viz",
+        "source", "measure", "ratio", "aggregate", "unit", "timeBucket", "topN", "includeOther", "viz",
         "filters", "groupBy", "overlay", "thresholds", "annotations",
     };
 
@@ -615,7 +631,8 @@ public static class ComposeSpec
             return (null, aggUnitError);
         }
 
-        /* mode: a real timeBucket => time series; else topN => ranked; else scalar. */
+        /* mode: timeBucket + topN together => rank-then-bucket (#2734); a real timeBucket alone => time
+           series; else topN => ranked; else scalar. */
         var bucket = ComposeTimeBucket.None;
         var bucketWire = Str(panel, "timeBucket");
         if (bucketWire is not null && !MeasureCatalog.TryParseTimeBucket(bucketWire, out bucket))
@@ -636,12 +653,28 @@ public static class ComposeSpec
             topN = Math.Min(topN, ComposeLimits.MaxTopN);
         }
 
-        if (hasBucket && hasTopN)
-        {
-            return (null, "panel cannot set both 'timeBucket' and 'topN' (a ranked panel is not a time series).");
-        }
+        var mode = hasBucket && hasTopN ? PanelMode.RankedTimeSeries
+            : hasBucket ? PanelMode.TimeSeries
+            : hasTopN ? PanelMode.Ranked
+            : PanelMode.Scalar;
 
-        var mode = hasBucket ? PanelMode.TimeSeries : hasTopN ? PanelMode.Ranked : PanelMode.Scalar;
+        /* includeOther (#2734): fold the non-top-N remainder into one "(other)" residual series. Only
+           meaningful in RankedTimeSeries mode — but a literal false is the same as absence, so it is
+           accepted anywhere (the annotations empty-array precedent); only a TRUE on the wrong mode is
+           author error worth naming. */
+        var includeOther = false;
+        if (panel["includeOther"] is JsonNode includeOtherNode)
+        {
+            if (includeOtherNode is not JsonValue includeOtherValue || !includeOtherValue.TryGetValue<bool>(out includeOther))
+            {
+                return (null, "panel.includeOther must be a boolean.");
+            }
+
+            if (includeOther && mode != PanelMode.RankedTimeSeries)
+            {
+                return (null, "'includeOther' folds the remainder of a top-N time series into an '(other)' series; it needs both 'timeBucket' and 'topN'.");
+            }
+        }
 
         /* viz — the v2 composed-panel vocabulary (distinct from v1 read panels' KnownViz); coherence with the
            panel's mode is checked below once groupBy is known (design §4). */
@@ -663,6 +696,13 @@ public static class ComposeSpec
         if (groupError is not null)
         {
             return (null, groupError);
+        }
+
+        /* Rank-then-bucket ranks the groupBy members — without one there is nothing to rank, and the
+           panel would just be a time series with a decorative topN. */
+        if (mode == PanelMode.RankedTimeSeries && groupBy!.Count == 0)
+        {
+            return (null, "'timeBucket' with 'topN' ranks a group-by dimension's members over the window; add 'groupBy' (the series to keep).");
         }
 
         /* viz ↔ mode coherence, so a stored def can never be un-renderable (design §4): line/area/stacked are
@@ -719,10 +759,11 @@ public static class ComposeSpec
             if (!overlayAllowed)
             {
                 /* Name the REAL blocker: a viz that never carries an overlay reports that, and only a
-                   line/area whose sole problem is the groupBy gets the dual-axis-grouping message. */
+                   line/area whose sole problem is the groupBy gets the dual-axis-grouping message (a
+                   RankedTimeSeries panel is grouped by construction, so it always gets that one). */
                 var vizCarriesOverlay = string.Equals(viz, "line", StringComparison.Ordinal)
                     || string.Equals(viz, "area", StringComparison.Ordinal);
-                return (null, vizCarriesOverlay && mode == PanelMode.TimeSeries && groupBy!.Count > 0
+                return (null, vizCarriesOverlay && mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries && groupBy!.Count > 0
                     ? "an overlay (dual-axis) time series cannot also group by a dimension — two value axes times many series is unreadable; drop the groupBy or the overlay."
                     : $"a '{viz}' panel cannot carry an overlay; overlays belong to scatter and ungrouped line/area panels.");
             }
@@ -762,6 +803,7 @@ public static class ComposeSpec
             Mode = mode,
             TimeBucket = bucket,
             TopN = topN,
+            IncludeOther = includeOther,
             Filters = filters!,
             GroupBy = groupBy!,
             Viz = viz,
@@ -988,8 +1030,9 @@ public static class ComposeSpec
             return (Array.Empty<ComposeAnnotationSource>(), null);
         }
 
-        if (mode != PanelMode.TimeSeries)
+        if (mode is not (PanelMode.TimeSeries or PanelMode.RankedTimeSeries))
         {
+            /* RankedTimeSeries qualifies: it has the time axis the markers need. */
             return (null, "annotations are only valid on a time-series panel (add a timeBucket).");
         }
 
@@ -1034,7 +1077,8 @@ public static class ComposeSpec
         || measure.AllowedDimensions.Contains(dimensionName);
 
     /// <summary>Rejects a viz that cannot render the panel's shape (design §4 shape-steering, enforced so a
-    /// stored def is never un-renderable): line/area/stacked/stacked-bar are time series; bar/pie are ranked
+    /// stored def is never un-renderable): line/area/stacked/stacked-bar are time series (plain or the
+    /// #2734 rank-then-bucket, whose rows are the same bucket+dims+value shape); bar/pie are ranked
     /// (topN) with a categorical group; stat is a single scalar; table renders any shape. A stacked (or
     /// stacked-bar) chart also needs a group-by (the parts that stack), and a single-value panel cannot group.</summary>
     private static string? ValidateVizMode(string viz, PanelMode mode, int groupByCount)
@@ -1047,6 +1091,7 @@ public static class ComposeSpec
         switch (mode)
         {
             case PanelMode.TimeSeries:
+            case PanelMode.RankedTimeSeries:
                 if (viz is not ("line" or "area" or "stacked" or "stacked-bar"))
                 {
                     return $"a '{viz}' chart is not a time series; use line/area/stacked/stacked-bar (or drop the timeBucket).";
