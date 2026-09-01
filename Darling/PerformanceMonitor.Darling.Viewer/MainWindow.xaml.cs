@@ -1423,7 +1423,10 @@ public partial class MainWindow : Window
             totals = new FleetTotals();
         }
 
-        ApplyFleetRollup(FleetRollup.Build(cards, totals));
+        /* #2753: TotalServers must be the registered fleet size (list.Count, the same source the sidebar's
+           "Servers: N" reads), not cards.Count — cards silently drops any server whose per-server summary
+           read failed this cycle, which made the Overview's total wobble against the stable sidebar count. */
+        ApplyFleetRollup(FleetRollup.Build(cards, totals, totalServerCount: list.Count));
 
         StatusText.Text = $"overview — refreshed {DateTime.Now:HH:mm:ss}";
     }

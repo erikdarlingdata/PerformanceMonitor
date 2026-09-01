@@ -256,13 +256,25 @@ public sealed class FleetRollup
     /// servers-with-failures, and worst-first ranking reduce the <paramref name="summaries"/> using #1426's
     /// card banding (no new bands); the blocking / deadlock totals come from the cross-server
     /// <paramref name="totals"/> SQL read. <paramref name="worstCount"/> caps the "Needs attention" list.
+    ///
+    /// <para><paramref name="totalServerCount"/> is the REGISTERED fleet size — the same count the sidebar
+    /// shows — and is what <see cref="TotalServers"/> reports. It defaults to <paramref name="summaries"/>'
+    /// own count for callers (tests, mainly) that only ever pass a fully-loaded set, but the real caller
+    /// MUST pass the registered count explicitly: <paramref name="summaries"/> is only the servers whose
+    /// per-server summary read succeeded THIS cycle (#2753 — a transient per-server read failure silently
+    /// drops that server from <paramref name="summaries"/>, so deriving the fleet total from its count made
+    /// the Overview's "Total Servers" wobble cycle to cycle while the sidebar, sourced from the registry,
+    /// never moved).</para>
     /// </summary>
-    public static FleetRollup Build(IReadOnlyList<ServerSummaryItem> summaries, FleetTotals totals, int worstCount = DefaultWorstCount)
+    public static FleetRollup Build(IReadOnlyList<ServerSummaryItem> summaries, FleetTotals totals, int worstCount = DefaultWorstCount, int? totalServerCount = null)
     {
+        var registeredTotal = totalServerCount ?? summaries.Count;
+
         if (summaries.Count == 0)
         {
             return new FleetRollup
             {
+                TotalServers = registeredTotal,
                 TotalBlockingEvents = totals.TotalBlockingEvents,
                 TotalDeadlocks = totals.TotalDeadlocks,
             };
@@ -315,7 +327,7 @@ public sealed class FleetRollup
 
         return new FleetRollup
         {
-            TotalServers = summaries.Count,
+            TotalServers = registeredTotal,
             HealthyCount = healthy,
             WarningCount = warning,
             CriticalCount = critical,
