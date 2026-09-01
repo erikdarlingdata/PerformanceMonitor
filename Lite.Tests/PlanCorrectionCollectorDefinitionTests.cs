@@ -179,6 +179,21 @@ public sealed class PlanCorrectionCollectorDefinitionTests
     }
 
     [Fact]
+    public void PayloadBody_DoesNotCarryRecompile()
+    {
+        /* #2759/#2760: both statements are static literal T-SQL with no runtime parameters, so
+           RECOMPILE has nothing to protect against parameter sniffing on, and
+           sys.dm_db_tuning_recommendations has no statistics — a cached plan's cardinality guess is
+           the same fixed heuristic a fresh compile produces. Live evidence on
+           prod-pos-use1-multi-45/Demo showed 4,237ms avg CPU against 381 logical reads and 18 rows: a
+           compile-cost signature paid per database, per server, every cycle, for no plan-quality
+           benefit. Caching the plan removes that cost fleet-wide with no functional change. */
+        var text = PlanCorrectionCollector.Instance.BuildQuery(Context(isAzureSqlDb: true)).Text;
+
+        Assert.DoesNotContain("OPTION(RECOMPILE)", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void QueryStoreJoins_AreLeft_SoAnAgedOutPlanCannotDropTheRecommendation()
     {
         /* Microsoft's Example 3 INNER JOINs sys.query_store_plan twice, which silently drops any
