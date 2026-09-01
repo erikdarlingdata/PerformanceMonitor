@@ -2520,6 +2520,19 @@ public sealed class DarlingComposeTests
            real one: the drill path and the series cap. */
         Assert.Contains("drills.set(key, null);", composeJs, StringComparison.Ordinal);
         Assert.Contains("const realKeys = order.filter((k) => !residual.has(k));", composeJs, StringComparison.Ordinal);
+
+        /* But that recognition MUST be gated on the panel actually carrying a residual, which only a
+           rank-then-bucket panel with includeOther does. pivotTimeSeries serves EVERY grouped time series, and
+           several groupBy dimensions are free-form user text (database_name, program_name, login_name,
+           host_name), so a plain panel may legitimately hold a row whose value IS the sentinel — matching the
+           string alone would strip that real member's drill and pull it out of the series cap. The compiler is
+           the authority on when the fold exists; the renderer must be told, never sniff. */
+        Assert.Contains("pivotTimeSeries(rows, groupDims, label, hasResidual = false)", composeJs, StringComparison.Ordinal);
+        Assert.Contains("if (hasResidual && isResidualRow(r, groupDims)) {", composeJs, StringComparison.Ordinal);
+        Assert.Contains(
+            "const hasResidual = isRankedTimeSeries(panelSpec) && panelSpec.includeOther === true;",
+            composeJs,
+            StringComparison.Ordinal);
     }
 
     /// <summary>

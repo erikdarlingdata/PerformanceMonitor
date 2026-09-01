@@ -294,7 +294,12 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
     case "area":
     case "stacked":
     case "stacked-bar": {
-      const { points, series, hidden } = pivotTimeSeries(rows, groupDims, measureLabel(panelSpec));
+      /* Only a rank-then-bucket panel with includeOther CAN contain the synthetic residual, and the pivot must
+         be told so: several groupBy dimensions are free-form user text (database_name, program_name, login_name,
+         host_name), so a plain grouped panel may legitimately hold a row whose value IS "(other)" — sniffing the
+         string alone would strip that real member's drill and hold it out of the series cap. */
+      const hasResidual = isRankedTimeSeries(panelSpec) && panelSpec.includeOther === true;
+      const { points, series, hidden } = pivotTimeSeries(rows, groupDims, measureLabel(panelSpec), hasResidual);
       nodes.push(
         renderLineChart({
           points,
@@ -314,7 +319,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
       if (hidden > 0) {
         /* On a rank-then-bucket panel the hidden series are members the author explicitly ASKED to rank, not
            incidental low-priority groups, so the note has to say which promise the chart is not keeping. */
-        const rankedMode = panelSpec.topN != null && panelSpec.topN !== "" && panelSpec.timeBucket;
+        const rankedMode = isRankedTimeSeries(panelSpec);
         nodes.push(el("div", {
           class: "chart-note",
           text: rankedMode
@@ -368,7 +373,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
  * with a group-by, one series per distinct dimension combination, values re-keyed per bucket. Series are capped to
  * MAX_SERIES by total magnitude (the rest reported as `hidden`) so a high-cardinality group stays legible.
  */
-export function pivotTimeSeries(rows, groupDims, label) {
+export function pivotTimeSeries(rows, groupDims, label, hasResidual = false) {
   if (!groupDims.length) {
     /* value2 (#1606) rides into each point so a dual-axis overlay can read it; absent = undefined = inert. */
     const points = rows.map((r) => ({ bucket: r.bucket, value: numOrNull(r.value), value2: numOrNull(r.value2) }));
@@ -391,7 +396,7 @@ export function pivotTimeSeries(rows, groupDims, label) {
       totals.set(key, 0);
       /* Read residual-ness off the ROW's dimension values, never by re-parsing the joined label — a real value
          containing the label's " / " separator would otherwise be mistaken for a residual combo. */
-      if (isResidualRow(r, groupDims)) {
+      if (hasResidual && isResidualRow(r, groupDims)) {
         residual.add(key);
         /* The #2734 residual is synthetic — the compiler's CASE fold, not a stored value — so an eq filter on it
            matches nothing and a drill would always land on an empty panel. Non-drillable for exactly the reason a
@@ -439,6 +444,11 @@ export function pivotTimeSeries(rows, groupDims, label) {
     drill: drills.get(key),
   }));
   return { points: [...byBucket.values()], series, hidden };
+}
+
+/** Whether a panel spec is the #2734 rank-then-bucket mode (both keys set) — the server's own rule. */
+function isRankedTimeSeries(panelSpec) {
+  return !!(panelSpec && panelSpec.timeBucket && panelSpec.topN != null && panelSpec.topN !== "");
 }
 
 /** Whether a row is the #2734 synthetic residual: the compiler's CASE fold sets EVERY group dimension to the
