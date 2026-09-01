@@ -11,6 +11,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Http;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -425,6 +426,30 @@ public sealed class DarlingWebOidcTests
     [Fact]
     public void SeatCodec_DeniedRole_CannotBeEncoded()
         => Assert.Throws<ArgumentOutOfRangeException>(() => DarlingWebSeat.EncodeCookieSubject("x", WebOidcRole.Denied));
+
+    /// <summary>
+    /// The read half of the middleware's seam. The auth middleware WRITES the seat into HttpContext.Items;
+    /// this is what every consumer reads it back with, and the absent-item default is load-bearing: a
+    /// loopback-only dashboard registers no auth middleware at all, so "no item" has to mean the
+    /// shared-token seat with today's full reach, never a denied one.
+    /// </summary>
+    [Fact]
+    public void Seat_FromContext_ReadsWhatTheMiddlewareWrote_AndDefaultsToSharedToken()
+    {
+        var empty = new DefaultHttpContext();
+        Assert.Same(DarlingWebSeat.SharedToken, DarlingWebSeat.FromContext(empty));
+
+        var viewer = new DarlingWebSeat("rita@example.com", CanEdit: false);
+        var carrying = new DefaultHttpContext();
+        carrying.Items[DarlingWebSeat.HttpContextItemKey] = viewer;
+        Assert.Same(viewer, DarlingWebSeat.FromContext(carrying));
+
+        /* A foreign value under our key is not a seat — fail closed to the documented default rather than
+           throwing inside the request pipeline. */
+        var junk = new DefaultHttpContext();
+        junk.Items[DarlingWebSeat.HttpContextItemKey] = "not-a-seat";
+        Assert.Same(DarlingWebSeat.SharedToken, DarlingWebSeat.FromContext(junk));
+    }
 
     [Fact]
     public void Seat_EditorPrincipal_SubjectOrTheWebConstant()
