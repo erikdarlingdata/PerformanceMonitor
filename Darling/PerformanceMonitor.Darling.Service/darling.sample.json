@@ -337,6 +337,30 @@
     //     // ... OR a PEM pair instead of the two lines above:
     //     // "certPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.crt",
     //     // "keyPath":  "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.key"
+    //   },
+    //
+    //   // OPTIONAL per-user OIDC sign-in (#2550) -- omit the whole block to keep the shared token as the only
+    //   // credential. When set, the login page adds an SSO button (authorization code + PKCE) and the shared
+    //   // token KEEPS working beside it (scripted callers / break-glass). Register this redirect URI at the
+    //   // IdP: {scheme}://{host}:{port}/auth/oidc/callback for every host browsers will use -- which today
+    //   // means the "listen" IP or localhost, because the anti-DNS-rebind Host allowlist admits only those.
+    //   // NOTE: providers differ on IP-literal redirect URIs -- Microsoft Entra permits them (and recommends
+    //   // the literal 127.0.0.1 over "localhost"), Okta requires a DNS name. A configured-DNS-name path is
+    //   // deliberately NOT in this change; see #2550 for that follow-up.
+    //   "oidc": {
+    //     "authority": "https://login.microsoftonline.com/<tenant-id>/v2.0", // the issuer; discovery is fetched from {authority}/.well-known/openid-configuration
+    //     "clientId": "<application/client id>",
+    //     "encryptedClientSecret": "<output of --encrypt-password>", // or "clientSecret" (env:/file: reference, or plaintext for dev; omit BOTH for a public client on PKCE alone)
+    //     "scopes": "openid profile email",                  // optional; openid is always forced in
+    //     "subjectClaim": "preferred_username",              // optional; default chain preferred_username -> email (only when email_verified) -> sub. When SET it is required -- no fallback.
+    //
+    //     // Role mapping: omit all three for parity with the shared token (every signed-in user may edit).
+    //     // With them, a claim value in adminRoles => edit; else viewerRoles => read-only (the server refuses
+    //     // every mutating request from that seat); else the sign-in is REFUSED. Values match case-sensitively
+    //     // (Entra sends group GUIDs; Okta sends names).
+    //     "roleClaim": "groups",
+    //     "adminRoles": ["<group id or name>"],
+    //     "viewerRoles": ["<group id or name>"]
     //   }
     // }
   },
