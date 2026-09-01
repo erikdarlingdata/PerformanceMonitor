@@ -209,6 +209,16 @@ public sealed class FleetRollup
     public int CriticalCount { get; init; }
     public int OfflineCount { get; init; }
 
+    /// <summary>
+    /// Registered servers whose per-server summary read did NOT complete this cycle (#2753 review finding)
+    /// — <c>TotalServers</c> minus however many summaries actually loaded. Deliberately tracked separately
+    /// from <see cref="ServersWithCollectionFailures"/>, which only reflects a LOADED summary's own FAILING
+    /// collectors: a server that failed to load this cycle has no summary to ask, so it cannot be banded
+    /// Healthy/Warning/Critical/Offline at all — it is neither known-healthy nor known-problem, and must
+    /// not be silently counted as the former just because it is absent from the "problem" list.
+    /// </summary>
+    public int UnknownCount { get; init; }
+
     /// <summary>Servers whose 7-day collection banding flags at least one FAILING collector (card reuse).</summary>
     public int ServersWithCollectionFailures { get; init; }
 
@@ -229,14 +239,36 @@ public sealed class FleetRollup
     /// </summary>
     public int AdditionalProblemCount { get; init; }
 
-    /// <summary>Any server needs attention (band != Healthy) — drives the ranking list vs the all-clear line.</summary>
+    /// <summary>Any server needs attention (band != Healthy) — drives the ranking list vs the all-clear line.
+    /// Deliberately NOT widened to include <see cref="UnknownCount"/>: the ranking is a list of specific
+    /// servers to click into, and an unknown-status server cannot be ranked or clicked into, only counted.
+    /// See <see cref="IsAllClear"/> for the property that gates the all-clear text.</summary>
     public bool HasProblems => WorstServers.Count > 0;
+
+    /// <summary>
+    /// True only when EVERY registered server is accounted for AND known-healthy — no ranked problems and
+    /// no server whose status this cycle is simply unknown. #2753 review: before this, the all-clear text
+    /// could read "All N servers healthy" while some of those N had no summary this cycle at all, which is
+    /// an affirmative false claim, not an absent one — worse than the original undercount bug.
+    /// </summary>
+    public bool IsAllClear => !HasProblems && UnknownCount == 0;
 
     /// <summary>"+N more need attention" when the ranking overflows its cap, else empty.</summary>
     public string AdditionalProblemText =>
         AdditionalProblemCount > 0 ? $"+{AdditionalProblemCount} more need attention" : "";
 
-    /// <summary>The all-clear affirmation shown when nothing needs attention.</summary>
+    /// <summary>"N server(s) didn't report this cycle" when some registered server has no summary this
+    /// cycle, else empty — the only place that gap is stated in words rather than silently absorbed into
+    /// either the healthy or the problem counts.</summary>
+    public string UnknownStatusText => UnknownCount switch
+    {
+        0 => "",
+        1 => "1 server didn't report this cycle",
+        _ => $"{UnknownCount} servers didn't report this cycle",
+    };
+
+    /// <summary>The all-clear affirmation shown when nothing needs attention. Content assumes the caller
+    /// only renders this when <see cref="IsAllClear"/> is true — see that property's remarks.</summary>
     public string AllHealthyText => TotalServers == 1
         ? "All 1 server healthy"
         : $"All {TotalServers} servers healthy";
@@ -269,12 +301,14 @@ public sealed class FleetRollup
     public static FleetRollup Build(IReadOnlyList<ServerSummaryItem> summaries, FleetTotals totals, int worstCount = DefaultWorstCount, int? totalServerCount = null)
     {
         var registeredTotal = totalServerCount ?? summaries.Count;
+        var unknown = Math.Max(0, registeredTotal - summaries.Count);
 
         if (summaries.Count == 0)
         {
             return new FleetRollup
             {
                 TotalServers = registeredTotal,
+                UnknownCount = unknown,
                 TotalBlockingEvents = totals.TotalBlockingEvents,
                 TotalDeadlocks = totals.TotalDeadlocks,
             };
@@ -328,6 +362,7 @@ public sealed class FleetRollup
         return new FleetRollup
         {
             TotalServers = registeredTotal,
+            UnknownCount = unknown,
             HealthyCount = healthy,
             WarningCount = warning,
             CriticalCount = critical,

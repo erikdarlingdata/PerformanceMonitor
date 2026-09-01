@@ -338,6 +338,47 @@ public sealed class ViewerFleetRollupBuilderTests
         Assert.Equal(5, rollup.TotalServers);
         // The band counts still reflect only what actually loaded — that part is correct as-is.
         Assert.Equal(2, rollup.HealthyCount);
+        Assert.Equal(3, rollup.UnknownCount);
+    }
+
+    [Fact]
+    public void Build_SomeServersUnknown_ButLoadedOnesAreAllHealthy_IsNotAllClear()
+    {
+        /* The exact review finding on #2754: 2 of 5 registered servers loaded, both healthy, zero ranked
+           problems — HasProblems is legitimately false (nothing to rank), but IsAllClear MUST be false,
+           because 3 servers' status this cycle is unknown, not confirmed healthy. Before this fix,
+           AllHealthyText's visibility was gated on HasProblems alone, so the UI would have rendered
+           "All 5 servers healthy" here despite 3 of them having no data at all this cycle. */
+        var summaries = new[] { Healthy("h1", 1), Healthy("h2", 2) };
+
+        var rollup = FleetRollup.Build(summaries, NoTotals, totalServerCount: 5);
+
+        Assert.False(rollup.HasProblems);
+        Assert.False(rollup.IsAllClear);
+        Assert.Equal(3, rollup.UnknownCount);
+        Assert.Equal("3 servers didn't report this cycle", rollup.UnknownStatusText);
+    }
+
+    [Fact]
+    public void Build_EveryRegisteredServerLoadedAndHealthy_IsAllClear()
+    {
+        // The genuine all-clear case: nothing unknown, nothing ranked as a problem.
+        var summaries = new[] { Healthy("h1", 1), Healthy("h2", 2) };
+
+        var rollup = FleetRollup.Build(summaries, NoTotals, totalServerCount: 2);
+
+        Assert.True(rollup.IsAllClear);
+        Assert.Equal(0, rollup.UnknownCount);
+        Assert.Equal("", rollup.UnknownStatusText);
+    }
+
+    [Fact]
+    public void Build_OneServerUnknown_UnknownStatusTextIsSingular()
+    {
+        var rollup = FleetRollup.Build(new[] { Healthy("h1", 1) }, NoTotals, totalServerCount: 2);
+
+        Assert.Equal(1, rollup.UnknownCount);
+        Assert.Equal("1 server didn't report this cycle", rollup.UnknownStatusText);
     }
 
     [Fact]
@@ -375,6 +416,8 @@ public sealed class ViewerFleetRollupBuilderTests
 
         Assert.Equal(5, rollup.TotalServers);
         Assert.Empty(rollup.WorstServers);
+        Assert.Equal(5, rollup.UnknownCount);
+        Assert.False(rollup.IsAllClear);
     }
 
     // ── Reason text + ranked-row display ────────────────────────────────────────────────────────────
