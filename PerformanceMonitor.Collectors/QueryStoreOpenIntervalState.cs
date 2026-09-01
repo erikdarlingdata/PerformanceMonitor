@@ -57,15 +57,22 @@ public static class QueryStoreOpenIntervalState
     public const string WatermarkKeyPrefix = "qsowm:";
 
     /// <summary>
-    /// How stale the open interval's stored snapshot may grow before a cycle refreshes it. Fifteen minutes
-    /// against the 60-minute Query Store default interval means ~4 snapshots per interval instead of one
-    /// per cycle (~12 at the 5-minute cadence) — roughly two thirds of the open-interval spend removed —
+    /// How stale the open interval's stored snapshot may grow before a cycle refreshes it. Thirty minutes
+    /// against the 60-minute Query Store default interval means ~2 snapshots per interval instead of one
+    /// per cycle (~12 at the 5-minute cadence) — roughly five sixths of the open-interval spend removed —
     /// while the CURRENT interval's view in any reader lags real time by at most this much. Readers of
-    /// closed history lose nothing at all. Deliberately NOT configurable yet: one number with a recorded
-    /// rationale beats a knob nobody can reason about, and the #2312 yardstick (multi-53 at ~50 s/run)
-    /// decides whether it ever needs to move.
+    /// closed history lose nothing at all. Deliberately NOT configurable per-server: one number with a
+    /// recorded rationale beats a knob nobody can reason about.
+    ///
+    /// <para>Moved from 15 to 30 (#2759) because the #2312 yardstick it was tuned against — multi-53 at
+    /// ~50 s/run — stopped holding. Measured live on <c>prod-pos-use1-multi-45</c> (2026-09-01, 3-hour
+    /// window of <c>collection_log</c>): open-interval-inclusive runs cost 110–133 s each (2–2.5x the
+    /// original yardstick), landing every 12–19 minutes — the 15-minute skip window was already firing as
+    /// designed, spacing the expensive runs out, but each one had grown too large for that spacing to be
+    /// enough. Doubling the window halves their frequency without changing anything about the query
+    /// itself or what a reader sees once an interval closes.</para>
     /// </summary>
-    public static readonly TimeSpan RefreshEvery = TimeSpan.FromMinutes(15);
+    public static readonly TimeSpan RefreshEvery = TimeSpan.FromMinutes(30);
 
     /// <summary>The state key for one database.</summary>
     public static string KeyFor(string databaseName) => WatermarkKeyPrefix + databaseName;

@@ -91,13 +91,13 @@ public sealed class QueryStoreOpenIntervalStateTests
         Assert.Equal("qsowm:SO", QueryStoreOpenIntervalState.KeyFor("SO"));
     }
 
-    /// <summary>Format/parse round-trip at second granularity, and the 15-minute horizon stays a recorded decision.</summary>
+    /// <summary>Format/parse round-trip at second granularity, and the 30-minute horizon stays a recorded decision (#2759).</summary>
     [Fact]
     public void FormatRoundTripsAndTheHorizonIsPinned()
     {
         var stamp = QueryStoreOpenIntervalState.Format(Now);
-        Assert.False(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(StateWith("SO", stamp), "SO", Now.AddMinutes(14)));
-        Assert.True(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(StateWith("SO", stamp), "SO", Now.AddMinutes(15)));
-        Assert.Equal(TimeSpan.FromMinutes(15), QueryStoreOpenIntervalState.RefreshEvery);
+        Assert.False(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(StateWith("SO", stamp), "SO", Now.AddMinutes(29)));
+        Assert.True(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(StateWith("SO", stamp), "SO", Now.AddMinutes(30)));
+        Assert.Equal(TimeSpan.FromMinutes(30), QueryStoreOpenIntervalState.RefreshEvery);
     }
 }
