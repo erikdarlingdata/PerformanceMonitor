@@ -51,6 +51,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// cookie/token gets a minimal inline login form. The cookie signing key is a per-process 32-byte RNG value,
 /// so a restart invalidates sessions (acceptable).</para>
 ///
+/// <para><b>OIDC sign-in (#2550, opt-in via <c>web.network.oidc</c>):</b> authorization code + PKCE beside
+/// the token — the login page grows an SSO link, the callback mints the SAME session cookie with the
+/// authenticated subject and role encoded in its signed subject slot (#2583), and a viewer-role seat is
+/// refused every mutating request by a group-level gate in the auth middleware. The token path is unchanged
+/// and remains the scripted-caller/break-glass credential; the CIDR stays outermost, OIDC endpoints
+/// included. See <see cref="Hosting.DarlingWebOidc"/> (the protocol) and
+/// <see cref="Hosting.DarlingWebSeat"/> (the seat model).</para>
+///
 /// <para><b>TLS (#2562):</b> opt-in via <c>web.network.tls</c> and applied to the NETWORK listener only — see
 /// <see cref="Hosting.DarlingWebTls"/> for the certificate rules and the Kestrel bind below for why the
 /// loopback listeners stay plain HTTP. Without it the exposed listener is plain HTTP and every start warns
@@ -76,6 +84,11 @@ public sealed class DarlingWebHostService : BackgroundService
     /// REMOVES the key material from the machine key store. A rebind that leaked it would accumulate a key
     /// per restart.</summary>
     private DarlingWebTls.LoadedCertificate? _serverCertificate;
+
+    /// <summary>The OIDC client for the current network listener (#2550) — null unless web.network.oidc is
+    /// configured AND valid. Holds the HttpClient and the cached discovery document, so its lifetime is the
+    /// listener's, exactly like the certificate above.</summary>
+    private DarlingWebOidcClient? _oidcClient;
 
     private int _runningPort;
 
@@ -255,6 +268,9 @@ public sealed class DarlingWebHostService : BackgroundService
         _serverCertificate?.Dispose();
         _serverCertificate = null;
 
+        _oidcClient?.Dispose();
+        _oidcClient = null;
+
         _runningPort = 0;
     }
 
@@ -275,6 +291,9 @@ public sealed class DarlingWebHostService : BackgroundService
 
         try { _serverCertificate?.Dispose(); } catch { /* best-effort */ }
         _serverCertificate = null;
+
+        try { _oidcClient?.Dispose(); } catch { /* best-effort */ }
+        _oidcClient = null;
     }
 
     /// <summary>
@@ -360,6 +379,72 @@ public sealed class DarlingWebHostService : BackgroundService
                         "Web dashboard token could not be decrypted ({Message}) — refusing to expose; binding loopback-only.",
                         ex.Message);
                     networkMode = false;
+                }
+            }
+
+            /* OIDC sign-in (#2550) — resolved once per start, like the token and the certificate. A
+               misconfiguration DISABLES OIDC and says so at Critical, but does NOT degrade the bind: OIDC is
+               additive — the dashboard without it is exactly the pre-#2550 dashboard, still behind the
+               token→cookie gate — so taking the whole surface down over it would punish the operator for
+               attempting more security than they had yesterday. */
+            DarlingWebOidcClient? oidcClient = null;
+            if (networkMode && network!.Oidc is { IsConfigured: true } oidcConfig)
+            {
+                var problem = DarlingWebOidc.ValidateConfig(oidcConfig);
+                string? clientSecret = null;
+                if (problem is null)
+                {
+                    try
+                    {
+                        clientSecret = oidcConfig.ResolveClientSecret(out var usedPlaintextSecret);
+                        if (usedPlaintextSecret)
+                        {
+                            _logger.LogWarning(
+                                "web.network.oidc.clientSecret is set in plaintext (dev convenience) — prefer encryptedClientSecret (produced by --encrypt-password).");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        problem = $"the client secret could not be resolved: {ex.Message}";
+                    }
+                }
+
+                if (problem is not null)
+                {
+                    _logger.LogCritical(
+                        "web.network.oidc is misconfigured ({Problem}) — OIDC sign-in is DISABLED this start; the shared token remains the only web credential.",
+                        problem);
+                }
+                else
+                {
+                    oidcClient = new DarlingWebOidcClient(new DarlingWebOidcClient.ResolvedOptions(
+                        oidcConfig.Authority!.Trim(),
+                        oidcConfig.ClientId!.Trim(),
+                        clientSecret,
+                        DarlingWebOidc.EffectiveScopes(oidcConfig.Scopes),
+                        string.IsNullOrWhiteSpace(oidcConfig.SubjectClaim) ? null : oidcConfig.SubjectClaim.Trim(),
+                        string.IsNullOrWhiteSpace(oidcConfig.RoleClaim) ? null : oidcConfig.RoleClaim.Trim(),
+                        oidcConfig.AdminRoles ?? Array.Empty<string>(),
+                        oidcConfig.ViewerRoles ?? Array.Empty<string>()));
+                    _oidcClient = oidcClient;
+
+                    if (clientSecret is null)
+                    {
+                        _logger.LogWarning(
+                            "web.network.oidc has no client secret — the code exchange will run as a PUBLIC client on PKCE alone. Some providers refuse this for web apps; register a confidential client and set encryptedClientSecret if sign-ins fail at the exchange.");
+                    }
+
+                    /* Name the redirect-URI shape at start, because it is the one thing the operator has to
+                       register at the IdP and the one thing some IdPs (Okta) refuse for a bare IP. */
+                    _logger.LogInformation(
+                        "OIDC sign-in enabled — authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts}). The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
+                        oidcClient.Options.Authority,
+                        oidcClient.Options.ClientId,
+                        oidcClient.Options.RoleClaim is null
+                            ? "none (every signed-in user gets the edit seat, the shared token's reach)"
+                            : $"claim '{oidcClient.Options.RoleClaim}' -> {oidcClient.Options.AdminRoles.Count} admin / {oidcClient.Options.ViewerRoles.Count} viewer value(s), unmatched users refused",
+                        effectivePort,
+                        $"{network.Listen} or localhost");
                 }
             }
 
@@ -662,36 +747,77 @@ public sealed class DarlingWebHostService : BackgroundService
                 var cidr = allowedCidr;
                 var token = accessToken;
                 /* Per-process signing key: a restart regenerates it and thereby invalidates every session
-                   cookie (acceptable — the operator re-presents the token once). */
+                   cookie (acceptable — the operator re-presents the token once). The OIDC transaction key is
+                   DERIVED from it rather than shared — see DeriveTransactionKey for why sharing the raw key
+                   across the two cookie shapes would let a pre-auth transaction cookie impersonate a session. */
                 var signingKey = RandomNumberGenerator.GetBytes(SigningKeyBytes);
+                var transactionKey = DarlingWebOidc.DeriveTransactionKey(signingKey);
 
                 _app.Use(async (context, next) =>
                 {
                     /* The Host-allowlist / DNS-rebinding guard already ran above (both modes); this gate owns
-                       only the network auth decision (session cookie / ?token= / in-CIDR). */
+                       the network auth decision (session cookie / ?token= / in-CIDR / the sign-in flow). */
                     var remote = context.Connection.RemoteIpAddress;
                     var hasValidCookie = TryValidateSessionCookie(
-                        context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow);
+                        context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject);
+
+                    /* Resolve WHO holds the cookie (#2550). A cryptographically valid cookie whose subject
+                       slot encodes a seat we do not recognize is treated as NO cookie: refusing is
+                       recoverable (re-login), serving an unresolvable identity is not. */
+                    var seat = DarlingWebSeat.SharedToken;
+                    if (hasValidCookie && !DarlingWebSeat.TryResolveSeat(cookieSubject, out seat))
+                    {
+                        hasValidCookie = false;
+                        seat = DarlingWebSeat.SharedToken;
+                    }
+
                     var presentedToken = context.Request.Query["token"].ToString();
                     var hasValidToken = DarlingHostBinding.FixedTimeTokenEquals(presentedToken, token);
+                    var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
 
-                    switch (DecideWebAuth(remote, cidr, hasValidCookie, hasValidToken))
+                    switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, hasValidToken))
                     {
-                        case WebAuthAction.Allow:
+                        case WebRequestAction.Allow:
+                            /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
+                               the updated_by stamps, endpoints added on any parallel branch — resolves the
+                               same identity without per-endpoint wiring. */
+                            context.Items[DarlingWebSeat.HttpContextItemKey] = seat;
+
+                            /* The group-level write gate (#2550): a read-only seat is refused every
+                               mutating request HERE, before routing, so a write endpoint added tomorrow is
+                               born gated instead of born exposed. */
+                            if (!DarlingWebSeat.IsRequestAllowed(seat, context.Request.Method, context.Request.Path.Value ?? "/"))
+                            {
+                                refusals.Report(
+                                    _logger, "Web dashboard", DarlingRefusalGate.ReadOnlySeat, StatusCodes.Status403Forbidden,
+                                    remote,
+                                    $"the signed-in seat is read-only (viewer role) and {context.Request.Method} is a mutation",
+                                    DateTime.UtcNow);
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                context.Response.ContentType = "application/json; charset=utf-8";
+                                await context.Response.WriteAsync("{\"error\": \"This account has read-only access.\"}");
+                                return;
+                            }
+
                             await next(context);
                             return;
 
-                        case WebAuthAction.SetCookieAndRedirect:
+                        case WebRequestAction.HandleAuthFlow:
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals);
+                            return;
+
+                        case WebRequestAction.SetCookieAndRedirect:
                             AppendSessionCookie(context, signingKey);
                             /* 302 (default) to the same path with ?token= stripped, so the token never lingers
                                in browser history, bookmarks, or a Referer header. */
                             context.Response.Redirect(BuildPathWithoutToken(context.Request));
                             return;
 
-                        case WebAuthAction.Forbid:
-                            /* The ONLY 403 this host produces: an out-of-CIDR remote, or one whose address
-                               ASP.NET Core could not report (which fails closed). A wrong credential from
-                               inside the CIDR is ShowLogin, not this - see below. */
+                        case WebRequestAction.Forbid:
+                            /* An out-of-CIDR remote, or one whose address ASP.NET Core could not report
+                               (which fails closed). A wrong credential from inside the CIDR is ShowLogin,
+                               not this - see below. The CIDR stays OUTERMOST: it wins over a valid cookie,
+                               a valid token, AND the OIDC endpoints (#2550). */
                             refusals.Report(
                                 _logger, "Web dashboard", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
                                 remote,
@@ -717,7 +843,7 @@ public sealed class DarlingWebHostService : BackgroundService
                                     DateTime.UtcNow);
                             }
 
-                            await WriteLoginPageAsync(context);
+                            await WriteLoginPageAsync(context, oidcClient is not null);
                             return;
                     }
                 });
@@ -846,6 +972,69 @@ public sealed class DarlingWebHostService : BackgroundService
         }
 
         return WebAuthAction.ShowLogin;
+    }
+
+    /* ---------------------------------------------------------------------------------------------------
+       OIDC sign-in (#2550). The flow endpoints, the per-request decision that routes to them, and the
+       handler. DecideWebAuth above is untouched — its matrix is the pinned pre-OIDC behavior, and
+       DecideWebRequest composes AROUND it rather than growing it, so the token path cannot regress by
+       construction.
+       --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>The verdict for one network-mode request, with the sign-in flow added (#2550). The first four
+    /// members are <see cref="WebAuthAction"/>'s, mapped one-to-one.</summary>
+    internal enum WebRequestAction { Allow, Forbid, SetCookieAndRedirect, ShowLogin, HandleAuthFlow }
+
+    internal const string OidcLoginPath = "/auth/oidc/login";
+    internal const string OidcCallbackPath = "/auth/oidc/callback";
+    internal const string LogoutPath = "/auth/logout";
+
+    /// <summary>
+    /// PURE: is this path one the auth-flow handler owns? The two OIDC legs exist only while OIDC is
+    /// enabled (disabled, they fall through to normal auth and render the login page — no route squatting);
+    /// logout is ALWAYS a flow path, because the shared-token seat holds a session cookie too and deserves a
+    /// way to drop it.
+    /// </summary>
+    internal static bool IsAuthFlowPath(string path, bool oidcEnabled)
+    {
+        if (string.Equals(path, LogoutPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return oidcEnabled
+            && (string.Equals(path, OidcLoginPath, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(path, OidcCallbackPath, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// PURE per-request decision, composing the sign-in flow around <see cref="DecideWebAuth"/>: the CIDR
+    /// stays OUTERMOST (an out-of-CIDR caller is 403 even on the OIDC endpoints — sign-in is not a way past
+    /// the network boundary), then a flow path is handled regardless of credential state (a signed-in user
+    /// re-visiting /auth/oidc/login is starting a new sign-in, not asking for the dashboard), then the
+    /// original matrix decides exactly as before.
+    /// </summary>
+    internal static WebRequestAction DecideWebRequest(
+        IPAddress? remoteIp, IPNetwork allowedCidr, bool isAuthFlowRoute, bool hasValidCookie, bool hasValidToken)
+    {
+        var isLoopback = DarlingWebEndpoints.IsLoopbackRemote(remoteIp);
+        if (!isLoopback && !DarlingHostBinding.IsRemoteAddressAllowed(remoteIp, allowedCidr))
+        {
+            return WebRequestAction.Forbid;
+        }
+
+        if (isAuthFlowRoute)
+        {
+            return WebRequestAction.HandleAuthFlow;
+        }
+
+        return DecideWebAuth(remoteIp, allowedCidr, hasValidCookie, hasValidToken) switch
+        {
+            WebAuthAction.Allow => WebRequestAction.Allow,
+            WebAuthAction.Forbid => WebRequestAction.Forbid,
+            WebAuthAction.SetCookieAndRedirect => WebRequestAction.SetCookieAndRedirect,
+            _ => WebRequestAction.ShowLogin,
+        };
     }
 
     /// <summary>
@@ -1005,9 +1194,9 @@ public sealed class DarlingWebHostService : BackgroundService
         return true;
     }
 
-    private static void AppendSessionCookie(HttpContext context, byte[] signingKey)
+    private static void AppendSessionCookie(HttpContext context, byte[] signingKey, string? subject = null)
     {
-        var value = BuildSessionCookieValue(signingKey, DateTimeOffset.UtcNow.Add(SessionLifetime));
+        var value = BuildSessionCookieValue(signingKey, DateTimeOffset.UtcNow.Add(SessionLifetime), subject);
         context.Response.Cookies.Append(SessionCookieName, value, new CookieOptions
         {
             HttpOnly = true,
@@ -1047,10 +1236,19 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>
-    /// PURE open-redirect guard for the token-strip 302 target: forces a single-slash site-relative path. A
-    /// request path beginning <c>//</c> (or <c>/\</c>) is a protocol-relative URL the browser follows off-site,
-    /// so a crafted <c>//evil.com/?token=...</c> would 302 the operator away; any leading slash/backslash run is
-    /// collapsed to one <c>/</c>. Empty maps to <c>/</c>.
+    /// PURE open-redirect guard for the token-strip 302 target and the OIDC <c>?return=</c> landing (#2550):
+    /// forces a single-slash site-relative path. A request path beginning <c>//</c> (or <c>/\</c>) is a
+    /// protocol-relative URL the browser follows off-site, so a crafted <c>//evil.com/?token=...</c> would
+    /// 302 the operator away; any leading slash/backslash run is collapsed to one <c>/</c>. Empty maps to
+    /// <c>/</c>.
+    ///
+    /// <para><b>ASCII control characters are stripped from the WHOLE string first</b> (review catch on
+    /// #2730): the WHATWG URL parser removes tab/CR/LF from anywhere in a URL before parsing, and that
+    /// stripping applies to <c>location.replace()</c>, <c>&lt;a href&gt;</c>, and <c>Location</c> headers
+    /// alike — so <c>\t//evil.com</c> would sail past a leading-slash-only guard and become protocol-relative
+    /// IN THE BROWSER. Stripping before collapsing means the guard sees the same string the browser will.
+    /// All C0 controls go, not just the three the URL spec names: none has any business in a path, and
+    /// enumerating exactly the browser's list is how the next variant gets through.</para>
     /// </summary>
     internal static string SanitizeRedirectPath(string location)
     {
@@ -1059,21 +1257,321 @@ public sealed class DarlingWebHostService : BackgroundService
             return "/";
         }
 
+        Span<char> cleaned = location.Length <= 512 ? stackalloc char[location.Length] : new char[location.Length];
+        var length = 0;
+        foreach (var c in location)
+        {
+            if (c >= ' ' && c != '\x7f')
+            {
+                cleaned[length++] = c;
+            }
+        }
+
         var i = 0;
-        while (i < location.Length && (location[i] == '/' || location[i] == '\\'))
+        while (i < length && (cleaned[i] == '/' || cleaned[i] == '\\'))
         {
             i++;
         }
 
-        return "/" + location.Substring(i);
+        return "/" + new string(cleaned.Slice(i, length - i));
     }
 
-    private static Task WriteLoginPageAsync(HttpContext context)
+    /* ---------------------------------------------------------------------------------------------------
+       The sign-in flow handler (#2550): /auth/logout always; /auth/oidc/login and /auth/oidc/callback when
+       OIDC is enabled. Reached only AFTER the CIDR gate (DecideWebRequest puts Forbid first), so everything
+       here is talking to a caller the network boundary already admitted.
+       --------------------------------------------------------------------------------------------------- */
+
+    private async Task HandleAuthFlowAsync(
+        HttpContext context,
+        DarlingWebOidcClient? oidcClient,
+        byte[] signingKey,
+        byte[] transactionKey,
+        DarlingWebSeat currentSeat,
+        DarlingHttpRefusalLog refusals)
+    {
+        var path = context.Request.Path.Value ?? "/";
+        var remote = context.Connection.RemoteIpAddress;
+
+        if (string.Equals(path, LogoutPath, StringComparison.OrdinalIgnoreCase))
+        {
+            /* Local sign-out only — the cookie dies, the IdP session (if any) lives on. RP-initiated logout
+               at the IdP would sign the user out of everything ELSE their org runs, which is not this
+               button's mandate. A GET with no CSRF token is deliberate too: the worst a forged logout does
+               is show someone the login page. */
+            if (currentSeat.Subject is not null)
+            {
+                _logger.LogInformation("Web dashboard sign-out: {Subject}",
+                    DarlingHttpRefusalLog.Sanitize(currentSeat.Subject, DarlingWebSeat.MaxSubjectLength));
+            }
+
+            context.Response.Cookies.Delete(SessionCookieName, new CookieOptions { Path = "/" });
+            context.Response.Redirect("/");
+            return;
+        }
+
+        if (oidcClient is null)
+        {
+            /* Unreachable through IsAuthFlowPath (the OIDC legs only qualify while a client exists), kept
+               as a backstop rather than a NullReference away from a 500. The answer is the login page —
+               exactly what the non-flow pipeline serves an unauthenticated caller — not a bare 4xx, which
+               the #2479 report-before-refusing pin rightly refuses to allow silently. */
+            await WriteLoginPageAsync(context, oidcEnabled: false);
+            return;
+        }
+
+        if (string.Equals(path, OidcLoginPath, StringComparison.OrdinalIgnoreCase))
+        {
+            var discovery = await oidcClient.GetDiscoveryAsync(context.RequestAborted);
+            if (discovery is null)
+            {
+                /* Through the rate-limited refusal log, not a bare LogWarning: this leg is reachable
+                   pre-credential by design, so during an IdP outage every hit would otherwise write a
+                   line — the #2479 flood, reintroduced on a new path. */
+                refusals.Report(
+                    _logger, "Web dashboard", DarlingRefusalGate.SignIn, StatusCodes.Status502BadGateway, remote,
+                    $"the OIDC discovery document could not be fetched/parsed from {oidcClient.Options.Authority} — the next sign-in attempt retries",
+                    DateTime.UtcNow);
+                await WriteSignInErrorAsync(context, StatusCodes.Status502BadGateway,
+                    "Single sign-on is temporarily unavailable (the identity provider did not answer). Use the access token, or try again.");
+                return;
+            }
+
+            var (verifier, challenge) = DarlingWebOidc.CreatePkce();
+            var state = DarlingWebOidc.CreateFlowValue();
+            var nonce = DarlingWebOidc.CreateFlowValue();
+
+            /* Where to land after the sign-in — the SPA path the login page was covering, run through the
+               same open-redirect guard as the token-strip 302. */
+            var returnPath = SanitizeRedirectPath(context.Request.Query["return"].ToString());
+
+            /* The redirect URI is derived from THIS request's scheme+Host (which the allowlist has already
+               vetted), then FROZEN into the transaction: the token endpoint requires the exact value the
+               authorization request used, and this host answers on several names at once. */
+            var redirectUri = $"{context.Request.Scheme}://{context.Request.Host.Value}{OidcCallbackPath}";
+
+            var startedTransaction = new DarlingWebOidc.OidcTransaction(state, nonce, verifier, redirectUri, returnPath);
+            context.Response.Cookies.Append(
+                DarlingWebOidc.TransactionCookieName,
+                DarlingWebOidc.BuildTransactionCookie(
+                    transactionKey, startedTransaction, DateTimeOffset.UtcNow.Add(DarlingWebOidc.TransactionLifetime)),
+                new CookieOptions
+                {
+                    HttpOnly = true,
+                    /* Lax, NOT Strict, and it is load-bearing: the callback arrives as a top-level
+                       navigation INITIATED BY THE IDP's ORIGIN, and a Strict cookie is simply not sent on
+                       cross-site navigations — the flow would fail on every sign-in with "expired or
+                       tampered", only in real browsers, never in a test harness. Lax sends it exactly on
+                       that top-level GET and still never on cross-site subresource/POST requests. */
+                    SameSite = SameSiteMode.Lax,
+                    Secure = context.Request.IsHttps,
+                    Path = "/auth/oidc",
+                    MaxAge = DarlingWebOidc.TransactionLifetime,
+                });
+
+            context.Response.Redirect(DarlingWebOidc.BuildAuthorizationUrl(
+                discovery.AuthorizationEndpoint,
+                oidcClient.Options.ClientId,
+                redirectUri,
+                oidcClient.Options.Scopes,
+                state,
+                nonce,
+                challenge));
+            return;
+        }
+
+        /* ------- the callback: the IdP sent the browser back with ?code=&state= (or ?error=). ------- */
+
+        var providerError = context.Request.Query["error"].ToString();
+        if (!string.IsNullOrEmpty(providerError))
+        {
+            /* IdP-authored in the honest case, but it rode a browser querystring here — anyone can put an
+               ?error= on this URL, which is exactly why it goes through the rate-limited refusal log,
+               sanitized like any other echoed input. */
+            refusals.Report(
+                _logger, "Web dashboard", DarlingRefusalGate.SignIn, StatusCodes.Status403Forbidden, remote,
+                $"the provider (or the querystring) reported '{DarlingHttpRefusalLog.Sanitize(providerError)}"
+                + $" {DarlingHttpRefusalLog.Sanitize(context.Request.Query["error_description"].ToString())}'",
+                DateTime.UtcNow);
+            await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
+                "The identity provider refused the sign-in. Ask your administrator, or use the access token.");
+            return;
+        }
+
+        var code = context.Request.Query["code"].ToString();
+        var presentedState = context.Request.Query["state"].ToString();
+        var hasTransaction = DarlingWebOidc.TryValidateTransactionCookie(
+            context.Request.Cookies[DarlingWebOidc.TransactionCookieName], transactionKey, DateTimeOffset.UtcNow,
+            out var transaction);
+
+        /* One-shot either way: success or failure, this transaction is spent. */
+        context.Response.Cookies.Delete(DarlingWebOidc.TransactionCookieName, new CookieOptions { Path = "/auth/oidc" });
+
+        if (string.IsNullOrEmpty(code) || !hasTransaction
+            || !string.Equals(presentedState, transaction!.State, StringComparison.Ordinal))
+        {
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status400BadRequest,
+                "the callback carried no code, or its state did not match the sign-in this host started (expired/tampered transaction, or a cross-site forgery)");
+            await WriteSignInErrorAsync(context, StatusCodes.Status400BadRequest,
+                "This sign-in attempt is stale or was not started by this dashboard. Start again from the login page.");
+            return;
+        }
+
+        var discoveryForExchange = await oidcClient.GetDiscoveryAsync(context.RequestAborted);
+        if (discoveryForExchange is null)
+        {
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status502BadGateway,
+                $"discovery is no longer available from {oidcClient.Options.Authority}, so the code exchange could not run");
+            await WriteSignInErrorAsync(context, StatusCodes.Status502BadGateway,
+                "Single sign-on is temporarily unavailable (the identity provider did not answer). Use the access token, or try again.");
+            return;
+        }
+
+        var exchange = await oidcClient.ExchangeCodeAsync(
+            discoveryForExchange.TokenEndpoint, code, transaction.RedirectUri, transaction.CodeVerifier, context.RequestAborted);
+        if (exchange.IdToken is null)
+        {
+            /* exchange.Error is IdP/transport-authored, never secret material (the client guarantees it),
+               but it still gets the sanitizer before a log line. */
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status502BadGateway,
+                $"the code exchange failed: {DarlingHttpRefusalLog.Sanitize(exchange.Error, 128)}");
+            await WriteSignInErrorAsync(context, StatusCodes.Status502BadGateway,
+                "The identity provider rejected the sign-in exchange. Try again; if it persists, the service log names the provider's error.");
+            return;
+        }
+
+        var payload = DarlingWebOidc.TryParseJwtPayload(exchange.IdToken);
+        var claimProblem = payload is null
+            ? "the id_token is not a parsable JWT"
+            : DarlingWebOidc.ValidateIdTokenClaims(
+                payload, discoveryForExchange.Issuer, oidcClient.Options.ClientId, transaction.Nonce, DateTimeOffset.UtcNow);
+        if (claimProblem is not null)
+        {
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status403Forbidden, $"the ID token failed validation: {claimProblem}");
+            await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
+                "The identity provider's answer did not validate. The service log has the specific check that failed.");
+            return;
+        }
+
+        var subject = DarlingWebOidc.ResolveSubject(payload!, oidcClient.Options.SubjectClaim);
+        if (subject is null)
+        {
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status403Forbidden, oidcClient.Options.SubjectClaim is null
+                ? "the ID token carries none of the subject claims (preferred_username/email/sub)"
+                : $"the ID token does not carry the configured subjectClaim '{oidcClient.Options.SubjectClaim}' — refusing rather than falling back to a claim the operator did not choose");
+            await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
+                "Signed in at the provider, but the token carries no usable identity for this dashboard. The service log names the missing claim.");
+            return;
+        }
+
+        if (subject.Length > DarlingWebSeat.MaxSubjectLength)
+        {
+            /* The cookie's own rule (#2583): refuse, never truncate — truncation merges identities. */
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status403Forbidden, $"the resolved subject is {subject.Length} characters (limit {DarlingWebSeat.MaxSubjectLength})");
+            await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
+                "Signed in at the provider, but the account identifier is too long for this dashboard's session. Configure a shorter subjectClaim.");
+            return;
+        }
+
+        if (DarlingWebOidc.SubjectCarriesControlCharacters(subject))
+        {
+            /* Same shape as the length cap (review catch on #2730): a subject with CR/LF in it could forge
+               lines in the audit trail these sign-ins feed, and no legitimate identifier carries controls —
+               refuse the seat rather than launder the name and attribute writes to the laundered form. */
+            ReportSignInRefusal(refusals, remote, StatusCodes.Status403Forbidden,
+                "the resolved subject contains ASCII control characters, which no legitimate identifier does");
+            await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
+                "Signed in at the provider, but the account identifier is not usable by this dashboard. Configure a different subjectClaim.");
+            return;
+        }
+
+        var role = DarlingWebOidc.MapRole(
+            oidcClient.Options.RoleClaim is null
+                ? Array.Empty<string>()
+                : DarlingWebOidc.ExtractClaimValues(payload!, oidcClient.Options.RoleClaim),
+            oidcClient.Options.AdminRoles,
+            oidcClient.Options.ViewerRoles);
+        if (role == WebOidcRole.Denied)
+        {
+            /* Authenticated at the IdP, unknown to the role mapping: refused, and the LOG carries who —
+               this line is the audit trail for "someone signed in who shouldn't reach the dashboard". */
+            _logger.LogWarning(
+                "OIDC sign-in refused: {Subject} authenticated at the provider but matches neither adminRoles nor viewerRoles in claim '{RoleClaim}'.",
+                DarlingHttpRefusalLog.Sanitize(subject, DarlingWebSeat.MaxSubjectLength), oidcClient.Options.RoleClaim);
+            await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
+                "Your account is not granted a seat on this dashboard. Ask your administrator to add you to a mapped role.");
+            return;
+        }
+
+        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(subject, role));
+
+        /* Per-user identity in the service log — the #2550 counterpart of the updated_by stamp. */
+        _logger.LogInformation(
+            "OIDC sign-in: {Subject} as {Role} from {Remote}",
+            DarlingHttpRefusalLog.Sanitize(subject, DarlingWebSeat.MaxSubjectLength),
+            role == WebOidcRole.Admin ? "admin (edit)" : "viewer (read-only)", remote);
+
+        await WriteSignedInLandingAsync(context, transaction.ReturnPath);
+    }
+
+    /// <summary>Sign-in refusals go through the rate-limited refusal log (#2479): the flow endpoints are
+    /// reachable pre-credential by design, so an unthrottled warning per failed callback would hand a
+    /// scanner the log-flood the limiter exists to bound. The one deliberate exception is the
+    /// role-mapping denial, which stays a direct line naming the subject — it is the audit trail, and
+    /// reaching it costs a completed IdP handshake.</summary>
+    private void ReportSignInRefusal(DarlingHttpRefusalLog refusals, IPAddress? remote, int statusCode, string reason)
+        => refusals.Report(_logger, "Web dashboard", DarlingRefusalGate.SignIn, statusCode, remote, reason, DateTime.UtcNow);
+
+    /// <summary>
+    /// The post-sign-in landing page. An HTML page with a script navigation instead of a 302, and the
+    /// difference is load-bearing: the session cookie is SameSite=Strict, and a 302 here would be the tail
+    /// of a navigation chain the IDP'S origin initiated — cross-site, so the browser would withhold the
+    /// just-set cookie from the redirect target and the user would land back on the login page having
+    /// genuinely signed in. A navigation started by a script on THIS page is same-site, and Strict cookies
+    /// travel with it.
+    /// </summary>
+    private static Task WriteSignedInLandingAsync(HttpContext context, string returnPath)
+    {
+        var safePath = SanitizeRedirectPath(returnPath);
+        /* JSON-encode for the script (handles quotes/backslashes), HTML-encode for the fallback link. */
+        var scriptTarget = System.Text.Json.JsonSerializer.Serialize(safePath);
+        var linkTarget = System.Text.Encodings.Web.HtmlEncoder.Default.Encode(safePath);
+
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = "text/html; charset=utf-8";
+        return context.Response.WriteAsync(
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
+            + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
+            + $"<p>Signed in — continuing to <a style='color:#2eaef1' href='{linkTarget}'>the dashboard</a>…</p>"
+            + $"<script>location.replace({scriptTarget});</script>"
+            + "</body></html>");
+    }
+
+    /// <summary>A minimal self-contained sign-in error page — same reasoning as the login form: it renders
+    /// before auth, so it can reference nothing gated.</summary>
+    private static Task WriteSignInErrorAsync(HttpContext context, int statusCode, string message)
+    {
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "text/html; charset=utf-8";
+        return context.Response.WriteAsync(
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
+            + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
+            + $"<p>{System.Text.Encodings.Web.HtmlEncoder.Default.Encode(message)}</p>"
+            + "<p><a style='color:#2eaef1' href='/'>Back to the login page</a></p>"
+            + "</body></html>");
+    }
+
+    private static Task WriteLoginPageAsync(HttpContext context, bool oidcEnabled)
     {
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
-        return context.Response.WriteAsync(LoginPageHtml);
+        return context.Response.WriteAsync(BuildLoginPageHtml(oidcEnabled));
     }
+
+    /// <summary>The login page, with the SSO affordance included exactly when OIDC is enabled — the token
+    /// form is never removed (#2550 keeps the shared token as the scripted-caller/break-glass path).</summary>
+    internal static string BuildLoginPageHtml(bool oidcEnabled)
+        => LoginPageHtml.Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : string.Empty);
 
     /* A minimal, fully self-contained login form (no external references) — a GET form whose only field is the
        access token, so submitting it re-requests the same URL with ?token=, which the middleware exchanges for
@@ -1107,6 +1605,9 @@ public sealed class DarlingWebHostService : BackgroundService
   button { padding: 0.55rem; border-radius: var(--radius-sm); border: 0; background: var(--accent); color: var(--bg-dark); font-weight: 600; cursor: pointer; font-size: 0.9rem; }
   button:hover { filter: brightness(1.08); }
   .host { font-size: 0.72rem; color: var(--muted); text-align: center; margin-top: 0.25rem; }
+  .sso { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.75rem; text-align: center; }
+  .sso a { display: block; padding: 0.55rem; border-radius: var(--radius-sm); border: 1px solid var(--accent); color: var(--accent); text-decoration: none; font-weight: 600; font-size: 0.9rem; }
+  .sso a:hover { background: rgba(46, 174, 241, 0.12); }
 </style>
 </head>
 <body>
@@ -1118,11 +1619,19 @@ public sealed class DarlingWebHostService : BackgroundService
   <label for='token'>Access token</label>
   <input id='token' name='token' type='password' autocomplete='off' autofocus>
   <button type='submit'>Enter</button>
+<!--SSO-->
   <div class='host' id='host'></div>
 </form>
 <script>document.getElementById('host').textContent = 'Accessing ' + location.host;</script>
 </body>
 </html>";
+
+    /* Spliced over the <!--SSO--> placeholder when OIDC is enabled (#2550). The link carries the page the
+       user was actually trying to reach as ?return=, so sign-in lands them there rather than on the root;
+       the server runs it through SanitizeRedirectPath before trusting it. Sits INSIDE the form for layout
+       only — it is an anchor, not a submit. */
+    private const string SsoFragmentHtml = @"  <div class='sso'><a id='sso' href='/auth/oidc/login'>Sign in with SSO</a></div>
+  <script>document.getElementById('sso').href = '/auth/oidc/login?return=' + encodeURIComponent(location.pathname + location.search);</script>";
 
     private static string Base64UrlEncode(byte[] bytes)
         => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');

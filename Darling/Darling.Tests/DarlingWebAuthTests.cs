@@ -94,6 +94,15 @@ public sealed class DarlingWebAuthTests
     [InlineData("/\\evil.com", "/evil.com")]            // slash-backslash trick -> collapsed
     [InlineData("///a", "/a")]                          // longer leading run
     [InlineData("/fleet?x=1", "/fleet?x=1")]            // preserved query on a safe path
+    /* #2730 review catch: the WHATWG URL parser strips tab/CR/LF from ANYWHERE in a URL before parsing —
+       location.replace, <a href>, and Location headers alike — so "\t//evil.com" past a leading-slash-only
+       guard becomes protocol-relative IN THE BROWSER. The guard strips C0 controls first, so it sees the
+       same string the browser will. */
+    [InlineData("\t//evil.com", "/evil.com")]           // tab-prefixed protocol-relative -> neutralized
+    [InlineData("/\t/evil.com", "/evil.com")]           // embedded tab building a // after browser stripping
+    [InlineData("\n//evil.com", "/evil.com")]           // LF variant
+    [InlineData("/\r\n/evil.com", "/evil.com")]         // CRLF variant
+    [InlineData("/dead\tlocks", "/deadlocks")]          // controls are stripped, the rest survives
     public void SanitizeRedirectPath_ForcesSingleSlashSiteRelative(string input, string expected)
         => Assert.Equal(expected, DarlingWebHostService.SanitizeRedirectPath(input));
 
@@ -302,5 +311,57 @@ public sealed class DarlingWebAuthTests
         Assert.False(DarlingWebHostService.TryValidateSessionCookie($"{parts[0]}.{parts[1]}", Key, now, out _));
         Assert.False(DarlingWebHostService.TryValidateSessionCookie($"{parts[0]}.{parts[1]}.{parts[1]}.{parts[2]}", Key, now, out _));
         Assert.False(DarlingWebHostService.TryValidateSessionCookie($"{parts[0]}..{parts[2]}", Key, now, out _));
+    }
+
+    /* ---- #2550: the per-request decision WITH the sign-in flow, composed AROUND DecideWebAuth ----
+       The DecideWebAuth matrix above is the pinned pre-OIDC behavior and is untouched; these rows pin the
+       composition rules: the CIDR stays outermost (it beats the OIDC endpoints too), a flow path is handled
+       regardless of credential state, and every non-flow request decides exactly as before. */
+
+    [Theory]
+    [InlineData("10.0.0.5", true, true, true, "Forbid")]                 // out-of-CIDR beats the flow route — sign-in is not a way past the boundary
+    [InlineData("192.168.1.50", true, false, false, "HandleAuthFlow")]   // in-CIDR flow route, no credential — the pre-auth login leg
+    [InlineData("192.168.1.50", true, true, false, "HandleAuthFlow")]    // flow route wins over a valid cookie (re-login / logout)
+    [InlineData("127.0.0.1", true, false, false, "HandleAuthFlow")]      // loopback may sign in too (localhost redirect URIs)
+    [InlineData("192.168.1.50", false, true, false, "Allow")]            // non-flow rows delegate to the original matrix…
+    [InlineData("192.168.1.50", false, false, true, "SetCookieAndRedirect")]
+    [InlineData("192.168.1.50", false, false, false, "ShowLogin")]
+    [InlineData("10.0.0.5", false, true, true, "Forbid")]
+    public void DecideWebRequest_ComposesFlowAroundDecideWebAuth(
+        string remote, bool isAuthFlowRoute, bool hasValidCookie, bool hasValidToken, string expected)
+        => Assert.Equal(expected, DarlingWebHostService.DecideWebRequest(
+            IPAddress.Parse(remote), Cidr, isAuthFlowRoute, hasValidCookie, hasValidToken).ToString());
+
+    [Theory]
+    [InlineData("/auth/logout", false, true)]                 // logout is a flow path even with OIDC off (token seats hold cookies too)
+    [InlineData("/auth/logout", true, true)]
+    [InlineData("/auth/oidc/login", true, true)]
+    [InlineData("/auth/oidc/callback", true, true)]
+    [InlineData("/auth/oidc/login", false, false)]            // OIDC off: the legs fall through to normal auth (login page, no squatting)
+    [InlineData("/auth/oidc/callback", false, false)]
+    [InlineData("/AUTH/OIDC/LOGIN", true, true)]              // paths are case-insensitive on this stack
+    [InlineData("/api/fleet", true, false)]
+    [InlineData("/auth/oidc/login/extra", true, false)]       // exact paths only
+    public void IsAuthFlowPath_Matrix(string path, bool oidcEnabled, bool expected)
+        => Assert.Equal(expected, DarlingWebHostService.IsAuthFlowPath(path, oidcEnabled));
+
+    /* ---- #2550: the login page grows the SSO affordance exactly when OIDC is enabled ---- */
+
+    [Fact]
+    public void LoginPage_SsoLink_PresentOnlyWhenOidcEnabled()
+    {
+        var withOidc = DarlingWebHostService.BuildLoginPageHtml(oidcEnabled: true);
+        var withoutOidc = DarlingWebHostService.BuildLoginPageHtml(oidcEnabled: false);
+
+        Assert.Contains(DarlingWebHostService.OidcLoginPath, withOidc, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingWebHostService.OidcLoginPath, withoutOidc, StringComparison.Ordinal);
+
+        /* The token form is NEVER removed — the shared token stays as the scripted-caller/break-glass path. */
+        Assert.Contains("name='token'", withOidc, StringComparison.Ordinal);
+        Assert.Contains("name='token'", withoutOidc, StringComparison.Ordinal);
+
+        /* The placeholder must not leak into either rendering. */
+        Assert.DoesNotContain("<!--SSO-->", withOidc, StringComparison.Ordinal);
+        Assert.DoesNotContain("<!--SSO-->", withoutOidc, StringComparison.Ordinal);
     }
 }

@@ -985,6 +985,15 @@ public sealed class WebNetworkConfig
     public WebTlsConfig? Tls { get; set; }
 
     /// <summary>
+    /// Opt-in per-user OIDC sign-in for the LAN-exposed dashboard (#2550). Omit for the existing behavior —
+    /// the shared token is the only credential. When configured, the login page additionally offers an SSO
+    /// sign-in (authorization code + PKCE); the shared token KEEPS working beside it as the scripted-caller /
+    /// break-glass fallback. See <see cref="WebOidcConfig"/>.
+    /// </summary>
+    [JsonPropertyName("oidc")]
+    public WebOidcConfig? Oidc { get; set; }
+
+    /// <summary>
     /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
     /// NOT the same as "exposed".
     /// </summary>
@@ -994,7 +1003,8 @@ public sealed class WebNetworkConfig
         || !string.IsNullOrWhiteSpace(AllowFrom)
         || !string.IsNullOrWhiteSpace(EncryptedToken)
         || !string.IsNullOrWhiteSpace(Token)
-        || (Tls?.IsConfigured ?? false);
+        || (Tls?.IsConfigured ?? false)
+        || (Oidc?.IsConfigured ?? false);
 
     /// <summary>
     /// The access token, preferring <see cref="EncryptedToken"/> (DPAPI-decrypted; Windows-only) over the
@@ -1024,6 +1034,131 @@ public sealed class WebNetworkConfig
             /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
             usedPlaintext = !DarlingSecretSource.IsReference(Token);
             return DarlingSecretSource.Resolve(Token, "web.network.token");
+        }
+
+        return null;
+    }
+}
+
+/// <summary>
+/// Opt-in per-user OIDC sign-in for the LAN-exposed web dashboard (#2550) — authorization code + PKCE against
+/// a standard OpenID Connect provider, resolved via its discovery document. Entirely OFF when this block is
+/// absent: the shared token → cookie exchange is byte-for-byte unchanged, and it KEEPS working beside OIDC when
+/// this is configured (the scripted-caller and break-glass path — an IdP outage must not lock the operator out
+/// of their own monitoring). Lives in darling.json rather than the store because the client secret needs the
+/// same DPAPI treatment <see cref="WebNetworkConfig.EncryptedToken"/> gets, and the host has to be able to bind
+/// before the store is necessarily reachable — the same reasoning as the token. File-defined, restart-only,
+/// like the rest of the network block.
+///
+/// <para><b>Role mapping.</b> With <see cref="RoleClaim"/> unset, every signed-in user gets the same reach the
+/// shared token grants (edit) — parity, not a new privilege. With it set, membership decides: a claim value in
+/// <see cref="AdminRoles"/> ⇒ edit; else a value in <see cref="ViewerRoles"/> ⇒ read-only; else the sign-in is
+/// REFUSED — an authenticated-at-the-IdP user with no mapped role gets nothing, which is per-user revocation
+/// doing its job. Matching is case-sensitive ordinal: role values are identifiers (Entra emits group GUIDs),
+/// not prose.</para>
+/// </summary>
+public sealed class WebOidcConfig
+{
+    /// <summary>
+    /// The provider's issuer/authority URL (e.g. <c>https://login.microsoftonline.com/{tenant}/v2.0</c> or
+    /// <c>https://{org}.okta.com/oauth2/default</c>). Discovery is fetched from
+    /// <c>{authority}/.well-known/openid-configuration</c>. Must be <c>https://</c> — plain <c>http://</c> is
+    /// accepted only for a loopback host (a local test IdP), because over HTTP the code exchange and the
+    /// tokens it returns would cross the wire in the clear.
+    /// </summary>
+    [JsonPropertyName("authority")]
+    public string? Authority { get; set; }
+
+    /// <summary>The registered client (application) id. Also the required ID-token audience — an ID token is
+    /// minted FOR a client, so there is no separate audience knob to misconfigure.</summary>
+    [JsonPropertyName("clientId")]
+    public string? ClientId { get; set; }
+
+    /// <summary>
+    /// DPAPI-LocalMachine-protected client secret, base64 — produced by <c>--encrypt-password</c>
+    /// (preferred over the plaintext <see cref="ClientSecret"/>). Read via <see cref="ResolveClientSecret"/>.
+    /// </summary>
+    [JsonPropertyName("encryptedClientSecret")]
+    public string? EncryptedClientSecret { get; set; }
+
+    /// <summary>
+    /// The client secret as a literal (dev convenience only; the caller warns) or an <c>env:</c>/<c>file:</c>
+    /// reference (#1804). Optional even in combination with <see cref="EncryptedClientSecret"/> absent: with
+    /// no secret at all the exchange runs as a PUBLIC client on PKCE alone, which some providers permit;
+    /// a confidential client with a secret is the recommended registration.
+    /// </summary>
+    [JsonPropertyName("clientSecret")]
+    public string? ClientSecret { get; set; }
+
+    /// <summary>Space-separated scopes. Default <c>openid profile email</c>; <c>openid</c> is always included
+    /// even when this names a set without it, because without it there is no ID token and no sign-in.</summary>
+    [JsonPropertyName("scopes")]
+    public string? Scopes { get; set; }
+
+    /// <summary>
+    /// The claim that becomes the seat's identity (the <c>updated_by</c> stamp). Unset = the useful-name chain:
+    /// <c>preferred_username</c> (Entra's UPN), then <c>email</c>, then <c>sub</c>. When SET, that exact claim
+    /// is required — a token without it REFUSES the sign-in rather than silently falling back, because "the
+    /// operator asked for X" and "we stamped something else" must not coexist quietly.
+    /// </summary>
+    [JsonPropertyName("subjectClaim")]
+    public string? SubjectClaim { get; set; }
+
+    /// <summary>The ID-token claim carrying role/group membership (e.g. <c>roles</c>, <c>groups</c>). String
+    /// or array-of-strings both work. Required whenever <see cref="AdminRoles"/>/<see cref="ViewerRoles"/> are
+    /// set, and pointless without them — either half alone is refused as a misconfiguration.</summary>
+    [JsonPropertyName("roleClaim")]
+    public string? RoleClaim { get; set; }
+
+    /// <summary>Claim values granting the EDIT seat (custom-view CRUD and any future write surface).</summary>
+    [JsonPropertyName("adminRoles")]
+    public string[]? AdminRoles { get; set; }
+
+    /// <summary>Claim values granting the READ-ONLY seat: the whole read surface plus running composed panels,
+    /// no mutations. The SPA already renders this seat (it hides edit affordances when <c>/api/session</c>
+    /// reports <c>can_edit: false</c>); the server refuses the writes regardless of what a client sends.</summary>
+    [JsonPropertyName("viewerRoles")]
+    public string[]? ViewerRoles { get; set; }
+
+    /// <summary>True when any field is set — the "does the operator want OIDC" gate.</summary>
+    [JsonIgnore]
+    public bool IsConfigured =>
+        !string.IsNullOrWhiteSpace(Authority)
+        || !string.IsNullOrWhiteSpace(ClientId)
+        || !string.IsNullOrWhiteSpace(EncryptedClientSecret)
+        || !string.IsNullOrWhiteSpace(ClientSecret)
+        || !string.IsNullOrWhiteSpace(Scopes)
+        || !string.IsNullOrWhiteSpace(SubjectClaim)
+        || !string.IsNullOrWhiteSpace(RoleClaim)
+        || AdminRoles is { Length: > 0 }
+        || ViewerRoles is { Length: > 0 };
+
+    /// <summary>
+    /// The client secret, preferring <see cref="EncryptedClientSecret"/> (DPAPI-decrypted; Windows-only) over
+    /// the plaintext/reference <see cref="ClientSecret"/> — the same shape as
+    /// <see cref="WebNetworkConfig.ResolveToken"/>. Returns null when neither is set (public-client PKCE-only
+    /// exchange).
+    /// </summary>
+    public string? ResolveClientSecret(out bool usedPlaintext)
+    {
+        usedPlaintext = false;
+
+        if (!string.IsNullOrWhiteSpace(EncryptedClientSecret))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    "web.network.oidc.encryptedClientSecret requires Windows (DPAPI); use \"clientSecret\" with an env:/file: reference on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(EncryptedClientSecret);
+        }
+
+        if (!string.IsNullOrWhiteSpace(ClientSecret))
+        {
+            /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
+            usedPlaintext = !DarlingSecretSource.IsReference(ClientSecret);
+            return DarlingSecretSource.Resolve(ClientSecret, "web.network.oidc.clientSecret");
         }
 
         return null;
