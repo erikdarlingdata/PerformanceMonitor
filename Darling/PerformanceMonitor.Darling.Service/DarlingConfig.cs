@@ -168,6 +168,22 @@ public sealed class DarlingConfig
     public AnalysisConfig Analysis { get; set; } = new();
 
     /// <summary>
+    /// The auto force-plan bot (#2138 phase 1). <c>enabled: false</c> (the default) means the bot
+    /// evaluates nothing; enabled with <c>dryRun: true</c> (also the default) journals every
+    /// would-force/blocked decision to <c>collect.plan_force_actions</c> in the MONITORING store.
+    /// Optional — omit the section entirely and the bot stays off.
+    ///
+    /// <para>Phase 1 has no write path at all: no build artifact here can force or unforce a plan on
+    /// a monitored server (see <see cref="PlanForceBot"/>), so these knobs govern what gets JUDGED
+    /// and JOURNALED. They are the same knobs the write path (#2731) will gate on — including the
+    /// third gate, the per-server <c>config_monitored_servers.plan_force_bot_enabled</c> opt-in that
+    /// nothing in this file can set — so a shadow-mode ledger scored now is a faithful rehearsal of
+    /// what an armed bot would have done.</para>
+    /// </summary>
+    [JsonPropertyName("forcePlanBot")]
+    public ForcePlanBotFileConfig ForcePlanBot { get; set; } = new();
+
+    /// <summary>
     /// The embedded MCP server (analysis slice AN4): the same analysis + data-read tool surface Lite
     /// and the Dashboard expose (the analysis class plus the plan-analysis and ~60 STORED data-read
     /// tools), over Streamable HTTP. Default OFF: a headless service should not open a port unless the
@@ -669,6 +685,87 @@ public sealed class AnalysisConfig
     /// <summary>Minimum finding severity (0.0–2.0) to notify on — the shared AnalysisNotificationService floor.</summary>
     [JsonPropertyName("notifySeverity")]
     public double NotifySeverity { get; set; } = 1.5;
+}
+
+/// <summary>
+/// The darling.json face of <see cref="PerformanceMonitor.Analysis.ForcePlanBotSettings"/> (#2138).
+/// File-level and NOT control-plane-backed in phase 1 (no <c>config_service</c> columns yet — a
+/// follow-up adds the store override + viewer surface), so these values are authoritative from the
+/// file at startup and a store reload does not change them. Kept as a separate JSON-shaped class
+/// rather than reusing the settings record so the wire names stay stable if the policy record grows.
+/// Every default is the safe state — see the settings record for what each knob means and why
+/// dry-run mirrors live mode exactly.
+///
+/// <para>The self-review knobs (<c>firstReviewMinutes</c>, <c>finalReviewMinutes</c>,
+/// <c>minReviewExecutions</c>, <c>netBenefitRatio</c>) are carried in full even though phase 1 places
+/// no force to review: they are the inputs to
+/// <see cref="PerformanceMonitor.Analysis.ForcePlanSelfReview"/>, whose whole verdict table is
+/// specced here so the rules a live force would be judged by are settled and reviewable BEFORE the
+/// write path exists to apply them.</para>
+/// </summary>
+public sealed class ForcePlanBotFileConfig
+{
+    /// <summary>Global gate 1 — false (default) means the bot evaluates nothing at all.</summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    /// <summary>Global gate 2 — true (default) journals decisions without touching any server.</summary>
+    [JsonPropertyName("dryRun")]
+    public bool DryRun { get; set; } = true;
+
+    /// <summary>The bot's own action floor on regression_factor (detection fires at 2; this can be raised independently).</summary>
+    [JsonPropertyName("minRegressionFactor")]
+    public double MinRegressionFactor { get; set; } = 2.0;
+
+    /// <summary>One journaled decision per (server, database, query) per this window.</summary>
+    [JsonPropertyName("queryCooldownHours")]
+    public int QueryCooldownHours { get; set; } = 24;
+
+    /// <summary>Rolling 24h cap on actionable decisions per server.</summary>
+    [JsonPropertyName("maxActionsPerServerPerDay")]
+    public int MaxActionsPerServerPerDay { get; set; } = 3;
+
+    /// <summary>Failed forces within the cooldown window that block a query from further forcing.</summary>
+    [JsonPropertyName("failedForceThreshold")]
+    public int FailedForceThreshold { get; set; } = 2;
+
+    /// <summary>The failure-memory window in hours (a sliding window, not a permanent flag).</summary>
+    [JsonPropertyName("failedForceCooldownHours")]
+    public int FailedForceCooldownHours { get; set; } = 168;
+
+    /// <summary>First self-review checkpoint after a live force, in minutes. Read by the review
+    /// state machine, which the write path (#2731) drives — nothing in phase 1 places a force.</summary>
+    [JsonPropertyName("firstReviewMinutes")]
+    public int FirstReviewMinutes { get; set; } = 60;
+
+    /// <summary>Final (terminal) self-review checkpoint, in minutes.</summary>
+    [JsonPropertyName("finalReviewMinutes")]
+    public int FinalReviewMinutes { get; set; } = 1440;
+
+    /// <summary>Executions required before a checkpoint judges cost.</summary>
+    [JsonPropertyName("minReviewExecutions")]
+    public int MinReviewExecutions { get; set; } = 25;
+
+    /// <summary>Post-force cpu/exec must be at or below this fraction of the baseline, or the review unforces.</summary>
+    [JsonPropertyName("netBenefitRatio")]
+    public double NetBenefitRatio { get; set; } = 0.75;
+
+    /// <summary>The clamped policy settings this file section resolves to.</summary>
+    public PerformanceMonitor.Analysis.ForcePlanBotSettings ToSettings() =>
+        new PerformanceMonitor.Analysis.ForcePlanBotSettings
+        {
+            Enabled = Enabled,
+            DryRun = DryRun,
+            MinRegressionFactor = MinRegressionFactor,
+            QueryCooldownHours = QueryCooldownHours,
+            MaxActionsPerServerPerDay = MaxActionsPerServerPerDay,
+            FailedForceThreshold = FailedForceThreshold,
+            FailedForceCooldownHours = FailedForceCooldownHours,
+            FirstReviewMinutes = FirstReviewMinutes,
+            FinalReviewMinutes = FinalReviewMinutes,
+            MinReviewExecutions = MinReviewExecutions,
+            NetBenefitRatio = NetBenefitRatio,
+        }.Normalize();
 }
 
 /// <summary>
@@ -1455,6 +1552,21 @@ public sealed class MonitoredServer
     /// </summary>
     [JsonIgnore]
     public int? StoredServerId { get; set; }
+
+    /// <summary>
+    /// <c>config_monitored_servers.plan_force_bot_enabled</c> as READ FROM THE STORE — write-gate 2
+    /// of the #2138 two-gate contract. A live force on this server requires the global
+    /// <c>forcePlanBot</c> gates AND this flag.
+    ///
+    /// <para><b>Not settable from the file</b> (<see cref="JsonIgnore"/>) on purpose, the
+    /// <see cref="StoredServerId"/> reasoning applied to a WRITE authorization: the registry is
+    /// authoritative once seeded, so a darling.json knob would be a silent no-op on every seeded box
+    /// (#2254) — and a knob that silently does nothing is worst of all when what it claims to gate is
+    /// a write to a production server. The seed always writes FALSE; opting a server in is a store
+    /// write (viewer surface to follow).</para>
+    /// </summary>
+    [JsonIgnore]
+    public bool PlanForceBotEnabled { get; set; }
 
     /// <summary>
     /// This server's <c>server_id</c>: the stored value when there is one, otherwise derived from

@@ -1069,8 +1069,8 @@ ON CONFLICT (id) DO NOTHING", connection);
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, $15, $15)
+    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, plan_force_bot_enabled, created_at, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $15, $15)
 ON CONFLICT (server_id) DO NOTHING", connection);
             /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
                and this is where it is minted and made permanent. When new rows stop being hash-keyed
@@ -1412,7 +1412,7 @@ FROM config_notification WHERE id = 1", connection);
         using var command = new NpgsqlCommand(@"
 SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate,
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
-       engine, port, server_id
+       engine, port, server_id, plan_force_bot_enabled
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -1462,6 +1462,10 @@ ORDER BY name", connection);
                the DBNull guard is for a store mid-migration rather than an expected path — and a null there
                falls back to the derivation, which is exactly what it did before this column was read at all. */
             StoredServerId = reader.IsDBNull(15) ? null : reader.GetInt32(15),
+            /* V107 (#2138): write-gate 2 for the force-plan bot. NOT NULL DEFAULT FALSE in the table, so the
+               DBNull guard is for a store mid-migration — and it reads as NOT opted in, because a write
+               authorization must fail CLOSED when the store cannot answer. */
+            PlanForceBotEnabled = !reader.IsDBNull(16) && reader.GetBoolean(16),
         };
 
         if (server.UsesSqlAuth && string.IsNullOrWhiteSpace(server.EncryptedPassword))

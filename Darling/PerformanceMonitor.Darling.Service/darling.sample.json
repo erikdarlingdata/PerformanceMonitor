@@ -198,6 +198,37 @@
     "notifySeverity": 1.5
   },
 
+  // Auto force-plan bot (#2138 phase 1, optional section). "enabled": false (the default) means the
+  // bot evaluates nothing. Enabled with "dryRun": true (also the default) is SHADOW MODE: after each
+  // scheduled analysis pass it journals every would-force / blocked decision, with evidence, to
+  // collect.plan_force_actions in the MONITORING store.
+  //
+  // THIS BUILD HAS NO WRITE PATH. Nothing here can force or unforce a plan on a monitored server --
+  // opening every switch below only changes what gets judged and journaled. The write path is a
+  // separate change (#2731), and when it lands a live write will additionally require the per-server
+  // opt-in column (config_monitored_servers.plan_force_bot_enabled), which nothing in this file can
+  // set -- it is a store write, FALSE for every seeded row.
+  //
+  // The knobs are the ones an armed bot gates on, so a shadow ledger scored now rehearses the real
+  // thing: repeated failed forces cool a query down for failedForceCooldownHours (a sliding window,
+  // never a permanent flag), and the review knobs (firstReviewMinutes / finalReviewMinutes /
+  // minReviewExecutions / netBenefitRatio) are the bar a live force would have to keep clearing --
+  // post-force cpu/exec at or below netBenefitRatio of the baseline it was sold on, or it gets taken
+  // back.
+  "forcePlanBot": {
+    "enabled": false,
+    "dryRun": true,
+    "minRegressionFactor": 2.0,
+    "queryCooldownHours": 24,
+    "maxActionsPerServerPerDay": 3,
+    "failedForceThreshold": 2,
+    "failedForceCooldownHours": 168,
+    "firstReviewMinutes": 60,
+    "finalReviewMinutes": 1440,
+    "minReviewExecutions": 25,
+    "netBenefitRatio": 0.75
+  },
+
   // SMTP alert delivery (optional). Enabled when host + from + to are all set. For an
   // authenticated relay, set username and run --encrypt-password for the password blob.
   "smtp": {

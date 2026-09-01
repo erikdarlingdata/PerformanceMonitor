@@ -163,6 +163,7 @@ public static class PgMigrations
         new Migration(104, "pg-deadlock-identity-index", V104Sql),
         new Migration(105, "collector-cost", V105Sql),
         new Migration(106, "pg-cpu-utilization", V106Sql),
+        new Migration(107, "plan-force-actions", V107Sql),
     };
 
     /// <summary>
@@ -2282,6 +2283,66 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V107 — the auto force-plan bot's journal (#2138 phase 1) plus the per-server opt-in column.
+    ///
+    /// <para><c>collect.plan_force_actions</c> is the bot's audit trail and ledger, and it is a first-class
+    /// deliverable rather than logging: every decision the bot takes about writing to a monitored SQL Server
+    /// — would-force (dry run), blocked-with-reasons, live force, self-review checkpoint, unforce — lands
+    /// here with the evidence numbers that justified it. NOT a collector (no CollectorCatalog entry, so no
+    /// generator-parity pin applies): it is written by the service's post-analysis bot pass, the
+    /// store_metrics/collector_cost pattern. APPEND-ONLY by design — reviews and outcomes are their own rows
+    /// pointing back via <c>related_action_id</c>, never UPDATEs, so the trail cannot be rewritten by the
+    /// thing it audits. Deliberately NOT enrolled in retention: an audit of writes to production servers is
+    /// the one series that should outlive the metrics that motivated it, and its volume is bounded by the
+    /// bot's own cooldowns (at most one decision per query per cooldown window).</para>
+    ///
+    /// <para><c>reasons</c> is a comma-joined text of the named gate/blocker reasons (the same strings the
+    /// MCP <c>structured_remediation</c> blockers carry) rather than <c>text[]</c>, so a future Lite twin
+    /// (DuckDB) can share the exact column shape. Identity PK because review rows reference their force row;
+    /// GENERATED ALWAYS so INSERTs need no sequence USAGE grant (the V64 reasoning).</para>
+    ///
+    /// <para><c>config.config_monitored_servers.plan_force_bot_enabled</c> is write-gate 2 of #2138's
+    /// two-gate contract (gate 1 is the global <c>forcePlanBot.enabled</c> + <c>dryRun</c> pair in
+    /// darling.json): a live write to a monitored server requires the global gates AND this row-level
+    /// opt-in, which defaults FALSE for every existing and future row. Like <c>capture_plans</c>, it has NO
+    /// darling.json counterpart on purpose — the registry is authoritative after seeding, so a file knob
+    /// would be a silent no-op on every seeded box (#2254); opting a server in is a store write (viewer
+    /// surface to follow), never a file edit.</para>
+    /// </summary>
+    private const string V107Sql = @"
+CREATE TABLE IF NOT EXISTS collect.plan_force_actions
+(
+    action_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    action_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text NOT NULL,
+    query_id bigint NOT NULL,
+    plan_id bigint NOT NULL,
+    action text NOT NULL,
+    mode text NOT NULL,
+    decision text NOT NULL,
+    reasons text NOT NULL DEFAULT '',
+    regression_factor numeric(19,2) NOT NULL DEFAULT 0,
+    latest_cpu_per_exec_us numeric(19,2) NOT NULL DEFAULT 0,
+    best_cpu_per_exec_us numeric(19,2) NOT NULL DEFAULT 0,
+    replica_role text,
+    parameter_sensitivity_cofired boolean NOT NULL DEFAULT FALSE,
+    outcome text NOT NULL,
+    detail text,
+    related_action_id bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_force_actions_time
+    ON collect.plan_force_actions(server_id, action_time);
+
+CREATE INDEX IF NOT EXISTS idx_plan_force_actions_query
+    ON collect.plan_force_actions(server_id, database_name, query_id, action_time);
+
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS plan_force_bot_enabled boolean NOT NULL DEFAULT FALSE;";
 
     /// <summary>
     /// V105 — <c>collect.collector_cost</c>, the tool's own per-collector cost on the monitored servers
