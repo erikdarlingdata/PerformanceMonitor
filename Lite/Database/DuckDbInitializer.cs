@@ -1289,6 +1289,25 @@ public class DuckDbInitializer
                     generator. Column types and ordinals are unchanged, so the positional appender
                     and old parquet are unaffected. */
             _logger?.LogInformation("Running migration to v48: server_properties hardware columns become nullable");
+
+            /* #2748: on any database that has ever completed a prior startup, DuckDbSchemaGenerator.CreateIndex's
+               default case already created idx_server_properties_time ON server_properties(server_id,
+               collection_time) — a real catalog object persisted in the .duckdb file, surviving a restart.
+               DuckDB's ALTER COLUMN dependency check refuses to touch a table with ANY index on it, even one
+               that names none of the altered columns — confirmed empirically, not merely by reading the error
+               text: "Dependency Error: Cannot alter entry ... because there are entries that depend on it."
+               (An archive view on the table does NOT trigger this — only the index does.) Drop the index
+               first; Schema.GetAllIndexStatements()'s loop (called unconditionally right after migrations,
+               inside this same InitializeAsync) recreates it, so nothing is left dangling. */
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "DROP INDEX IF EXISTS idx_server_properties_time");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v48 could not drop idx_server_properties_time ahead of the ALTERs (non-fatal, the ALTERs below may still fail): {Error}", ex.Message);
+            }
+
             foreach (var column in new[] { "cpu_count", "hyperthread_ratio", "physical_memory_mb" })
             {
                 try
@@ -1384,12 +1403,24 @@ public class DuckDbInitializer
             _logger?.LogInformation("Running migration to v53: adding the alerted-state memory to config_database_state_expected");
             try
             {
+                /* #2748: config_database_state_expected itself was never given its own numbered migration —
+                   it only exists because Schema.GetAllTableStatements() unconditionally CREATE TABLE IF NOT
+                   EXISTS-es it, which does not run until AFTER RunMigrationsAsync returns. A database old
+                   enough to predate the table (upgrading through v53 for the first time) hits this ALTER
+                   before that later step ever creates it. CreateDatabaseStateExpectedTable is itself
+                   idempotent, so calling it here is a no-op for anyone who already has the table (from a
+                   prior run) and a correct fresh create — new columns included — for anyone who does not. */
+                await ExecuteNonQueryAsync(connection, Schema.CreateDatabaseStateExpectedTable);
                 await ExecuteNonQueryAsync(connection, "ALTER TABLE config_database_state_expected ADD COLUMN IF NOT EXISTS last_alerted_state VARCHAR");
                 await ExecuteNonQueryAsync(connection, "ALTER TABLE config_database_state_expected ADD COLUMN IF NOT EXISTS last_alerted_at TIMESTAMP");
             }
-            catch
+            catch (Exception ex)
             {
-                /* Table doesn't exist yet — will be created with the full schema below */
+                /* The CREATE above means "table doesn't exist yet" can no longer be the cause — a catch here
+                   now means something else went wrong. Log it rather than swallow it silently, matching every
+                   sibling migration block; this whole PR exists because a silently-swallowed failure here is
+                   exactly what left #2748's database unfixed for two releases. */
+                _logger?.LogWarning("Migration to v53 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
 
