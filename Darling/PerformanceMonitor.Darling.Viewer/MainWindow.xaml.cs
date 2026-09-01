@@ -1423,7 +1423,10 @@ public partial class MainWindow : Window
             totals = new FleetTotals();
         }
 
-        ApplyFleetRollup(FleetRollup.Build(cards, totals));
+        /* #2753: TotalServers must be the registered fleet size (list.Count, the same source the sidebar's
+           "Servers: N" reads), not cards.Count — cards silently drops any server whose per-server summary
+           read failed this cycle, which made the Overview's total wobble against the stable sidebar count. */
+        ApplyFleetRollup(FleetRollup.Build(cards, totals, totalServerCount: list.Count));
 
         StatusText.Text = $"overview — refreshed {DateTime.Now:HH:mm:ss}";
     }
@@ -1442,7 +1445,11 @@ public partial class MainWindow : Window
         FleetWorstServersList.Visibility = rollup.HasProblems ? Visibility.Visible : Visibility.Collapsed;
         FleetAdditionalProblems.Visibility =
             rollup.AdditionalProblemCount > 0 ? Visibility.Visible : Visibility.Collapsed;
-        FleetAllHealthyText.Visibility = rollup.HasProblems ? Visibility.Collapsed : Visibility.Visible;
+        /* #2753 review: the all-clear line must not claim "All N healthy" while some of those N have no
+           summary this cycle at all (IsAllClear, not HasProblems, is the gate) — and that gap gets its own
+           line rather than being silently absorbed into either the healthy or the all-clear text. */
+        FleetUnknownStatusText.Visibility = rollup.UnknownCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+        FleetAllHealthyText.Visibility = rollup.IsAllClear ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>Empties the Overview: no cards, no roll-up, and no stale authority left behind for the filter

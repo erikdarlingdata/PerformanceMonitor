@@ -943,6 +943,12 @@
                                                FontSize="11" TextDecorations="Underline"
                                                Foreground="{DynamicResource AccentBrush}"/>
                                 </Border>
+                                <!-- #2753 review: a server with no summary this cycle is neither known-healthy
+                                     nor a ranked problem, so it gets its own line rather than being silently
+                                     folded into "All N healthy" (an affirmative false claim) or the ranked
+                                     Needs Attention list (which can only name servers it actually has data for). -->
+                                <TextBlock x:Name="FleetUnknownStatusText" Text="{Binding UnknownStatusText}"
+                                           FontSize="11" Foreground="{DynamicResource WarningBrush}" Margin="0,0,0,2" Visibility="Collapsed"/>
                                 <TextBlock x:Name="FleetAllHealthyText" Text="{Binding AllHealthyText}"
                                            FontSize="12" Foreground="{DynamicResource SuccessBrush}" Margin="0,0,0,2" Visibility="Collapsed"/>
                             </StackPanel>

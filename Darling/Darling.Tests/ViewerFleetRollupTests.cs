@@ -323,6 +323,75 @@ public sealed class ViewerFleetRollupBuilderTests
     }
 
     [Fact]
+    public void Build_TotalServers_UsesTheRegisteredCount_NotJustTheLoadedSummaries()
+    {
+        /* #2753: a transient per-server summary-read failure drops that server from `summaries` for THIS
+           cycle only (MainWindow's LoadOverviewAsync catches the failure and returns null, then filters
+           nulls out before calling Build). Deriving TotalServers from summaries.Count made the Overview's
+           "Total Servers" wobble cycle to cycle while the sidebar — sourced from the stable server registry
+           — never moved. TotalServers must equal the registered fleet size passed via totalServerCount,
+           even when fewer summaries actually loaded this cycle. */
+        var summaries = new[] { Healthy("h1", 1), Healthy("h2", 2) }; // 2 loaded...
+
+        var rollup = FleetRollup.Build(summaries, NoTotals, totalServerCount: 5); // ...of 5 registered
+
+        Assert.Equal(5, rollup.TotalServers);
+        // The band counts still reflect only what actually loaded — that part is correct as-is.
+        Assert.Equal(2, rollup.HealthyCount);
+        Assert.Equal(3, rollup.UnknownCount);
+    }
+
+    [Fact]
+    public void Build_SomeServersUnknown_ButLoadedOnesAreAllHealthy_IsNotAllClear()
+    {
+        /* The exact review finding on #2754: 2 of 5 registered servers loaded, both healthy, zero ranked
+           problems — HasProblems is legitimately false (nothing to rank), but IsAllClear MUST be false,
+           because 3 servers' status this cycle is unknown, not confirmed healthy. Before this fix,
+           AllHealthyText's visibility was gated on HasProblems alone, so the UI would have rendered
+           "All 5 servers healthy" here despite 3 of them having no data at all this cycle. */
+        var summaries = new[] { Healthy("h1", 1), Healthy("h2", 2) };
+
+        var rollup = FleetRollup.Build(summaries, NoTotals, totalServerCount: 5);
+
+        Assert.False(rollup.HasProblems);
+        Assert.False(rollup.IsAllClear);
+        Assert.Equal(3, rollup.UnknownCount);
+        Assert.Equal("3 servers didn't report this cycle", rollup.UnknownStatusText);
+    }
+
+    [Fact]
+    public void Build_EveryRegisteredServerLoadedAndHealthy_IsAllClear()
+    {
+        // The genuine all-clear case: nothing unknown, nothing ranked as a problem.
+        var summaries = new[] { Healthy("h1", 1), Healthy("h2", 2) };
+
+        var rollup = FleetRollup.Build(summaries, NoTotals, totalServerCount: 2);
+
+        Assert.True(rollup.IsAllClear);
+        Assert.Equal(0, rollup.UnknownCount);
+        Assert.Equal("", rollup.UnknownStatusText);
+    }
+
+    [Fact]
+    public void Build_OneServerUnknown_UnknownStatusTextIsSingular()
+    {
+        var rollup = FleetRollup.Build(new[] { Healthy("h1", 1) }, NoTotals, totalServerCount: 2);
+
+        Assert.Equal(1, rollup.UnknownCount);
+        Assert.Equal("1 server didn't report this cycle", rollup.UnknownStatusText);
+    }
+
+    [Fact]
+    public void Build_TotalServers_DefaultsToSummariesCount_WhenNotSpecified()
+    {
+        // Existing callers (every other test in this file) don't pass totalServerCount — must keep working
+        // exactly as before: TotalServers falls back to summaries.Count.
+        var rollup = FleetRollup.Build(new[] { Healthy("h1", 1), Healthy("h2", 2) }, NoTotals);
+
+        Assert.Equal(2, rollup.TotalServers);
+    }
+
+    [Fact]
     public void Build_NoServers_StillCarriesTotals_ButHasNoRanking()
     {
         var totals = new FleetTotals { TotalBlockingEvents = 5, TotalDeadlocks = 2 };
@@ -334,6 +403,21 @@ public sealed class ViewerFleetRollupBuilderTests
         Assert.False(rollup.HasProblems);
         Assert.Equal(5, rollup.TotalBlockingEvents);
         Assert.Equal(2, rollup.TotalDeadlocks);
+    }
+
+    [Fact]
+    public void Build_EveryServerFailedToLoadThisCycle_StillReportsTheRegisteredTotal()
+    {
+        // #2753's worst case: every per-server summary read failed this one cycle (summaries is empty),
+        // but the fleet is not — TotalServers must still be the registered count, not 0, so the Overview
+        // panel doesn't collapse (FleetRollupContainer.Visibility keys off TotalServers > 0) just because
+        // one bad sweep happened to fail everything.
+        var rollup = FleetRollup.Build(Array.Empty<ServerSummaryItem>(), NoTotals, totalServerCount: 5);
+
+        Assert.Equal(5, rollup.TotalServers);
+        Assert.Empty(rollup.WorstServers);
+        Assert.Equal(5, rollup.UnknownCount);
+        Assert.False(rollup.IsAllClear);
     }
 
     // ── Reason text + ranked-row display ────────────────────────────────────────────────────────────
