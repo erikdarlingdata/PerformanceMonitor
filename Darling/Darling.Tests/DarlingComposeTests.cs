@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -247,6 +248,61 @@ public sealed class DarlingComposeTests
         Assert.Equal(10, plan.TopN);
     }
 
+    /* ─────────────── #2734: timeBucket + topN = rank-then-bucket (window-total top-N series) ─────────────── */
+
+    [Fact]
+    public void TryParsePanel_AcceptsTopNWithTimeBucket_AsRankedTimeSeries()
+    {
+        /* The old XOR rejection flipped to acceptance (#2734): "the hourly trend of the top N" is a real
+           shape now. Ranking is by the WINDOW TOTAL (option 1, decided); includeOther defaults OFF. */
+        var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"line\"}");
+        Assert.Equal(PanelMode.RankedTimeSeries, plan.Mode);
+        Assert.Equal(5, plan.TopN);
+        Assert.Equal(ComposeTimeBucket.Hour, plan.TimeBucket);
+        Assert.False(plan.IncludeOther);
+    }
+
+    [Fact]
+    public void TryParsePanel_RankedTimeSeries_ReadsIncludeOther()
+    {
+        var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"stacked\"}");
+        Assert.Equal(PanelMode.RankedTimeSeries, plan.Mode);
+        Assert.True(plan.IncludeOther);
+    }
+
+    [Theory]
+    /* includeOther:true is only meaningful when both timeBucket and topN are set — naming that beats a
+       silently ignored knob. A literal false is the same as absence and stays accepted anywhere (the
+       annotations empty-array precedent, tested below). */
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"line\"}", "needs both 'timeBucket' and 'topN'")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"includeOther\":true,\"viz\":\"bar\"}", "needs both 'timeBucket' and 'topN'")]
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"includeOther\":\"yes\",\"viz\":\"line\"}", "must be a boolean")]
+    /* A rank-then-bucket panel is still a time series to the viz gate: bar/pie stay ranked-only. */
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"bar\"}", "not a time series")]
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"pie\"}", "not a time series")]
+    /* A grouped time series never carries a dual-axis overlay, ranked or not. */
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"database_name\"],\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "cannot also group")]
+    public void TryParsePanel_RankedTimeSeries_RejectsIncoherence_NamingTheReason(string json, string expectedFragment)
+    {
+        Assert.Contains(expectedFragment, RejectReason(json), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    /* Every time-series viz renders the new mode (its rows are the same bucket+dims+value shape), table
+       renders anything, and annotations ride it — it has the time axis the markers need. */
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"area\"}")]
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"stacked-bar\"}")]
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"table\"}")]
+    [InlineData("{\"source\":\"deadlocks\",\"measure\":\"deadlock_count\",\"aggregate\":\"count\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"database_name\"],\"viz\":\"line\",\"annotations\":[\"deadlocks\"]}")]
+    /* includeOther:false is a no-op and legal anywhere, exactly like an empty annotations array. */
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"includeOther\":false,\"viz\":\"bar\"}")]
+    public void TryParsePanel_RankedTimeSeries_AcceptsCoherentShapes(string json)
+    {
+        var (plan, error) = ComposeSpec.TryParsePanel(PanelJson(json), Array.Empty<string>());
+        Assert.True(error is null, error);
+        Assert.NotNull(plan);
+    }
+
     [Fact]
     public void TryParsePanel_AcceptsARatio()
     {
@@ -283,7 +339,9 @@ public sealed class DarlingComposeTests
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"unit\":\"gb\",\"viz\":\"table\"}", "not valid for measure")]
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"nope\"}", "unknown or missing viz")]
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"nope\",\"viz\":\"line\"}", "unknown timeBucket")]
-    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"topN\":5,\"viz\":\"line\"}", "cannot set both")]
+    /* #2734: timeBucket + topN is a real mode now, but it ranks the groupBy members — without one there
+       is nothing to rank. */
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"topN\":5,\"viz\":\"line\"}", "add 'groupBy'")]
     /* like on a non-likeable dimension (query_hash). */
     [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"viz\":\"table\",\"filters\":[{\"dimension\":\"query_hash\",\"op\":\"like\",\"value\":\"x\"}]}", "not allowed on dimension")]
     /* a dimension the measure does not allow. */
@@ -524,8 +582,110 @@ public sealed class DarlingComposeTests
     public void Compile_RankedShape_OrdersByValueDescWithBoundLimit()
     {
         var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}"));
-        Assert.Contains("ORDER BY value DESC", sql, StringComparison.Ordinal);
+        /* NULLS LAST pins the #2743 review fix: DESC's default NULLS FIRST ranked a NULL-aggregate group
+           at the top, and under the LIMIT it evicted a legitimate member. The bare form must stay gone. */
+        Assert.Contains("ORDER BY value DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY value DESC\n", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $", sql, StringComparison.Ordinal);
+    }
+
+    /* ─────────────── #2734: the rank-then-bucket SQL shape ─────────────── */
+
+    [Fact]
+    public void Compile_RankedTimeSeries_RanksByWindowTotal_ThenBucketsOnlyThoseMembers()
+    {
+        var sql = Compile(ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"line\"}"));
+
+        /* The rank pass: the Ranked query minus the time column, as a CTE — window-total ordering with the
+           bound topN LIMIT ($3 here: window $1/$2, then topN; no scope, no filters). */
+        Assert.StartsWith("WITH topn AS (", sql, StringComparison.Ordinal);
+        /* NULLS LAST, because DESC's Postgres default is NULLS FIRST and this ordering decides series
+           MEMBERSHIP — a NULL-aggregate group must never evict a real winner (#2743 review). */
+        Assert.Contains("ORDER BY value DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
+
+        /* The series pass buckets ONLY the winners: membership is IS NOT DISTINCT FROM (a NULL group key
+           that wins a slot must not be knocked out of its own series by '='). */
+        Assert.Contains("AND EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type)", sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('hour', f.collection_time)", sql, StringComparison.Ordinal);
+
+        /* Default is NO residual series — the label appears only under includeOther. */
+        Assert.DoesNotContain(ComposeCompiler.OtherSeriesLabel, sql, StringComparison.Ordinal);
+
+        /* Still a time series to the #1687 row cap: newest buckets kept, re-sorted ascending — and the
+           wrapper opens AFTER the rank CTE, so the WITH stays top-level. */
+        Assert.Contains("SELECT * FROM (", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("topn AS (", StringComparison.Ordinal) < sql.IndexOf("SELECT * FROM (", StringComparison.Ordinal),
+            "the row-cap wrapper must open after the rank CTE, not swallow it");
+        Assert.EndsWith("ORDER BY bucket", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_RankedTimeSeries_IncludeOther_FoldsTheRemainderIntoOneSeries()
+    {
+        var sql = Compile(ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"stacked\"}"));
+
+        /* The residual fold: non-members keep contributing, relabeled — so every bucket still sums to the
+           window total. The CASE replaces the WHERE semi-filter (a row filtered out cannot be folded). */
+        var fold = $"CASE WHEN EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type) THEN f.wait_type ELSE '{ComposeCompiler.OtherSeriesLabel}' END";
+        Assert.Contains(fold + " AS wait_type", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY date_trunc('hour', f.collection_time), " + fold, sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("  AND EXISTS", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_RankedTimeSeries_BindsEachValueOnce_SharedByBothPasses()
+    {
+        /* Both passes aggregate the same fact rows, so the filter/scope predicates appear TWICE in the
+           text but each value is bound ONCE — the clause text (same $n) is reused, never re-bound.
+           Params: $1/$2 window, $3 scope, $4 filter array, $5 topN. */
+        var plan = ValidPlan(
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"line\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"neq\",\"value\":[\"SLEEP_TASK\",\"BROKER_TASK_STOP\"]}]}");
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(new[] { "PROD-01" }, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        Assert.True(error is null, error);
+
+        var sql = compiled!.Sql;
+        Assert.Equal(5, compiled.Parameters.Count);
+        Assert.Equal(2, CountOccurrences(sql, "f.server_name = ANY($3)"));
+        Assert.Equal(2, CountOccurrences(sql, "<> ALL($4)"));
+        Assert.Contains("LIMIT $5", sql, StringComparison.Ordinal);
+        /* Values stay bound, never interpolated — in either pass. */
+        Assert.DoesNotContain("PROD-01", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SLEEP_TASK", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_RankedTimeSeries_ModuleJoinDim_JoinsInBothPasses_WithTheWithTopLevel()
+    {
+        /* object_name is the #1568 stitched dimension: the module CTE (m) comes first, the rank CTE joins
+           it (rank one population), and the series pass joins it again (chart the same population). Both
+           passes go through the SAME ColumnRef, so the #2737 ad-hoc fold rides along: the '(ad hoc)'
+           bucket ranks and charts as an ordinary member, never a NULL that membership would drop. */
+        var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"line\"}"));
+
+        Assert.StartsWith("WITH m AS (", sql, StringComparison.Ordinal);
+        Assert.Contains(", topn AS (", sql, StringComparison.Ordinal);
+        Assert.Equal(2, CountOccurrences(sql, "LEFT JOIN m ON m.sql_handle = f.sql_handle"));
+        Assert.Contains(
+            $"t.object_name IS NOT DISTINCT FROM COALESCE(m.object_name, '{MeasureCatalog.AdHocLabel}')",
+            sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf(", topn AS (", StringComparison.Ordinal) < sql.IndexOf("SELECT * FROM (", StringComparison.Ordinal),
+            "both CTEs must precede the row-cap wrapper");
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     [Fact]
@@ -1093,6 +1253,12 @@ public sealed class DarlingComposeTests
            be a false alarm on the most ordinary result there is. */
         Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.Ranked, ComposeLimits.HardRowCap));
         Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.Scalar, ComposeLimits.HardRowCap));
+
+        /* Rank-then-bucket (#2734) is a time series to the cap: its row count is series x buckets (the
+           bound topN LIMIT lives in the rank CTE, not on the output rows), so exactly-at-cap means the
+           newest-bucket truncation happened and must be said. */
+        Assert.NotNull(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.RankedTimeSeries, ComposeLimits.HardRowCap));
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.RankedTimeSeries, ComposeLimits.HardRowCap - 1));
     }
 
     /* ─────────────────────────── #991 Availability Group measures ─────────────────────────── */
@@ -2003,6 +2169,7 @@ public sealed class DarlingComposeTests
             "\"title\":\"T\",\"span\":2,\"hours\":48}," +
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":25,\"groupBy\":[\"query_hash\"],\"viz\":\"scatter\"," +
             "\"overlay\":{\"measure\":\"query_executions\",\"aggregate\":\"sum\",\"unit\":\"count\"},\"title\":\"S\",\"span\":1}," +
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"line\",\"title\":\"TopN\"}," +
             "{\"source\":\"wait_stats\",\"ratio\":\"signal_wait_pct\",\"timeBucket\":\"hour\",\"viz\":{\"type\":\"line\"}}]}");
         Assert.True(ok.IsValid, ok.Error);
     }
@@ -2301,6 +2468,117 @@ public sealed class DarlingComposeTests
         Assert.NotEmpty(declaredKeys);
         Assert.Equal(declaredKeys, templates.Select(t => t.Name).OrderBy(k => k, StringComparer.Ordinal).ToArray());
     }
+
+    /* ─────────── #2734: the editor's shape vocabulary must cover every server mode ─────────── */
+
+    /// <summary>
+    /// The category pin behind the #2743 review's save-path finding: the web composer models a panel's mode as a
+    /// single <c>shape</c> enum, and a server <see cref="PanelMode"/> with NO shape to map onto does not fail
+    /// loudly — it round-trips LOSSILY. A stored rank-then-bucket panel loaded as a plain "timeseries" re-saved
+    /// as one, silently dropping topN/includeOther and downgrading the panel, with no validation error because
+    /// the degraded result is itself valid. That is the exact silently-wrong class #2733 and this PR exist to
+    /// close, reached through the editor's round trip instead of the parser.
+    ///
+    /// <para>So this asserts the INVARIANT, not the instance: SHAPE_LABELS (editor.js — the shape vocabulary
+    /// both the dashboard composer and notebook.js share) declares exactly as many shapes as there are
+    /// PanelMode values. A fifth server mode added without an editor shape fails HERE, at the seam, instead of
+    /// quietly eating someone's stored panel on their next save.</para>
+    /// </summary>
+    [Fact]
+    public void EveryServerPanelMode_HasAnEditorShape()
+    {
+        var shapes = EditorShapeKeys();
+        Assert.Equal(Enum.GetValues<PanelMode>().Length, shapes.Length);
+
+        /* The rank-then-bucket shape specifically, since it is the one this PR adds — and both round-trip
+           functions must know it, or the save path drops a key the load path read. */
+        Assert.Contains("topseries", shapes);
+        var editor = EditorSource();
+        Assert.Contains("hasBucket && hasTopN ? \"topseries\"", editor, StringComparison.Ordinal);
+        Assert.Contains("else if (p.shape === \"topseries\")", editor, StringComparison.Ordinal);
+        /* Both keys AND the residual flag survive serialization — dropping any one is the data loss. */
+        Assert.Contains("d.includeOther = true;", editor, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The residual label is a CROSS-LANGUAGE constant: the compiler emits it into the rows, and the frontend has
+    /// to recognize that exact string to keep the series out of the drill path and out of the MAX_SERIES
+    /// competition (#2743 review). A mirrored literal drifts silently — rename it on one side and the residual
+    /// quietly becomes drillable-into-nothing again, and starts evicting a real top-N winner — so the copy is
+    /// pinned to the source of truth here.
+    /// </summary>
+    [Fact]
+    public void TheOtherSeriesLabel_IsMirroredInTheFrontend()
+    {
+        var composeJs = FrontendSource("compose.js");
+        Assert.Contains(
+            $"const OTHER_SERIES_LABEL = \"{ComposeCompiler.OtherSeriesLabel}\";",
+            composeJs,
+            StringComparison.Ordinal);
+
+        /* And the residual must be held out of BOTH places a synthetic series would otherwise be mistaken for a
+           real one: the drill path and the series cap. */
+        Assert.Contains("drills.set(key, null);", composeJs, StringComparison.Ordinal);
+        Assert.Contains("const realKeys = order.filter((k) => !residual.has(k));", composeJs, StringComparison.Ordinal);
+
+        /* But that recognition MUST be gated on the panel actually carrying a residual, which only a
+           rank-then-bucket panel with includeOther does. pivotTimeSeries serves EVERY grouped time series, and
+           several groupBy dimensions are free-form user text (database_name, program_name, login_name,
+           host_name), so a plain panel may legitimately hold a row whose value IS the sentinel — matching the
+           string alone would strip that real member's drill and pull it out of the series cap. The compiler is
+           the authority on when the fold exists; the renderer must be told, never sniff. */
+        Assert.Contains("pivotTimeSeries(rows, groupDims, label, hasResidual = false)", composeJs, StringComparison.Ordinal);
+        Assert.Contains("if (hasResidual && isResidualRow(r, groupDims)) {", composeJs, StringComparison.Ordinal);
+        Assert.Contains(
+            "const hasResidual = isRankedTimeSeries(panelSpec) && panelSpec.includeOther === true;",
+            composeJs,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The composer's default Top N for a top-N-over-time panel must not exceed what the chart will actually draw
+    /// (#2743 review): the mode's whole promise is "exactly these N", and compose.js draws at most MAX_SERIES, so
+    /// a larger default would silently hide winners the author never chose to hide. Two files, one number.
+    /// </summary>
+    [Fact]
+    public void TheEditorsTopSeriesDefault_DoesNotExceedWhatTheChartDraws()
+    {
+        var maxSeries = int.Parse(
+            Regex.Match(FrontendSource("compose.js"), @"const MAX_SERIES = (?<n>\d+);").Groups["n"].Value,
+            CultureInfo.InvariantCulture);
+        var editorCeiling = int.Parse(
+            Regex.Match(FrontendSource("editor.js"), @"const MAX_TIME_SERIES = (?<n>\d+);").Groups["n"].Value,
+            CultureInfo.InvariantCulture);
+
+        Assert.Equal(maxSeries, editorCeiling);
+        Assert.Contains(
+            "if (v === \"topseries\") p.topN = clampInt(p.topN, 1, MAX_TIME_SERIES, MAX_TIME_SERIES);",
+            FrontendSource("editor.js"),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>One wwwroot/js source file, read from the repo beside this test.</summary>
+    private static string FrontendSource(string fileName, [CallerFilePath] string thisFile = "")
+    {
+        var path = Path.GetFullPath(Path.Combine(
+            Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Service", "wwwroot", "js", fileName));
+        Assert.True(File.Exists(path), $"{fileName} not found at {path} (did the frontend move?)");
+        return File.ReadAllText(path);
+    }
+
+    /// <summary>The shape keys declared in <c>SHAPE_LABELS</c> (wwwroot/js/editor.js) — the composer's whole
+    /// mode vocabulary, shared with notebook.js, which imports both round-trip functions from it.</summary>
+    private static string[] EditorShapeKeys()
+    {
+        var line = Regex.Match(EditorSource(), @"^const SHAPE_LABELS = \{(?<body>[^}]*)\};", RegexOptions.Multiline);
+        Assert.True(line.Success, "SHAPE_LABELS not found in editor.js (did the composer's shape model move?)");
+        return Regex.Matches(line.Groups["body"].Value, @"(?<key>\w+)\s*:")
+            .Select(m => m.Groups["key"].Value)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static string EditorSource() => FrontendSource("editor.js");
 
     /// <summary>Every <c>key:</c> declared in <c>NOTEBOOK_TEMPLATES</c> (wwwroot/js/notebook.js), sorted.
     /// <c>key:</c> appears nowhere else in that file, so a plain line scan is unambiguous.</summary>
@@ -2760,6 +3038,163 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connectio
         command.Parameters.AddWithValue(1000L);
         command.Parameters.AddWithValue(500L);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+}
+
+/// <summary>
+/// Gated (DARLING_TEST_PG) execution of the #2734 rank-then-bucket shape against real Postgres — the string
+/// pins above prove the TEXT, this proves the ARITHMETIC: the top-N membership comes from the WINDOW TOTAL
+/// (not any single bucket), the residual "(other)" series carries exactly what the excluded members did per
+/// bucket, and without includeOther the excluded members simply vanish. The fixture is adversarial on
+/// purpose: the loudest single-bucket spike belongs to a member that must NOT rank (window-total beats
+/// bucket-loudness), and its name sorts alphabetically first so an accidental min()/first-N would pick it.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class ComposeTopSeriesLivePostgresTests
+{
+    private const int ServerId = -973401;
+    private const string ServerName = "compose-topn-bucket";
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task RankedTimeSeriesPanel_RunsOnPostgres_TopNByWindowTotal_AndResidualArithmetic()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live rank-then-bucket test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteAsync(connection, ct);
+
+        /* Two hourly buckets ending on the last whole hour. Window totals: PAGELATCH_BIG 1000,
+           SOS_MEDIUM 500, AAA_LOUD_EARLY 300, ZZZ_LATE 200 — so topN=2 keeps PAGELATCH_BIG + SOS_MEDIUM.
+           The trap: in bucket 1 AAA_LOUD_EARLY (300) OUTSCORES SOS_MEDIUM (100); a per-bucket ranker (or
+           an alphabetical tie-break) would seat it. Window-total ranking must not. */
+        /* Capture Ticks ONCE: two UtcNow reads straddle by a few microseconds, which lands 'hour' just
+           BEFORE the boundary and no derived bucket key ever matches date_trunc's output. */
+        var nowTicks = DateTime.UtcNow.Ticks;
+        var hour = new DateTime(nowTicks - (nowTicks % TimeSpan.TicksPerHour), DateTimeKind.Utc);
+        var bucket1 = hour.AddHours(-2);
+        var bucket2 = hour.AddHours(-1);
+
+        var bodySucceeded = false;
+        try
+        {
+            await InsertAsync(connection, bucket1.AddMinutes(10), "PAGELATCH_BIG", 900, ct);
+            await InsertAsync(connection, bucket2.AddMinutes(10), "PAGELATCH_BIG", 100, ct);
+            await InsertAsync(connection, bucket1.AddMinutes(15), "SOS_MEDIUM", 100, ct);
+            await InsertAsync(connection, bucket2.AddMinutes(15), "SOS_MEDIUM", 400, ct);
+            await InsertAsync(connection, bucket1.AddMinutes(20), "AAA_LOUD_EARLY", 300, ct);
+            await InsertAsync(connection, bucket2.AddMinutes(20), "ZZZ_LATE", 200, ct);
+
+            /* includeOther: the two winners keep their names, everything else folds into "(other)". */
+            var withOther = await RunAsync(connection,
+                "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":2,\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"stacked\"}",
+                hour, ct);
+
+            Assert.Equal(
+                new[] { ComposeCompiler.OtherSeriesLabel, "PAGELATCH_BIG", "SOS_MEDIUM" },
+                withOther.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+
+            Assert.Equal(900.0, withOther["PAGELATCH_BIG"][bucket1], 3);
+            Assert.Equal(100.0, withOther["PAGELATCH_BIG"][bucket2], 3);
+            Assert.Equal(100.0, withOther["SOS_MEDIUM"][bucket1], 3);
+            Assert.Equal(400.0, withOther["SOS_MEDIUM"][bucket2], 3);
+
+            /* The residual is per-bucket honest: 300 (AAA_LOUD_EARLY) then 200 (ZZZ_LATE) — so every
+               bucket still sums to the window total (1300 and 700). */
+            Assert.Equal(300.0, withOther[ComposeCompiler.OtherSeriesLabel][bucket1], 3);
+            Assert.Equal(200.0, withOther[ComposeCompiler.OtherSeriesLabel][bucket2], 3);
+
+            /* Default (no includeOther): the excluded members vanish entirely — two series, no residual. */
+            var withoutOther = await RunAsync(connection,
+                "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":2,\"groupBy\":[\"wait_type\"],\"viz\":\"line\"}",
+                hour, ct);
+
+            Assert.Equal(
+                new[] { "PAGELATCH_BIG", "SOS_MEDIUM" },
+                withoutOther.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+            Assert.Equal(900.0, withoutOther["PAGELATCH_BIG"][bucket1], 3);
+            Assert.Equal(400.0, withoutOther["SOS_MEDIUM"][bucket2], 3);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>Parses + compiles the panel, runs the SHIPPED statement, and shapes the rows as
+    /// series → bucket → value for assertion.</summary>
+    private static async Task<Dictionary<string, Dictionary<DateTime, double>>> RunAsync(
+        NpgsqlConnection connection, string panelJson, DateTime windowEnd, CancellationToken ct)
+    {
+        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panelJson)!, []);
+        Assert.True(parseError is null, parseError);
+
+        var (compiled, compileError) = ComposeCompiler.Compile(
+            plan!,
+            new ComposeRunContext([ServerName], windowEnd.AddHours(-3), windowEnd, ComposeRunContext.NoVariables,
+                RollupAvailability.All, windowEnd, RollupCoverage.Unknown));
+        Assert.True(compileError is null, compileError);
+
+        await using var command = new NpgsqlCommand(compiled!.Sql, connection);
+        foreach (var parameter in compiled.Parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        var series = new Dictionary<string, Dictionary<DateTime, double>>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var bucket = reader.GetDateTime(reader.GetOrdinal("bucket"));
+            var name = reader.GetString(reader.GetOrdinal("wait_type"));
+            var value = reader.GetDouble(reader.GetOrdinal("value"));
+            if (!series.TryGetValue(name, out var points))
+            {
+                series[name] = points = new Dictionary<DateTime, double>();
+            }
+
+            points[bucket] = value;
+        }
+
+        return series;
+    }
+
+    private static async Task InsertAsync(
+        NpgsqlConnection connection, DateTime collectionTimeUtc, string waitType, long deltaWaitMs, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO collect.wait_stats
+    (collection_id, collection_time, server_id, server_name, wait_type,
+     waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
+     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection);
+        command.Parameters.AddWithValue(1L);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(waitType);
+        command.Parameters.AddWithValue(1L);
+        command.Parameters.AddWithValue(deltaWaitMs); /* the cumulative column; unread by the SUM */
+        command.Parameters.AddWithValue(0L);
+        command.Parameters.AddWithValue(1L);
+        command.Parameters.AddWithValue(deltaWaitMs); /* delta_wait_time_ms — what the measure aggregates */
+        command.Parameters.AddWithValue(0L);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand("DELETE FROM collect.wait_stats WHERE server_id = $1", connection);
+        command.Parameters.AddWithValue(ServerId);
+        await command.ExecuteNonQueryAsync(ct);
     }
 }
 
