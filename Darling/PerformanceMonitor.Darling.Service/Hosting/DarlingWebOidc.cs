@@ -282,10 +282,21 @@ internal static class DarlingWebOidc
             return "token is expired";
         }
 
-        if (payload["nbf"] is JsonValue nbfValue && TryGetUnixSeconds(nbfValue, out var nbf)
-            && now + ClockSkew < DateTimeOffset.FromUnixTimeSeconds(nbf))
+        /* A PRESENT but unreadable nbf is refused rather than skipped: the old form silently ignored it,
+           so a token whose nbf was out of representable range — "not valid until the year 40,000" — would
+           have been accepted as though it carried no nbf at all. A claim we cannot read is a claim we
+           cannot honor. */
+        if (payload["nbf"] is JsonValue nbfValue)
         {
-            return "token is not yet valid ('nbf' is in the future)";
+            if (!TryGetUnixSeconds(nbfValue, out var nbf))
+            {
+                return "token carries an unusable 'nbf' claim";
+            }
+
+            if (now + ClockSkew < DateTimeOffset.FromUnixTimeSeconds(nbf))
+            {
+                return "token is not yet valid ('nbf' is in the future)";
+            }
         }
 
         var nonce = StringClaim(payload, "nonce");
@@ -302,22 +313,52 @@ internal static class DarlingWebOidc
     private static string? StringClaim(JsonObject payload, string claim)
         => payload[claim] is JsonValue value && value.TryGetValue<string>(out var s) ? s : null;
 
+    /// <summary>
+    /// The window <see cref="DateTimeOffset.FromUnixTimeSeconds"/> can represent. Enforced HERE rather than
+    /// left to that method (review catch on #2744), because it THROWS outside this range: a token claiming
+    /// <c>"exp": 9999999999999999</c> is a perfectly valid JSON long, ~40,000 years past the ceiling, and it
+    /// reached the conversion unguarded. This file's contract is that a malformed token is REFUSED, never
+    /// thrown on — an ArgumentOutOfRangeException here would surface as an unhandled 500 on a callback
+    /// endpoint reachable without any credential, instead of the clean refusal every other bad claim gets.
+    /// </summary>
+    private const long MinRepresentableUnixSeconds = -62135596800L;
+    private const long MaxRepresentableUnixSeconds = 253402300799L;
+
     private static bool TryGetUnixSeconds(JsonValue value, out long seconds)
     {
-        if (value.TryGetValue<long>(out seconds))
+        seconds = 0;
+
+        if (value.TryGetValue<long>(out var l))
         {
-            return true;
+            return TryAcceptUnixSeconds(l, out seconds);
         }
 
-        /* Some providers serialize numeric-date claims as JSON floats. */
+        /* Some providers serialize numeric-date claims as JSON floats. The range test happens BEFORE the
+           cast: converting an out-of-range double to long is unspecified in an unchecked context, so
+           casting first and range-checking after would be checking a value the language never promised. */
         if (value.TryGetValue<double>(out var d))
         {
-            seconds = (long)d;
-            return true;
+            if (double.IsNaN(d) || d < MinRepresentableUnixSeconds || d > MaxRepresentableUnixSeconds)
+            {
+                return false;
+            }
+
+            return TryAcceptUnixSeconds((long)d, out seconds);
         }
 
-        seconds = 0;
         return false;
+    }
+
+    private static bool TryAcceptUnixSeconds(long candidate, out long seconds)
+    {
+        if (candidate < MinRepresentableUnixSeconds || candidate > MaxRepresentableUnixSeconds)
+        {
+            seconds = 0;
+            return false;
+        }
+
+        seconds = candidate;
+        return true;
     }
 
     /* ---------------------------------------------------------------------------------------------------

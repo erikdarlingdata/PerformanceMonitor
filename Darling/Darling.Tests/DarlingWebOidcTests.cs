@@ -283,6 +283,44 @@ public sealed class DarlingWebOidcTests
             Payload(nonce: null), Issuer, ClientId, Nonce, DateTimeOffset.UtcNow)!, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Review catch on #2744: an out-of-range numeric date is a valid JSON long but throws inside
+    /// DateTimeOffset.FromUnixTimeSeconds — which on this pre-credential callback endpoint meant an
+    /// unhandled 500 rather than the clean refusal every other bad claim gets. These assert the REFUSAL
+    /// (a returned problem string) and, by not throwing, the invariant itself.
+    /// </summary>
+    [Fact]
+    public void ValidateIdTokenClaims_OutOfRangeNumericDates_RefuseWithoutThrowing()
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        var farFutureExp = Payload();
+        farFutureExp["exp"] = 9999999999999999L;      // ~40,000 years past DateTimeOffset's ceiling
+        Assert.Contains("exp", DarlingWebOidc.ValidateIdTokenClaims(farFutureExp, Issuer, ClientId, Nonce, now)!, StringComparison.Ordinal);
+
+        var farPastExp = Payload();
+        farPastExp["exp"] = -99999999999999L;
+        Assert.Contains("exp", DarlingWebOidc.ValidateIdTokenClaims(farPastExp, Issuer, ClientId, Nonce, now)!, StringComparison.Ordinal);
+
+        /* The float path takes the range test BEFORE the cast, so this refuses rather than casting an
+           unspecified value into range by accident. */
+        var floatExp = Payload();
+        floatExp["exp"] = 1e18;
+        Assert.Contains("exp", DarlingWebOidc.ValidateIdTokenClaims(floatExp, Issuer, ClientId, Nonce, now)!, StringComparison.Ordinal);
+
+        /* A PRESENT but unreadable nbf is refused, not skipped: silently ignoring it would accept a token
+           claiming it is not valid until the year 40,000. */
+        var badNbf = Payload();
+        badNbf["nbf"] = 9999999999999999L;
+        Assert.Contains("nbf", DarlingWebOidc.ValidateIdTokenClaims(badNbf, Issuer, ClientId, Nonce, now)!, StringComparison.Ordinal);
+
+        /* And the ordinary float form still WORKS — the guard must not reject providers that send
+           numeric dates as JSON floats. */
+        var okFloat = Payload();
+        okFloat["exp"] = (double)now.AddMinutes(10).ToUnixTimeSeconds();
+        Assert.Null(DarlingWebOidc.ValidateIdTokenClaims(okFloat, Issuer, ClientId, Nonce, now));
+    }
+
     /// <summary>A malformed token REFUSES, never throws — validation runs on IdP-authored input.</summary>
     [Fact]
     public void ValidateIdTokenClaims_NonStringClaimTypes_RefuseWithoutThrowing()

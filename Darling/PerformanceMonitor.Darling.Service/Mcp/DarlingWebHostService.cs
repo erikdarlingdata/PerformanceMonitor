@@ -803,7 +803,33 @@ public sealed class DarlingWebHostService : BackgroundService
                             return;
 
                         case WebRequestAction.HandleAuthFlow:
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals);
+                            /* The flow endpoints are reachable WITHOUT a credential by design (a sign-in has
+                               to start somewhere), and this pipeline registers no exception-handling
+                               middleware — so anything that throws in here would answer an anonymous caller
+                               with an unhandled 500 and a stack-shaped failure instead of a refusal. The
+                               #2744 review found one such throw for real (an out-of-range exp reaching
+                               DateTimeOffset); that root cause is fixed in DarlingWebOidc, and this boundary
+                               exists so the NEXT one is also a clean refusal rather than a 500. A client
+                               abort still propagates — that is not a failure to report. */
+                            try
+                            {
+                                await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals);
+                            }
+                            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+                            {
+                                throw;
+                            }
+                            catch (Exception ex)
+                            {
+                                ReportSignInRefusal(refusals, remote, StatusCodes.Status500InternalServerError,
+                                    $"the sign-in flow failed unexpectedly: {DarlingHttpRefusalLog.Sanitize(ex.Message, 128)}");
+                                if (!context.Response.HasStarted)
+                                {
+                                    await WriteSignInErrorAsync(context, StatusCodes.Status500InternalServerError,
+                                        "The sign-in could not be completed. The service log names what failed.");
+                                }
+                            }
+
                             return;
 
                         case WebRequestAction.SetCookieAndRedirect:
