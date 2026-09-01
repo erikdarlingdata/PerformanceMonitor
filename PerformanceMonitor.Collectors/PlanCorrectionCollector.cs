@@ -123,8 +123,18 @@ public sealed class PlanCorrectionCollector : CollectorDefinitionBase<PlanCorrec
     /// its details JSON already shredded — hands the optimizer a real row count, and the final query
     /// nested-loop SEEKS each query_id/plan_id into the QS views instead of scanning them. SET NOCOUNT
     /// ON so the SELECT INTO emits no result set and the caller's reader takes the final SELECT as the
-    /// shipped rows; both statements carry OPTION(RECOMPILE); the #temp is scoped to this sp_executesql
-    /// and dropped explicitly.
+    /// shipped rows; the #temp is scoped to this sp_executesql and dropped explicitly.
+    /// </para>
+    ///
+    /// <para>
+    /// #2759/#2760: neither statement carries OPTION(RECOMPILE) anymore. Both are static literal T-SQL
+    /// with no runtime parameters — nothing here for RECOMPILE to protect against parameter sniffing —
+    /// and sys.dm_db_tuning_recommendations has no statistics (see below), so a cached plan's cardinality
+    /// guess is the same fixed heuristic a fresh compile would produce; there is no plan-quality benefit
+    /// to buy back. Live evidence on prod-pos-use1-multi-45/Demo: 5,004ms avg duration, 4,237ms avg CPU
+    /// (85%), 381 logical reads, 18 rows — a compile-cost signature, not an execution-cost one, on a
+    /// query that runs per database, per server, every cycle. Caching the plan removes that repeated
+    /// compile cost fleet-wide with no functional change.
     /// </para>
     ///
     /// <para>
@@ -242,8 +252,7 @@ CROSS APPLY
                 TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanAbortedCount') AS bigint),
                 TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanErrorCount') AS bigint)
             )
-) AS pfd
-OPTION(RECOMPILE);
+) AS pfd;
 
 SELECT
     force_last_good_plan_desired_state = o.desired_state_desc,
@@ -326,8 +335,7 @@ LEFT JOIN sys.query_store_query_text AS qsqt
 LEFT JOIN sys.query_store_plan AS qsp
   ON qsp.query_id = r.query_id
   AND qsp.plan_id = r.last_good_plan_id
-ORDER BY r.score DESC, r.recommendation_name
-OPTION(RECOMPILE);
+ORDER BY r.score DESC, r.recommendation_name;
 
 DROP TABLE #pm_plan_correction_recs;";
 
