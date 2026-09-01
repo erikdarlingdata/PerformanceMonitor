@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Lite.Tests.Helpers;
@@ -179,18 +180,27 @@ public sealed class PlanCorrectionCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadBody_DoesNotCarryRecompile()
+    public void PayloadBody_CarriesRecompile_ForPlanCacheHygiene()
     {
-        /* #2759/#2760: both statements are static literal T-SQL with no runtime parameters, so
-           RECOMPILE has nothing to protect against parameter sniffing on, and
-           sys.dm_db_tuning_recommendations has no statistics — a cached plan's cardinality guess is
-           the same fixed heuristic a fresh compile produces. Live evidence on
-           prod-pos-use1-multi-45/Demo showed 4,237ms avg CPU against 381 logical reads and 18 rows: a
-           compile-cost signature paid per database, per server, every cycle, for no plan-quality
-           benefit. Caching the plan removes that cost fleet-wide with no functional change. */
+        /* This body runs once per database, per server, every cycle. RECOMPILE is here to keep that
+           many plans OUT of the cache — plan cache hygiene, not performance — and it is close to free:
+           measured post-#2764 with SET STATISTICS TIME ON, compile is ~84ms CPU total across all five
+           statements, and that figure is a ceiling (taken under emulation).
+
+           #2760 removed both hints believing ~4,237ms of avg CPU on prod-pos-use1-multi-45/Demo was
+           compile cost. It never was — that was the live Query Store catalog-view joins, which #2764
+           fixed by staging them into temps. Pinned so nobody removes these to "save" compile time
+           again. Anchored per statement rather than by bare Contains, because the enumeration query
+           carries its own RECOMPILE and would mask a regression here. */
         var text = PlanCorrectionCollector.Instance.BuildQuery(Context(isAzureSqlDb: true)).Text;
 
-        Assert.DoesNotContain("OPTION(RECOMPILE)", text, StringComparison.Ordinal);
+        /* \s* spans the newline: the source is CRLF on disk, so a literal "\n" match would not hold. */
+        Assert.Matches(@"\)\s+AS\s+pfd\s*OPTION\(RECOMPILE\);", text);
+        Assert.Matches(@"ORDER\s+BY\s+r\.score\s+DESC,\s+r\.recommendation_name\s*OPTION\(RECOMPILE\);", text);
+
+        Assert.Equal(
+            2,
+            Regex.Matches(text, @"OPTION\(RECOMPILE\)").Count);
     }
 
     [Fact]
