@@ -1414,9 +1414,13 @@ public class DuckDbInitializer
                 await ExecuteNonQueryAsync(connection, "ALTER TABLE config_database_state_expected ADD COLUMN IF NOT EXISTS last_alerted_state VARCHAR");
                 await ExecuteNonQueryAsync(connection, "ALTER TABLE config_database_state_expected ADD COLUMN IF NOT EXISTS last_alerted_at TIMESTAMP");
             }
-            catch
+            catch (Exception ex)
             {
-                /* Table doesn't exist yet — will be created with the full schema below */
+                /* The CREATE above means "table doesn't exist yet" can no longer be the cause — a catch here
+                   now means something else went wrong. Log it rather than swallow it silently, matching every
+                   sibling migration block; this whole PR exists because a silently-swallowed failure here is
+                   exactly what left #2748's database unfixed for two releases. */
+                _logger?.LogWarning("Migration to v53 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
 
