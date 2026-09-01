@@ -85,7 +85,18 @@ IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
         N'@linux bit OUTPUT', @linux = @is_linux OUTPUT;
 
 SELECT TOP (60)
-    sample_time = DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSDATETIME()),
+    /* MILLISECOND, not SECOND-truncated: dividing by 1000 before DATEADD(SECOND, ...) discards the
+       sub-second remainder of the elapsed-ticks offset, and that remainder is different on every poll
+       (SYSDATETIME() keeps moving while a given ring-buffer entry's own timestamp does not). Since this
+       query re-reads the ring buffer's whole retained history every cycle and dedups client-side on this
+       COMPUTED value (a physical entry has no stable key), a recomputed sample_time that drifts forward
+       by a fraction of a second on a later poll can land just above the watermark and re-insert the same
+       entry as a fresh row - a near-duplicate a moment after the original. Issue #2749: this duplicate
+       pattern (two samples ~200ms-1s apart, then a real ~60s gap to the next) collapses
+       TimeSeriesGaps.BreakAtGaps's median-derived threshold to sub-second, breaking the CPU chart's line
+       at every genuine interval and leaving only the tiny intra-duplicate dash. Millisecond arithmetic
+       keeps the full offset, so recomputing the same entry on a later poll reproduces the same instant. */
+    sample_time = DATEADD(MILLISECOND, -(@ms_ticks - t.timestamp), SYSDATETIME()),
     sqlserver_cpu_utilization = x.process_utilization,
     other_process_cpu_utilization =
         CASE

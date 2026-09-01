@@ -53,6 +53,26 @@ public sealed class CpuUtilizationCollectorDefinitionTests
     }
 
     [Fact]
+    public void BuildQuery_RingBuffer_ComputesSampleTimeAtMillisecondPrecision_NotSecondTruncated()
+    {
+        /* #2749: DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), ...) discarded the sub-second
+           remainder of the elapsed-ticks offset, and that remainder differs on every poll (SYSDATETIME()
+           keeps moving; a given ring-buffer entry's own timestamp does not). Since this query re-reads
+           the ring buffer's whole retained history every cycle and dedups client-side on this COMPUTED
+           value, a later poll's recomputed sample_time for the SAME physical entry could drift forward by
+           a fraction of a second, land just above the watermark, and re-insert a near-duplicate row a
+           moment after the original -- which collapsed the CPU chart's TimeSeriesGaps median threshold to
+           sub-second and broke the line at every genuine ~1-minute interval, leaving only dots. Millisecond
+           arithmetic (no /1000 truncation) makes recomputing the same entry deterministic across polls. */
+        var plan = CpuUtilizationCollector.Instance.BuildQuery(
+            CollectorTestContext.Make(s_deltas, isAzureSqlDb: false));
+
+        Assert.Contains("DATEADD(MILLISECOND, -(@ms_ticks - t.timestamp), SYSDATETIME())", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("/ 1000)", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("DATEADD(SECOND, -((@ms_ticks", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BuildQuery_Azure_NoWatermark_UsesTop60()
     {
         var plan = CpuUtilizationCollector.Instance.BuildQuery(

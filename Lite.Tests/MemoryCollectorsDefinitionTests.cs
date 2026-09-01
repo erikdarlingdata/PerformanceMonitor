@@ -143,6 +143,18 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     }
 
     [Fact]
+    public void BuildQuery_ComputesSampleTimeAtMillisecondPrecision_NotSecondTruncated()
+    {
+        /* #2749 sibling fix -- see CpuUtilizationCollectorDefinitionTests' identical pin for the full
+           explanation. Same ring-buffer / client-side-watermark-dedup shape, same truncation bug. */
+        var plan = MemoryPressureEventsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas));
+
+        Assert.Contains("DATEADD(MILLISECOND, -(@ms_ticks - t.timestamp), @now)", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("/ 1000)", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("DATEADD(SECOND, -((@ms_ticks", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReadAsync_DedupsAtWatermark_IncludingNullSampleTimes()
     {
         var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
