@@ -202,10 +202,64 @@ public sealed class PlanCorrectionCollectorDefinitionTests
            that is exactly backwards — it lands with a null query_text instead of vanishing. */
         var text = PlanCorrectionCollector.Instance.BuildQuery(Context(isAzureSqlDb: true)).Text;
 
-        Assert.Contains("LEFT JOIN sys.query_store_query AS qsq", text, StringComparison.Ordinal);
-        Assert.Contains("LEFT JOIN sys.query_store_query_text AS qsqt", text, StringComparison.Ordinal);
-        Assert.Contains("LEFT JOIN sys.query_store_plan AS qsp", text, StringComparison.Ordinal);
+        /* #2764 moved these joins off the live views and onto the staged temps; the LEFT semantics
+           are what this test protects, so it follows the joins to their new targets. */
+        Assert.Contains("LEFT JOIN #pm_plan_correction_queries AS qsq", text, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN #pm_plan_correction_query_text AS qsqt", text, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN #pm_plan_correction_plans AS qsp", text, StringComparison.Ordinal);
         Assert.DoesNotContain("INNER JOIN", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStoreViews_AreStagedToTemps_NeverJoinedLive()
+    {
+        /* #2764, the rest of the sp_QuickieStore rule. #2673 staged sys.dm_db_tuning_recommendations
+           but the shipping SELECT still LEFT JOINed sys.query_store_query / _query_text / _plan LIVE,
+           which is exactly the naive-catalog-view join the pattern exists to avoid. Each view must now
+           be read exactly once, into a temp keyed off the already-staged recommendation set, and the
+           shipping SELECT must join the temps. This pins that a live view never appears on the JOIN
+           side again — a `JOIN sys.query_store_` anywhere in the body is a regression. */
+        var text = PlanCorrectionCollector.Instance.BuildQuery(Context(isAzureSqlDb: true)).Text;
+
+        Assert.DoesNotContain("JOIN sys.query_store_query ", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN sys.query_store_query_text", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN sys.query_store_plan", text, StringComparison.Ordinal);
+
+        /* Each view is staged from exactly one SELECT ... INTO, keyed off the recs (or the queries temp
+           for the text, the plan -> query -> text chain). */
+        Assert.Equal(1, Count(text, "FROM sys.query_store_plan AS qsp"));
+        Assert.Equal(1, Count(text, "FROM sys.query_store_query AS qsq"));
+        Assert.Equal(1, Count(text, "FROM sys.query_store_query_text AS qsqt"));
+        Assert.Contains("INTO #pm_plan_correction_plans", text, StringComparison.Ordinal);
+        Assert.Contains("INTO #pm_plan_correction_queries", text, StringComparison.Ordinal);
+        Assert.Contains("INTO #pm_plan_correction_query_text", text, StringComparison.Ordinal);
+        Assert.Contains("AND   r.last_good_plan_id = qsp.plan_id", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE q.query_text_id = qsqt.query_text_id", text, StringComparison.Ordinal);
+
+        /* Every temp is dropped explicitly, so nothing leaks across the sp_executesql scope. */
+        foreach (var temp in new[]
+        {
+            "#pm_plan_correction_recs",
+            "#pm_plan_correction_plans",
+            "#pm_plan_correction_queries",
+            "#pm_plan_correction_query_text",
+        })
+        {
+            Assert.Contains($"DROP TABLE IF EXISTS {temp};", text, StringComparison.Ordinal);
+            Assert.Contains($"DROP TABLE {temp};", text, StringComparison.Ordinal);
+        }
+    }
+
+    private static int Count(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     /// <summary>
