@@ -95,8 +95,17 @@ SELECT TOP (60)
        pattern (two samples ~200ms-1s apart, then a real ~60s gap to the next) collapses
        TimeSeriesGaps.BreakAtGaps's median-derived threshold to sub-second, breaking the CPU chart's line
        at every genuine interval and leaving only the tiny intra-duplicate dash. Millisecond arithmetic
-       keeps the full offset, so recomputing the same entry on a later poll reproduces the same instant. */
-    sample_time = DATEADD(MILLISECOND, -(@ms_ticks - t.timestamp), SYSDATETIME()),
+       keeps the full offset, so recomputing the same entry on a later poll reproduces the same instant.
+       Issue #2755: passing the full elapsed-ticks offset straight to DATEADD(MILLISECOND, ...) overflows
+       once it exceeds int range (~24.8 days of milliseconds) on server uptimes past that point - hit in
+       production on a long-uptime box within minutes of #2749's fix shipping. Split into a SECOND-scale
+       DATEADD (safely inside int range for realistic uptimes, ~68 years) plus a MILLISECOND-scale DATEADD
+       for the 0-999 remainder: same result as the single-step version (verified bit-identical against a
+       live SQL Server across the full delta range, including values past the int boundary), because no
+       intermediate value ever leaves int range. */
+    sample_time = DATEADD(
+        MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),
+        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSDATETIME())),
     sqlserver_cpu_utilization = x.process_utilization,
     other_process_cpu_utilization =
         CASE

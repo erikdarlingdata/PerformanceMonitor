@@ -62,14 +62,32 @@ public sealed class CpuUtilizationCollectorDefinitionTests
            value, a later poll's recomputed sample_time for the SAME physical entry could drift forward by
            a fraction of a second, land just above the watermark, and re-insert a near-duplicate row a
            moment after the original -- which collapsed the CPU chart's TimeSeriesGaps median threshold to
-           sub-second and broke the line at every genuine ~1-minute interval, leaving only dots. Millisecond
-           arithmetic (no /1000 truncation) makes recomputing the same entry deterministic across polls. */
+           sub-second and broke the line at every genuine ~1-minute interval, leaving only dots. */
         var plan = CpuUtilizationCollector.Instance.BuildQuery(
             CollectorTestContext.Make(s_deltas, isAzureSqlDb: false));
 
-        Assert.Contains("DATEADD(MILLISECOND, -(@ms_ticks - t.timestamp), SYSDATETIME())", plan.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("/ 1000)", plan.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("DATEADD(SECOND, -((@ms_ticks", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("MILLISECOND, -((@ms_ticks - t.timestamp) % 1000)", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildQuery_RingBuffer_SplitsSampleTimeMath_ToAvoidMillisecondDateaddOverflow()
+    {
+        /* #2755: a single DATEADD(MILLISECOND, -(@ms_ticks - t.timestamp), ...) -- the #2749 fix's shape --
+           overflows once the elapsed-ticks offset exceeds int range (~24.8 days of milliseconds), which a
+           long-uptime box hit in production within minutes of that fix shipping ("Arithmetic overflow error
+           converting expression to data type int"). Splitting into a SECOND-scale DATEADD (safely inside int
+           range for realistic uptimes, ~68 years) plus a MILLISECOND-scale DATEADD for the 0-999 remainder
+           preserves the exact same instant -- verified bit-identical against a live SQL Server across the
+           full delta range, including negative deltas and values past the int boundary -- without ever
+           passing an out-of-range value to any single DATEADD call. */
+        var plan = CpuUtilizationCollector.Instance.BuildQuery(
+            CollectorTestContext.Make(s_deltas, isAzureSqlDb: false));
+
+        Assert.Contains("DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSDATETIME())", plan.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "DATEADD(\n        MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),\n        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSDATETIME())),",
+            plan.Text.Replace("\r\n", "\n"),
+            StringComparison.Ordinal);
     }
 
     [Fact]

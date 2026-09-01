@@ -44,8 +44,14 @@ SELECT
     /* MILLISECOND, not SECOND-truncated -- see CpuUtilizationCollector's identical fix (#2749) for the
        full explanation: dividing by 1000 before DATEADD(SECOND, ...) discards the sub-second remainder,
        which differs on every poll, so re-reading the same ring-buffer entry on a later cycle recomputes a
-       slightly different sample_time and the client-side watermark dedup below can treat it as new. */
-    sample_time = DATEADD(MILLISECOND, -(@ms_ticks - t.timestamp), @now),
+       slightly different sample_time and the client-side watermark dedup below can treat it as new.
+       Split into SECOND + MILLISECOND-remainder DATEADD calls -- see CpuUtilizationCollector's identical
+       fix (#2755) for the full explanation: a single DATEADD(MILLISECOND, ...) overflows once the offset
+       exceeds int range (~24.8 days of ms), which this collector's wider ring-buffer retention window hit
+       in production within minutes of the single-step version shipping. */
+    sample_time = DATEADD(
+        MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),
+        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), @now)),
     memory_notification = t.record.value('(/Record/ResourceMonitor/Notification)[1]', 'nvarchar(100)'),
     memory_indicators_process = t.record.value('(/Record/ResourceMonitor/IndicatorsProcess)[1]', 'integer'),
     memory_indicators_system = t.record.value('(/Record/ResourceMonitor/IndicatorsSystem)[1]', 'integer')

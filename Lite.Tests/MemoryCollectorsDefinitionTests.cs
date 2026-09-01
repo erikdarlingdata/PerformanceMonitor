@@ -149,9 +149,23 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
            explanation. Same ring-buffer / client-side-watermark-dedup shape, same truncation bug. */
         var plan = MemoryPressureEventsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas));
 
-        Assert.Contains("DATEADD(MILLISECOND, -(@ms_ticks - t.timestamp), @now)", plan.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("/ 1000)", plan.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("DATEADD(SECOND, -((@ms_ticks", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("MILLISECOND, -((@ms_ticks - t.timestamp) % 1000)", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildQuery_SplitsSampleTimeMath_ToAvoidMillisecondDateaddOverflow()
+    {
+        /* #2755 sibling fix -- see CpuUtilizationCollectorDefinitionTests' identical pin for the full
+           explanation. This collector's own live production data was the one that actually overflowed:
+           447/447 SUCCESS before the #2751 fix deployed, then 24/24 ERROR ("Arithmetic overflow error
+           converting expression to data type int") within ~14 minutes after, on a real box. */
+        var plan = MemoryPressureEventsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas));
+
+        Assert.Contains("DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), @now)", plan.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "DATEADD(\n        MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),\n        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), @now)),",
+            plan.Text.Replace("\r\n", "\n"),
+            StringComparison.Ordinal);
     }
 
     [Fact]
