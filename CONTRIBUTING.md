@@ -16,7 +16,7 @@ Thank you for your interest in contributing to the SQL Server Performance Monito
 
 ## Project Overview
 
-This repository contains two editions of the SQL Server Performance Monitor:
+This repository contains three editions of the SQL Server Performance Monitor:
 
 **Full Edition** — server-installed collectors with a separate dashboard:
 
@@ -32,6 +32,24 @@ This repository contains two editions of the SQL Server Performance Monitor:
 | Folder | Description |
 |--------|-------------|
 | `Lite/` | Standalone WPF app with embedded DuckDB, collects directly from DMVs over the network |
+
+**Darling Edition** — headless collector service with a central PostgreSQL store:
+
+| Folder | Description |
+|--------|-------------|
+| `Darling/PerformanceMonitor.Darling.Service/` | Windows service — collector runner, alert engine host, scheduled analysis, MCP and web dashboard endpoints |
+| `Darling/PerformanceMonitor.Darling.Storage/` | The PostgreSQL store — the migration ladder (`PgMigrations.cs`), the schema generator, writers and readers |
+| `Darling/PerformanceMonitor.Darling.Analysis/` | Binds the shared analysis pipeline to the store |
+| `Darling/PerformanceMonitor.Darling.Viewer/` | WPF viewer — reads the store directly, any number of seats |
+
+`Darling/README.md` is the operator-facing document (configuration, installation, what the service does on
+monitored servers). This file covers the contributor-facing conventions.
+
+Lite and Darling share their libraries, all targeting `net10.0`: `PerformanceMonitor.Collectors` (every
+collector definition — the query sent to the monitored server, the row mappings, the delta rules, the
+cadences), `PerformanceMonitor.Alerting` (the alert engine), plus `.Analysis`, `.Notifications`,
+`.PlanAnalysis`, `.Common` and `.Ui`. Only the storage layer differs: Lite writes DuckDB, Darling writes
+PostgreSQL.
 
 ---
 
@@ -61,6 +79,10 @@ dotnet build Lite/PerformanceMonitorLite.csproj
 # Build CLI Installer (self-contained)
 dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
 
+# Build Darling (headless service, then the viewer)
+dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj
+dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj
+
 ```
 
 ### Running the Applications
@@ -74,6 +96,11 @@ dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
 1. Run `Lite/bin/Debug/net10.0-windows/PerformanceMonitorLite.exe`
 2. Add a SQL Server connection (requires VIEW SERVER STATE permission)
 3. Data collection begins automatically
+
+**Darling:**
+1. Provision a PostgreSQL store — or let the service run its own bundled one — and write `darling.json`
+2. Install and start the service; it applies any pending schema migrations on startup
+3. Point the viewer at the same store. `Darling/README.md` has the full procedure
 
 ---
 
@@ -149,6 +176,62 @@ The Full Dashboard has a clean separation between data collection and display:
 
 **There is no clean single-layer contribution path for Lite collectors.** Adding a new collector requires changes across 5-7 files with careful coordination.
 
+### Darling Edition Architecture
+
+Darling puts a process boundary between collection and display: a headless Windows service collects 24/7
+into a central PostgreSQL store, and any number of viewer seats read that store.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Monitored SQL Server or PostgreSQL                 │
+│  (No install beyond two Extended Events sessions on SQL Server) │
+└─────────────────────────────────────────────────────────────────┘
+                            │ DMV / catalog queries
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│      PerformanceMonitor.Darling.Service (Windows service)       │
+│                                                                 │
+│  1. DarlingCollectorRunner.cs                                   │
+│     └── Runs the shared collector definitions, 24/7             │
+│                                                                 │
+│  2. PerformanceMonitor.Alerting + .Notifications                │
+│     └── Shared alert engine, cooldowns, delivery                │
+│                                                                 │
+│  3. PerformanceMonitor.Darling.Analysis                         │
+│     └── Scheduled analysis / recommendations pass               │
+│                                                                 │
+│  4. Mcp/*.cs + DarlingWebEndpoints.cs                           │
+│     └── MCP server and web dashboard                            │
+└─────────────────────────────────────────────────────────────────┘
+                            │ binary COPY / SQL (Npgsql)
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│     PostgreSQL store (TimescaleDB optional, auto-detected)      │
+│  ├── collect.* tables (raw collected data)                      │
+│  ├── config.* tables (control plane, schedules, alert settings) │
+│  └── darling_schema_version (what the migration ladder stamps)  │
+└─────────────────────────────────────────────────────────────────┘
+                            │ SQL queries
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│     PerformanceMonitor.Darling.Viewer (WPF, one per seat)       │
+│  └── ViewerDataService.*.cs reads the store directly            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key insight:** the viewer talks to the store, not to the service, so both are versioned against the
+schema rather than against each other. `ViewerDataService.RequiredStoreSchemaVersion` is
+`StorageVersion.SchemaVersion`, and the viewer refuses at connect time to open a store below it
+(`MainWindow.xaml.cs`) instead of failing later on a column that is not there yet.
+
+**The schema is a ladder, not a schema file.** `PgMigrations.Scripts` is an ordered list of
+`Migration(version, name, sql)`. On startup the service reads `MAX(version)` from `darling_schema_version`
+and applies every rung above it, each in its own transaction, stamping the table as it goes. V1 is
+generated from the collector definitions (`PgSchemaGenerator.GenerateFullSchema()`); later rungs are
+appended, never edited, because a store that already ran a rung will never read it again. TimescaleDB
+conversion is deliberately *not* on the ladder — it is runtime setup (`TimescaleSupport`) applied only when
+the extension is present, so the same store works on plain PostgreSQL.
+
 ---
 
 ## Contribution Paths
@@ -165,6 +248,7 @@ The Full Dashboard has a clean separation between data collection and display:
 | **Documentation** | Low | README, comments, troubleshooting guides |
 | **MCP tool improvements** | Medium | `Dashboard/Mcp/` or `Lite/Mcp/` |
 | **New Lite collectors** | **High** | See warning below |
+| **Darling schema migrations** | **High** | Four coordinated edits — see below |
 
 ### Adding a New Full Dashboard Collector
 
@@ -192,6 +276,65 @@ See the existing collectors as templates. Each collector is self-contained.
 All of these must be coordinated. The schema must match what the collector inserts, the LocalDataService must query what the schema defines, the UI must display what LocalDataService returns, etc.
 
 If you want to contribute a new Lite collector, please **open an issue first** to discuss the approach.
+
+### Adding a Darling Migration Rung
+
+Every Darling schema change is a numbered rung on the ladder, and it takes four coordinated edits. CI is red
+until all four are there.
+
+1. **The rung.** Add `new Migration(N, "kebab-name", VNSql)` at the end of `PgMigrations.Scripts`, with a
+   matching `private const string VNSql`. Schema-qualify every object in it (`collect.`, `config.`) — the
+   migrate session runs under `search_path = collect, config, public`, so a bare `CREATE TABLE` silently
+   lands in `collect` with `collect`'s ACL whether or not that is where you meant it.
+2. **The version.** Set `StorageVersion.SchemaVersion = N`.
+3. **The pins.** These are symbolic: the tests assert against `StorageVersion.SchemaVersion`, not against a
+   literal, so they follow the bump rather than needing one (`ScaffoldTests` pins it to
+   `PgMigrations.Scripts[^1].Version`, `MigrationLadderPins` pins the ladder's shape, and each rung's own
+   store test pins the ladder max). The literals a rung's own test does carry are its **own** ordinals,
+   which never move: its version number, its probe ordinal, and the version its sentinel maps to. Write
+   those the way the newest existing rung's test writes them, and leave earlier rungs' literals alone — a
+   demoted rung whose test still asserts it is the newest is how the next rung's build goes red.
+4. **The viewer probe.** `ViewerDataService.StoreSchemaProbeSql` reads `information_schema` (plus
+   `pg_indexes` / `pg_extension` where a sentinel is not a table or column) for one sentinel per rung, and
+   `MapProbedSchemaVersion` maps them newest-first. A rung needs all four parts: a sentinel line in the
+   probe SQL, one more `reader.GetBoolean(<next ordinal>)` in `GetStoreSchemaVersionAsync`, one more
+   trailing `bool hasThing = false` parameter, and an arm `if (hasThing) return N;` placed **above** the
+   previous one. Miss it and a fully-migrated store probes one rung short, so the connect-time gate refuses
+   a store that is in fact current — permanently, because no later upgrade changes the answer.
+
+#### Rung numbering: `max(dev) + 1`, never pre-reserved
+
+The applier ascends and skips anything already stamped
+(`if (migration.Version <= currentVersion) continue;`), which makes the two failure modes wildly asymmetric:
+
+- A **collision** is loud. Two branches take the same N and the second one gets a rebase conflict.
+- A **gap** is silent and unrepairable. Take N+1 while N is unclaimed, merge first, and stores stamp N+1;
+  the branch that later lands N has its rung skipped forever — the objects never exist, every reader of
+  them fails permanently, and no upgrade repairs it. That is why V45 is permanently absent and has a
+  comment in its place rather than a rung.
+
+So take `max(dev) + 1`, never reserve a number above an unmerged sibling's, and when two PRs want the same
+number the first to actually merge keeps it while the other renumbers — rung and `StorageVersion` together —
+at its own merge. `MigrationLadderPins` enforces both halves in CI:
+`TheLadder_IsStrictlyOrdered_WithNoDuplicates` and `TheLadder_IsDenseAboveTheHistoricalGap`, with V45 as the
+one sanctioned hole.
+
+### Two-Store Parity
+
+The shared libraries are written against seams, and every seam has one implementation per store —
+`PgAlertStateStore` for Darling, `LiteAlertStateStore` for Lite, and so on. Two rules keep them from
+drifting:
+
+- **Declare interface members as required, not defaulted.** `IAlertStateStore`, `IAlertEngineSettings` and
+  `IAlertDeliverer` give no member a default implementation, so adding one makes the compiler name every
+  implementer *and* every test fake (`AlertEngineTests.FakeStateStore`, `DarlingSelfAlertTests.StubStateStore`,
+  `LiteAlertForwardingTests.InMemoryStateStore`). A default implementation compiles and leaves the ones you
+  forgot quietly doing nothing.
+- **State added to one store reads as permanently empty on the other, and nothing fails to build.** A
+  Darling migration rung plus a reader for it has a Lite twin: bump `DuckDbInitializer.CurrentSchemaVersion`,
+  add an idempotent `if (fromVersion < N)` upgrade block, register the table in
+  `Schema.GetAllTableStatements()`, and update the table-count assertion in `DuckDbSchemaTests`. Without it
+  the shared engine keeps asking Lite a question its store can never answer.
 
 ---
 
@@ -259,6 +402,13 @@ Darling's PostgreSQL store (not T-SQL — the Darling service stores to PostgreS
 - **Schema-qualify every object in a migration** (`collect.*`, `config.*`). The migrate session's
   `search_path` resolves bare names to a different schema, so an unqualified `CREATE` or `ALTER`
   can land an object in the wrong one silently.
+- **Timestamps are naive UTC.** Columns are declared `timestamp`, never `timestamptz`, and SQL that stamps
+  its own time uses `now() AT TIME ZONE 'UTC'`.
+- **Strip the `DateTimeKind` before binding a timestamp parameter** —
+  `DateTime.SpecifyKind(value, DateTimeKind.Unspecified)`. Npgsql infers `timestamptz` from a `Utc` or
+  `Local` kind, PostgreSQL then converts into the session's time zone on the way into a naive column, and
+  the row lands at the wrong hour with no error anywhere. Several files keep a one-line `Naive()` helper
+  for exactly this; use it rather than binding a `DateTime` straight through.
 
 ### C# Style
 
@@ -371,6 +521,18 @@ Use the troubleshooting scripts:
    ```
    claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
    ```
+
+### Testing Darling Changes
+
+`Darling.Tests` targets `net10.0-windows`, so it builds anywhere but only runs on Windows. Three CI jobs
+cover it, and which one goes red tells you where to look:
+
+- **Darling Linux build** — it does not compile. The fastest signal available.
+- **Darling PostgreSQL tests** — the full `Darling.Tests` suite against a real PostgreSQL with TimescaleDB.
+  `DARLING_TEST_PG` lights up the `[Collection("live-postgres")]` classes, so this is the job that actually
+  applies the ladder and reads the probe back. A migration mistake surfaces here.
+- **build** (Windows) — runs `Lite.Tests` and `Darling.Tests` without a live store. This is where a
+  two-store parity gap surfaces.
 
 ### SQL Server Versions
 
