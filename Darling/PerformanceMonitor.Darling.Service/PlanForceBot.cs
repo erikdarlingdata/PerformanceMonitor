@@ -41,7 +41,17 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class PlanForceBot
 {
     /* Belt over the extractor's per-finding cap: the pass evaluates at most this many targets, so a
-       pathological drill-down can never turn one analysis pass into a journal flood. */
+       pathological drill-down can never turn one analysis pass into a journal flood.
+
+       It counts targets EVALUATED, not rows journaled, and that is the load-bearing choice: each
+       evaluated target costs a store round trip (GetQueryHistoryAsync) whatever the verdict turns out
+       to be, so the cap bounds the WORK a pass can do, not just its output. Counting only journaled
+       rows would let a pass whose targets are all inside their cooldown spend an unbounded number of
+       history reads for an empty journal — the one shape the budget exists to stop. The cost is that
+       a suppressed target can occupy a slot a later actionable one wanted; that is acceptable because
+       FactRemediation.ExtractPlanRegressionTargets already caps each finding at 5 targets ordered
+       worst-regression-first, so the actionable ones are at the front of the list by construction. If
+       that per-finding cap ever rises, revisit this ordering assumption rather than this number. */
     internal const int MaxTargetsPerPass = 10;
 
     private readonly IPlanForceActionStore _store;
