@@ -41,7 +41,11 @@ DECLARE
 SELECT @ms_ticks = dosi.ms_ticks FROM sys.dm_os_sys_info AS dosi;
 
 SELECT
-    sample_time = DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), @now),
+    /* MILLISECOND, not SECOND-truncated -- see CpuUtilizationCollector's identical fix (#2749) for the
+       full explanation: dividing by 1000 before DATEADD(SECOND, ...) discards the sub-second remainder,
+       which differs on every poll, so re-reading the same ring-buffer entry on a later cycle recomputes a
+       slightly different sample_time and the client-side watermark dedup below can treat it as new. */
+    sample_time = DATEADD(MILLISECOND, -(@ms_ticks - t.timestamp), @now),
     memory_notification = t.record.value('(/Record/ResourceMonitor/Notification)[1]', 'nvarchar(100)'),
     memory_indicators_process = t.record.value('(/Record/ResourceMonitor/IndicatorsProcess)[1]', 'integer'),
     memory_indicators_system = t.record.value('(/Record/ResourceMonitor/IndicatorsSystem)[1]', 'integer')
