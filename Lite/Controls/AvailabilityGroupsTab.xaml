@@ -126,13 +126,13 @@
                                                 </Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Header="Send queue (KB)" Binding="{Binding SendQueueDisplay}" Width="Auto"/>
-                                        <DataGridTextColumn Header="Redo queue (KB)" Binding="{Binding RedoQueueDisplay}" Width="Auto"/>
-                                        <DataGridTextColumn Header="Send rate (KB/s)" Binding="{Binding SendRateDisplay}" Width="Auto"/>
-                                        <DataGridTextColumn Header="Redo rate (KB/s)" Binding="{Binding RedoRateDisplay}" Width="Auto"/>
-                                        <DataGridTextColumn Header="Lag" Binding="{Binding LagDisplay}" Width="Auto"/>
-                                        <DataGridTextColumn Header="Est drain (min)" Binding="{Binding SendDrainDisplay}" Width="Auto"/>
-                                        <DataGridTextColumn Header="Est redo (min)" Binding="{Binding RedoDrainDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Send queue (KB)" Binding="{Binding SendQueueDisplay}" SortMemberPath="LogSendQueueKb" Width="Auto"/>
+                                        <DataGridTextColumn Header="Redo queue (KB)" Binding="{Binding RedoQueueDisplay}" SortMemberPath="RedoQueueKb" Width="Auto"/>
+                                        <DataGridTextColumn Header="Send rate (KB/s)" Binding="{Binding SendRateDisplay}" SortMemberPath="LogSendRateKbPerSec" Width="Auto"/>
+                                        <DataGridTextColumn Header="Redo rate (KB/s)" Binding="{Binding RedoRateDisplay}" SortMemberPath="RedoRateKbPerSec" Width="Auto"/>
+                                        <DataGridTextColumn Header="Lag" Binding="{Binding LagDisplay}" SortMemberPath="SecondaryLagSeconds" Width="Auto"/>
+                                        <DataGridTextColumn Header="Est drain (min)" Binding="{Binding SendDrainDisplay}" SortMemberPath="EstimatedSendDrainMinutes" Width="Auto"/>
+                                        <DataGridTextColumn Header="Est redo (min)" Binding="{Binding RedoDrainDisplay}" SortMemberPath="EstimatedRedoCompletionMinutes" Width="Auto"/>
                                         <DataGridTextColumn Header="Data movement" Binding="{Binding DataMovementDisplay}" Width="*">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock">
