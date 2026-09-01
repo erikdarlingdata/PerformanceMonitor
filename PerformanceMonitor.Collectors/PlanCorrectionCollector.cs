@@ -120,10 +120,20 @@ public sealed class PlanCorrectionCollector : CollectorDefinitionBase<PlanCorrec
     /// SCANNING the whole plan store — catastrophic on a bloated Query Store, where one prod database's
     /// read tailed to 260s (avg ~4s). The recommendation set is invariably small (the engine keeps only
     /// a handful of live recommendations and erases them on restart), so materialising it first — with
-    /// its details JSON already shredded — hands the optimizer a real row count, and the final query
-    /// nested-loop SEEKS each query_id/plan_id into the QS views instead of scanning them. SET NOCOUNT
-    /// ON so the SELECT INTO emits no result set and the caller's reader takes the final SELECT as the
-    /// shipped rows; the #temp is scoped to this sp_executesql and dropped explicitly.
+    /// its details JSON already shredded — hands the optimizer a real row count. SET NOCOUNT ON so the
+    /// SELECT INTOs emit no result set and the caller's reader takes the final SELECT as the shipped
+    /// rows; every #temp is scoped to this sp_executesql and dropped explicitly.
+    /// </para>
+    ///
+    /// <para>
+    /// #2764 completes the sp_QuickieStore pattern: #2673 staged the DMV side but the final SELECT still
+    /// LEFT JOINed sys.query_store_query / sys.query_store_query_text / sys.query_store_plan LIVE. The
+    /// Query Store side is now staged too, the way sp_QuickieStore populates #query_store_plan then
+    /// #query_store_query then #query_store_query_text: each temp pulls ONLY the rows keyed by the
+    /// already-small recommendation set (plans by (query_id, last_good_plan_id), queries by query_id,
+    /// text by the queries' query_text_id), and the final SELECT joins the three temps rather than the
+    /// catalog views. The live views are therefore touched exactly once each, by a seek keyed off a
+    /// materialised row count, and never appear on the JOIN side of the shipping query at all.
     /// </para>
     ///
     /// <para>
@@ -179,6 +189,9 @@ SET NOCOUNT ON;
   Query Store joins below seek a real row count instead of scanning the whole plan store off a
   statistics-free DMV cardinality guess. See the summary for why this is the 260s fix.*/
 DROP TABLE IF EXISTS #pm_plan_correction_recs;
+DROP TABLE IF EXISTS #pm_plan_correction_plans;
+DROP TABLE IF EXISTS #pm_plan_correction_queries;
+DROP TABLE IF EXISTS #pm_plan_correction_query_text;
 
 SELECT
     recommendation_name = dtr.name,
@@ -254,6 +267,54 @@ CROSS APPLY
             )
 ) AS pfd;
 
+/*Stage the Query Store side too (#2764, the rest of the sp_QuickieStore rule). Each temp pulls only
+  the rows the recommendation set actually names, keyed off #pm_plan_correction_recs, so the live
+  catalog views are seeked once each here and never joined by the shipping SELECT below. Plans are
+  keyed by the (query_id, last_good_plan_id) pair the final join needs; queries by query_id; text by
+  query_text_id from the queries temp, the same plan -> query -> text chain sp_QuickieStore walks.*/
+SELECT
+    query_id = qsp.query_id,
+    plan_id = qsp.plan_id,
+    plan_forcing_type_desc = qsp.plan_forcing_type_desc,
+    is_forced_plan = qsp.is_forced_plan,
+    last_force_failure_reason_desc = qsp.last_force_failure_reason_desc
+INTO #pm_plan_correction_plans
+FROM sys.query_store_plan AS qsp
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_plan_correction_recs AS r
+    WHERE r.query_id = qsp.query_id
+    AND   r.last_good_plan_id = qsp.plan_id
+);
+
+SELECT
+    query_id = qsq.query_id,
+    query_text_id = qsq.query_text_id
+INTO #pm_plan_correction_queries
+FROM sys.query_store_query AS qsq
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_plan_correction_recs AS r
+    WHERE r.query_id = qsq.query_id
+);
+
+SELECT
+    query_text_id = qsqt.query_text_id,
+    query_sql_text = qsqt.query_sql_text
+INTO #pm_plan_correction_query_text
+FROM sys.query_store_query_text AS qsqt
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_plan_correction_queries AS q
+    WHERE q.query_text_id = qsqt.query_text_id
+);
+
 SELECT
     force_last_good_plan_desired_state = o.desired_state_desc,
     force_last_good_plan_actual_state = o.actual_state_desc,
@@ -328,15 +389,18 @@ OUTER APPLY
 ) AS drop_index
 LEFT JOIN #pm_plan_correction_recs AS r
   ON 1 = 1 /*keeps the enablement row when the engine has no recommendations*/
-LEFT JOIN sys.query_store_query AS qsq
+LEFT JOIN #pm_plan_correction_queries AS qsq
   ON qsq.query_id = r.query_id
-LEFT JOIN sys.query_store_query_text AS qsqt
+LEFT JOIN #pm_plan_correction_query_text AS qsqt
   ON qsqt.query_text_id = qsq.query_text_id
-LEFT JOIN sys.query_store_plan AS qsp
+LEFT JOIN #pm_plan_correction_plans AS qsp
   ON qsp.query_id = r.query_id
   AND qsp.plan_id = r.last_good_plan_id
 ORDER BY r.score DESC, r.recommendation_name;
 
+DROP TABLE #pm_plan_correction_query_text;
+DROP TABLE #pm_plan_correction_queries;
+DROP TABLE #pm_plan_correction_plans;
 DROP TABLE #pm_plan_correction_recs;";
 
     /// <summary>
