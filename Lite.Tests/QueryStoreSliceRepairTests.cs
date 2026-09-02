@@ -294,6 +294,58 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         Assert.False(await service.AlreadyRepairedAsync());
     }
 
+    /// <summary>
+    /// #2748: the attempt is recorded BEFORE the repair runs, not after it succeeds.
+    ///
+    /// <para>This is the only protection that survives the failure it was written for. A reporter's store took
+    /// <c>duckdb.dll</c> down with a native fast-fail (0xc0000409) partway through this repair — no managed
+    /// exception, no unwinding, nothing recorded — so every subsequent launch re-surveyed, re-ran and re-died,
+    /// and the app could never start again. Anything recorded only on success, or only in a <c>catch</c>, is
+    /// unreachable in that scenario by construction.</para>
+    /// </summary>
+    [Fact]
+    public async Task StartupRepair_RecordsTheAttempt_EvenOnASuccessfulPass()
+    {
+        var t = new DateTime(2026, 6, 13, 11, 0, 0, DateTimeKind.Unspecified);
+        await SeedAsync(t, queryId: 1, planId: 11, intervalId: 7001, executionCount: 100, avgDurationUs: 1778);
+        await SeedAsync(t, queryId: 1, planId: 11, intervalId: 7001, executionCount: 25, avgDurationUs: 2245);
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+        Assert.Equal(0L, await service.AttemptCountAsync());
+
+        await service.RepairOnStartupAsync();
+
+        /* The count answers "did we try", not "did we fail" — a successful pass still leaves its row. */
+        Assert.Equal(1L, await service.AttemptCountAsync());
+        Assert.True(await service.AlreadyRepairedAsync());
+    }
+
+    /// <summary>
+    /// #2748: once the attempt cap is reached on a store that never completes, startup stops attempting. The
+    /// app must launch even when the repair cannot.
+    /// </summary>
+    [Fact]
+    public async Task StartupRepair_AtTheAttemptCap_SkipsEntirely_SoTheAppCanStart()
+    {
+        /* An unrepairable archive file makes every pass partial, so the completion marker is never written and
+           the pre-#2748 code retried on every launch forever. */
+        await WriteUncombinableArchiveAsync(Path.Combine(_archivePath, "202604_query_store_stats.parquet"));
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+
+        for (var i = 0; i < QueryStoreSliceRepairService.MaxStartupAttempts; i++)
+        {
+            await service.RepairOnStartupAsync();
+        }
+
+        Assert.False(await service.AlreadyRepairedAsync());
+        Assert.Equal((long)QueryStoreSliceRepairService.MaxStartupAttempts, await service.AttemptCountAsync());
+
+        /* The next launch must NOT add another attempt: it is gated off before the dangerous work. */
+        await service.RepairOnStartupAsync();
+        Assert.Equal((long)QueryStoreSliceRepairService.MaxStartupAttempts, await service.AttemptCountAsync());
+    }
+
     /// <summary>A store with nothing to repair records the marker anyway, so the survey stops running forever.</summary>
     [Fact]
     public async Task StartupRepair_OnACleanStore_RecordsTheMarkerSoItDoesNotSurveyEveryLaunch()

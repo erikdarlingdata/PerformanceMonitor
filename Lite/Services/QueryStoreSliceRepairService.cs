@@ -242,6 +242,87 @@ public sealed class QueryStoreSliceRepairService
     }
 
     /// <summary>
+    /// Attempts recorded BEFORE the repair runs, so a repair that never returns still leaves a trace (#2748).
+    ///
+    /// <para><b>Why a separate table from <see cref="MarkerTable"/>, and why written first.</b> The completion
+    /// marker answers "did this finish"; this one answers "did we try". The distinction only matters in the one
+    /// case that brought it into being, and in that case it is the whole ballgame: on 2026-09-02 a reporter's
+    /// store took <c>duckdb.dll</c> down with a native fast-fail (<c>0xc0000409</c>, subcode 7 —
+    /// <c>FAST_FAIL_FATAL_APP_EXIT</c>, the native library aborting) partway through this repair, on a store
+    /// with 31,426 split intervals. A native abort is not a managed exception: the <c>catch</c> in
+    /// <see cref="RepairOnStartupAsync"/> never runs, the process is gone mid-statement, and nothing is
+    /// recorded. So the next launch surveyed the same store, found the same work, ran the same repair and died
+    /// the same way — a permanent, self-perpetuating crash loop with the app never reaching a usable state.
+    /// Recording the attempt first is the only thing that survives that, precisely because it is committed
+    /// before the dangerous work begins.</para>
+    /// </summary>
+    internal const string AttemptTable = "query_store_slice_repair_attempts";
+
+    /// <summary>
+    /// How many times a startup repair may be attempted before this store stops trying on startup.
+    ///
+    /// <para>Two, not one: a single failure is genuinely often transient — a file locked by a backup agent, a
+    /// machine suspended mid-pass — and the existing retry-on-partial behavior is load-bearing for exactly
+    /// those. What must not survive is the THIRD identical launch, because by then the evidence is that this
+    /// store reproduces the failure deterministically and every further attempt just denies the user their
+    /// app.</para>
+    /// </summary>
+    internal const int MaxStartupAttempts = 2;
+
+    /// <summary>
+    /// Attempts recorded so far. Zero when the table does not exist, which is every store that has not yet run
+    /// a build carrying #2748's fix.
+    /// </summary>
+    internal async Task<long> AttemptCountAsync(CancellationToken cancellationToken = default)
+    {
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+
+        using var exists = connection.CreateCommand();
+        exists.CommandText =
+            $"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'main' AND table_name = '{AttemptTable}'";
+        if (Convert.ToInt64(await exists.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture) == 0)
+        {
+            return 0;
+        }
+
+        using var rows = connection.CreateCommand();
+        rows.CommandText = $"SELECT COUNT(*) FROM {AttemptTable}";
+        return Convert.ToInt64(await rows.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Records an attempt and COMMITS it before the caller does anything dangerous.
+    ///
+    /// <para><see cref="CancellationToken.None"/> throughout, for the reason the completion marker uses it: this
+    /// is bookkeeping whose entire value is that it is already durable when the next thing goes wrong. A write
+    /// abandoned here buys a microsecond and costs the protection.</para>
+    /// </summary>
+    private async Task RecordAttemptAsync(long hotGroups)
+    {
+        using var readLock = _duckDb.AcquireReadLock(CancellationToken.None);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(CancellationToken.None);
+
+        using var create = connection.CreateCommand();
+        create.CommandText =
+            $"CREATE TABLE IF NOT EXISTS {AttemptTable} (attempted_at TIMESTAMP NOT NULL, hot_groups BIGINT NOT NULL)";
+        await create.ExecuteNonQueryAsync(CancellationToken.None);
+
+        using var insert = connection.CreateCommand();
+        insert.CommandText =
+            $"INSERT INTO {AttemptTable} (attempted_at, hot_groups) VALUES (CURRENT_TIMESTAMP, {hotGroups})";
+        await insert.ExecuteNonQueryAsync(CancellationToken.None);
+
+        /* CHECKPOINT so the row is in the database FILE, not just this connection's WAL view. The whole point
+           is to survive a process that is about to be killed without unwinding. */
+        using var checkpoint = connection.CreateCommand();
+        checkpoint.CommandText = "CHECKPOINT";
+        await checkpoint.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+
+    /// <summary>
     /// The startup entry point: repair once, automatically, and record it — or leave it to be retried.
     ///
     /// <para><b>Automatic rather than operator-invoked, unlike Darling's verb, and that asymmetry is
@@ -287,10 +368,35 @@ public sealed class QueryStoreSliceRepairService
                 return;
             }
 
+            /* #2748: the attempt is recorded and CHECKPOINTed BEFORE the repair runs, and a store that has
+               already burned its attempts stops here. A native crash inside duckdb.dll takes the process down
+               without unwinding, so the catch below never runs and nothing else in this method gets the chance
+               to record anything — which is how a single bad store turned into an app that could never start
+               again. This gate is deliberately the LAST thing before the dangerous work and the first thing
+               checked on the way in. */
+            var attempts = await AttemptCountAsync(cancellationToken);
+            if (attempts >= MaxStartupAttempts)
+            {
+                _logger?.LogError(
+                    "#1912 Query Store repair SKIPPED: {Attempts} previous attempt(s) on this store did not complete, " +
+                    "so it will not be retried automatically — see issue #2748. The app starts normally and collects " +
+                    "normally; only the one-time collapse of {HotGroups} pre-#1907 split interval(s) is left undone, " +
+                    "and #1907's read-side tie-break still resolves those rows deterministically. To retry after " +
+                    "upgrading, drop the '{Table}' table from the store.",
+                    attempts,
+                    survey.HotGroups,
+                    AttemptTable);
+                return;
+            }
+
             _logger?.LogInformation(
-                "#1912 one-time Query Store repair starting: {HotGroups} split interval(s) in the hot store, {ArchiveFiles} archive file(s) affected",
+                "#1912 one-time Query Store repair starting (attempt {Attempt} of {Max}): {HotGroups} split interval(s) in the hot store, {ArchiveFiles} archive file(s) affected",
+                attempts + 1,
+                MaxStartupAttempts,
                 survey.HotGroups,
                 survey.Archive.Count(a => a.Groups > 0));
+
+            await RecordAttemptAsync(survey.HotGroups);
 
             var result = await RepairAsync(
                 new Progress<string>(message => _logger?.LogInformation("#1912 {Message}", message)),
