@@ -555,11 +555,21 @@ public sealed class ServerSummaryItem
     public string ThreadsDetail =>
         TotalThreads is > 0 ? $"Available: {AvailableThreads}/{TotalThreads}" : "";
 
-    /// <summary>Collectors value — "N failed" or "OK" (Dashboard's CollectorDisplayText).</summary>
-    public string CollectorDisplay => FailedCollectorCount > 0 ? $"{FailedCollectorCount} failed" : "OK";
+    /// <summary>
+    /// Collectors value — "Stale" when the server is offline, else "N failed" / "OK" (Dashboard's
+    /// CollectorDisplayText). #2784 mirrors the web #2779/#2783 fix: a server that has stopped collecting has
+    /// stale collector counts, and they are not "OK" — they are unmeasured. The verdict keys only on the
+    /// FAILING count (a stale collector is neither healthy nor failing, so it stays 0 and reads a green "OK"
+    /// while the server is dark). Rather than invent a stale-count threshold, reuse the reachability signal the
+    /// card already carries (<see cref="IsOffline"/>, the same one that drives the offline overlay): an offline
+    /// server's collectors read a neutral "Stale", never a green "OK".
+    /// </summary>
+    public string CollectorDisplay =>
+        IsOffline ? "Stale" : FailedCollectorCount > 0 ? $"{FailedCollectorCount} failed" : "OK";
 
-    /// <summary>Collectors detail — "Healthy: N, Failing: M" (Dashboard's CollectorDetailText).</summary>
-    public string CollectorDetail => $"Healthy: {HealthyCollectorCount}, Failing: {FailedCollectorCount}";
+    /// <summary>Collectors detail — "No recent collection" when offline, else "Healthy: N, Failing: M" (Dashboard's CollectorDetailText).</summary>
+    public string CollectorDetail =>
+        IsOffline ? "No recent collection" : $"Healthy: {HealthyCollectorCount}, Failing: {FailedCollectorCount}";
 
     /// <summary>
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time
@@ -633,8 +643,15 @@ public sealed class ServerSummaryItem
     public HealthSeverity ThreadsSeverity =>
         ServerHealthClassifier.ThreadsSeverity(TotalThreads, AvailableThreads, ThreadsWaitingForCpu, RequestsWaitingForThreads);
 
-    /// <summary>Collectors band — any FAILING collector is Warning.</summary>
-    public HealthSeverity CollectorSeverity => ServerHealthClassifier.CollectorSeverity(FailedCollectorCount);
+    /// <summary>
+    /// Collectors band — neutral Unknown when the server is offline (its collectors are unmeasured, not
+    /// healthy — #2784), else Warning on any FAILING collector. Offline is already painted by the card border /
+    /// overlay, so this governs only the per-metric dot: it must not show a green "healthy" dot on a dark
+    /// server. The overall metric band reads FailedCollectorCount straight from ToHealthMetrics(), not this
+    /// property, so the neutral offline reading never leaks into the card's worst-band or fleet score.
+    /// </summary>
+    public HealthSeverity CollectorSeverity =>
+        IsOffline ? HealthSeverity.Unknown : ServerHealthClassifier.CollectorSeverity(FailedCollectorCount);
 
     /// <summary>The card's worst metric band (offline handled separately by the border / overlay).</summary>
     public HealthSeverity OverallMetricSeverity => ServerHealthClassifier.OverallMetricSeverity(ToHealthMetrics());
