@@ -189,4 +189,121 @@ public sealed class DarlingTriageEndpointTests
         var query = DarlingTriageEndpoint.BuildSectionQuery(Section(), "srv&x=1 y", null);
         Assert.Equal("?server=srv%26x%3D1%20y", query);
     }
+
+    /* ---------------- #2768: the fleet-level store self-alert family ---------------- */
+
+    /// <summary>The whole bug in one assertion: the label the store self-alerts fire under has to be
+    /// RECOGNISED, or the page runs per-server reads against a server that cannot resolve and renders the
+    /// three resolver errors the reporter saw. Keyed on the engine's own constant, so a rename on either
+    /// side fails here rather than silently regressing the page.</summary>
+    [Fact]
+    public void IsFleetLevelStoreServer_RecognisesTheEnginesStoreLabel_AndNothingElse()
+    {
+        Assert.True(DarlingTriageEndpoint.IsFleetLevelStoreServer(DarlingSelfAlertEvaluator.StoreServerLabel));
+        /* Trimmed and case-insensitive: the label makes a round trip through a URL before it gets here. */
+        Assert.True(DarlingTriageEndpoint.IsFleetLevelStoreServer("  monitor store  "));
+
+        Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreServer("RMVNSQL01\\INST1"));
+        Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreServer(null));
+        Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreServer("   "));
+        /* A real server that merely CONTAINS the label must not be swallowed by the fleet-level path. */
+        Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreServer("Monitor Store Replica"));
+    }
+
+    /// <summary>Every store self-alert must land on its own mapping, not the per-server fallback — the
+    /// fallback is exactly what produced "Could not resolve server" three times per page. The engine exports
+    /// the cadence metric as a constant, so that one is pinned by symbol; the rest are pinned by the literal
+    /// the engine fires, which is the string the history row and any mute rule key on.</summary>
+    [Theory]
+    [InlineData("Store Disk Pressure")]
+    [InlineData("Store Runtime Upgrade")]
+    [InlineData("Compression Job Stuck")]
+    [InlineData("Store Disk Pressure Resolved")]
+    [InlineData("Store Job Cadence Recovered")]
+    [InlineData("Compression Job Recovered")]
+    public void EveryStoreSelfAlert_HasItsOwnSections_NotThePerServerFallback(string metric)
+    {
+        Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(metric));
+    }
+
+    /// <summary>The [Theory] above pins the WIRE strings an operator's history row actually carries. This
+    /// pins the same mappings by SYMBOL, so renaming a metric on the engine breaks here instead of silently
+    /// downgrading that alert's triage page to the per-server fallback - the drift alarm #2710 established
+    /// for the engine's other exported metric-name constants.</summary>
+    [Fact]
+    public void StoreMetricNameConstants_ResolveToTheirOwnMapping_NotTheFallback()
+    {
+        foreach (var metric in new[]
+                 {
+                     DarlingSelfAlertEvaluator.DiskPressureMetric,
+                     DarlingSelfAlertEvaluator.DiskPressureResolvedMetric,
+                     DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+                     DarlingSelfAlertEvaluator.CompressionJobMetric,
+                     DarlingSelfAlertEvaluator.JobCadenceMetric,
+                 })
+        {
+            Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(metric));
+        }
+    }
+
+    /// <summary>The store family's sections must ALL be fleet-level. A per-server section reached through a
+    /// store alert would bind the synthetic label as <c>server</c> and reproduce the original defect for that
+    /// one card, which is the regression this pin exists to catch.</summary>
+    [Fact]
+    public void StoreSelfAlertSections_AreAllFleetLevel_SoNoneBindsTheSyntheticServer()
+    {
+        foreach (var metric in new[]
+                 {
+                     DarlingSelfAlertEvaluator.DiskPressureMetric,
+                     DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+                     DarlingSelfAlertEvaluator.CompressionJobMetric,
+                     DarlingSelfAlertEvaluator.JobCadenceMetric,
+                 })
+        {
+            var sections = DarlingTriageEndpoint.SectionsFor(metric);
+            Assert.NotEmpty(sections);
+            Assert.All(sections, s => Assert.True(s.FleetLevel,
+                $"'{metric}' section '{s.Title}' ({s.Read}) is not fleet-level and would bind the synthetic store server."));
+        }
+    }
+
+    /// <summary>A fleet-level section drops the server even when one is supplied — the reads it names take no
+    /// <c>server</c>, and on a store alert the only value available is the unresolvable label. <c>as_of</c>
+    /// and the fixed params still bind, so the anchoring behaviour is unchanged.</summary>
+    [Fact]
+    public void BuildSectionQuery_FleetLevelSection_OmitsTheServer_ButKeepsAsOfAndFixedParams()
+    {
+        var fleet = new DarlingTriageEndpoint.TriageSection(
+            "Store size", "get_store_metrics",
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["days_back"] = "30" },
+            FleetLevel: true);
+
+        Assert.Equal(
+            "?as_of=2026-08-31T08%3A15%3A00Z&days_back=30",
+            DarlingTriageEndpoint.BuildSectionQuery(fleet, DarlingSelfAlertEvaluator.StoreServerLabel, "2026-08-31T08:15:00Z"));
+
+        /* And the per-server default is untouched — the same section shape WITH FleetLevel off still binds it. */
+        var perServer = new DarlingTriageEndpoint.TriageSection(
+            "Store size", "get_store_metrics",
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["days_back"] = "30" });
+
+        Assert.Equal(
+            "?server=SRV-01&days_back=30",
+            DarlingTriageEndpoint.BuildSectionQuery(perServer, "SRV-01", null));
+    }
+
+    /// <summary>The per-server families must NOT have been swept into the fleet-level path — the reporter
+    /// confirmed deadlocks/blocking/High CPU render fully today, and they have to keep doing so.</summary>
+    [Fact]
+    public void PerServerSections_StayPerServer_SoTheyStillBindTheirServer()
+    {
+        foreach (var metric in new[] { "High CPU", "Deadlocks Detected", "Blocking Detected", "Volume Free Space" })
+        {
+            Assert.All(DarlingTriageEndpoint.SectionsFor(metric), s => Assert.False(s.FleetLevel,
+                $"'{metric}' section '{s.Title}' ({s.Read}) became fleet-level and would stop binding its server."));
+        }
+
+        Assert.All(DarlingTriageEndpoint.DefaultSections, s => Assert.False(s.FleetLevel));
+        Assert.False(DarlingTriageEndpoint.CollectionLogSection.FleetLevel);
+    }
 }
