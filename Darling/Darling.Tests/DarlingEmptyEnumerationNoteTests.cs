@@ -101,11 +101,16 @@ public sealed class DarlingEmptyEnumerationNoteTests
     [Fact]
     public void Worker_Passes_The_Note_To_The_Collection_Log_Write()
     {
-        /* The note reaches error_message through LogCollectionAsync's message parameter, on the SUCCESS
-           write only — the status argument on that same call must stay "SUCCESS". */
+        /* The note reaches error_message through LogCollectionAsync's message parameter, on the write for
+           a run that RETURNED rather than threw. That write's status was a hardcoded "SUCCESS" until #2801,
+           which is how a cycle abandoned by the #2673 wall-clock budget — storing nothing, advancing no
+           watermark — inherited a success status. Pinned as the shared classifier rather than a literal so
+           it cannot quietly go back to one; the note still rides this same write, which is the original
+           claim and is unchanged. */
         var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
-        Assert.Contains("\"SUCCESS\", result.Rows, result.SqlMs, result.StorageMs, result.Note", source);
+        Assert.Contains("status, result.Rows, result.SqlMs, result.StorageMs, result.Note", source);
+        Assert.Contains("EnumeratedCollectorDriver.ClassifyReturnedRun(result.Abandoned)", source);
     }
 
     [Fact]

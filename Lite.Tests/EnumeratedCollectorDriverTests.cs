@@ -461,7 +461,7 @@ public sealed class EnumeratedCollectorDriverTests
     /// logging site by RETURNING rather than throwing, so it took the ordinary path and inherited that
     /// path's hardcoded "SUCCESS" in BOTH hosts -- while having stored nothing and advanced no watermark.
     ///
-    /// <para>Observed on prod-pos-use1-ayr-01: every one of the 36 abandonments in the store's 17-day
+    /// <para>Observed on one heavily-loaded monitored server: every one of the 36 abandonments in the 17-day
     /// retention was status SUCCESS with rows_collected = 0. The harm is not only that a health check
     /// counting non-SUCCESS rows reported zero: DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync
     /// takes last_success from status IN ('SUCCESS', 'SKIPPED'), so a collector abandoning every cycle
