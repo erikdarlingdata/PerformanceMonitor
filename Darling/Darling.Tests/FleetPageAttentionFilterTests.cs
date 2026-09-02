@@ -197,7 +197,8 @@ public sealed class FleetPageAttentionFilterTests
     {
         var app = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
-        /* .grid is the only 260px-track grid in app.css (.stats is 150px), so this pins it specifically. */
+        /* .grid keeps its 1fr max (shared with triage); .server-grid also has a 260px min now, but its max is
+           460px, so this 1fr-specific string still pins .grid alone. */
         Assert.Contains("repeat(auto-fit, minmax(260px, 1fr))", app, StringComparison.Ordinal);
         /* No grid track in app.css uses auto-fill (the .stats comment says the word but not "repeat(auto-fill"). */
         Assert.DoesNotContain("repeat(auto-fill", app, StringComparison.Ordinal);
@@ -206,6 +207,55 @@ public sealed class FleetPageAttentionFilterTests
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "editor.css"));
         Assert.Contains("repeat(auto-fit, minmax(260px, 1fr))", editor, StringComparison.Ordinal);
         Assert.DoesNotContain("repeat(auto-fill", editor, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2772 follow-up: the server-card grids cap their track width so a wide screen adds COLUMNS rather than
+    /// fattening a few cards.
+    ///
+    /// <para>auto-fit stopped the empty-track shrink, but with a `1fr` max the surviving cards then stretched
+    /// the other way — two servers on an ultrawide became two ~1000px cards, a lone server one full-width card,
+    /// all whitespace past what six small stat tiles want. The fleet grids (flat and tag-group, both rendering
+    /// serverCards) now carry a `server-grid` class bounding the track to 260-460px (~the width the issue
+    /// measured as reading "correctly") and centring the leftover space. Scoped to `.server-grid`, NOT `.grid`,
+    /// because `.grid` is shared with the triage page, whose span-2 cards and notice strips want the full row —
+    /// so the class must ride BOTH fleet grids and the cap must live only under it. Verified live at two-card and
+    /// five-card widths; pinned as source (no CSS/DOM runner).</para>
+    /// </summary>
+    [Fact]
+    public void FleetServerCardGrids_CapTrackWidth_AndKeepTheScopeOffTriage()
+    {
+        var app = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
+        Assert.Contains(".server-grid {", app, StringComparison.Ordinal);
+        /* Cap + centre asserted as a contiguous block, so the centring is pinned to .server-grid rather than
+           merely present somewhere (ReadRepoFile has already normalised CRLF to \n). */
+        Assert.Contains(
+            "repeat(auto-fit, minmax(260px, 460px));\n  justify-content: center;",
+            app,
+            StringComparison.Ordinal);
+
+        /* The cap only wins because .server-grid follows .grid in source order (equal specificity, later wins).
+           A refactor moving it above .grid would silently restore 1fr and lose the cap, so pin the order. */
+        Assert.True(
+            app.IndexOf(".grid {", StringComparison.Ordinal) < app.IndexOf(".server-grid {", StringComparison.Ordinal),
+            ".server-grid must follow .grid in app.css or its width cap loses the cascade");
+
+        /* The indented tag-group grid overrides the centring back to start — a centred grouped grid detaches its
+           cards from their left-aligned header (review-caught). It keeps the cap; only justify-content differs. */
+        Assert.Contains(".tag-group-grid { margin: 0.5rem 0 0.2rem; justify-content: start; }", app, StringComparison.Ordinal);
+
+        /* Both server-card grids (flat + tag-group) must carry the class, or the cap misses one view. */
+        var fleet = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "fleet.js"));
+        Assert.Contains("class: \"grid server-grid\"", fleet, StringComparison.Ordinal);
+        Assert.Contains("class: \"grid server-grid tag-group-grid\"", fleet, StringComparison.Ordinal);
+
+        /* Scope guard: the triage grid stays bare .grid (full-width span-2 cards + notice strips), so a global
+           cap must not have leaked onto it — the reason the cap is a class, not a change to .grid. */
+        var triage = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "triage.js"));
+        Assert.DoesNotContain("server-grid", triage, StringComparison.Ordinal);
     }
 
     /// <summary>
