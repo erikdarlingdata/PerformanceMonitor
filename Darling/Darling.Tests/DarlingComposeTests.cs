@@ -2665,6 +2665,22 @@ public sealed class DarlingComposeTests
             hourlyNotice,
             StringComparison.Ordinal);
 
+        /* Singular grammar (#2779-session dogfood): a store that only reaches back ONE day must read "1 day", not
+           "1 days". Measured hourly floor at now-1d, window 2 days back — held rounds to "1" (singular), window
+           to "2" (plural), so both arms are exercised in one notice. */
+        var oneDayCoverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStatsHourlyView] = now.AddDays(-1),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal));
+        var singularNotice = ComposeStoreAvailability.BuildRetentionNotice(
+            "query_stats", hourlyRoute, now.AddDays(-2), now, RollupAvailability.All, oneDayCoverage);
+        Assert.NotNull(singularNotice);
+        Assert.Contains("reaches back about 1 day,", singularNotice, StringComparison.Ordinal);
+        Assert.Contains("2 days back", singularNotice, StringComparison.Ordinal);
+        Assert.DoesNotContain("1 days", singularNotice, StringComparison.Ordinal);
+
         /* Hourly route, window INSIDE the horizon: silent. */
         Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown));
 
