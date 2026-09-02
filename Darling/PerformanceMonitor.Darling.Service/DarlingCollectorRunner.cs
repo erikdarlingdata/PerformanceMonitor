@@ -38,7 +38,20 @@ namespace PerformanceMonitor.Darling.Service;
 /// — a single query, an enumeration that yielded nothing — and null is their correct answer rather than a
 /// value they forgot to supply. The one site that MUST set it is the success return.
 /// </param>
-public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs, string? Note = null, FanoutCost? Fanout = null);
+/// <param name="Abandoned">
+/// True only for a cycle the #2673 whole-server wall-clock budget gave up on: nothing was stored and no
+/// watermark advanced. Carried as its own field rather than inferred from <paramref name="Note"/>, because
+/// matching on the note's TEXT would make the collection_log status depend on a human-readable string that
+/// exists to be reworded — the classification and the wording have to move independently. Defaulted false so
+/// the seven ordinary construction sites are unchanged; the abandonment return is the only site that sets it.
+/// </param>
+public sealed record CollectorRunResult(
+    int Rows,
+    long SqlMs,
+    long StorageMs,
+    string? Note = null,
+    FanoutCost? Fanout = null,
+    bool Abandoned = false);
 
 /// <summary>
 /// Runs a shared collector definition against one monitored server and binary-COPYs the rows
@@ -1211,7 +1224,12 @@ public sealed class DarlingCollectorRunner
                     _logger?.LogWarning(
                         "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
                         definition.Name, server.Config.DisplayName, budgetSeconds);
-                    return new CollectorRunResult(0, sqlSlice.ElapsedMilliseconds, 0, $"wall-clock budget ({budgetSeconds}s) reached; cycle abandoned");
+                    return new CollectorRunResult(
+                        0,
+                        sqlSlice.ElapsedMilliseconds,
+                        0,
+                        EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds),
+                        Abandoned: true);
                 }
 
                 /* Optional best-effort second query on the same connection (server_properties'

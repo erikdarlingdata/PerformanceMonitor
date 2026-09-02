@@ -270,6 +270,58 @@ public static class EnumeratedCollectorDriver
         + "collected and will be re-read next cycle (the watermark did not advance)";
 
     /// <summary>
+    /// The collection_log status for a cycle the #2673 whole-server wall-clock budget abandoned, shared so
+    /// both hosts write the same value.
+    ///
+    /// <para>Its own status rather than any existing one, because each of the alternatives says something
+    /// false. <c>SUCCESS</c> is what it used to be and is the bug: the run shipped nothing and advanced no
+    /// watermark, yet counted as the newest success in <c>ReadCollectionSignalsAsync</c>'s
+    /// <c>status IN ('SUCCESS', 'SKIPPED')</c>, so a collector abandoning every cycle read as perpetually
+    /// fresh, and it landed in the #1837 note channel whose whole claim is that the run SUCCEEDED.
+    /// <c>ERROR</c> would page on a guard doing exactly its job. <c>YIELDED</c> is documented as the 1s
+    /// LOCK_TIMEOUT guard and is read as evidence of lock contention on the TARGET — reusing it would send
+    /// an operator hunting contention that is not there. <c>SKIPPED</c> is a healthy no-op that counts as
+    /// success; this is the opposite, work attempted and paid for that shipped nothing.</para>
+    ///
+    /// <para>Safe to add because every read buckets by explicit list — <c>IN ('ERROR', 'PERMISSIONS')</c>,
+    /// <c>= 'YIELDED'</c>, <c>IN ('SUCCESS', 'SKIPPED')</c> — never by complement, so a new value joins no
+    /// bucket rather than silently joining the wrong one, and <c>collection_log.status</c> carries no CHECK
+    /// constraint, so no migration rung is needed. The self-alert's consecutive-failure fast path is
+    /// server-scoped across every collector, so one collector abandoning among ~40 healthy ones cannot
+    /// empty its success window.</para>
+    /// </summary>
+    public const string AbandonedStatus = "ABANDONED";
+
+    /// <summary>
+    /// What a whole-cycle #2673 abandonment writes to <c>collection_log.error_message</c>, <c>{0}</c> = the
+    /// budget in seconds. Shared for the same reason <see cref="WallClockBudgetErrorFormat"/> is: both hosts
+    /// had their own copy of this literal, so the wording an operator greps for could drift between them.
+    /// </summary>
+    public const string WholeCycleBudgetNoteFormat =
+        "wall-clock budget ({0}s) reached; cycle abandoned";
+
+    /// <summary>
+    /// The statuses the freshness reads count as a collection having happened —
+    /// <c>DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync</c>'s <c>last_success</c> and
+    /// <c>recent_success</c>, and the health reads' <c>last_success_time</c>. Named here so the invariant
+    /// that <see cref="AbandonedStatus"/> is NOT one of them is assertable rather than a property of four
+    /// separately-maintained SQL strings.
+    /// </summary>
+    public static readonly IReadOnlyList<string> FreshnessSuccessStatuses = new[] { "SUCCESS", "SKIPPED" };
+
+    /// <summary>
+    /// How a run that RETURNED (rather than threw) becomes a collection_log status, shared by both hosts so
+    /// the two cannot drift on it — they previously held one hardcoded <c>"SUCCESS"</c> literal each, which
+    /// is precisely how the whole-cycle abandonment inherited a success status in both.
+    /// </summary>
+    /// <param name="abandoned">
+    /// <c>CollectorRunResult.Abandoned</c> / <c>RunTelemetry.Abandoned</c> — set only where the #2673
+    /// whole-server wall-clock budget gave up, having stored nothing and advanced no watermark.
+    /// </param>
+    public static string ClassifyReturnedRun(bool abandoned) =>
+        abandoned ? AbandonedStatus : "SUCCESS";
+
+    /// <summary>
     /// The collection-log note for a per-database cycle where SOME databases failed and the rest
     /// succeeded (#2623). <c>{0}</c> = how many failed, <c>{1}</c> = how many were attempted,
     /// <c>{2}</c> = up to <see cref="MaxNamedFailedDatabases"/> of their names, <c>{3}</c> = the first
@@ -313,6 +365,17 @@ public static class EnumeratedCollectorDriver
 
     /// <summary><see cref="UnreadableFailureSetErrorFormat"/> parsed once (CA1863).</summary>
     private static readonly CompositeFormat s_unreadableFailureSet = CompositeFormat.Parse(UnreadableFailureSetErrorFormat);
+
+    /// <summary><see cref="WholeCycleBudgetNoteFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_wholeCycleBudgetNote = CompositeFormat.Parse(WholeCycleBudgetNoteFormat);
+
+    /// <summary>
+    /// The #2673 whole-cycle abandonment note, rendered. A method rather than the bare format string
+    /// because both HOSTS build this one (the other format constants here are consumed in-file), so
+    /// exposing the string would leave each host to parse it and to pick its own culture.
+    /// </summary>
+    public static string WholeCycleBudgetNote(int budgetSeconds) =>
+        string.Format(CultureInfo.InvariantCulture, s_wholeCycleBudgetNote, budgetSeconds);
 
     /// <summary>
     /// Reads an enumeration query's result: the item list, then the OPTIONAL SECOND RESULT SET of
