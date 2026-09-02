@@ -1609,6 +1609,26 @@ public sealed class DarlingCollectorRunner
     /// uncut, because inside a cut pass "absent from the result" and "excluded by the budget predicate" are
     /// indistinguishable from the client.</para>
     /// </summary>
+    /// <summary>
+    /// Clears this database's plan-fetch backoff (#2776) without disturbing the size it learned.
+    /// </summary>
+    /// <remarks>
+    /// Called from the "nothing to fetch this cycle" early returns, which are the two ways a pass can end
+    /// well without reaching the success line at the bottom of the fetch. Without this a database that
+    /// failed once and then went quiet would keep the count pinned — nothing resets it, because nothing
+    /// runs — and the first pass after the work came back, possibly hours later and against a completely
+    /// different store, would be narrowed for a reason that expired long ago. Only the counter is cleared;
+    /// the learned average is the expensive part and it stays. Advisory, so a lost race is fine: the next
+    /// idle cycle clears it again.
+    /// </remarks>
+    private void ClearPlanFetchBackoff((int ServerId, string Database) carryKey)
+    {
+        if (_observedPlanSize.TryGetValue(carryKey, out var estimate) && estimate.ConsecutiveFetchFailures > 0)
+        {
+            _observedPlanSize.TryUpdate(carryKey, QueryStorePlanXmlState.RecordFetchSuccess(estimate), estimate);
+        }
+    }
+
     private async Task FetchAndStorePlansAsync(
         SqlConnection sqlConnection,
         ServerRuntime server,
@@ -1629,6 +1649,7 @@ public sealed class DarlingCollectorRunner
             {
                 /* The steady quiet cycle: nothing referenced, nothing owed. Zero store reads, zero target
                    queries — the whole point of the reshape. */
+                ClearPlanFetchBackoff(carryKey);
                 return;
             }
 
@@ -1663,7 +1684,11 @@ public sealed class DarlingCollectorRunner
 
             if (missing.Count == 0)
             {
+                /* The probe round-tripped the store and came back with nothing owed — a stronger proof of
+                   store health than the quiet cycle above, since this one actually wrote touch timestamps.
+                   Treat it as the completed pass it is (#2776). */
                 _planFetchCarryover.TryRemove(carryKey, out _);
+                ClearPlanFetchBackoff(carryKey);
                 return;
             }
 
@@ -1855,6 +1880,8 @@ public sealed class DarlingCollectorRunner
             var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
             {
+                /* Nothing referenced, nothing owed — so any carried failure count is stale (#2776). */
+                _textFetchFailures.TryRemove(carryKey, out _);
                 return;
             }
 
@@ -1888,7 +1915,9 @@ public sealed class DarlingCollectorRunner
 
             if (missing.Count == 0)
             {
+                /* Probed the store, nothing owed: the same end-well-without-fetching case as the plan side. */
                 _textFetchCarryover.TryRemove(carryKey, out _);
+                _textFetchFailures.TryRemove(carryKey, out _);
                 return;
             }
 

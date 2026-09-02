@@ -185,6 +185,30 @@ public sealed class QueryStoreFetchBackoffTests
     }
 
     /// <summary>
+    /// An IDLE cycle clears the backoff, and must not cost the database the size it learned. The runner
+    /// clears the counter from its "nothing to fetch this cycle" early returns, because those are the two
+    /// ways a pass ends well without reaching the success line — and a database that failed once and then
+    /// went quiet would otherwise keep the count pinned forever, since nothing runs to reset it. The trap
+    /// this pins is clearing by writing a fresh record: that would also throw away the learned average and
+    /// send the database back to the 160KB seed on the pass right after it recovers.
+    /// </summary>
+    [Fact]
+    public void AnIdleCycleClearsTheBackoffWithoutForgettingTheLearnedSize()
+    {
+        var estimate = new QueryStorePlanXmlState.PlanSizeEstimate(48_000, CatchUpInProgress: false);
+        estimate = QueryStorePlanXmlState.RecordFetchFailure(estimate);
+        estimate = QueryStorePlanXmlState.RecordFetchFailure(estimate);
+
+        Assert.Equal(128, QueryStorePlanXmlState.NarrowForFailures(512, estimate.ConsecutiveFetchFailures));
+
+        /* The idle cycle: nothing owed, so the runner clears the backoff exactly as a completed pass does. */
+        estimate = QueryStorePlanXmlState.RecordFetchSuccess(estimate);
+
+        Assert.Equal(512, QueryStorePlanXmlState.NarrowForFailures(512, estimate.ConsecutiveFetchFailures));
+        Assert.Equal(48_000, estimate.AvgBytes);
+    }
+
+    /// <summary>
     /// <see cref="QueryStorePlanXmlState.Learn"/> must CARRY the failure count through, not reset it.
     /// Learn runs mid-pass, before the store write that is the likeliest thing to throw — so a Learn that
     /// returned a fresh record would clear the backoff on exactly the pass about to fail, and the
