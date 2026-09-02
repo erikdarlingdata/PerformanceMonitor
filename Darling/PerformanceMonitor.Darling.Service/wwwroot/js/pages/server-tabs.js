@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, fmtMs } from "../util.js";
+import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, fmtMs, windowFromHours } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 
@@ -137,7 +137,10 @@ function fanout(read, params, specs) {
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") return mount(body, emptyStrip(res.message));
       try {
-        mount(body, VIZ[spec.viz](res.data, spec));
+        /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
+           hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
+           Blocking/Deadlock Severity, ...) would fall back to its sparse data extent. Inert for the table specs. */
+        mount(body, VIZ[spec.viz](res.data, { ...spec, windowHours: params && params.hours }));
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -198,6 +201,8 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
       ],
       formatValue: (v) => Math.round(v).toLocaleString(),
       unit: "ms/s",
+      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
+      ...windowFromHours(ctx.hours),
     })
   );
 }
@@ -267,6 +272,8 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
         { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
       ],
       formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
+      ...windowFromHours(ctx.hours),
     })
   );
 }
@@ -381,6 +388,9 @@ async function drawQueryTrend(slot, server, ctx, query) {
       ],
       formatValue: (v) => Math.round(v).toLocaleString() + " ms",
       unit: "ms",
+      /* #2802: axis spans the requested window (ctx.hours ending now). When the read is #2353-truncated the data
+         starts later than the window and plots toward the right; the truncation notice above already says so. */
+      ...windowFromHours(ctx.hours),
     }),
     VIZ.table(trend.data, {
       rowsKey: "trend",
@@ -423,7 +433,8 @@ export function fileIoPanel(server, ctx) {
       valueKey: "avg_read_latency_ms",
     });
     if (!series.length) return mount(body, emptyStrip("No file I/O samples in this window."));
-    mount(body, renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms" }));
+    /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. */
+    mount(body, renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(ctx.hours) }));
   })();
   return panel;
 }

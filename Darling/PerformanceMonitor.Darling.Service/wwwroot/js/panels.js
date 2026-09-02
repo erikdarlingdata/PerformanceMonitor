@@ -35,6 +35,7 @@ import {
   applyFormat,
   bandClass,
   sevClass,
+  windowFromHours,
 } from "./util.js";
 import { renderLineChart, SERIES_COLORS } from "./charts.js";
 
@@ -195,7 +196,21 @@ function vizLine(data, desc) {
   const formatValue = desc.format ? (v) => applyFormat(desc.format, v) : (v) => String(Math.round(v));
   /* Percentage charts cap the y-domain at 100 so a 96% reading never rounds the axis up past 100% (B3). */
   const clampMax = desc.clampMax ?? (desc.format === "pct" ? 100 : null);
-  return renderLineChart({ points, xKey: desc.xKey, series, formatValue, clampMax, unit: desc.unit ?? null });
+  /* #2802: span the x-axis over the REQUESTED window ("last N hours" ending now), not the data's own extent, so a
+     sparse trend (blocking/deadlocks) plots at its true position instead of the axis zooming to its burst. The
+     width is the panel's own `hours` param — `windowHours` when a fanout injects it (a fanout spec carries no
+     params), else desc.params.hours. Absent ⇒ null ⇒ the chart keeps its data-extent domain, unchanged. */
+  const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours);
+  return renderLineChart({
+    points,
+    xKey: desc.xKey,
+    series,
+    formatValue,
+    clampMax,
+    unit: desc.unit ?? null,
+    windowStart: win ? win.windowStart : null,
+    windowEnd: win ? win.windowEnd : null,
+  });
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */

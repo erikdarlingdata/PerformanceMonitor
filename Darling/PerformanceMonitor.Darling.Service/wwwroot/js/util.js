@@ -176,13 +176,31 @@ export function relTime(s) {
 }
 
 /** Compact axis label for a Date: HH:MM, widening to include the calendar date when `withDate` is set (the
- *  chart passes true whenever the domain's first and last samples fall on different calendar days). */
+ *  chart passes true whenever the domain's start and end fall on different calendar days). */
 export function axisTime(date, withDate) {
   if (!date) return "";
   if (withDate) {
     return date.toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
   }
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * The x-axis DOMAIN window for a "last N hours" trend chart (#2802): [now - hours, now] as UTC-epoch ms, for
+ * renderLineChart's windowStart/windowEnd. windowEnd is the client's render-time now, NOT the last data point —
+ * the trend reads echo only hours_back (the requested width), never a window-end/as-of timestamp, and the SPA
+ * never sends as_of, so the server anchors the window at ITS request-time now, which the render-time now matches
+ * to within request latency (sub-second to a couple of seconds; negligible at the charts' minute-granularity
+ * tick labels). Anchoring to the last data point instead would slide an old sparse burst to the right edge and
+ * read as current — the #2802 bug. Returns null for a missing/non-positive hours so the chart falls back to its
+ * data-extent domain unchanged (byte-for-byte the pre-#2802 behavior). `Date.now()` is a UTC epoch, directly
+ * comparable to the parseUtc'd data times.
+ */
+export function windowFromHours(hours) {
+  const h = Number(hours);
+  if (!isFinite(h) || h < 1) return null;
+  const windowEnd = Date.now();
+  return { windowStart: windowEnd - h * 3600000, windowEnd };
 }
 
 /* ─────────────────────────── value formatters ─────────────────────────── */
