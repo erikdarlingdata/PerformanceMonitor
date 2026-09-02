@@ -245,6 +245,15 @@ public sealed partial class QueryStoreSliceRepairService
     /// </summary>
     private async Task RecordAttemptAsync(long hotGroups)
     {
+        /* #2748 DECLINES the token: this attempt marker is NOT abandonable, deliberately. Abandon the write
+           and no attempt is recorded, so a store that then aborts natively comes back with its count
+           unchanged — the crash loop this marker exists to end, defeated at the one moment it is needed.
+
+           Stated plainly for #2761, which is about this service holding uncancelable locks: this is a SECOND
+           such site, so that issue now has two, not one. It is the small one — two statements against a table
+           of a handful of rows — where #2761's is the survey's full GROUP BY over the hot store plus a
+           read_parquet of every archive file. Bounded and short is not the same as free, and whoever picks
+           #2761 up should know this exists rather than discover it. */
         using var readLock = _duckDb.AcquireReadLock(CancellationToken.None);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(CancellationToken.None);
