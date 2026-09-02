@@ -346,6 +346,35 @@ public sealed class FleetPageAttentionFilterTests
         return fleet;
     }
 
+    /// <summary>
+    /// #2779: an offline server's Collectors chip reads "Stale", not a green "OK".
+    ///
+    /// <para><c>collector_severity</c> keys only on the FAILING count, and a stale collector is counted as
+    /// neither healthy nor failing (the fleet reader's per-status tally drops STALE), so a server that stopped
+    /// collecting kept a green "Collectors OK · N healthy · 0 failing" while its own header said "no recent
+    /// collection" and its Collection Health tab showed every row STALE. Rather than a new stale-count
+    /// threshold, <c>metricBands</c> reuses the reachability signal already on the card — <c>is_online</c>, the
+    /// same one that bands the card Offline — to read the chip "Stale" in the neutral Unknown tone when the
+    /// server is offline. <c>metricBands</c> is the ONE builder both the fleet cards and the per-server detail
+    /// header render (server.js imports it), so the fix lands on both surfaces at once and cannot diverge.
+    /// Pinned as source (no JS/DOM runner); verified live by calling metricBands with an offline card
+    /// (→ "Stale" / sev-Unknown) and an online one (→ "OK" / sev-Healthy).</para>
+    /// </summary>
+    [Fact]
+    public void OfflineServerCollectorsChip_ReadsStale_NotAGreenOk()
+    {
+        var fleet = FleetJs;
+        Assert.Contains("const collectorsStale = c.is_online === false;", fleet, StringComparison.Ordinal);
+        /* Offline → "Stale" in the neutral tone, not the green OK / N-healthy line. */
+        Assert.Contains("? \"Stale\"", fleet, StringComparison.Ordinal);
+        Assert.Contains("collectorsStale ? \"Unknown\" : c.collector_severity", fleet, StringComparison.Ordinal);
+
+        /* One shared builder: the detail header renders the SAME metricBands, so the fix covers both surfaces. */
+        var server = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js"));
+        Assert.Contains("import { metricBands }", server, StringComparison.Ordinal);
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         var count = 0;
