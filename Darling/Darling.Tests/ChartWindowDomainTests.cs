@@ -56,6 +56,9 @@ public sealed class ChartWindowDomainTests
     private static string EndpointsCs => ReadRepoFile(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
 
+    private static string ComposeSpecCs => ReadRepoFile(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeSpec.cs"));
+
     /// <summary>
     /// The renderer honours an optional window as its x-domain, keeps the data extent SEPARATE (so a sparse
     /// series' burst can never re-scale the axis), and derives the date-in-labels decision from the DOMAIN bounds
@@ -160,6 +163,14 @@ public sealed class ChartWindowDomainTests
            live composed panel's drawn axis matches the server's default window. */
         Assert.Contains("const DEFAULT_COMPOSE_HOURS = 24;", compose, StringComparison.Ordinal);
         Assert.Contains("private const int DefaultComposeHours = 24;", EndpointsCs, StringComparison.Ordinal);
+
+        /* The relative-window ceiling is clamped to the SAME MaxWindowHours the run endpoint applies (Math.Clamp),
+           so a stored/imported range.hours beyond it draws an axis matching the clamped window the server serves,
+           not the raw value (#2802 review). The JS mirror constant is pinned in lockstep with ComposeLimits so it
+           cannot drift, and the clamp is asserted actually applied to the resolved hours. */
+        Assert.Contains("const MAX_COMPOSE_WINDOW_HOURS = 24 * 90;", compose, StringComparison.Ordinal);
+        Assert.Contains("Math.min(rawHours, MAX_COMPOSE_WINDOW_HOURS)", compose, StringComparison.Ordinal);
+        Assert.Contains("public const int MaxWindowHours = 24 * 90;", ComposeSpecCs, StringComparison.Ordinal);
     }
 
     private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")

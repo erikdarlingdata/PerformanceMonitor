@@ -91,6 +91,13 @@ function legacyHoursPin(spec) {
  *  DarlingWebEndpoints.DefaultComposeHours so a live panel's drawn axis matches the server's default window. */
 const DEFAULT_COMPOSE_HOURS = 24;
 
+/** The widest window a composed panel may query (hours) — MIRRORS ComposeLimits.MaxWindowHours (ComposeSpec.cs),
+ *  the ceiling the run endpoint clamps a relative `hours` to (Math.Clamp). resolveChartWindow clamps to the SAME
+ *  value, so a stored/imported `range.hours` (or a legacy per-panel `hours`) beyond it draws an axis no wider than
+ *  the window the server actually serves — the "axis can never disagree with the query window" guarantee held even
+ *  for an out-of-range stored value the UI's own pickers can't produce (#2802 review). 24 * 90 = 90 days. */
+const MAX_COMPOSE_WINDOW_HOURS = 24 * 90;
+
 /**
  * The x-axis DOMAIN window for a composed TIME-SERIES panel (#2802) — the window the rows were actually fetched
  * over, so a sparse series plots at its true position instead of the renderer zooming to the data's own extent
@@ -124,13 +131,19 @@ function resolveChartWindow(panelSpec, scope, zoom) {
     const b = ms(pin.windowEnd);
     if (a != null && b != null && b > a) return { windowStart: a, windowEnd: b };
   }
-  /* 3. Relative: a relative pin's hours, else the live view scope's hours, else the endpoint's own default. */
-  const hours =
+  /* 3. Relative: a relative pin's hours, else the live view scope's hours, else the endpoint's own default —
+        then CLAMPED to the same [1, MaxWindowHours] ceiling the run endpoint applies (Math.Clamp there). The
+        server clamps a relative `hours` unconditionally at run time and serves at most MaxWindowHours of data, so
+        an unclamped axis over a larger stored/imported `range.hours` (or legacy per-panel `hours`) would be wider
+        than the window actually served — the exact axis-vs-window disagreement this fix forbids. In-range values
+        (everything the UI pickers can produce) pass through unchanged. */
+  const rawHours =
     pin && typeof pin.hours === "number" && pin.hours >= 1
       ? pin.hours
       : scope && typeof scope.hours === "number" && scope.hours >= 1
         ? scope.hours
         : DEFAULT_COMPOSE_HOURS;
+  const hours = Math.max(1, Math.min(rawHours, MAX_COMPOSE_WINDOW_HOURS));
   const windowEnd = Date.now();
   return { windowStart: windowEnd - hours * 3600000, windowEnd };
 }
