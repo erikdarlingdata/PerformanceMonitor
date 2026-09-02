@@ -65,7 +65,9 @@
 
 .view-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  /* auto-fit for the same reason as .grid (#2772): with only a few saved views, auto-fill leaves empty 260px
+     tracks and shrinks the cards on a wide viewport instead of letting them fill the row. */
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 1rem;
 }
 .view-card { display: block; cursor: pointer; transition: border-color 0.1s ease, background 0.1s ease; }

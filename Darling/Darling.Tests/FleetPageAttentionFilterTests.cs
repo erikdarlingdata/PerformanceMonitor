@@ -178,6 +178,37 @@ public sealed class FleetPageAttentionFilterTests
     }
 
     /// <summary>
+    /// #2772: the fleet card grid stretches its cards to fill the row, rather than shrinking them as the window
+    /// widens.
+    ///
+    /// <para>`.grid` (the fleet server cards, and the Custom Views list's `.view-cards`) sized its tracks with
+    /// <c>auto-fill</c>, which creates as many 260px tracks as the viewport holds whether or not there are cards
+    /// for them. With fewer cards than tracks, the cards occupied the first tracks and shrank into them while the
+    /// rest sat empty — so a WIDER window made the cards NARROWER, until a card fell below what its inner
+    /// three-tile <c>.stats</c> row needs and the third tile clipped mid-text (<c>BP 4.0 G</c>, <c>0 fai</c>).
+    /// <c>auto-fit</c> collapses the empty tracks so the cards fill the row instead, the fix <c>.stats</c> itself
+    /// already used one screen down for the identical reason. The bug is invisible at fleet scale — every track
+    /// occupied — and obvious at two servers, so a silent revert to <c>auto-fill</c> would pass every eye and
+    /// every large-fleet demo. Pinned as source because the repo carries no CSS/DOM test runner (the FleetJs
+    /// scan pattern above); the fix was also verified live at a two-card width, before and after.</para>
+    /// </summary>
+    [Fact]
+    public void FleetAndViewCardGrids_StretchWithAutoFit_NotAutoFill()
+    {
+        var app = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
+        /* .grid is the only 260px-track grid in app.css (.stats is 150px), so this pins it specifically. */
+        Assert.Contains("repeat(auto-fit, minmax(260px, 1fr))", app, StringComparison.Ordinal);
+        /* No grid track in app.css uses auto-fill (the .stats comment says the word but not "repeat(auto-fill"). */
+        Assert.DoesNotContain("repeat(auto-fill", app, StringComparison.Ordinal);
+
+        var editor = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "editor.css"));
+        Assert.Contains("repeat(auto-fit, minmax(260px, 1fr))", editor, StringComparison.Ordinal);
+        Assert.DoesNotContain("repeat(auto-fill", editor, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// One place turns the filter on and off, and the header checkbox is where its state lives — so the "+N
     /// more" link cannot shrink the grid behind the toggle's back, and either affordance can undo the other.
     /// The toggle is also re-seeded from module state on every render, which is what stops the 60-second
