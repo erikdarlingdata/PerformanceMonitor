@@ -185,6 +185,22 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
 
+    /// <summary>
+    /// The synthetic server label every FLEET-LEVEL store self-alert fires under — Store Disk Pressure,
+    /// Store Runtime Upgrade, Store Job Over Cadence and Compression Job Stuck, plus each one's resolution
+    /// edge. The monitoring store is not a SQL Server instance and is not in the monitored-server registry,
+    /// so this string deliberately resolves to NOTHING: <c>DarlingServerResolver</c> cannot match it, and the
+    /// deliverer's #1236 int.TryParse override no-ops on it exactly like the non-numeric <see cref="DiskKey"/>.
+    ///
+    /// <para>A CONST rather than twelve repeated literals since #2768: the triage endpoint has to recognise
+    /// this exact label to know an alert is fleet-level and serve store reads instead of per-server ones.
+    /// While it was a bare literal that page ran <c>get_server_summary</c> / <c>get_collection_health</c> /
+    /// <c>get_collection_log</c> against an unresolvable server and rendered three resolver errors on every
+    /// store alert. Renaming it must stay in step with <c>DarlingTriageEndpoint.IsFleetLevelStoreServer</c>,
+    /// which is why both sides now read one symbol.</para>
+    /// </summary>
+    internal const string StoreServerLabel = "Monitor Store";
+
     /* Compression-job self-heal edge state (#1581). FLEET-level like disk pressure (one shared store), but
        MULTI-keyed by job_id (a store has many compression policy jobs). The state is the re-arm-once/escalate
        machine: ReArmed = detected + re-armed once this episode (a later still-stuck reading is a RE-HANG);
@@ -1342,7 +1358,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _lastAlertedDiskPressurePercent[DiskKey] = percentFree;
                 var storeText = storeSizeBytes is long size ? $" The store currently holds {FormatGb(size)}." : "";
                 await FireAsync(
-                    DiskKey, "Monitor Store", "Store Disk Pressure", reason,
+                    DiskKey, StoreServerLabel, "Store Disk Pressure", reason,
                     $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
                     detail: reason + storeText + " When the store volume fills, collection and every write stop " +
                         "for the WHOLE fleet, and a headless service has no dashboard to warn you. Free space on the " +
@@ -1365,7 +1381,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _lastAlertedDiskPressurePercent.TryRemove(DiskKey, out _);
             await RecordResolutionAsync(new AlertResolution(
-                DiskKey, "Monitor Store", "Store Disk Pressure",
+                DiskKey, StoreServerLabel, "Store Disk Pressure",
                 "Store Disk Pressure Resolved", "Monitor store volume free space recovered"), cancellationToken);
         }
     }
@@ -1441,7 +1457,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         : " The pre-upgrade data directory is kept as a rollback copy for the next couple of service starts, then deleted automatically.";
 
                 await FireAsync(
-                    StoreUpgradeKey, "Monitor Store", StoreUpgradeMetric,
+                    StoreUpgradeKey, StoreServerLabel, StoreUpgradeMetric,
                     degraded ? $"PostgreSQL {report.ToMajor} (cleanup incomplete)" : $"PostgreSQL {report.ToMajor}",
                     $"PostgreSQL {report.FromMajor}",
                     detail: $"The monitor's own store was upgraded in place from PostgreSQL {report.FromMajor} to {report.ToMajor}.{timescale} " +
@@ -1466,7 +1482,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
 
             await FireAsync(
-                StoreUpgradeKey, "Monitor Store", StoreUpgradeMetric,
+                StoreUpgradeKey, StoreServerLabel, StoreUpgradeMetric,
                 $"PostgreSQL {report.FromMajor} (upgrade failed)", $"PostgreSQL {report.ToMajor}",
                 detail: $"The monitor's own store FAILED to upgrade from PostgreSQL {report.FromMajor} to {report.ToMajor}, at step '{report.FailedStep}': {report.FailureMessage} " +
                     $"The store reverted to PostgreSQL {report.FromMajor} and is collecting normally — no data was lost, because the pre-upgrade data directory is never modified until the upgrade succeeds. " +
@@ -1580,7 +1596,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastJobOverCadenceAlert[key] = now;
                     bool critical = percent >= 100.0;
                     await FireAsync(
-                        JobCadenceKeyPrefix + key, "Monitor Store", JobCadenceMetric,
+                        JobCadenceKeyPrefix + key, StoreServerLabel, JobCadenceMetric,
                         $"{percent:F0}% of schedule interval", $"{warnPercent}%",
                         detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
                             $"{job.ScheduleIntervalMs / 1000.0:F0}s schedule interval ({percent:F0}%). " +
@@ -1603,7 +1619,7 @@ internal sealed class DarlingSelfAlertEvaluator
             else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
             {
                 await RecordResolutionAsync(new AlertResolution(
-                    JobCadenceKeyPrefix + key, "Monitor Store", JobCadenceMetric,
+                    JobCadenceKeyPrefix + key, StoreServerLabel, JobCadenceMetric,
                     "Store Job Cadence Recovered",
                     $"Monitor Store: {label} is back under {warnPercent}% of its schedule interval"), cancellationToken);
             }
@@ -1659,7 +1675,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _compressionJobState[key] = CompressionJobHealth.ReArmed;
                     await FireAsync(
-                        CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} was stuck ({job.Reason}) and has been automatically re-armed " +
                             "(alter_job next_start => now). A stuck compression policy halts the store's archival tier, so " +
@@ -1681,7 +1697,7 @@ internal sealed class DarlingSelfAlertEvaluator
                        never loop alter_job on it, and page: a human must re-arm it (or grant ownership). */
                     _compressionJobState[key] = CompressionJobHealth.Escalated;
                     await FireAsync(
-                        CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it — " +
                             "alter_job failed, usually because the store login does not own the job. Compression is halted, " +
@@ -1700,7 +1716,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _compressionJobState[key] = CompressionJobHealth.Escalated;
                 _lastCompressionJobAlert[key] = now;
                 await FireAsync(
-                    CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                    CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle — it " +
                         "re-hung, so the service has STOPPED auto-re-arming it. This is a product-bug signal: the compression " +
@@ -1718,7 +1734,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _lastCompressionJobAlert[key] = now;
                     await FireAsync(
-                        CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation — still not compressing. " +
                             "Manual intervention is required; the service will not auto-re-arm it.",
@@ -1743,7 +1759,7 @@ internal sealed class DarlingSelfAlertEvaluator
             _compressionJobState.TryRemove(key, out _);
             _lastCompressionJobAlert.TryRemove(key, out _);
             await RecordResolutionAsync(new AlertResolution(
-                CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                 "Compression Job Recovered",
                 $"TimescaleDB compression job {key} is running on schedule again"), cancellationToken);
         }
