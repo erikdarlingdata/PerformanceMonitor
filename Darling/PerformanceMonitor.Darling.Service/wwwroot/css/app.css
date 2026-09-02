@@ -141,7 +141,11 @@ a:hover { text-decoration: underline; }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  /* auto-FIT, not auto-fill (#2772): with fewer cards than the viewport has 260px tracks, auto-fill keeps the
+     empty tracks and the cards shrink into their track — so a WIDER window made the cards NARROWER until the
+     inner .stats tiles clipped. auto-fit collapses the empty tracks so the cards stretch to fill the row, the
+     same fix .stats already uses one screen down. */
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 1rem;
 }
 
