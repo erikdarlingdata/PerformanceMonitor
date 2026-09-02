@@ -411,30 +411,55 @@ public sealed class ServerPageTabsTests
     }
 
     /// <summary>
-    /// Dogfood web-polish pins (#2780, #2781).
+    /// Dogfood web-polish pins (#2780, #2781), including their PARITY: each fix touches every surface that shares
+    /// the behaviour, not just the one where it was spotted (a divergence here is exactly the drift these pins
+    /// guard).
     ///
-    /// <para>#2780: a read window wider than the read can serve comes back as a raw "hours_back value 'N' exceeds
-    /// maximum of M hours" validation string. The panel loader turns that specific error into a NOTICE naming the
-    /// window the view keeps, instead of mounting the API's developer wording as a red error — so picking "last 30
-    /// days" on a 7-day read reads as a range hint, not a fault.</para>
+    /// <para>#2780: the "window too wide" degrade lives in ONE shared helper (<c>readErrorStrip</c>) that both the
+    /// descriptor loader (panels.js) and the hand-built server-tab composites route read errors through — so a tab
+    /// cannot show a friendly notice on one panel and the raw API string on its neighbour. The JS regex is pinned
+    /// to the ACTUAL backend message (<c>McpHelpers.ValidateHoursBack</c>): the cross-language seam that would
+    /// otherwise break silently if either side were reworded, which the earlier literal-only pin missed.</para>
     ///
-    /// <para>#2781: the Alert History status cell drops the "tray" channel (the Lite/Dashboard system-tray toast,
-    /// which the headless web surface has no equivalent for) rather than appending a meaningless "· tray"; a real
-    /// channel still renders. Pinned as source (no JS/DOM runner); both were verified live.</para>
+    /// <para>#2781: the surface-less "tray" channel is dropped on BOTH surfaces that render the alert-history
+    /// status cell — the Alert History page and the triage deep-link page it mirrors. Pinned as source (no JS/DOM
+    /// runner); all verified live.</para>
     /// </summary>
     [Fact]
     public void WebDashboard_DegradesOverRangeGracefully_AndDropsTheTrayChannel()
     {
+        /* One shared helper carries the over-range degrade. */
+        var util = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js"));
+        Assert.Contains("export function readErrorStrip(message)", util, StringComparison.Ordinal);
+        Assert.Contains("exceeds maximum of (\\d+) hours", util, StringComparison.Ordinal);
+        Assert.Contains("noticeStrip(", util, StringComparison.Ordinal);
+
+        /* The JS regex must match the message the backend actually emits — pin the seam, not just the literal. */
+        var backendMessage = PerformanceMonitor.Common.McpHelpers.ValidateHoursBack(
+            PerformanceMonitor.Common.McpHelpers.MaxHoursBack + 1);
+        Assert.NotNull(backendMessage);
+        Assert.Matches("exceeds maximum of (\\d+) hours", backendMessage!);
+
+        /* Parity: both the loader and the composites route read errors through the helper — no read-error site
+           left on the raw path, or the tab mixes friendly notices with raw API strings. */
         var panels = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
-        /* The over-range error is matched and re-rendered as a notice, not mounted as the raw errorStrip string. */
-        Assert.Contains("exceeds maximum of (\\d+) hours", panels, StringComparison.Ordinal);
-        Assert.Contains("noticeStrip(", panels, StringComparison.Ordinal);
+        Assert.Contains("readErrorStrip(res.message)", panels, StringComparison.Ordinal);
+        var serverTabs = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        Assert.Contains("readErrorStrip(res.message)", serverTabs, StringComparison.Ordinal);
+        Assert.Contains("readErrorStrip(trend.message)", serverTabs, StringComparison.Ordinal);
+        Assert.DoesNotContain("errorStrip(res.message)", serverTabs, StringComparison.Ordinal);
+        Assert.DoesNotContain("errorStrip(trend.message)", serverTabs, StringComparison.Ordinal);
 
+        /* #2781 on BOTH surfaces that render the status cell. */
         var alerts = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "alerts.js"));
-        /* The channel span renders only when the channel is not the surface-less "tray". */
         Assert.Contains("a.notification_type !== \"tray\"", alerts, StringComparison.Ordinal);
+        var triage = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "triage.js"));
+        Assert.Contains("a.notification_type !== \"tray\"", triage, StringComparison.Ordinal);
     }
 
     /// <summary>

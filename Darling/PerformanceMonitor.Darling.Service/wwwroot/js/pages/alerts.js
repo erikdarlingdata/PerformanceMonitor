@@ -41,7 +41,7 @@ function triageCell(a) {
 /* Sent + Muted + Delivery Error collapse into one glyph+text status cell (B2). The channel is appended only
    when it means something on THIS surface: the store records "tray" (the Lite/Dashboard system-tray toast),
    which the headless web dashboard has no equivalent for, so a bare "tray" is dropped rather than shown as a
-   meaningless delivery channel (#2781). A real channel (smtp/teams/slack/...) still renders. */
+   meaningless delivery channel (#2781). A real channel (email / webhook / email+webhook) still renders. */
 function statusCell(a) {
   let glyph, label, sev;
   if (a.muted) {
