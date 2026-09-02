@@ -190,7 +190,17 @@ public sealed partial class QueryStoreSliceRepairService
     /// Attempts recorded so far. Zero when the table does not exist, which is every store that has not yet run
     /// a build carrying #2748's fix.
     /// </summary>
-    internal async Task<long> AttemptCountAsync(CancellationToken cancellationToken = default)
+    internal async Task<long> AttemptCountAsync(CancellationToken cancellationToken = default) =>
+        (await ReadAttemptsAsync(cancellationToken)).Count;
+
+    /// <summary>
+    /// The attempt count AND the shape the last attempt recorded, in ONE acquisition.
+    ///
+    /// <para>The shape is carried here so the capped path never has to survey. Reading it alongside the count
+    /// rather than in its own method is deliberate: a separate call would be a second uncancelable-lock site
+    /// for #2761 to weigh, for two numbers that are written together and read together.</para>
+    /// </summary>
+    internal async Task<AttemptState> ReadAttemptsAsync(CancellationToken cancellationToken = default)
     {
         using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
@@ -201,13 +211,23 @@ public sealed partial class QueryStoreSliceRepairService
             $"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'main' AND table_name = '{AttemptTable}'";
         if (Convert.ToInt64(await exists.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture) == 0)
         {
-            return 0;
+            return new AttemptState(0, 0, 0);
         }
 
         using var rows = connection.CreateCommand();
-        rows.CommandText = $"SELECT COUNT(*) FROM {AttemptTable}";
-        return Convert.ToInt64(await rows.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture);
+        rows.CommandText =
+            $"SELECT COUNT(*), COALESCE(MAX(hot_groups), 0), COALESCE(MAX(archive_files), 0) FROM {AttemptTable}";
+        using var reader = await rows.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new AttemptState(0, 0, 0);
+        }
+
+        return new AttemptState(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
     }
+
+    /// <summary>What the attempt table knows: how many attempts, and how much work the last one saw.</summary>
+    internal readonly record struct AttemptState(long Count, long HotGroups, long ArchiveFiles);
 
     /// <summary>
     /// Records an attempt marker and COMMITS it before the caller does anything dangerous.
@@ -243,7 +263,7 @@ public sealed partial class QueryStoreSliceRepairService
     /// startup precisely so the UI stays interactive and reading. Taking the write lock for two rows of
     /// bookkeeping would stall those readers for no durability gain.</para>
     /// </summary>
-    private async Task RecordAttemptAsync(long hotGroups)
+    private async Task RecordAttemptAsync(long hotGroups, long archiveFiles)
     {
         /* #2748 DECLINES the token: this attempt marker is NOT abandonable, deliberately. Abandon the write
            and no attempt is recorded, so a store that then aborts natively comes back with its count
@@ -260,12 +280,12 @@ public sealed partial class QueryStoreSliceRepairService
 
         using var create = connection.CreateCommand();
         create.CommandText =
-            $"CREATE TABLE IF NOT EXISTS {AttemptTable} (attempted_at TIMESTAMP NOT NULL, hot_groups BIGINT NOT NULL)";
+            $"CREATE TABLE IF NOT EXISTS {AttemptTable} (attempted_at TIMESTAMP NOT NULL, hot_groups BIGINT NOT NULL, archive_files BIGINT NOT NULL)";
         await create.ExecuteNonQueryAsync(CancellationToken.None);
 
         using var insert = connection.CreateCommand();
         insert.CommandText =
-            $"INSERT INTO {AttemptTable} (attempted_at, hot_groups) VALUES (CURRENT_TIMESTAMP, {hotGroups})";
+            $"INSERT INTO {AttemptTable} (attempted_at, hot_groups, archive_files) VALUES (CURRENT_TIMESTAMP, {hotGroups}, {archiveFiles})";
         await insert.ExecuteNonQueryAsync(CancellationToken.None);
     }
 
@@ -293,6 +313,35 @@ public sealed partial class QueryStoreSliceRepairService
                 return;
             }
 
+            /* #2748 review: the cap is checked BEFORE the survey, and that ordering is the point.
+               SurveyAsync is the expensive thing this service has — a full GROUP BY over the hot table plus a
+               read_parquet of every monthly archive file. Checking the cap after it would mean a permanently
+               capped store paid that cost on every launch forever, purely to produce the message below, which
+               flatly contradicts the "the app starts and collects normally" this fix promises. Reading the
+               attempt table is a COUNT over a handful of rows, so a capped store now short-circuits on
+               something cheap. The shape quoted in the message is what the last attempt RECORDED rather than
+               what a fresh survey would find, which is the same number that survey would have cost us. */
+            var attempts = await ReadAttemptsAsync(cancellationToken);
+            if (attempts.Count >= MaxStartupAttempts)
+            {
+                /* Report BOTH halves of the outstanding work. Naming only the hot groups would read as "0 left
+                   undone" on a store whose hot table is already clean but whose archive files are not — the
+                   repair reaches both, and the archive half is the half a partial pass leaves behind, which is
+                   exactly the state a capped store is most likely to be in. */
+                _logger?.LogError(
+                    "#1912 Query Store repair SKIPPED: {Attempts} previous attempt(s) on this store did not complete, " +
+                    "so it will not be retried automatically — see issue #2748. The app starts normally and collects " +
+                    "normally; what is left undone is the one-time collapse of {HotGroups} pre-#1907 split interval(s) " +
+                    "in the hot store and {ArchiveFiles} archive file(s) as of the last attempt, and #1907's read-side " +
+                    "tie-break still resolves those rows deterministically. To retry after upgrading, drop the " +
+                    "'{Table}' table from the store.",
+                    attempts.Count,
+                    attempts.HotGroups,
+                    attempts.ArchiveFiles,
+                    AttemptTable);
+                return;
+            }
+
             var survey = await SurveyAsync(cancellationToken);
             if (!survey.HasWork && survey.Unreadable.Count == 0)
             {
@@ -315,41 +364,16 @@ public sealed partial class QueryStoreSliceRepairService
                 return;
             }
 
-            /* #2748: the attempt is recorded and committed BEFORE the repair runs, and a store that has
-               already burned its attempts stops here. A native crash inside duckdb.dll takes the process down
-               without unwinding, so the catch below never runs and nothing else in this method gets the chance
-               to record anything — which is how a single bad store turned into an app that could never start
-               again. This gate is deliberately the LAST thing before the dangerous work and the first thing
-               checked on the way in. */
-            var attempts = await AttemptCountAsync(cancellationToken);
-            if (attempts >= MaxStartupAttempts)
-            {
-                /* Report BOTH halves of the outstanding work. Naming only the hot groups would read as "0 left
-                   undone" on a store whose hot table is already clean but whose archive files are not — the
-                   repair reaches both, and the archive half is the half that can be left behind by a partial
-                   pass, which is exactly the state a skipped store is most likely to be in. */
-                _logger?.LogError(
-                    "#1912 Query Store repair SKIPPED: {Attempts} previous attempt(s) on this store did not complete, " +
-                    "so it will not be retried automatically — see issue #2748. The app starts normally and collects " +
-                    "normally; what is left undone is the one-time collapse of {HotGroups} pre-#1907 split interval(s) " +
-                    "in the hot store and {ArchiveFiles} archive file(s), and #1907's read-side tie-break still " +
-                    "resolves those rows deterministically. To retry after upgrading, drop the '{Table}' table " +
-                    "from the store.",
-                    attempts,
-                    survey.HotGroups,
-                    survey.Archive.Count(a => a.Groups > 0),
-                    AttemptTable);
-                return;
-            }
+            var archiveFiles = survey.Archive.Count(a => a.Groups > 0);
 
             _logger?.LogInformation(
                 "#1912 one-time Query Store repair starting (attempt {Attempt} of {Max}): {HotGroups} split interval(s) in the hot store, {ArchiveFiles} archive file(s) affected",
-                attempts + 1,
+                attempts.Count + 1,
                 MaxStartupAttempts,
                 survey.HotGroups,
-                survey.Archive.Count(a => a.Groups > 0));
+                archiveFiles);
 
-            await RecordAttemptAsync(survey.HotGroups);
+            await RecordAttemptAsync(survey.HotGroups, archiveFiles);
 
             var result = await RepairAsync(
                 new Progress<string>(message => _logger?.LogInformation("#1912 {Message}", message)),
@@ -751,8 +775,6 @@ COPY (
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
     }
-
-    /// <summary>The full projection: key columns as-is, everything else combined, in the source's own order.</summary>
 
     private static async Task<IReadOnlyList<string>> ColumnsOfTableAsync(
         DuckDBConnection connection, string table, CancellationToken cancellationToken)

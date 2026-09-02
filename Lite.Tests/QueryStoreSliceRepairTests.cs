@@ -352,6 +352,14 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         /* The next launch must NOT add another attempt: it is gated off before the dangerous work. */
         await service.RepairOnStartupAsync();
         Assert.Equal((long)QueryStoreSliceRepairService.MaxStartupAttempts, await service.AttemptCountAsync());
+
+        /* And a capped launch must not SURVEY either. The survey is the expensive thing this service has, so a
+           capped store paying it on every launch forever would contradict the "app starts and collects
+           normally" this fix promises. What makes that possible is here: the recorded shape carries BOTH
+           halves, so the skip message can still name the outstanding work without a fresh survey to find it. */
+        var recorded = await service.ReadAttemptsAsync();
+        Assert.Equal((long)QueryStoreSliceRepairService.MaxStartupAttempts, recorded.Count);
+        Assert.True(recorded.ArchiveFiles > 0, "the recorded shape must carry the archive half, not just the hot half");
     }
 
     /// <summary>A store with nothing to repair records the marker anyway, so the survey stops running forever.</summary>

@@ -10,9 +10,14 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
+  <!-- No VersionOverride, deliberately, and unlike tools/CompactionRepro. That tool pins 1.5.3 because it
+       must keep reproducing against its ORIGINAL DuckDB; this one must track whatever Lite ships, since the
+       whole point is exercising the repair against the version and memory budget users actually run. An
+       override equal to the central version would look harmless and silently stop tracking on the next
+       DuckDB bump. -->
   <ItemGroup>
-    <PackageReference Include="DuckDB.NET.Data" VersionOverride="1.5.5" />
-    <PackageReference Include="DuckDB.NET.Bindings.Full" VersionOverride="1.5.5" />
+    <PackageReference Include="DuckDB.NET.Data" />
+    <PackageReference Include="DuckDB.NET.Bindings.Full" />
   </ItemGroup>
 
   <!-- Link the real collapse logic so the reproducer exercises the EXACT expressions production

@@ -109,6 +109,7 @@ public sealed partial class QueryStoreSliceRepairService
         return $"ANY_VALUE({column})";
     }
 
+    /// <summary>The full projection: key columns as-is, everything else combined, in the source's own order.</summary>
     private static string BuildProjection(IReadOnlyList<string> columns, IReadOnlyList<string> key)
     {
         var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
