@@ -298,6 +298,16 @@ public sealed class QueryStoreSliceRepairService
     /// <para><see cref="CancellationToken.None"/> throughout, for the reason the completion marker uses it: this
     /// is bookkeeping whose entire value is that it is already durable when the next thing goes wrong. A write
     /// abandoned here buys a microsecond and costs the protection.</para>
+    ///
+    /// <para><b>The commit is the durability, not a CHECKPOINT.</b> This wants to survive the process being
+    /// killed mid-repair without unwinding, and a committed DuckDB transaction already does: the WAL is written
+    /// and flushed at commit, and it replays when the store is next opened. The failure being defended against
+    /// is a native <c>abort()</c> — the process dies, the machine does not — so anything the OS has taken is
+    /// safe. An explicit CHECKPOINT would buy nothing here and cost something real: CHECKPOINT is MAINTENANCE
+    /// under this store's locking model (it reorganizes the database file, and a reader mid-query gets "Reached
+    /// the end of the file"), so it belongs under the WRITE lock — and this service is fired un-awaited at
+    /// startup precisely so the UI stays interactive and reading. Taking the write lock for two rows of
+    /// bookkeeping would stall those readers for no durability gain.</para>
     /// </summary>
     private async Task RecordAttemptAsync(long hotGroups)
     {
@@ -314,12 +324,6 @@ public sealed class QueryStoreSliceRepairService
         insert.CommandText =
             $"INSERT INTO {AttemptTable} (attempted_at, hot_groups) VALUES (CURRENT_TIMESTAMP, {hotGroups})";
         await insert.ExecuteNonQueryAsync(CancellationToken.None);
-
-        /* CHECKPOINT so the row is in the database FILE, not just this connection's WAL view. The whole point
-           is to survive a process that is about to be killed without unwinding. */
-        using var checkpoint = connection.CreateCommand();
-        checkpoint.CommandText = "CHECKPOINT";
-        await checkpoint.ExecuteNonQueryAsync(CancellationToken.None);
     }
 
     /// <summary>
@@ -368,7 +372,7 @@ public sealed class QueryStoreSliceRepairService
                 return;
             }
 
-            /* #2748: the attempt is recorded and CHECKPOINTed BEFORE the repair runs, and a store that has
+            /* #2748: the attempt is recorded and committed BEFORE the repair runs, and a store that has
                already burned its attempts stops here. A native crash inside duckdb.dll takes the process down
                without unwinding, so the catch below never runs and nothing else in this method gets the chance
                to record anything — which is how a single bad store turned into an app that could never start
