@@ -540,7 +540,8 @@ export function metricBands(c) {
      failing), so it stays green while the server is offline. Rather than invent a stale-count threshold, reuse
      the reachability signal the card already carries (is_online, the same one that bands the card Offline and
      titles the header "no recent collection"): when the server is offline the chip reads "Stale" in the neutral
-     Unknown tone — the Collection Health tab's own word for these rows — instead of a green "OK · N healthy". */
+     Unknown tone instead of a green "OK · N healthy" (the "no recent collection" detail carries the specifics,
+     and "Stale" is the word the Collection Health tab lands on for these rows once its own floor is crossed). */
   const collectorsStale = c.is_online === false;
   const collectorsValue = collectorsStale
     ? "Stale"

@@ -369,10 +369,12 @@ public sealed class FleetPageAttentionFilterTests
         Assert.Contains("? \"Stale\"", fleet, StringComparison.Ordinal);
         Assert.Contains("collectorsStale ? \"Unknown\" : c.collector_severity", fleet, StringComparison.Ordinal);
 
-        /* One shared builder: the detail header renders the SAME metricBands, so the fix covers both surfaces. */
+        /* One shared builder: the detail header RENDERS the same metricBands (the load-bearing call, not just
+           the import), so the fix covers both surfaces and they cannot drift. */
         var server = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js"));
         Assert.Contains("import { metricBands }", server, StringComparison.Ordinal);
+        Assert.Contains("metricBands(card)", server, StringComparison.Ordinal);
     }
 
     private static int CountOccurrences(string haystack, string needle)
