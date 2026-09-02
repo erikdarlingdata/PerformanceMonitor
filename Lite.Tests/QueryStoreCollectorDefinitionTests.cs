@@ -412,6 +412,29 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     /// <summary>
+    /// #2776: the per-command budget is 500 s and it is SET, not inherited. Pinned because both defaults it
+    /// replaces were invisible — the store side fell through to Npgsql's 30 s and the SQL side to the runner's
+    /// 60 s, and neither number appeared anywhere a reader would look. The value is an empirical over-shoot
+    /// pending measurement, so this exists to make a silent revert to "no override" fail loudly, NOT to assert
+    /// that 500 is the right answer.
+    /// </summary>
+    [Fact]
+    public void CommandTimeoutOverride_IsSetExplicitly_AndFitsInsideTheWallClockBudget()
+    {
+        var over = QueryStoreCollector.Instance.CommandTimeoutSecondsOverride;
+
+        Assert.NotNull(over);
+        Assert.Equal(500, over!.Value);
+
+        /* The wall-clock bound of last resort must stay OUTSIDE the per-command one, or the command timeout
+           is unreachable and the budget it sits under can never fire. */
+        Assert.True(
+            QueryStoreCollector.PerDatabaseWallClockBudget.TotalSeconds > over.Value,
+            $"per-command {over.Value}s must sit under PerDatabaseWallClockBudget "
+            + $"{QueryStoreCollector.PerDatabaseWallClockBudget.TotalSeconds}s");
+    }
+
+    /// <summary>
     /// Replica attribution turns on at major 16 — sys.query_store_replicas and
     /// sys.query_store_runtime_stats.replica_group_id both exist from SQL 2022, verified live against
     /// 16.0.4255.1 (the docs' "2025+" claim for the view is wrong), so the gate is >= 16, not >= 17.

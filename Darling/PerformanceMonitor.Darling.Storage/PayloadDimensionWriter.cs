@@ -35,6 +35,12 @@ public static class PayloadDimensionWriter
     /// rather than 400. Callers pass the batch's own collection time as the last-seen watermark so
     /// it matches the fact rows exactly (and so a backfilled/replayed batch cannot stamp content as
     /// fresher than the rows referencing it).
+    ///
+    /// <para><paramref name="commandTimeoutSeconds"/> is OPTIONAL and defaults to null, which leaves the
+    /// command on Npgsql's own default exactly as before — this method is shared with the general
+    /// per-collector payload flush, whose observed store phases run 1.8–11.4s and which #2776 has no
+    /// evidence against. Only the Query Store plan-fetch caller opts in, because that is the path where a
+    /// 12 MB flush plus map upsert in one transaction was being cancelled at 30s.</para>
     /// </summary>
     public static async Task FlushAsync(
         NpgsqlConnection connection,
@@ -42,7 +48,8 @@ public static class PayloadDimensionWriter
         PayloadDimensionBatch batch,
         DateTime collectionTime,
         CancellationToken cancellationToken,
-        bool compressPlanContent = true)
+        bool compressPlanContent = true,
+        int? commandTimeoutSeconds = null)
     {
         if (connection is null)
         {
@@ -80,6 +87,11 @@ public static class PayloadDimensionWriter
                 && string.Equals(dimTable, PayloadDimensions.CompressedContentDimTable, StringComparison.Ordinal);
 
             await using var command = new NpgsqlCommand(PayloadDimensions.UpsertSql(dimTable, compress), connection, transaction);
+            if (commandTimeoutSeconds is int timeout)
+            {
+                command.CommandTimeout = timeout;
+            }
+
             command.Parameters.Add(new NpgsqlParameter
             {
                 NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,

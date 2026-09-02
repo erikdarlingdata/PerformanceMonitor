@@ -60,6 +60,7 @@ public static class QueryStorePlanWriter
         string databaseName,
         IReadOnlyList<FetchedPlan> plans,
         DateTime collectionTimeUtc,
+        int commandTimeoutSeconds,
         CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -111,10 +112,16 @@ public static class QueryStorePlanWriter
 
         using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        /* Dimension FIRST — see the class comment on why the torn-write side matters. */
-        await PayloadDimensionWriter.FlushAsync(connection, transaction, batch, stamp, cancellationToken);
+        /* #2776: THIS transaction is the one the 30s Npgsql default was cutting. The dimension flush below
+           writes up to the whole per-pass plan-XML budget (12 MB) and the map upsert follows it, both inside
+           this single transaction, on a store concurrently serving a 4-wide sweep — the longest store-side
+           operation the collector performs. Both commands now carry the caller's explicit budget instead of
+           inheriting a default nobody chose. */
 
-        using (var upsert = new NpgsqlCommand(QueryStorePlanMap.UpsertSql, connection, transaction))
+        /* Dimension FIRST — see the class comment on why the torn-write side matters. */
+        await PayloadDimensionWriter.FlushAsync(connection, transaction, batch, stamp, cancellationToken, commandTimeoutSeconds: commandTimeoutSeconds);
+
+        using (var upsert = new NpgsqlCommand(QueryStorePlanMap.UpsertSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
         {
             upsert.Parameters.AddWithValue(mapServerIds.ToArray());
             upsert.Parameters.AddWithValue(mapDatabases.ToArray());

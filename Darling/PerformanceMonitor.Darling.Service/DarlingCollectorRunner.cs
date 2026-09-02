@@ -1667,7 +1667,7 @@ public sealed class DarlingCollectorRunner
             if (references.Count > 0)
             {
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
-                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, cancellationToken);
+                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
                 {
                     if (!verdict.Resolved || verdict.HashStale)
@@ -1777,7 +1777,7 @@ public sealed class DarlingCollectorRunner
             if (fetched.Count > 0)
             {
                 var landed = await QueryStorePlanWriter.WriteAsync(
-                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
+                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var id in landed)
                 {
                     missing.Remove(id);
@@ -1899,7 +1899,7 @@ public sealed class DarlingCollectorRunner
             if (references.Count > 0)
             {
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
-                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, cancellationToken);
+                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
                 {
                     if (!verdict.Resolved || verdict.HashStale)
@@ -1988,7 +1988,7 @@ public sealed class DarlingCollectorRunner
             if (fetched.Count > 0)
             {
                 var landed = await QueryStoreTextWriter.WriteAsync(
-                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
+                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var id in landed)
                 {
                     missing.Remove(id);
