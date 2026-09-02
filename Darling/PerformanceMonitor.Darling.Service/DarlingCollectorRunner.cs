@@ -1468,6 +1468,16 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// The server-scoped watermark SQL, exposed so a pin can assert the SHIPPED string rather than a
+    /// retyped copy of it. <paramref name="bounded"/> adds the <c>collection_time</c> predicate — the
+    /// partitioning column, and the only thing here that prunes a chunk.
+    /// </summary>
+    internal static string BuildServerWatermarkSql(string tableName, string columnName, bool bounded) =>
+        bounded
+            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
+            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+
+    /// <summary>
     /// Gets the most recent value of a timestamp column from Postgres for incremental collection.
     /// Returns null on first run or if the query fails (caller uses a fallback window) — the
     /// Postgres twin of Lite's GetLastCollectedTimeAsync.
@@ -1489,16 +1499,6 @@ public sealed class DarlingCollectorRunner
     /// query_store's 60-minute window instead of the ~5-minute incremental one, re-collected what it
     /// already had, and grew the table that made the next read slower.</para>
     /// </summary>
-    /// <summary>
-    /// The server-scoped watermark SQL, exposed so a pin can assert the SHIPPED string rather than a
-    /// retyped copy of it. <paramref name="bounded"/> adds the <c>collection_time</c> predicate — the
-    /// partitioning column, and the only thing here that prunes a chunk.
-    /// </summary>
-    internal static string BuildServerWatermarkSql(string tableName, string columnName, bool bounded) =>
-        bounded
-            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
-            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
-
     public async Task<DateTime?> GetLastCollectedTimeAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken,
         DateTime? collectedSince = null)
