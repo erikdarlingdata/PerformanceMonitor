@@ -485,6 +485,46 @@ public sealed class ViewerServerSummaryDisplayTests
     }
 
     [Fact]
+    public void CollectorSeverity_OfflineServer_ReadsStaleNeutral_NotGreenOk()
+    {
+        // #2784 (parity with the web #2779/#2783 fix): a server that has gone dark has STALE collector counts
+        // — FailedCollectorCount stays 0 because a stale collector is neither healthy nor failing — so the
+        // failing-count-only verdict rendered a green "OK / Healthy: 0, Failing: 0" on an offline server
+        // (latent behind the offline overlay, but wrong). Keyed on IsOffline — the same reachability signal
+        // that drives the overlay — the verdict now reads a neutral "Stale".
+        var offline = new ServerSummaryItem { IsOnline = false, HealthyCollectorCount = 0, FailedCollectorCount = 0 };
+        Assert.True(offline.IsOffline);
+        Assert.Equal("Stale", offline.CollectorDisplay);
+        Assert.Equal("No recent collection", offline.CollectorDetail);
+        Assert.Equal(HealthSeverity.Unknown, offline.CollectorSeverity);   // neutral, NOT green Healthy
+
+        // Offline WINS over a stale failing count too: once the server is dark every count is unmeasured, so a
+        // leftover "2 failing" from the last collection must not keep reading as an active failure.
+        var offlineWithStaleFailures = new ServerSummaryItem { IsOnline = false, FailedCollectorCount = 2 };
+        Assert.Equal("Stale", offlineWithStaleFailures.CollectorDisplay);
+        Assert.Equal(HealthSeverity.Unknown, offlineWithStaleFailures.CollectorSeverity);
+
+        // A GENUINE collector failure on a reachable server still surfaces red / "N failed" — not swallowed
+        // into Stale.
+        var failing = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 28, FailedCollectorCount = 2 };
+        Assert.Equal("2 failed", failing.CollectorDisplay);
+        Assert.Equal(HealthSeverity.Warning, failing.CollectorSeverity);
+
+        // A healthy ONLINE server is unchanged — green "OK".
+        var healthy = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 30, FailedCollectorCount = 0 };
+        Assert.Equal("OK", healthy.CollectorDisplay);
+        Assert.Equal("Healthy: 30, Failing: 0", healthy.CollectorDetail);
+        Assert.Equal(HealthSeverity.Healthy, healthy.CollectorSeverity);
+
+        // Not-yet-connection-classified (IsOnline null — awaiting first collection) keeps the normal reading:
+        // "Stale" is for a KNOWN-offline server only, matching the web's strict `is_online === false`.
+        var notChecked = new ServerSummaryItem { HealthyCollectorCount = 30, FailedCollectorCount = 0 };
+        Assert.False(notChecked.IsOffline);
+        Assert.Equal("OK", notChecked.CollectorDisplay);
+        Assert.Equal(HealthSeverity.Healthy, notChecked.CollectorSeverity);
+    }
+
+    [Fact]
     public void DeadlockSeverity_AnyInWindow_IsCritical()
     {
         Assert.Equal(HealthSeverity.Healthy, new ServerSummaryItem { DeadlockCount = 0 }.DeadlockSeverity);
