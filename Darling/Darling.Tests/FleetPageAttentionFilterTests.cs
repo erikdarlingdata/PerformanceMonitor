@@ -197,7 +197,8 @@ public sealed class FleetPageAttentionFilterTests
     {
         var app = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
-        /* .grid is the only 260px-track grid in app.css (.stats is 150px), so this pins it specifically. */
+        /* .grid keeps its 1fr max (shared with triage); .server-grid also has a 260px min now, but its max is
+           460px, so this 1fr-specific string still pins .grid alone. */
         Assert.Contains("repeat(auto-fit, minmax(260px, 1fr))", app, StringComparison.Ordinal);
         /* No grid track in app.css uses auto-fill (the .stats comment says the word but not "repeat(auto-fill"). */
         Assert.DoesNotContain("repeat(auto-fill", app, StringComparison.Ordinal);
@@ -227,7 +228,22 @@ public sealed class FleetPageAttentionFilterTests
         var app = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
         Assert.Contains(".server-grid {", app, StringComparison.Ordinal);
-        Assert.Contains("repeat(auto-fit, minmax(260px, 460px))", app, StringComparison.Ordinal);
+        /* Cap + centre asserted as a contiguous block, so the centring is pinned to .server-grid rather than
+           merely present somewhere (ReadRepoFile has already normalised CRLF to \n). */
+        Assert.Contains(
+            "repeat(auto-fit, minmax(260px, 460px));\n  justify-content: center;",
+            app,
+            StringComparison.Ordinal);
+
+        /* The cap only wins because .server-grid follows .grid in source order (equal specificity, later wins).
+           A refactor moving it above .grid would silently restore 1fr and lose the cap, so pin the order. */
+        Assert.True(
+            app.IndexOf(".grid {", StringComparison.Ordinal) < app.IndexOf(".server-grid {", StringComparison.Ordinal),
+            ".server-grid must follow .grid in app.css or its width cap loses the cascade");
+
+        /* The indented tag-group grid overrides the centring back to start — a centred grouped grid detaches its
+           cards from their left-aligned header (review-caught). It keeps the cap; only justify-content differs. */
+        Assert.Contains(".tag-group-grid { margin: 0.5rem 0 0.2rem; justify-content: start; }", app, StringComparison.Ordinal);
 
         /* Both server-card grids (flat + tag-group) must carry the class, or the cap misses one view. */
         var fleet = ReadRepoFile(Path.Combine(
