@@ -359,6 +359,28 @@ END;
     public override TimeSpan? PerItemWallClockBudget => PerDatabaseWallClockBudget;
 
     /// <summary>
+    /// The per-command budget for this collector, on BOTH halves of a fetch (#2776) — the SQL Server read
+    /// via <see cref="DarlingCollectorRunner"/>'s <c>itemTimeout</c>, and the store-side probe/write commands
+    /// the runner hands the same value to. One number, because a fetch is one logical operation and a cancel
+    /// on either half has the identical consequence: the ids read as still-missing, the carry-over keeps them,
+    /// and the target re-decompresses the same plans next cycle.
+    ///
+    /// <para><b>500 s is an empirical over-shoot pending measurement, not settled tuning.</b> Erik chose it
+    /// deliberately against an observed <c>max_sql_ms</c> of 361 s, to see where the failures stop rather than
+    /// to sit just above the worst known case. Evidence it replaces: the store side inherited Npgsql's 30 s
+    /// default (nobody chose it — the path simply never set one) and the SQL side sat at the 60 s runner
+    /// default, while measured <c>plan_fetch</c> phases reach 91,526 ms. Baseline on use1 over 14.9 h: 125
+    /// plan-fetch failures, 16 text-fetch, 2,965 candidate-cap clamps.</para>
+    ///
+    /// <para><b>The tradeoff, stated because it may show up as a regression.</b> A fetch that previously failed
+    /// fast now HOLDS its slot for up to 500 s. Fleet concurrency is 4 and the sweep budget is 60 s, so
+    /// <c>skipping relaunch</c> and BODY_OVERRUN can get WORSE even if the failure count improves. Both
+    /// directions have to be read together or a win on one number hides a loss on the other. Sits under
+    /// <see cref="PerDatabaseWallClockBudget"/> (600 s), which remains the outer bound of last resort.</para>
+    /// </summary>
+    public override int? CommandTimeoutSecondsOverride => 500;
+
+    /// <summary>
     /// The self-identification marker every collector query carries in its leading comment. Self rows
     /// are excluded CLIENT-SIDE in the shared read loop both paths use (#1565) — the old SQL-side
     /// NOT LIKE predicate was 75% of the read's elapsed time (a full nvarchar(max) scan per row on a

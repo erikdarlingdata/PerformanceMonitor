@@ -31,6 +31,14 @@ public sealed class QueryStoreFetchProbeLivePostgresTests
     private const string ServerName = "darling-fetch-probe-e2e";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private const string Db = "ProbeDb";
+
+    /* #2776: the store-write path now takes an explicit command timeout instead of inheriting Npgsql's
+       30s default. These fixtures write a handful of rows, so the value is immaterial to what they assert —
+       it is here only because the parameter is required, which is deliberate: making it required is what
+       forced every call site (including this one) to be found by the compiler rather than by a timeout in
+       production. */
+    private const int TestTimeoutSeconds = 30;
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
@@ -59,7 +67,7 @@ public sealed class QueryStoreFetchProbeLivePostgresTests
                     new FetchedPlan(1, "<plan one/>", "0xAAAA"),
                     new FetchedPlan(2, PlanXml: null, PlanHash: "0xBBBB"),
                 },
-                landedAt, ct);
+                landedAt, TestTimeoutSeconds, ct);
             Assert.Equal(new long[] { 1, 2 }, landed);
 
             using (var marker = new NpgsqlCommand(
@@ -76,7 +84,7 @@ public sealed class QueryStoreFetchProbeLivePostgresTests
             var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
                 connection, ServerId, Db,
                 new[] { (1L, (string?)"0xAAAA"), (2L, (string?)"0xBBBB"), (3L, (string?)"0xCCCC") },
-                now, ct);
+                now, TestTimeoutSeconds, ct);
 
             Assert.Equal(3, verdicts.Count);
             Assert.Equal(new FetchProbeVerdict(1, Resolved: true, HashStale: false), verdicts[0]);
@@ -107,7 +115,7 @@ SELECT
             /* An in-place rewrite: same plan_id, different live hash. Stale, and still resolved — the
                caller refetches on the OR of the two. */
             var stale = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
-                connection, ServerId, Db, new[] { (1L, (string?)"0xDEAD") }, now.AddHours(2), ct);
+                connection, ServerId, Db, new[] { (1L, (string?)"0xDEAD") }, now.AddHours(2), TestTimeoutSeconds, ct);
             Assert.Equal(new FetchProbeVerdict(1, Resolved: true, HashStale: true), stale.Single());
 
             /* Text side: land one row WITHOUT a hash (the legacy shape), then probe with a live hash —
@@ -115,15 +123,15 @@ SELECT
                reset detector firing. */
             await QueryStoreTextWriter.WriteAsync(
                 connection, ServerId, Db,
-                new[] { new FetchedQueryText(10, "SELECT 1", QueryHash: null) }, landedAt, ct);
+                new[] { new FetchedQueryText(10, "SELECT 1", QueryHash: null) }, landedAt, TestTimeoutSeconds, ct);
 
             var adopt = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
-                connection, ServerId, Db, new[] { (10L, (string?)"0x1111"), (11L, (string?)"0x2222") }, now, ct);
+                connection, ServerId, Db, new[] { (10L, (string?)"0x1111"), (11L, (string?)"0x2222") }, now, TestTimeoutSeconds, ct);
             Assert.Equal(new FetchProbeVerdict(10, Resolved: true, HashStale: false), adopt[0]);
             Assert.Equal(new FetchProbeVerdict(11, Resolved: false, HashStale: false), adopt[1]);
 
             var renumbered = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
-                connection, ServerId, Db, new[] { (10L, (string?)"0x9999") }, now.AddHours(2), ct);
+                connection, ServerId, Db, new[] { (10L, (string?)"0x9999") }, now.AddHours(2), TestTimeoutSeconds, ct);
             Assert.Equal(new FetchProbeVerdict(10, Resolved: true, HashStale: true), renumbered.Single());
 
             bodySucceeded = true;
