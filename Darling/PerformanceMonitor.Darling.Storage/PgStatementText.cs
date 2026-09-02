@@ -83,16 +83,41 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
 
     /// <summary>
     /// Aurora's extended function. Kept as its own constant now that there are two sources (#2651).
+    ///
+    /// <para>Deduplicated on <c>queryid</c> for the reason <see cref="VanillaFetchSql"/> spells out, and it is
+    /// the same defect: #2651 met the duplicate-key abandonment while writing the vanilla arm, fixed it THERE,
+    /// and left this arm — which predates it (#2284) — as it was. <c>aurora_stat_statements</c> keys exactly as
+    /// <c>pg_stat_statements</c> does, on <c>(queryid, userid, dbid, toplevel)</c>, so it duplicates for
+    /// identically the same reason and the upsert abandoned every batch on every Aurora server.</para>
     /// </summary>
     public const string AuroraFetchSql = @"
 SELECT
-    s.queryid AS queryid,
-    s.query AS query_text
-FROM aurora_stat_statements(true) AS s
-WHERE s.queryid IS NOT NULL
-AND   s.query IS NOT NULL
-AND   s.toplevel
-ORDER BY s.total_exec_time DESC
+    queryid,
+    query_text
+FROM
+(
+    /* DISTINCT ON, and it is not tidiness - see VanillaFetchSql for the full reasoning. One queryid comes
+       back once per user and database that ran it, the upsert keys on (server_id, queryid), and it meets
+       those duplicates as '21000: ON CONFLICT DO UPDATE command cannot affect row a second time'.
+
+       That error aborts the STATEMENT, so the batch's non-duplicate rows are lost with it - a single
+       repeated queryid stores nothing at all, not merely one row fewer. Measured on the pgmon fleet before
+       this fix: 50 of 50 Aurora servers failing, zero succeeding, get_pg_top_queries returning
+       query_text: null on every row.
+
+       Any of the duplicates would do - the text is the normalized statement and is identical across them -
+       so the costliest is taken, which is the same thing the outer ORDER BY is choosing for. */
+    SELECT DISTINCT ON (s.queryid)
+        s.queryid AS queryid,
+        s.query AS query_text,
+        s.total_exec_time AS total_exec_time
+    FROM aurora_stat_statements(true) AS s
+    WHERE s.queryid IS NOT NULL
+    AND   s.query IS NOT NULL
+    AND   s.toplevel
+    ORDER BY s.queryid, s.total_exec_time DESC
+) AS d
+ORDER BY d.total_exec_time DESC
 LIMIT $1";
 
     /// <summary>

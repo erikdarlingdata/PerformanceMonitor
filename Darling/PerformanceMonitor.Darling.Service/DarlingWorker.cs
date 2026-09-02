@@ -2316,6 +2316,18 @@ public sealed class DarlingWorker : BackgroundService
         var queryIds = new List<long>();
         var texts = new List<string>();
 
+        /* The upsert keys on (server_id, queryid) and a batch carrying one queryid twice does not lose one
+           row - PostgreSQL aborts the whole statement with 21000, so the non-duplicate rows are lost with
+           it. Both source arms already dedupe in SQL, which is where it belongs: the fetch knows which
+           duplicate is the costliest and can order for it. This is the backstop, here because the bug being
+           fixed WAS a source arm missing that dedupe - #2651 added the vanilla arm with it and left the
+           Aurora arm (#2284) without, and for a week every Aurora server stored no text at all. A third
+           source can make the same omission; this is the one place all of them funnel through.
+
+           Keep-first is deliberate rather than arbitrary: both arms rank costliest-first, so the first
+           occurrence of a queryid is the row the SQL already chose. */
+        var seen = new HashSet<long>();
+
         await using var connection = new Npgsql.NpgsqlConnection(runtime.ConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = new Npgsql.NpgsqlCommand(
@@ -2330,7 +2342,13 @@ public sealed class DarlingWorker : BackgroundService
                 continue;
             }
 
-            queryIds.Add(reader.GetInt64(0));
+            var queryId = reader.GetInt64(0);
+            if (!seen.Add(queryId))
+            {
+                continue;
+            }
+
+            queryIds.Add(queryId);
             texts.Add(reader.GetString(1));
         }
 
