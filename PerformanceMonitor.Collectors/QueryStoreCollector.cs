@@ -1194,6 +1194,16 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
     /// catalog, K=114 and a 12 MB budget, both shapes returned the same 114 rows and 1.7 MB, and the join-back
     /// form took 274ms cold / 262ms warm against 133ms for this one. Plan-id-only with no XML touched was 114ms,
     /// so this shape sits 19ms above the floor while the join-back form pays for the decompression twice.</para>
+    ///
+    /// <para>The obvious next idea — evaluate the byte budget against the COMPRESSED length first, so plans the
+    /// budget will discard are never decompressed at all — is not available through this view, and that was
+    /// measured rather than assumed (#2791). Over 512 candidate ids: selecting <c>plan_id</c> alone is 14ms,
+    /// <c>DATALENGTH(qsp.query_plan)</c> is 321ms, and a full <c>CONVERT(nvarchar(max), ...)</c> is 331ms. The
+    /// DATALENGTH form costs what the full decompression costs because the VIEW decompresses on any access to
+    /// the column, so there is no cheap size to filter on; the compressed blob lives in the undocumented
+    /// <c>sys.plan_persist_plan</c>, which is not a surface to ship against. The budget therefore bounds what
+    /// is SHIPPED, not what is decompressed, and that is a property of the catalog rather than a shortcoming
+    /// of this query.</para>
     /// </summary>
     public CollectorQuery BuildPlanFetchByIdsQuery(string item, CollectorContext context, IReadOnlyList<long> planIds, long budgetBytes)
     {
@@ -1255,7 +1265,44 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            SET NOCOUNT ON so the SELECT INTO emits no result set: the caller's reader takes the first result
            set as the shipped rows, and a stray done-count row would derail it. The #temp is created inside
            this sp_executesql scope and dropped at the end - explicit DROP for clarity; it would auto-drop on
-           scope exit regardless. */
+           scope exit regardless.
+
+           HASH JOIN on the fetch statement (#2791), and it is the whole fix rather than a tuning knob.
+           sys.query_store_plan's view definition unions the on-disk table with the in-memory TVF
+           QUERY_STORE_PLAN_IN_MEM, and the optimizer has NO statistics for that TVF - it uses a fixed guess.
+           Measured on AYR the guess is 1,000 rows against 14,633 actual, 1,463% off, which is what makes
+           Nested Loops look cheap: the TVF lands on the INNER side and is re-executed once per candidate
+           plan_id, up to MaxCandidatePlans = 512 times, each execution scanning the whole in-memory Query
+           Store before a single plan is decompressed. sp_QuickieStore put this statement at 55,000-61,000ms
+           CPU, top of the entire instance. Under the hint it is a Hash Match reading the TVF ONCE: 0.508s.
+
+           Query-level rather than per-join because the joins live inside the view definition and cannot be
+           hinted individually. That means it also applies to the Clustered Index Seek into plan_persist_plan
+           (91% of estimated cost), and the seek->scan trade this risks DOES happen: under the hint that
+           access becomes a Clustered Index Scan. It is a non-issue, and that is measured rather than argued
+           - the scan costs 0.032s, against 0.373s for the TVF and 0.436s for the Hash Match above it, and
+           the whole statement finishes in 0.508s on an 85%-full Query Store. Recorded in this direction on
+           purpose: the estimate says the seek is 91% of the cost and the actual plan says it is 6% of a
+           half-second, so the operator the estimate points at is not the one that matters.
+
+           The cost of forcing it: a Hash Match needs a workspace memory grant where the Nested Loops it
+           replaces needs none, and that applies on EVERY invocation, including small ones the optimizer
+           would have served grant-free (review catch). Measured rather than waved through - grants on a
+           40,882-plan Query Store, no spill in any case:
+
+             4 candidate ids  : unhinted 0KB (pure loops)                -> hinted 1,264KB
+             512 candidate ids: unhinted 1,760KB (already a hash anyway) -> hinted 3,624KB
+
+           So the hint does introduce a grant on small candidate sets, and it is ~1.2MB; at the other end
+           MaxCandidatePlans caps the input at 512 and the grant at ~3.6MB, where the optimizer was already
+           choosing a hash and paying 1.8MB of it regardless. The cap is what makes this bounded rather than
+           a function of Query Store size. Sweeps are concurrent across servers but sequential within one, so
+           the fleet-wide worst case is a few concurrent sweeps' worth, single-digit MB - against a statement
+           that was burning 55,000-61,000ms of CPU. If this were ever wrong it would show as RESOURCE_SEMAPHORE
+           waits or a hash spill on the monitored instance, neither of which appears here.
+
+           The SECOND statement below keeps plain OPTION(RECOMPILE): it reads only #plan_fetch and joins
+           nothing, so there is no join strategy to force. Not an oversight - checked. */
         var body = $@"SET NOCOUNT ON;
 
 SELECT
@@ -1264,7 +1311,8 @@ SELECT
     query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)
 INTO #plan_fetch
 FROM sys.query_store_plan AS qsp
-WHERE qsp.plan_id IN ({idList});
+WHERE qsp.plan_id IN ({idList})
+OPTION(RECOMPILE, HASH JOIN);
 
 SELECT
     plan_id = b.plan_id,
@@ -1362,7 +1410,19 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            byte-budget cut is unchanged.
 
            SET NOCOUNT ON so the SELECT INTO emits no result set. #temp is scoped to this sp_executesql and
-           dropped at the end. ROWS UNBOUNDED PRECEDING for the same per-row-cut reason as the plan fetch. */
+           dropped at the end. ROWS UNBOUNDED PRECEDING for the same per-row-cut reason as the plan fetch.
+
+           HASH JOIN for the same reason as the plan fetch (#2791), and this one is a two-view join written
+           out in the open: sys.query_store_query and sys.query_store_query_text are BOTH TVF-backed unions
+           over their in-memory halves, driven by an IN list, which is exactly the shape that put the plan
+           fetch on the inner side of a loop 512 times over. The plan fetch is the variant that carries the
+           AYR measurement; this one is the same defect treated the same way, and that distinction is stated
+           rather than blurred - the join-strategy change and the identical-rowset property are verified
+           here, the 60s->0.5s number is not this statement's and is not claimed for it.
+
+           Same memory-grant trade as the plan fetch above, and the same bound: the id list is capped by the
+           caller, so the hash input does not scale with Query Store size. Measured on the same 40,882-plan
+           catalog with no spill. */
         var body = $@"SET NOCOUNT ON;
 
 SELECT
@@ -1373,7 +1433,8 @@ INTO #text_fetch
 FROM sys.query_store_query AS qsq
 JOIN sys.query_store_query_text AS qst
   ON qst.query_text_id = qsq.query_text_id
-WHERE qsq.query_id IN ({idList});
+WHERE qsq.query_id IN ({idList})
+OPTION(RECOMPILE, HASH JOIN);
 
 SELECT
     query_id = b.query_id,

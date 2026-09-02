@@ -436,6 +436,52 @@ public class QueryStorePlanFetchTests
     private static string LiveSql(CollectorContext context) =>
         QueryStoreCollector.Instance.BuildPerItemQuery(Db, context).Text;
 
+    /* ---------------------------------------------------------------------------------------------
+       #2791: the fetch statements read TVF-backed Query Store views, for which the optimizer has no
+       statistics and uses a fixed guess (1,000 estimated against 14,633 actual on AYR, 1,463% off).
+       That guess put QUERY_STORE_PLAN_IN_MEM on the INNER side of a Nested Loops join, re-executed
+       once per candidate id up to MaxCandidatePlans = 512, at 55,000-61,000ms CPU per fetch. The
+       query-level hint is the only lever - the joins live inside the view definition.
+       --------------------------------------------------------------------------------------------- */
+
+    [Fact]
+    public void PlanFetch_ForcesHashJoin_OnTheStatementThatReadsTheCatalogView()
+    {
+        var text = QueryStoreCollector.Instance
+            .BuildPlanFetchByIdsQuery("db", Context(capturePlanXml: true), new long[] { 1, 2, 3 }, 12_582_912).Text;
+
+        Assert.Contains("OPTION(RECOMPILE, HASH JOIN)", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TextFetch_ForcesHashJoin_ForTheSameReason()
+    {
+        var text = QueryStoreCollector.Instance
+            .BuildTextFetchByIdsQuery("db", Context(capturePlanXml: true, fetchTextSeparately: true), new long[] { 1, 2, 3 }, 12_582_912).Text;
+
+        Assert.Contains("OPTION(RECOMPILE, HASH JOIN)", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The hint belongs ONLY on the statement that joins. The second statement of each builder reads the
+    /// #temp and joins nothing, so forcing a strategy there would be cargo-cult - and a query-level hint on
+    /// a joinless statement is the kind of thing that gets copied forward and later defended as load-bearing.
+    /// Exactly one hinted statement, exactly one plain RECOMPILE, in both builders.
+    /// </summary>
+    [Fact]
+    public void TheBudgetStatementsKeepPlainRecompile_BecauseTheyJoinNothing()
+    {
+        var plan = QueryStoreCollector.Instance
+            .BuildPlanFetchByIdsQuery("db", Context(capturePlanXml: true), new long[] { 1 }, 12_582_912).Text;
+        var text = QueryStoreCollector.Instance
+            .BuildTextFetchByIdsQuery("db", Context(capturePlanXml: true, fetchTextSeparately: true), new long[] { 1 }, 12_582_912).Text;
+
+        Assert.Equal(1, plan.Split("HASH JOIN").Length - 1);
+        Assert.Equal(1, plan.Split("OPTION(RECOMPILE);").Length - 1);
+        Assert.Equal(1, text.Split("HASH JOIN").Length - 1);
+        Assert.Equal(1, text.Split("OPTION(RECOMPILE);").Length - 1);
+    }
+
     private static CollectorContext Context(bool capturePlanXml, bool fetchTextSeparately = false)
     {
         var context = new CollectorContext
