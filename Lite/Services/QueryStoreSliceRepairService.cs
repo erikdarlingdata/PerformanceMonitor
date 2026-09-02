@@ -223,6 +223,16 @@ public sealed partial class QueryStoreSliceRepairService
     /// It is two statements against a table holding at most a handful of rows, not the survey's full GROUP BY
     /// over the hot store, so the window that cannot be abandoned is bounded and short.</para>
     ///
+    /// <para><b>That the commit alone survives the abort is MEASURED, not assumed.</b> The whole gate rests on
+    /// it: if the marker did not come back, the count would never reach the cap and the crash loop would
+    /// continue with a fix that merely looks like one. Tested against DuckDB 1.5.5 by writing the marker
+    /// exactly as this method does and then killing the process without any unwinding — once via
+    /// <c>Environment.FailFast</c> (SIGABRT, exit 134, no finalizers, no Dispose) and once via an external
+    /// SIGKILL, the latter being uninterceptable. In both cases a fresh process read the marker back and
+    /// <see cref="AttemptCountAsync"/> returned 1; the abort visibly leaves a populated <c>.wal</c> beside the
+    /// store, which is replayed on the next open. Simulating the reporter's loop end to end then went
+    /// 0 → 1 → 2, and the third launch skipped the repair and started, which is the escape this exists for.</para>
+    ///
     /// <para><b>The commit is the durability, not a CHECKPOINT.</b> This wants to survive the process being
     /// killed mid-repair without unwinding, and a committed DuckDB transaction already does: the WAL is written
     /// and flushed at commit, and it replays when the store is next opened. The failure being defended against
