@@ -33,12 +33,6 @@ if (File.Exists(dbPath)) File.Delete(dbPath);
 
 Console.WriteLine($"groups={groups:N0}  planTextPerRow={textKb}KB  memory_limit={memLimit}");
 
-string[] keyCols =
-[
-    "server_id", "database_name", "query_id", "plan_id", "runtime_stats_interval_id",
-    "first_execution_time", "execution_type_desc", "replica_role", "collection_time",
-];
-
 string[] sumCols = ["execution_count"];
 string[] avgCols =
 [
@@ -113,6 +107,12 @@ FROM range(0, {groups * 2}) AS t(i)");
 Console.WriteLine($"seeded {groups * 2:N0} rows in {sw.ElapsedMilliseconds:N0} ms");
 
 var allCols = ReadStrings("SELECT column_name FROM information_schema.columns WHERE table_name = 'query_store_stats' ORDER BY ordinal_position");
+
+/* The dedup key comes from production too, not a second hand-typed copy. KeyColumnsFor filters
+   FullKeyColumns down to what the table actually has, and the synthetic table above carries all nine, so
+   this returns the full key. Add or drop a key column in production and this reproducer follows; hard-code
+   it and the repro would keep grouping on the old key and quietly stop proving anything. */
+var keyCols = QueryStoreSliceRepairService.KeyColumnsFor(allCols);
 var keySet = new HashSet<string>(keyCols, StringComparer.OrdinalIgnoreCase);
 
 /* The SHIPPED expressions, linked from Lite/Services/QueryStoreSliceRepairService.Collapse.cs -
