@@ -185,6 +185,16 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
 
+    /// <summary>The alert metric name the fleet-level Store Disk Pressure edge fires under. A WEBHOOK
+    /// AUTOMATION KEY like its siblings, and the triage map (#2768) keys on it too, so it is a const and
+    /// must stay stable across releases.</summary>
+    internal const string DiskPressureMetric = "Store Disk Pressure";
+
+    /// <summary>The resolution title the Store Disk Pressure recovery edge records into
+    /// <c>config_alert_log.metric_name</c>. The triage map (#2768) aliases it back to
+    /// <see cref="DiskPressureMetric"/>, so it is a const for the same reason.</summary>
+    internal const string DiskPressureResolvedMetric = "Store Disk Pressure Resolved";
+
     /// <summary>
     /// The synthetic server label every FLEET-LEVEL store self-alert fires under — Store Disk Pressure,
     /// Store Runtime Upgrade, Store Job Over Cadence and Compression Job Stuck, plus each one's resolution
@@ -216,7 +226,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>The alert metric name every compression-job self-alert fires under (first-detection + escalation
     /// re-fires share it, so the deliverer's per-metric cooldown and the recovery resolution correlate cleanly;
     /// escalation is distinguished by the message, not a second metric name).</summary>
-    private const string CompressionJobMetric = "Compression Job Stuck";
+    internal const string CompressionJobMetric = "Compression Job Stuck";
 
     /// <summary>Prefixes the fleet-level compression-job alert serverKey so it never parses as a server_id.</summary>
     private const string CompressionKeyPrefix = "compressjob:";
@@ -1358,7 +1368,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _lastAlertedDiskPressurePercent[DiskKey] = percentFree;
                 var storeText = storeSizeBytes is long size ? $" The store currently holds {FormatGb(size)}." : "";
                 await FireAsync(
-                    DiskKey, StoreServerLabel, "Store Disk Pressure", reason,
+                    DiskKey, StoreServerLabel, DiskPressureMetric, reason,
                     $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
                     detail: reason + storeText + " When the store volume fills, collection and every write stop " +
                         "for the WHOLE fleet, and a headless service has no dashboard to warn you. Free space on the " +
@@ -1381,8 +1391,8 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _lastAlertedDiskPressurePercent.TryRemove(DiskKey, out _);
             await RecordResolutionAsync(new AlertResolution(
-                DiskKey, StoreServerLabel, "Store Disk Pressure",
-                "Store Disk Pressure Resolved", "Monitor store volume free space recovered"), cancellationToken);
+                DiskKey, StoreServerLabel, DiskPressureMetric,
+                DiskPressureResolvedMetric, "Monitor store volume free space recovered"), cancellationToken);
         }
     }
 

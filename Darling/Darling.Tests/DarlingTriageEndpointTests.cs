@@ -226,12 +226,24 @@ public sealed class DarlingTriageEndpointTests
         Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(metric));
     }
 
+    /// <summary>The [Theory] above pins the WIRE strings an operator's history row actually carries. This
+    /// pins the same mappings by SYMBOL, so renaming a metric on the engine breaks here instead of silently
+    /// downgrading that alert's triage page to the per-server fallback - the drift alarm #2710 established
+    /// for the engine's other exported metric-name constants.</summary>
     [Fact]
-    public void StoreJobOverCadence_MapsByTheEnginesOwnConstant()
+    public void StoreMetricNameConstants_ResolveToTheirOwnMapping_NotTheFallback()
     {
-        Assert.NotSame(
-            DarlingTriageEndpoint.DefaultSections,
-            DarlingTriageEndpoint.SectionsFor(DarlingSelfAlertEvaluator.JobCadenceMetric));
+        foreach (var metric in new[]
+                 {
+                     DarlingSelfAlertEvaluator.DiskPressureMetric,
+                     DarlingSelfAlertEvaluator.DiskPressureResolvedMetric,
+                     DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+                     DarlingSelfAlertEvaluator.CompressionJobMetric,
+                     DarlingSelfAlertEvaluator.JobCadenceMetric,
+                 })
+        {
+            Assert.NotSame(DarlingTriageEndpoint.DefaultSections, DarlingTriageEndpoint.SectionsFor(metric));
+        }
     }
 
     /// <summary>The store family's sections must ALL be fleet-level. A per-server section reached through a
@@ -242,7 +254,9 @@ public sealed class DarlingTriageEndpointTests
     {
         foreach (var metric in new[]
                  {
-                     "Store Disk Pressure", "Store Runtime Upgrade", "Compression Job Stuck",
+                     DarlingSelfAlertEvaluator.DiskPressureMetric,
+                     DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+                     DarlingSelfAlertEvaluator.CompressionJobMetric,
                      DarlingSelfAlertEvaluator.JobCadenceMetric,
                  })
         {

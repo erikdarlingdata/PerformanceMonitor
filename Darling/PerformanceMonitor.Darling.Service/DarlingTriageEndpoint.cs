@@ -109,9 +109,9 @@ internal static class DarlingTriageEndpoint
         ("Forced Plan Failing Resolved", "Forced Plan Failing"),
         /* The store family's recovery edges (#2768). Store Runtime Upgrade has no resolution edge — an
            in-place major upgrade is a one-shot event, not a condition that clears. */
-        ("Store Disk Pressure Resolved", "Store Disk Pressure"),
-        ("Store Job Cadence Recovered", "Store Job Over Cadence"),
-        ("Compression Job Recovered", "Compression Job Stuck"),
+        (DarlingSelfAlertEvaluator.DiskPressureResolvedMetric, DarlingSelfAlertEvaluator.DiskPressureMetric),
+        ("Store Job Cadence Recovered", DarlingSelfAlertEvaluator.JobCadenceMetric),
+        ("Compression Job Recovered", DarlingSelfAlertEvaluator.CompressionJobMetric),
     };
 
     /// <summary>
@@ -240,10 +240,10 @@ internal static class DarlingTriageEndpoint
                schedule_interval_ms / duration_vs_cadence_percent for job cadence — the alert's own detail text
                points at that same series — and per-object compression ratios for a stuck compression job),
                and collector cost is what DRIVES the volume all three are downstream of. */
-            ["Store Disk Pressure"] = StoreSections(),
-            ["Store Runtime Upgrade"] = StoreSections(),
+            [DarlingSelfAlertEvaluator.DiskPressureMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.StoreUpgradeMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
-            ["Compression Job Stuck"] = StoreSections(),
+            [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
 
             /* PostgreSQL alert family (PostgresAlertEvaluator). */
             ["PostgreSQL Wraparound Risk"] = new[]
