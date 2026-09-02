@@ -209,6 +209,40 @@ public sealed class FleetPageAttentionFilterTests
     }
 
     /// <summary>
+    /// #2772 follow-up: the server-card grids cap their track width so a wide screen adds COLUMNS rather than
+    /// fattening a few cards.
+    ///
+    /// <para>auto-fit stopped the empty-track shrink, but with a `1fr` max the surviving cards then stretched
+    /// the other way — two servers on an ultrawide became two ~1000px cards, a lone server one full-width card,
+    /// all whitespace past what six small stat tiles want. The fleet grids (flat and tag-group, both rendering
+    /// serverCards) now carry a `server-grid` class bounding the track to 260-460px (~the width the issue
+    /// measured as reading "correctly") and centring the leftover space. Scoped to `.server-grid`, NOT `.grid`,
+    /// because `.grid` is shared with the triage page, whose span-2 cards and notice strips want the full row —
+    /// so the class must ride BOTH fleet grids and the cap must live only under it. Verified live at two-card and
+    /// five-card widths; pinned as source (no CSS/DOM runner).</para>
+    /// </summary>
+    [Fact]
+    public void FleetServerCardGrids_CapTrackWidth_AndKeepTheScopeOffTriage()
+    {
+        var app = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
+        Assert.Contains(".server-grid {", app, StringComparison.Ordinal);
+        Assert.Contains("repeat(auto-fit, minmax(260px, 460px))", app, StringComparison.Ordinal);
+
+        /* Both server-card grids (flat + tag-group) must carry the class, or the cap misses one view. */
+        var fleet = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "fleet.js"));
+        Assert.Contains("class: \"grid server-grid\"", fleet, StringComparison.Ordinal);
+        Assert.Contains("class: \"grid server-grid tag-group-grid\"", fleet, StringComparison.Ordinal);
+
+        /* Scope guard: the triage grid stays bare .grid (full-width span-2 cards + notice strips), so a global
+           cap must not have leaked onto it — the reason the cap is a class, not a change to .grid. */
+        var triage = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "triage.js"));
+        Assert.DoesNotContain("server-grid", triage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// One place turns the filter on and off, and the header checkbox is where its state lives — so the "+N
     /// more" link cannot shrink the grid behind the toggle's back, and either affordance can undo the other.
     /// The toggle is also re-seeded from module state on every render, which is what stops the 60-second

@@ -257,7 +257,7 @@ function redrawCards() {
   mount(gridNode, [
     notice,
     matched.length
-      ? el("div", { class: "grid" }, matched.map(serverCard))
+      ? el("div", { class: "grid server-grid" }, matched.map(serverCard))
       /* The notice already explains an empty grid whenever it is showing, in more precise words than this
          line can manage — so this is the case it does NOT cover: no attention filter, and the search term is
          the only thing that could have emptied the grid. Two boxes saying the same thing in different words
@@ -335,7 +335,7 @@ function renderGrouped(matched) {
       continue;
     }
     if (g.cards.length) {
-      nodes.push(el("div", { class: "grid tag-group-grid", style: "margin-left:" + (g.depth + 1) * GROUP_INDENT + "px" }, g.cards.map(serverCard)));
+      nodes.push(el("div", { class: "grid server-grid tag-group-grid", style: "margin-left:" + (g.depth + 1) * GROUP_INDENT + "px" }, g.cards.map(serverCard)));
     }
   }
   return nodes;

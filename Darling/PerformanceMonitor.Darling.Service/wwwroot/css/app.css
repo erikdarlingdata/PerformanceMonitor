@@ -149,6 +149,18 @@ a:hover { text-decoration: underline; }
   gap: 1rem;
 }
 
+/* #2772 follow-up: the SERVER-CARD grids (fleet flat + tag-group) cap each track instead of stretching to 1fr.
+   auto-fit already stopped the empty-track SHRINK; without a max the surviving cards then stretched the other
+   way — two servers on an ultrawide gave two ~1000px cards, a lone server one full-width card, all whitespace
+   past what six small stat tiles want. A bounded max track (260-460px, ~the width the issue measured as reading
+   "correctly") keeps cards at a comfortable size and centres the leftover space, so the grid adds columns as it
+   widens rather than fattening a few cards. Scoped to .server-grid, NOT .grid, because .grid is shared with the
+   triage page, whose span-2 cards and notice strips want the full width. */
+.server-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 460px));
+  justify-content: center;
+}
+
 /* #2020: grouped (tag-tree) fleet view — collapsible tag headers, each with its card grid indented beneath.
    The read-only web twin of the desktop sidebar tree; indent is applied inline per tree depth. */
 .tag-group-header {
