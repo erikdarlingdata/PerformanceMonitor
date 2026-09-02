@@ -535,8 +535,23 @@ export function metricBands(c) {
   const blockingDetail = c.blocking_count > 0 && c.max_blocking_wait_ms > 0 ? "max wait " + fmtMs(c.max_blocking_wait_ms) : null;
   const deadlockDetail = c.deadlock_count > 0 && c.deadlock_last_seen ? "last " + relTime(c.deadlock_last_seen) : null;
 
-  const collectorsValue = c.failed_collector_count > 0 ? fmtInt(c.failed_collector_count) + " failing" : "OK";
-  const collectorsDetail = fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing";
+  /* #2779: a server that has stopped collecting has stale collector counts — its collectors are not "OK", they
+     are unmeasured. collector_severity keys only on the FAILING count (a stale collector is neither healthy nor
+     failing), so it stays green while the server is offline. Rather than invent a stale-count threshold, reuse
+     the reachability signal the card already carries (is_online, the same one that bands the card Offline and
+     titles the header "no recent collection"): when the server is offline the chip reads "Stale" in the neutral
+     Unknown tone instead of a green "OK · N healthy" (the "no recent collection" detail carries the specifics,
+     and "Stale" is the word the Collection Health tab lands on for these rows once its own floor is crossed). */
+  const collectorsStale = c.is_online === false;
+  const collectorsValue = collectorsStale
+    ? "Stale"
+    : c.failed_collector_count > 0
+    ? fmtInt(c.failed_collector_count) + " failing"
+    : "OK";
+  const collectorsDetail = collectorsStale
+    ? "no recent collection" + (c.last_collection ? " · last " + relTime(c.last_collection) : "")
+    : fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing";
+  const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
 
   return el("div", { class: "metric-bands" }, [
     chip("CPU", cpuValue, c.cpu_severity, cpuDetail),
@@ -544,7 +559,7 @@ export function metricBands(c) {
     chip("Memory", memValue, c.memory_severity, memDetail),
     chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
-    chip("Collectors", collectorsValue, c.collector_severity, collectorsDetail),
+    chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
   ]);
 }
 
