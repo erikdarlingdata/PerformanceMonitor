@@ -175,13 +175,14 @@ function vizLine(data, desc) {
   if (!seriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
   const points = getPath(data, desc.rowsKey) || [];
   /* ZERO points is a different statement from ONE point, and only the descriptor knows which sentence is true.
-     renderLineChart says "Not enough data points to chart yet" below two rows, which is right while collection is
-     warming up and wrong for a read whose empty array means the thing simply did not happen: get_blocking_trend
-     and get_deadlock_trend used to return `trend: []` with no {status,message} envelope on an idle server, so a
-     healthy server got a warming-up message about a condition it never had. Those two now answer with an
-     envelope (#2485) and are classified as "empty" before they reach a viz at all; this guard still stands for
-     every OTHER line read, which has no envelope of its own. A descriptor's emptyText wins at exactly zero; the
-     one-point case still falls through, because there the chart's own sentence IS the true one. */
+     A read whose empty array means the thing simply did not happen must say so, not inherit a warming-up
+     message about a condition it never had: get_blocking_trend and get_deadlock_trend used to return
+     `trend: []` with no {status,message} envelope on an idle server, so a healthy server got exactly that
+     wrong message. Those two now answer with an envelope (#2485) and are classified as "empty" before they
+     reach a viz at all; this guard still stands for every OTHER line read, which has no envelope of its own.
+     A descriptor's emptyText wins at exactly zero. The one-point case falls through to renderLineChart, which
+     now draws that lone bucket as a marker (a single reading IS data) rather than the old "not enough data
+     points" strip — so a series that reached one bucket reads consistently beside siblings that reached two. */
   if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);
   const series = seriesCfg.map((s, i) => ({
     key: s.key,
