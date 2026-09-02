@@ -2449,6 +2449,8 @@ RETURNING s.state_key";
                 ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
                 : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
             using var command = new NpgsqlCommand(sql, connection);
+            /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
+            command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(databaseName);
             if (collectedSince is DateTime floor)
@@ -2464,9 +2466,17 @@ RETURNING s.state_key";
                 return dt;
             }
         }
-        catch
+        catch (Exception ex)
         {
-            /* If the Postgres query fails, caller uses fallback window */
+            /* Parity with the server-scoped twin (#2795). #2344's bound makes a TIMEOUT unlikely here,
+               but every other failure — dropped connection, bad SQL — still returned a null that reads
+               as a first run, and silence is the property that let the twin's version of this survive
+               for months under a green suite. */
+            _logger?.LogWarning(
+                "Per-database watermark read failed for server {ServerId} database {Database} on "
+                + "{Table}.{Column} — falling back to the collector's default window, which re-collects "
+                + "data already stored: {Message}",
+                serverId, databaseName, tableName, columnName, ex.Message);
         }
         return null;
     }
@@ -2485,6 +2495,8 @@ RETURNING s.state_key";
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1", connection);
+            /* Parity with both timestamp twins (#2795): explicit, not Npgsql's inherited 30 s. */
+            command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is not null && result != DBNull.Value)
@@ -2492,9 +2504,15 @@ RETURNING s.state_key";
                 return Convert.ToInt64(result);
             }
         }
-        catch
+        catch (Exception ex)
         {
-            /* If the Postgres query fails, caller uses fallback window */
+            /* Parity with both timestamp twins (#2795). job_history is small enough that this is
+               unlikely to time out, but a swallowed failure here sets HasCollectedBefore down the
+               first-run path with no trace anywhere — the same silence, one table over. */
+            _logger?.LogWarning(
+                "Numeric watermark read failed for server {ServerId} on {Table}.{Column} — falling back "
+                + "to the collector's first-run path: {Message}",
+                serverId, tableName, columnName, ex.Message);
         }
         return null;
     }
