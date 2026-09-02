@@ -478,9 +478,11 @@ export async function renderView(main, id) {
  * Render a notebook definition as a vertical DOCUMENT: markdown cells through the air-gapped renderMarkdown, panel
  * cells through the SAME composed-panel card + validation the dashboard grid uses (panelOrError). It reuses this
  * page's server/time/variable scope bar (buildViewControls) exactly as a dashboard does, so flipping the scope
- * re-scopes every panel cell at once — EXCEPT a cell carrying its own `range` (#2735), whose window pin wins over
- * the scope bar's time range (the card wears a "Pinned" badge so the exception is visible; server scope still
- * applies). Export/Delete/Edit are shared with the dashboard renderer; Edit points at the notebook composer route.
+ * re-scopes every panel cell at once — EXCEPT a cell that overrides the window (a #2735 `range` pin or a
+ * per-panel `hours` override), which wins over the scope bar's time range. The composed-panel card wears a
+ * "Pinned" badge (compose.js pinBadge/effectivePin) whenever a cell overrides the window, so the exception is
+ * visible and the scope bar can't silently lie for it; server scope still applies (#2788). Export/Delete/Edit
+ * are shared with the dashboard renderer; Edit points at the notebook composer route.
  */
 async function renderNotebookDoc(main, view, session, catalog, fleetRes) {
   const def = view.definition || {};
