@@ -65,13 +65,37 @@ export function cellRange(spec) {
 }
 
 /**
- * The pinned-window badge (#2735): shown in the card header of any panel whose spec carries its own `range`,
- * so it is always visible WHICH cells are pinned to their own window and which are live on the scope bar —
- * without it, the scope bar's time range would silently lie for pinned cells. Server scope still applies to
- * pinned cells (the pin is a window, not a server), which the tooltip spells out.
+ * The effective per-panel WINDOW OVERRIDE that makes a panel ignore the scope bar's time range — the single
+ * thing the "Pinned" badge announces AND the thing buildRunBody() actually applies, resolved HERE so the two
+ * can never drift. This closes #2788: a per-panel `hours` override pinned the rendered window (buildRunBody
+ * read it) but drew NO badge, because the badge consulted only the `range` pin. Two shapes reach the read path
+ * and BOTH override the scope: the #2735 per-cell `range` pin (absolute {windowStart,windowEnd} or relative
+ * {hours}), authored over MCP / by import; and the composer's legacy per-panel `hours` override (editor.js's
+ * "Time range" dropdown, stored top-level). The `range` pin wins when both are set, mirroring buildRunBody's
+ * precedence. Null == the panel is live and follows the scope bar.
+ */
+function effectivePin(spec) {
+  return cellRange(spec) || legacyHoursPin(spec);
+}
+
+/** The composer's per-panel `hours` override as a relative pin, or null — held to the same >=1 numeric guard
+ *  cellRange applies to a nested `range.hours`, so a degenerate value reads as "live", never a zero-length
+ *  window. Kept SEPARATE from cellRange on purpose: the notebook editor round-trip (cellToModel /
+ *  pinnedWindowStrip in notebook.js) treats `range` as the authorable #2735 pin and `hours` as the shared
+ *  panel model's own field, so folding them together there would double-store the pin and break Unpin. */
+function legacyHoursPin(spec) {
+  return spec && typeof spec.hours === "number" && spec.hours >= 1 ? { hours: spec.hours } : null;
+}
+
+/**
+ * The pinned-window badge (#2735, #2788): shown in the card header of any panel that overrides the scope bar's
+ * time range — a #2735 `range` pin OR a per-panel `hours` override (both resolved by effectivePin) — so it is
+ * always visible WHICH panels are pinned to their own window and which are live on the scope bar; without it the
+ * scope bar's time range would silently lie for pinned panels. Server scope still applies to a pinned panel (the
+ * pin is a window, not a server), which the tooltip spells out.
  */
 function pinBadge(panelSpec) {
-  const range = cellRange(panelSpec);
+  const range = effectivePin(panelSpec);
   if (!range) return null;
   const label = pinRangeLabel(range);
   return el("span", {
@@ -192,20 +216,20 @@ function buildRunBody(panelSpec, scope, zoom = null) {
   if (s.values && Object.keys(s.values).length) body.values = s.values;
   if (s.server != null) body.server = s.server;
   if (s.hours != null) body.hours = s.hours;
-  if (panelSpec.hours != null) body.hours = panelSpec.hours;
-  /* The per-cell window pin (#2735): a notebook panel cell's own `range` wins over the view scope (and over
-     the legacy per-panel `hours` above). A transient brush-zoom still wins over the pin — it is the viewer's
-     explicit request on THIS panel, and clearing it pops back to the pinned window, exactly the zoom-over-
-     hours precedence a live panel has. */
-  const range = cellRange(panelSpec);
-  if (range) {
-    if (range.windowStart) {
+  /* The per-panel WINDOW OVERRIDE — the #2735 per-cell `range` pin, or the composer's legacy per-panel `hours` —
+     resolved by the SAME effectivePin() the "Pinned" badge reads, so the window a panel renders on can never
+     disagree with the badge that announces it (#2788). Either wins over the view scope above. A transient
+     brush-zoom still wins over an absolute pin — it is the viewer's explicit request on THIS panel, and clearing
+     it pops back to the pinned window, exactly the zoom-over-hours precedence a live panel has. */
+  const pin = effectivePin(panelSpec);
+  if (pin) {
+    if (pin.windowStart) {
       if (!zoomed) {
-        body.windowStart = range.windowStart;
-        body.windowEnd = range.windowEnd;
+        body.windowStart = pin.windowStart;
+        body.windowEnd = pin.windowEnd;
       }
     } else {
-      body.hours = range.hours;
+      body.hours = pin.hours;
     }
   }
   return body;
