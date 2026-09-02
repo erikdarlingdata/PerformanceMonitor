@@ -1278,10 +1278,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
 
            Query-level rather than per-join because the joins live inside the view definition and cannot be
            hinted individually. That means it also applies to the Clustered Index Seek into plan_persist_plan
-           (91% of estimated cost), and forcing hash there could have turned a 512-row seek into a full scan
-           of a large table - the real risk of this change. Measured, it does not: the hinted statement
-           completes in half a second on an 85%-full Query Store, so the seek->scan trade never materialises.
-           Recorded because the estimate says it should be a problem and the measurement says it is not.
+           (91% of estimated cost), and the seek->scan trade this risks DOES happen: under the hint that
+           access becomes a Clustered Index Scan. It is a non-issue, and that is measured rather than argued
+           - the scan costs 0.032s, against 0.373s for the TVF and 0.436s for the Hash Match above it, and
+           the whole statement finishes in 0.508s on an 85%-full Query Store. Recorded in this direction on
+           purpose: the estimate says the seek is 91% of the cost and the actual plan says it is 6% of a
+           half-second, so the operator the estimate points at is not the one that matters.
 
            The SECOND statement below keeps plain OPTION(RECOMPILE): it reads only #plan_fetch and joins
            nothing, so there is no join strategy to force. Not an oversight - checked. */
