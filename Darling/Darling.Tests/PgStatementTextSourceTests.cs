@@ -165,6 +165,7 @@ public sealed class PgStatementTextUpsertLivePostgresTests
             await ddl.ExecuteNonQueryAsync(ct);
         }
 
+        var bodySucceeded = false;
         try
         {
             /* One queryid twice — exactly the shape aurora_stat_statements and pg_stat_statements hand back
@@ -182,13 +183,22 @@ public sealed class PgStatementTextUpsertLivePostgresTests
             /* Deduplicated the way both fetch arms now do it, the same batch stores every distinct row. */
             await UpsertAsync(connection, duplicated.Distinct().ToArray(), ct);
             Assert.Equal(2, await CountAsync(connection, ct));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await using var cleanup = new NpgsqlCommand(
-                "DELETE FROM collect.pg_statement_text WHERE server_id = $1", connection);
-            cleanup.Parameters.AddWithValue(ServerId);
-            await cleanup.ExecuteNonQueryAsync(ct);
+            /* #1902: through LiveStoreCleanup on its own connection, never the body's. The body here ENDS in
+               a deliberate PostgresException, so a hand-rolled teardown on the same connection is the exact
+               shape the ratchet exists to stop — it would throw from the finally and replace the failure a
+               reader needs to see. */
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var delete = new NpgsqlCommand(
+                    "DELETE FROM collect.pg_statement_text WHERE server_id = $1", cleanup);
+                delete.Parameters.AddWithValue(ServerId);
+                await delete.ExecuteNonQueryAsync(cleanupCt);
+            });
         }
     }
 
