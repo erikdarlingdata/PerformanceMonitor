@@ -53,11 +53,19 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
            ResetData does not know to clear it, so it would leak between tests in this class and make the
            second one see a store that had "already been repaired". Dropped here rather than taught to
            ResetData, because the production behavior being relied on is precisely that nothing routine
-           removes it. */
+           removes it.
+
+           #2748's attempt table has the same property and needs the same treatment: created on demand,
+           survives normal operation by design, unknown to ResetData. Left behind, the two attempts the cap
+           test records are still there for whichever test runs next, that test trips the cap and returns
+           before repairing anything, and it fails on an assertion about the completion marker that has
+           nothing to do with what it was testing. */
         using var connection = _duckDb.CreateConnection();
         connection.Open();
         using var drop = connection.CreateCommand();
-        drop.CommandText = $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.MarkerTable}";
+        drop.CommandText =
+            $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.MarkerTable}; " +
+            $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.AttemptTable}";
         drop.ExecuteNonQuery();
     }
 
@@ -294,6 +302,120 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         Assert.False(await service.AlreadyRepairedAsync());
     }
 
+    /// <summary>
+    /// #2748: the attempt is recorded BEFORE the repair runs, not after it succeeds.
+    ///
+    /// <para>This is the only protection that survives the failure it was written for. A reporter's store took
+    /// <c>duckdb.dll</c> down with a native fast-fail (0xc0000409) partway through this repair — no managed
+    /// exception, no unwinding, nothing recorded — so every subsequent launch re-surveyed, re-ran and re-died,
+    /// and the app could never start again. Anything recorded only on success, or only in a <c>catch</c>, is
+    /// unreachable in that scenario by construction.</para>
+    /// </summary>
+    [Fact]
+    public async Task StartupRepair_RecordsTheAttempt_EvenOnASuccessfulPass()
+    {
+        var t = new DateTime(2026, 6, 13, 11, 0, 0, DateTimeKind.Unspecified);
+        await SeedAsync(t, queryId: 1, planId: 11, intervalId: 7001, executionCount: 100, avgDurationUs: 1778);
+        await SeedAsync(t, queryId: 1, planId: 11, intervalId: 7001, executionCount: 25, avgDurationUs: 2245);
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+        Assert.Equal(0L, await service.AttemptCountAsync());
+
+        await service.RepairOnStartupAsync();
+
+        /* The count answers "did we try", not "did we fail" — a successful pass still leaves its row. */
+        Assert.Equal(1L, await service.AttemptCountAsync());
+        Assert.True(await service.AlreadyRepairedAsync());
+    }
+
+    /// <summary>
+    /// #2748: once the attempt cap is reached on a store that never completes, startup stops attempting. The
+    /// app must launch even when the repair cannot.
+    /// </summary>
+    [Fact]
+    public async Task StartupRepair_AtTheAttemptCap_SkipsEntirely_SoTheAppCanStart()
+    {
+        /* An unrepairable archive file makes every pass partial, so the completion marker is never written and
+           the pre-#2748 code retried on every launch forever. */
+        await WriteUncombinableArchiveAsync(Path.Combine(_archivePath, "202604_query_store_stats.parquet"));
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+
+        for (var i = 0; i < QueryStoreSliceRepairService.MaxStartupAttempts; i++)
+        {
+            await service.RepairOnStartupAsync();
+        }
+
+        Assert.False(await service.AlreadyRepairedAsync());
+        Assert.Equal((long)QueryStoreSliceRepairService.MaxStartupAttempts, await service.AttemptCountAsync());
+
+        /* The next launch must NOT add another attempt: it is gated off before the dangerous work. */
+        await service.RepairOnStartupAsync();
+        Assert.Equal((long)QueryStoreSliceRepairService.MaxStartupAttempts, await service.AttemptCountAsync());
+
+        /* And a capped launch must not SURVEY either. The survey is the expensive thing this service has, so a
+           capped store paying it on every launch forever would contradict the "app starts and collects
+           normally" this fix promises. What makes skipping it possible is that the attempt row carries the
+           shape the last attempt SAW, so the message can still name the outstanding work.
+
+           This store is capped because of an UNREADABLE archive file, and that is the case worth pinning: it
+           is counted in survey.Unreadable, not in Archive (which counts files with repairable groups). Record
+           only the hot and archive halves and this very store — the archetype of a capped one, since an
+           unrepairable file is what makes every pass partial forever — would report "0 archive file(s)" and
+           read as though nothing were outstanding. That is the same misreporting the earlier review caught for
+           the hot/archive split, one case further along. */
+        var recorded = await service.ReadAttemptsAsync();
+        Assert.Equal((long)QueryStoreSliceRepairService.MaxStartupAttempts, recorded.Count);
+        Assert.True(
+            recorded.UnreadableFiles > 0,
+            "a store capped by an unrepairable file must record that, or the skip message claims nothing is left undone");
+    }
+
+    /// <summary>
+    /// #2748: the recorded shape is the LAST attempt's row, not the worst value each column ever held.
+    ///
+    /// <para>They diverge in the ordinary partial-repair case, not an exotic one. Attempt 1 finds 100 split
+    /// intervals, collapses the hot table and commits that — then an archive file fails, so the completion
+    /// marker is withheld. Attempt 2 surveys a hot store that is genuinely clean now and records zero. Read
+    /// the shape with independent <c>MAX()</c>es and the skip message goes on telling the user 100 intervals
+    /// are outstanding in a hot store that has already been repaired.</para>
+    ///
+    /// <para>Written against the rows directly because the sibling cap test cannot catch this: its store is
+    /// capped by a permanently unreadable file with no hot-table data, so every attempt records identical
+    /// numbers and <c>MAX</c> and "last row" agree by accident.</para>
+    /// </summary>
+    [Fact]
+    public async Task ReadAttempts_ReturnsTheLastAttemptsShape_NotTheMaximumEverRecorded()
+    {
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            using var create = connection.CreateCommand();
+            create.CommandText =
+                $"CREATE TABLE IF NOT EXISTS {QueryStoreSliceRepairService.AttemptTable} " +
+                "(attempted_at TIMESTAMP NOT NULL, hot_groups BIGINT NOT NULL, archive_files BIGINT NOT NULL, unreadable_files BIGINT NOT NULL)";
+            await create.ExecuteNonQueryAsync();
+
+            using var insert = connection.CreateCommand();
+            insert.CommandText =
+                $"INSERT INTO {QueryStoreSliceRepairService.AttemptTable} VALUES " +
+                "(TIMESTAMP '2026-09-02 10:00:00', 100, 3, 1), " +
+                "(TIMESTAMP '2026-09-02 11:00:00', 0, 2, 1)";
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        var recorded = await service.ReadAttemptsAsync();
+
+        Assert.Equal(2L, recorded.Count);
+
+        /* The whole point: 0, not 100. The hot store was repaired by the first attempt. */
+        Assert.Equal(0L, recorded.HotGroups);
+        Assert.Equal(2L, recorded.ArchiveFiles);
+        Assert.Equal(1L, recorded.UnreadableFiles);
+    }
+
     /// <summary>A store with nothing to repair records the marker anyway, so the survey stops running forever.</summary>
     [Fact]
     public async Task StartupRepair_OnACleanStore_RecordsTheMarkerSoItDoesNotSurveyEveryLaunch()
@@ -377,26 +499,40 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         /* Not one silent acquisition left. This is the assertion that goes red on the pre-#2465 file. */
         Assert.Empty(Regex.Matches(source, @"_duckDb\.AcquireReadLock\(\)"));
 
-        /* Three FORWARD it: the marker read, the survey, and the archive rewrite-to-temp. Each abandons into
-           a state the next launch reproduces for free, so there is nothing to protect by waiting. */
-        Assert.Equal(3, Regex.Matches(source, @"_duckDb\.AcquireReadLock\(cancellationToken\)").Count);
+        /* FOUR forward it: the marker read, the survey, the archive rewrite-to-temp, and #2748's attempt
+           COUNT. Each abandons into a state the next launch reproduces for free, so there is nothing to
+           protect by waiting — the attempt count is a question, and a question dropped is just re-asked. */
+        Assert.Equal(4, Regex.Matches(source, @"_duckDb\.AcquireReadLock\(cancellationToken\)").Count);
 
-        /* Two DECLINE it, and both are the marker write — the only thing here that records work already done
-           and irreversible, where abandoning costs the next launch the whole survey to learn nothing. */
+        /* THREE decline it, and all three are marker writes: the two completion markers, plus #2748's attempt
+           marker. Same reason in each case — they record something that abandoning does not undo.
+
+           The attempt marker's version of that is the sharpest one in the file, and it is worth stating
+           because #2761 has this service holding an uncancelable lock under review. This decline is NOT the
+           uncancelable-survey shape #2761 is about: it is two statements against a table with at most a
+           handful of rows, not a full GROUP BY over the hot store. What it protects is the crash gate itself.
+           If this write is abandoned, no attempt is recorded, and a store that then takes duckdb.dll down
+           natively comes back on the next launch with its attempt count unchanged — which is precisely the
+           infinite crash loop #2748 exists to end. Forwarding the token here would make the protection
+           abandonable at the one moment it is about to be needed. */
         var declined = Regex.Matches(source, @"_duckDb\.AcquireReadLock\(CancellationToken\.None\)");
-        Assert.Equal(2, declined.Count);
+        Assert.Equal(3, declined.Count);
 
         foreach (Match site in declined)
         {
             var reason = source[Math.Max(0, site.Index - 1500)..site.Index];
-            Assert.Contains("#2465", reason, StringComparison.Ordinal);
             Assert.Contains("marker", reason, StringComparison.Ordinal);
+            Assert.True(
+                reason.Contains("#2465", StringComparison.Ordinal) || reason.Contains("#2748", StringComparison.Ordinal),
+                "every declining acquisition must cite the issue whose reasoning it is following");
         }
 
         /* And each decline is WHOLE. A lock that will not be abandoned in front of a write that will be is
-           worse than either choice made consistently, so the open and both statements decline too. */
-        Assert.Equal(2, Regex.Matches(source, @"await connection\.OpenAsync\(CancellationToken\.None\);").Count);
+           worse than either choice made consistently, so the open and the statements decline too. Three opens
+           now: the two completion markers and the attempt marker. */
+        Assert.Equal(3, Regex.Matches(source, @"await connection\.OpenAsync\(CancellationToken\.None\);").Count);
         Assert.Equal(2, Regex.Matches(source, @"await MarkRepairedAsync\(connection, [^;]*CancellationToken\.None\);").Count);
+        Assert.Equal(2, Regex.Matches(source, @"await (create|insert)\.ExecuteNonQueryAsync\(CancellationToken\.None\);").Count);
 
         /* The write locks stay out of this: AcquireWriteLock has no token-taking overload, so there is no
            decision to state at those two. Their timeout question is #2463's, not this test's. */
