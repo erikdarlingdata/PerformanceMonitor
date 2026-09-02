@@ -174,9 +174,14 @@ internal static class ComposeStoreAvailability
 
         var windowDays = (nowUtc - windowStartUtc).TotalDays;
         var heldDays = (nowUtc - oldestHeld).TotalDays;
+        /* Pluralise on the RENDERED number, not the raw double: heldDays formats as a whole number and windowDays
+           to one decimal, so "1" is singular ("1 day") while "1.5" and "30" are plural — a one-day store no
+           longer reads "reaches back about 1 days". */
+        var heldText = heldDays.ToString("0", CultureInfo.InvariantCulture);
+        var windowText = windowDays.ToString("0.#", CultureInfo.InvariantCulture);
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"partial window: this panel read the {tierName} tier, which on this store reaches back about {heldDays:0} days, but the requested window starts {windowDays:0.#} days back — older points are not included.");
+            $"partial window: this panel read the {tierName} tier, which on this store reaches back about {heldText} day{(heldText == "1" ? "" : "s")}, but the requested window starts {windowText} day{(windowText == "1" ? "" : "s")} back — older points are not included.");
     }
 
     /// <summary>
