@@ -52,10 +52,24 @@ internal static class DarlingTriageEndpoint
 {
     /// <summary>One triage section: a display title plus the <c>/api/read</c> read it runs and the fixed
     /// query params it binds (wire keys, exactly what the dispatch lambda reads — <c>hours</c>, <c>limit</c>,
-    /// <c>top</c>, ...). The server and the <c>as_of</c> anchor are injected per request.</summary>
-    internal sealed record TriageSection(string Title, string Read, IReadOnlyDictionary<string, string> Params);
+    /// <c>top</c>, ...). The server and the <c>as_of</c> anchor are injected per request, EXCEPT on a
+    /// <paramref name="FleetLevel"/> section: those reads take no server at all (#2768), so injecting one
+    /// would bind a parameter the tool does not read and imply a scope the section does not have.</summary>
+    internal sealed record TriageSection(
+        string Title, string Read, IReadOnlyDictionary<string, string> Params, bool FleetLevel = false);
 
-    private static TriageSection S(string title, string read, params (string Key, string Value)[] parameters)
+    private static TriageSection S(string title, string read, params (string Key, string Value)[] parameters) =>
+        Section(title, read, fleetLevel: false, parameters);
+
+    /// <summary>A FLEET-LEVEL section (#2768): a read that answers about the monitoring store or the whole
+    /// fleet and therefore takes no <c>server</c>. Used by the store self-alert family, whose alerts fire
+    /// under the synthetic <see cref="DarlingSelfAlertEvaluator.StoreServerLabel"/> and have no per-server
+    /// scope to drill into.</summary>
+    private static TriageSection F(string title, string read, params (string Key, string Value)[] parameters) =>
+        Section(title, read, fleetLevel: true, parameters);
+
+    private static TriageSection Section(
+        string title, string read, bool fleetLevel, params (string Key, string Value)[] parameters)
     {
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (key, value) in parameters)
@@ -63,7 +77,7 @@ internal static class DarlingTriageEndpoint
             map[key] = value;
         }
 
-        return new TriageSection(title, read, map);
+        return new TriageSection(title, read, map, fleetLevel);
     }
 
     /// <summary>
@@ -93,6 +107,11 @@ internal static class DarlingTriageEndpoint
         ("Long-Running Jobs Cleared", "Long-Running Job"),
         ("Database State Resolved", "Database State"),
         ("Forced Plan Failing Resolved", "Forced Plan Failing"),
+        /* The store family's recovery edges (#2768). Store Runtime Upgrade has no resolution edge — an
+           in-place major upgrade is a one-shot event, not a condition that clears. */
+        (DarlingSelfAlertEvaluator.DiskPressureResolvedMetric, DarlingSelfAlertEvaluator.DiskPressureMetric),
+        ("Store Job Cadence Recovered", DarlingSelfAlertEvaluator.JobCadenceMetric),
+        ("Compression Job Recovered", DarlingSelfAlertEvaluator.CompressionJobMetric),
     };
 
     /// <summary>
@@ -213,6 +232,19 @@ internal static class DarlingTriageEndpoint
                 S("Collection health", "get_collection_health"),
                 S("Server summary", "get_server_summary"),
             },
+            /* The store self-alert family (#2768). These fire under the synthetic
+               DarlingSelfAlertEvaluator.StoreServerLabel, which is not a registered target, so the per-server
+               reads the fallback used to run could never apply — they rendered three resolver errors on every
+               store alert. One shape for the whole family, the AG precedent: get_store_metrics answers all of
+               them (total_bytes + daily_growth for disk pressure, the objects[] rows' last_run_duration_ms /
+               schedule_interval_ms / duration_vs_cadence_percent for job cadence — the alert's own detail text
+               points at that same series — and per-object compression ratios for a stuck compression job),
+               and collector cost is what DRIVES the volume all three are downstream of. */
+            [DarlingSelfAlertEvaluator.DiskPressureMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.StoreUpgradeMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
+
             /* PostgreSQL alert family (PostgresAlertEvaluator). */
             ["PostgreSQL Wraparound Risk"] = new[]
             {
@@ -248,6 +280,15 @@ internal static class DarlingTriageEndpoint
         S("Server summary", "get_server_summary"),
     };
 
+    /// <summary>The store self-alert family's sections (#2768) — both FLEET-LEVEL, so neither binds a server.
+    /// <c>get_store_metrics</c> is the store's own size/compression/growth series plus a row per TimescaleDB
+    /// background job; <c>get_collector_cost</c> is what drives the ingest volume those numbers move with.</summary>
+    private static TriageSection[] StoreSections() => new[]
+    {
+        F("Store size, growth and background jobs", "get_store_metrics", ("days_back", "30")),
+        F("Collector cost (what drives store volume)", "get_collector_cost", ("days_back", "7")),
+    };
+
     /// <summary>The fallback for a metric with no mapping — self-alerts, and any metric added after this map.
     /// A summary plus collection health is thin but always valid; the standing collection-log section below
     /// rides alongside on every page.</summary>
@@ -268,6 +309,20 @@ internal static class DarlingTriageEndpoint
         !string.IsNullOrWhiteSpace(metricName) && SectionsByMetric.TryGetValue(metricName.Trim(), out var sections)
             ? sections
             : DefaultSections;
+
+    /// <summary>
+    /// PURE (#2768): is this link's <c>server</c> the synthetic label the fleet-level store self-alerts fire
+    /// under? Those alerts are ABOUT the monitoring store, which is not a monitored SQL Server and is not in
+    /// the registry, so resolving it is guaranteed to fail. Recognising it lets the page skip resolution
+    /// entirely — no page-level "Could not resolve server" warning for a server that was never supposed to
+    /// resolve — and skip the standing per-server collection-log section, which needs a server to mean
+    /// anything. Compared case-insensitively and trimmed, matching how the history filter and
+    /// <see cref="SectionsFor"/> treat their inputs, because the label arrives back through a URL.
+    /// </summary>
+    internal static bool IsFleetLevelStoreServer(string? server) =>
+        !string.IsNullOrWhiteSpace(server)
+        && string.Equals(
+            server.Trim(), DarlingSelfAlertEvaluator.StoreServerLabel, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>How far past the firing instant each section's window END sits, so the firing itself — and
     /// its immediate aftermath — is inside the window rather than being its exclusive upper bound.</summary>
@@ -330,11 +385,16 @@ internal static class DarlingTriageEndpoint
 
             var notes = new JsonArray();
 
+            /* #2768: a store self-alert's server is the synthetic StoreServerLabel, which cannot resolve by
+               design. Recognise it up front and skip resolution rather than reporting a failure the operator
+               can do nothing about — the sections this page then runs are fleet-level and take no server. */
+            var fleetLevelStore = IsFleetLevelStoreServer(serverQuery);
+
             /* Server resolution — a failure is a NOTE, not a 500: the page still renders the alert-history
                match (fleet-wide) and whatever sections can answer without a resolvable server. */
             int? serverId = null;
             string? serverName = serverQuery;
-            if (!string.IsNullOrWhiteSpace(serverQuery))
+            if (!fleetLevelStore && !string.IsNullOrWhiteSpace(serverQuery))
             {
                 try
                 {
@@ -417,13 +477,27 @@ internal static class DarlingTriageEndpoint
                 sections.Add(await RunSectionAsync(section, dispatch, context, postgres, analysis, serverName, asOf));
             }
 
-            sections.Add(await RunSectionAsync(CollectionLogSection, dispatch, context, postgres, analysis, serverName, asOf));
+            /* The standing per-server collection log rides along on every per-server page. It is SKIPPED for a
+               fleet-level store alert (#2768): get_collection_log is keyed on a server, so with the synthetic
+               label it could only ever answer with the resolver error this fix exists to remove. */
+            if (!fleetLevelStore)
+            {
+                sections.Add(await RunSectionAsync(CollectionLogSection, dispatch, context, postgres, analysis, serverName, asOf));
+            }
+            else
+            {
+                notes.Add((JsonNode)(
+                    "This is a fleet-level alert about the monitoring store itself, not about a monitored " +
+                    "server, so the per-server sections do not apply and are replaced by the store's own " +
+                    "size, growth, background-job and collector-cost reads."));
+            }
 
             var body = new JsonObject
             {
                 ["metric"] = metric,
                 ["server"] = serverName,
                 ["server_id"] = serverId,
+                ["fleet_level"] = fleetLevelStore,
                 ["at"] = anchor.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
                 ["as_of"] = asOf,
                 ["dedup_key"] = dedup,
@@ -487,7 +561,9 @@ internal static class DarlingTriageEndpoint
     }
 
     /// <summary>PURE: the synthetic query string one section binds — its fixed params plus the injected
-    /// <c>server</c> and <c>as_of</c> (each omitted when absent, so the tool sees its own default).</summary>
+    /// <c>server</c> and <c>as_of</c> (each omitted when absent, so the tool sees its own default). A
+    /// <see cref="TriageSection.FleetLevel"/> section never gets the server (#2768): its read does not take
+    /// one, and on a store alert the only server available is a label that resolves to nothing.</summary>
     internal static string BuildSectionQuery(TriageSection section, string? serverName, string? asOf)
     {
         var builder = new StringBuilder(64);
@@ -497,7 +573,7 @@ internal static class DarlingTriageEndpoint
                 .Append(Uri.EscapeDataString(key)).Append('=').Append(Uri.EscapeDataString(value));
         }
 
-        if (!string.IsNullOrWhiteSpace(serverName))
+        if (!section.FleetLevel && !string.IsNullOrWhiteSpace(serverName))
         {
             Append("server", serverName);
         }
