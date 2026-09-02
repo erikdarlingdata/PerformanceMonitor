@@ -709,9 +709,10 @@ public sealed class ServerPageTabsTests
     ///
     /// <para>Both helpers THROW without a sentence, and every tab is built during the DOM-shim run, so a panel
     /// that forgot one cannot reach a browser. The zero-versus-one distinction was verified against the shipped
-    /// vizLine: zero points with an emptyText renders the descriptor's sentence, one point still renders the
-    /// chart's own (which is the true statement there), and zero points WITHOUT one still falls through — so a
-    /// stored view authored before this existed is unchanged.</para>
+    /// vizLine: zero points with an emptyText renders the descriptor's sentence; one point falls through to
+    /// renderLineChart, which draws that lone bucket as a marker (a single reading is data, not a warming-up
+    /// absence); and zero points WITHOUT an emptyText still falls through — so a stored view authored before
+    /// this existed is unchanged.</para>
     /// </summary>
     [Fact]
     public void EveryDataPanel_ExplainsItsOwnEmptyState()
@@ -735,8 +736,8 @@ public sealed class ServerPageTabsTests
             StringComparison.Ordinal);
 
         /* And renderPanel is what renders both, from the descriptor field the helpers set. The line guard fires
-           at EXACTLY zero rows: at one row the chart's own sentence is the true one, and a descriptor that never
-           had an emptyText (every stored view authored before this) still falls through unchanged. */
+           at EXACTLY zero rows: at one row renderLineChart draws the lone bucket as a marker, and a descriptor
+           that never had an emptyText (every stored view authored before this) still falls through unchanged. */
         var panels = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         Assert.Contains("desc.emptyText || \"No rows in this window.\"", panels, StringComparison.Ordinal);
@@ -754,6 +755,43 @@ public sealed class ServerPageTabsTests
             panels,
             StringComparison.Ordinal);
         Assert.Contains("function stat(title, read, params, stats, subtitle, span = 1, emptyText) {", js, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A single collected bucket renders as a marker, not the "not enough data points" strip.
+    ///
+    /// <para>renderLineChart's warming-up strip is right at ZERO rows and wrong at one: a series that reached a
+    /// single time bucket has a real reading in hand. On a warming-up tab siblings reach two buckets at
+    /// different rates — deadlocks and waits sample every cycle, blocking snapshots are sparser — so the
+    /// one-bucket panels showed "not enough data points" beside charts that plotted the same window, and the
+    /// tab read as half-broken while it warmed up. The whole-chart gate now fires only at zero rows; one point
+    /// falls through to a centered dot per series (a polyline needs two). Pinned as source because there is no
+    /// JS execution harness for the chart module — a regression here is invisible until a cold server is on
+    /// camera, which is exactly when it is seen.</para>
+    /// </summary>
+    [Fact]
+    public void SingleBucketSeries_RendersAsAMarker_NotTheWarmingUpStrip()
+    {
+        var charts = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "charts.js"));
+
+        /* The whole-chart gate is zero-only now; a single row is data and proceeds to the geometry below. */
+        Assert.Contains("if (rows.length === 0) {", charts, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (rows.length < 2) {", charts, StringComparison.Ordinal);
+
+        /* A lone plottable point has no segment to stroke, so it draws as a dot instead of being skipped. */
+        Assert.Contains("if (linePts.length === 1) {", charts, StringComparison.Ordinal);
+        Assert.Contains("class: \"series-dot\"", charts, StringComparison.Ordinal);
+
+        /* A single bucket spans no time (spanMs === 0); its x centers rather than pinning to the left axis. */
+        Assert.Contains("spanMs === 0 ? M.l + plotW / 2", charts, StringComparison.Ordinal);
+
+        /* Stacked-area collapses to a zero-area polygon at one bucket, so it draws a dot at each series' stack
+           top rather than a blank grid — the mode this fix would otherwise have regressed (its polygon paints
+           nothing, .series-area has no stroke). The dual-axis overlay's lone reading draws a dot too, so the
+           "a dot per series" rule holds for every chart mode and both axes, not just the plain line. */
+        Assert.Contains("cy: plotY(stackTops[0][k])", charts, StringComparison.Ordinal);
+        Assert.Contains("if (pts2.length === 1) {", charts, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -417,6 +417,7 @@ table.data td.sev-Healthy { color: var(--ok); }
 .chart .scatter-dot.drillable:hover { fill-opacity: 1; }
 .chart .hover-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
 .chart .hover-dot { stroke: var(--bg-dark); stroke-width: 1.5; }
+.chart .series-dot { stroke: var(--bg-dark); stroke-width: 1.5; } /* a single-bucket series' resting marker (no segment to stroke) */
 
 .chart-legend {
   display: flex;
