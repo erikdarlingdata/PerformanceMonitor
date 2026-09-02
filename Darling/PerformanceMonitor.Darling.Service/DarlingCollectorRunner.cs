@@ -147,6 +147,18 @@ public sealed class DarlingCollectorRunner
     private readonly ConcurrentDictionary<(int ServerId, string Database), long[]> _textFetchCarryover = new();
 
     /// <summary>
+    /// Consecutive-failure count for the TEXT fetch (#2776), the backoff input its
+    /// <see cref="QueryStorePlanXmlState.NarrowForFailures"/> call reads.
+    ///
+    /// <para>A dictionary of its own rather than a field on a carried estimate, because the text fetch
+    /// deliberately has no estimator to hang it off — <c>DATALENGTH</c> on text is cheap, so there is no
+    /// decompression to bound and no learned average to carry. The plan side keeps its counter inside
+    /// <see cref="QueryStorePlanXmlState.PlanSizeEstimate"/> for exactly the opposite reason: it already has
+    /// a record to live in.</para>
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), int> _textFetchFailures = new();
+
+    /// <summary>
     /// Ids per IN-list statement for the plan fetch. Small on purpose: each id in the list is a plan the
     /// server will DECOMPRESS to run the budget's running total, so the statement size is never the real
     /// bound — the candidate cap from <see cref="QueryStorePlanXmlState.CandidatePlanCount"/> is — and 400
@@ -1578,6 +1590,26 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// Clears this database's plan-fetch backoff (#2776) without disturbing the size it learned.
+    /// </summary>
+    /// <remarks>
+    /// Called from the "nothing to fetch this cycle" early returns, which are the two ways a pass can end
+    /// well without reaching the success line at the bottom of the fetch. Without this a database that
+    /// failed once and then went quiet would keep the count pinned — nothing resets it, because nothing
+    /// runs — and the first pass after the work came back, possibly hours later and against a completely
+    /// different store, would be narrowed for a reason that expired long ago. Only the counter is cleared;
+    /// the learned average is the expensive part and it stays. Advisory, so a lost race is fine: the next
+    /// idle cycle clears it again.
+    /// </remarks>
+    private void ClearPlanFetchBackoff((int ServerId, string Database) carryKey)
+    {
+        if (_observedPlanSize.TryGetValue(carryKey, out var estimate) && estimate.ConsecutiveFetchFailures > 0)
+        {
+            _observedPlanSize.TryUpdate(carryKey, QueryStorePlanXmlState.RecordFetchSuccess(estimate), estimate);
+        }
+    }
+
+    /// <summary>
     /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
     /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
     /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
@@ -1606,14 +1638,18 @@ public sealed class DarlingCollectorRunner
         IReadOnlyList<(long PlanId, string? PlanHash)> references,
         CancellationToken cancellationToken)
     {
+        /* Hoisted out of the try (#2776) so the catch can advance this database's backoff counter — the
+           handler needs the same key the body uses. */
+        var carryKey = (server.ServerId, databaseName);
+
         try
         {
-            var carryKey = (server.ServerId, databaseName);
             var hasCarryover = _planFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
             {
                 /* The steady quiet cycle: nothing referenced, nothing owed. Zero store reads, zero target
                    queries — the whole point of the reshape. */
+                ClearPlanFetchBackoff(carryKey);
                 return;
             }
 
@@ -1648,7 +1684,11 @@ public sealed class DarlingCollectorRunner
 
             if (missing.Count == 0)
             {
+                /* The probe round-tripped the store and came back with nothing owed — a stronger proof of
+                   store health than the quiet cycle above, since this one actually wrote touch timestamps.
+                   Treat it as the completed pass it is (#2776). */
                 _planFetchCarryover.TryRemove(carryKey, out _);
+                ClearPlanFetchBackoff(carryKey);
                 return;
             }
 
@@ -1668,6 +1708,19 @@ public sealed class DarlingCollectorRunner
                 _logger?.LogInformation(
                     "query_store plan fetch on '{Server}' database [{Database}]: candidate cap clamped to {K} — a bound sized this pass, not a measurement.",
                     server.Config.DisplayName, databaseName, cap);
+            }
+
+            /* #2776: narrow the width by the consecutive-failure count before it is used. A database whose
+               store write keeps timing out re-paid FULL decompression every cycle and re-attempted a write
+               the store had already proven it could not commit; halving per failure converges on a width
+               that fits. Inert at zero failures, floored so the database never stops. */
+            var backedOff = QueryStorePlanXmlState.NarrowForFailures(cap, estimate.ConsecutiveFetchFailures);
+            if (backedOff != cap)
+            {
+                _logger?.LogInformation(
+                    "query_store plan fetch on '{Server}' database [{Database}]: width narrowed {Cap} -> {Narrowed} after {Failures} consecutive failure(s) — backing off, not giving up; a completed pass restores full width.",
+                    server.Config.DisplayName, databaseName, cap, backedOff, estimate.ConsecutiveFetchFailures);
+                cap = backedOff;
             }
 
             /* Ascending ids (SortedSet order) so the budget's in-SQL cut and the cross-chunk break are
@@ -1763,12 +1816,31 @@ public sealed class DarlingCollectorRunner
             {
                 _planFetchCarryover.TryRemove(carryKey, out _);
             }
+
+            /* #2776: the pass completed — restore full width. Recorded HERE rather than inside Learn
+               because Learn runs before the store write, so a pass that threw would otherwise clear its own
+               backoff on the way down. Reaching this line is the only proof the write actually committed. */
+            _observedPlanSize.AddOrUpdate(
+                carryKey,
+                static (_, _) => default,
+                static (_, current, _) => QueryStorePlanXmlState.RecordFetchSuccess(current),
+                0);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #2776: advance the backoff so the next pass attempts a narrower width. Read-modify-write
+               through the dictionary rather than the local `estimate`, because Learn may already have
+               written a newer record for this key and clobbering it would discard this pass's size
+               learning. */
+            var failed = _observedPlanSize.AddOrUpdate(
+                carryKey,
+                static (_, _) => QueryStorePlanXmlState.RecordFetchFailure(default),
+                static (_, current, _) => QueryStorePlanXmlState.RecordFetchFailure(current),
+                0);
+
             _logger?.LogWarning(ex,
-                "query_store plan fetch failed on '{Server}' database [{Database}] — runtime statistics are unaffected, and whatever did not land is still missing from the store, so the next cycle that references it re-selects it.",
-                server.Config.DisplayName, databaseName);
+                "query_store plan fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are unaffected, and whatever did not land is still missing from the store, so the next cycle that references it re-selects it at a narrower width.",
+                server.Config.DisplayName, databaseName, failed.ConsecutiveFetchFailures);
         }
     }
 
@@ -1800,12 +1872,16 @@ public sealed class DarlingCollectorRunner
         IReadOnlyList<(long QueryId, string? QueryHash)> references,
         CancellationToken cancellationToken)
     {
+        /* Hoisted out of the try (#2776), same reason as the plan side: the catch advances the backoff. */
+        var carryKey = (server.ServerId, databaseName);
+
         try
         {
-            var carryKey = (server.ServerId, databaseName);
             var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
             {
+                /* Nothing referenced, nothing owed — so any carried failure count is stale (#2776). */
+                _textFetchFailures.TryRemove(carryKey, out _);
                 return;
             }
 
@@ -1839,14 +1915,39 @@ public sealed class DarlingCollectorRunner
 
             if (missing.Count == 0)
             {
+                /* Probed the store, nothing owed: the same end-well-without-fetching case as the plan side. */
                 _textFetchCarryover.TryRemove(carryKey, out _);
+                _textFetchFailures.TryRemove(carryKey, out _);
                 return;
             }
 
             var budget = context.TextByteBudgetOverride ?? 12 * 1024 * 1024;
-            var attempt = new List<long>(missing.Count);
+
+            /* #2776: the text fetch has no candidate cap by design — DATALENGTH on text is cheap, so only
+               the byte budget bounds it and the whole missing set is normally attempted. That stays true
+               while the fetch is healthy. Once it starts throwing, the unbounded set is the problem: the
+               store write is what times out, and re-attempting the identical width guarantees the identical
+               timeout. Narrowing by consecutive failures converges on a width the store can commit, and is
+               inert (full set) at zero failures. */
+            var textFailures = _textFetchFailures.TryGetValue(carryKey, out var carriedFailures)
+                ? carriedFailures
+                : 0;
+            var textWidth = QueryStorePlanXmlState.NarrowForFailures(missing.Count, textFailures);
+            if (textWidth != missing.Count)
+            {
+                _logger?.LogInformation(
+                    "query_store text fetch on '{Server}' database [{Database}]: width narrowed {Full} -> {Narrowed} after {Failures} consecutive failure(s) — backing off, not giving up; a completed pass restores full width.",
+                    server.Config.DisplayName, databaseName, missing.Count, textWidth, textFailures);
+            }
+
+            var attempt = new List<long>(textWidth);
             foreach (var id in missing)
             {
+                if (attempt.Count >= textWidth)
+                {
+                    break;
+                }
+
                 attempt.Add(id);
             }
 
@@ -1922,12 +2023,25 @@ public sealed class DarlingCollectorRunner
             {
                 _textFetchCarryover.TryRemove(carryKey, out _);
             }
+
+            /* #2776: the pass completed — restore full width. Removing the key rather than zeroing it keeps
+               the dictionary to just the databases currently backing off. */
+            _textFetchFailures.TryRemove(carryKey, out _);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #2776: advance the backoff so the next pass attempts a narrower width. Saturates at the same
+               halving count the plan side uses, so the counter stays meaningful rather than unbounded. */
+            var failures = _textFetchFailures.AddOrUpdate(
+                carryKey,
+                1,
+                static (_, current) => current >= QueryStorePlanXmlState.MaxBackoffHalvings
+                    ? QueryStorePlanXmlState.MaxBackoffHalvings
+                    : current + 1);
+
             _logger?.LogWarning(ex,
-                "query_store text fetch failed on '{Server}' database [{Database}] — runtime statistics are already written, and whatever did not land is still missing from the store, so the next cycle that references those statements re-selects them.",
-                server.Config.DisplayName, databaseName);
+                "query_store text fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are already written, and whatever did not land is still missing from the store, so the next cycle that references those statements re-selects them at a narrower width.",
+                server.Config.DisplayName, databaseName, failures);
         }
     }
 

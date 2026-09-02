@@ -26,6 +26,7 @@ import {
   mount,
   loadingStrip,
   errorStrip,
+  readErrorStrip,
   emptyStrip,
   readTool,
   apiGet,
@@ -55,7 +56,9 @@ async function loadPanel(desc, body) {
   const res = desc.read ? await readTool(desc.read, desc.params) : await apiGet(desc.path + buildQuery(desc.params));
 
   if (res.kind === "error") {
-    mount(body, errorStrip(res.message));
+    /* readErrorStrip degrades the "window too wide" validation error to a notice; every other error stays red
+       (#2780). Shared with the server-tab composites so the whole page degrades the same way. */
+    mount(body, readErrorStrip(res.message));
     return;
   }
   if (res.kind === "empty") {

@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, mount, truncate, loadingStrip, errorStrip, emptyStrip, disclosure, noticeStrip, fmtMs } from "../util.js";
+import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, fmtMs } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 
@@ -134,7 +134,7 @@ function fanout(read, params, specs) {
     const res = await readTool(read, params);
     specs.forEach((spec, i) => {
       const body = shells[i].body;
-      if (res.kind === "error") return mount(body, errorStrip(res.message));
+      if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") return mount(body, emptyStrip(res.message));
       try {
         mount(body, VIZ[spec.viz](res.data, spec));
@@ -159,7 +159,7 @@ export function waitsPanel(server, ctx) {
   const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the wait you pick");
   (async () => {
     const res = await readTool("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
-    if (res.kind === "error") return mount(body, errorStrip(res.message));
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
     const waits = res.data.waits || [];
@@ -184,7 +184,7 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
   mount(slot, loadingStrip());
   const trend = await readTool("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours });
   if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : errorStrip(trend.message));
+    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : readErrorStrip(trend.message));
     return;
   }
   mount(
@@ -218,7 +218,7 @@ export function perfmonPanel(server, ctx) {
   const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counter you pick");
   (async () => {
     const res = await readTool("get_perfmon_stats", { server });
-    if (res.kind === "error") return mount(body, errorStrip(res.message));
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
     const names = [...new Set((res.data.counters || []).map((c) => c.counter_name).filter(Boolean))].sort();
@@ -246,7 +246,7 @@ export function perfmonPanel(server, ctx) {
 async function drawPerfmonTrend(slot, server, ctx, counterName) {
   mount(slot, loadingStrip());
   const trend = await readTool("get_perfmon_trend", { server, counter_name: counterName, hours: ctx.hours });
-  if (trend.kind === "error") return mount(slot, errorStrip(trend.message));
+  if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
   if (trend.kind === "empty") {
     const hinted = trend.hints && Array.isArray(trend.hints.collected_counters) ? trend.hints.collected_counters : null;
     mount(slot, [
@@ -296,7 +296,7 @@ export function topQueriesPanel(server, ctx) {
   const { panel, body } = panelShell("Top Queries by CPU", ctx.label + ", with a per-collection trend for the query you pick");
   (async () => {
     const res = await readTool("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
-    if (res.kind === "error") return mount(body, errorStrip(res.message));
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
     const queries = res.data.queries || [];
@@ -350,7 +350,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
     hours: ctx.hours,
   });
   if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : errorStrip(trend.message));
+    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : readErrorStrip(trend.message));
     return;
   }
 
@@ -414,7 +414,7 @@ export function fileIoPanel(server, ctx) {
   const { panel, body } = panelShell("File I/O Latency", "avg read latency per database, " + ctx.label);
   (async () => {
     const res = await readTool("get_file_io_trend", { server, hours: ctx.hours });
-    if (res.kind === "error") return mount(body, errorStrip(res.message));
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
     const { points, series } = pivot(res.data.trend || [], {

@@ -24,11 +24,15 @@ import { el, mount, apiGet, buildQuery, loadingStrip, errorStrip, emptyStrip, no
 import { VIZ } from "../panels.js";
 import { suggestViz, deriveVizConfig } from "../derive.js";
 
-/* The get_alert_history wire shape's status collapse, matching the Alert History page's own cell. */
+/* The get_alert_history wire shape's status collapse, matching the Alert History page's own cell — including
+   its #2781 rule: the "tray" channel (the Lite/Dashboard system-tray toast) is meaningless on the headless web,
+   so it is dropped rather than shown; a real channel still renders. The tray rule here is kept in lockstep
+   with statusCell in alerts.js (the two collapse the status slightly differently otherwise). */
 function alertStatusText(a) {
   if (a.muted) return "Muted";
   if (a.send_error) return "Delivery failed: " + a.send_error;
-  if (a.alert_sent) return "Sent" + (a.notification_type ? " (" + a.notification_type + ")" : "");
+  const channel = a.notification_type && a.notification_type !== "tray" ? " (" + a.notification_type + ")" : "";
+  if (a.alert_sent) return "Sent" + channel;
   return "Not sent";
 }
 

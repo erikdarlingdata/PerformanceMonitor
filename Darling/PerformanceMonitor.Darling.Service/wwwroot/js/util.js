@@ -112,6 +112,25 @@ export function emptyStrip(message) {
 export function noticeStrip(message) {
   return el("div", { class: "strip notice", role: "status" }, [message]);
 }
+/**
+ * Render a read error, degrading the "window too wide" case to a notice (#2780). A range wider than a read can
+ * serve comes back as a raw `hours_back value 'N' exceeds maximum of M hours (D days)...` validation string
+ * (McpHelpers.ValidateHoursBack); that is a range choice, not a fault, so it becomes a status notice naming the
+ * window the view keeps rather than a red error carrying the API's own wording. Every other message stays an
+ * error. SHARED by every read-error site — the descriptor loader AND the hand-built server-tab composites — so
+ * a tab cannot show a friendly notice on one panel and the raw string on its neighbour.
+ */
+export function readErrorStrip(message) {
+  const m = /exceeds maximum of (\d+) hours/.exec(message || "");
+  if (m) {
+    const hours = Number(m[1]);
+    const days = Math.round(hours / 24);
+    return noticeStrip(
+      "This view keeps up to " + hours + " hours (" + days + " day" + (days === 1 ? "" : "s") +
+      ") of history — pick a shorter range.");
+  }
+  return errorStrip(message);
+}
 export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
 }
