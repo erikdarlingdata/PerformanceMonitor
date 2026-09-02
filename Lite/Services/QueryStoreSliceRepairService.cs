@@ -215,8 +215,20 @@ public sealed partial class QueryStoreSliceRepairService
         }
 
         using var rows = connection.CreateCommand();
-        rows.CommandText =
-            $"SELECT COUNT(*), COALESCE(MAX(hot_groups), 0), COALESCE(MAX(archive_files), 0), COALESCE(MAX(unreadable_files), 0) FROM {AttemptTable}";
+        /* The LAST attempt's row, not MAX() across all of them. Those diverge the moment two attempts see
+           different work, which is the ordinary partial-repair case rather than an exotic one: attempt 1
+           collapses the hot table and commits, an archive file then fails, the completion marker is withheld,
+           and attempt 2's survey correctly finds zero hot groups left. Independent MAX()es would go on
+           reporting attempt 1's hot count and tell the user an already-clean hot store still has work
+           outstanding - the same misreporting caught earlier for the hot/archive split, reintroduced across
+           attempts instead of within one. Ordered by attempted_at then rowid, so attempts landing inside the
+           same timestamp still resolve to insertion order. */
+        rows.CommandText = $@"
+SELECT
+    (SELECT COUNT(*) FROM {AttemptTable}),
+    COALESCE((SELECT hot_groups FROM {AttemptTable} ORDER BY attempted_at DESC, rowid DESC LIMIT 1), 0),
+    COALESCE((SELECT archive_files FROM {AttemptTable} ORDER BY attempted_at DESC, rowid DESC LIMIT 1), 0),
+    COALESCE((SELECT unreadable_files FROM {AttemptTable} ORDER BY attempted_at DESC, rowid DESC LIMIT 1), 0)";
         using var reader = await rows.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {

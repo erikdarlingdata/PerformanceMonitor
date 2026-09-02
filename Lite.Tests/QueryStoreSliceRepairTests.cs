@@ -371,6 +371,51 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
             "a store capped by an unrepairable file must record that, or the skip message claims nothing is left undone");
     }
 
+    /// <summary>
+    /// #2748: the recorded shape is the LAST attempt's row, not the worst value each column ever held.
+    ///
+    /// <para>They diverge in the ordinary partial-repair case, not an exotic one. Attempt 1 finds 100 split
+    /// intervals, collapses the hot table and commits that — then an archive file fails, so the completion
+    /// marker is withheld. Attempt 2 surveys a hot store that is genuinely clean now and records zero. Read
+    /// the shape with independent <c>MAX()</c>es and the skip message goes on telling the user 100 intervals
+    /// are outstanding in a hot store that has already been repaired.</para>
+    ///
+    /// <para>Written against the rows directly because the sibling cap test cannot catch this: its store is
+    /// capped by a permanently unreadable file with no hot-table data, so every attempt records identical
+    /// numbers and <c>MAX</c> and "last row" agree by accident.</para>
+    /// </summary>
+    [Fact]
+    public async Task ReadAttempts_ReturnsTheLastAttemptsShape_NotTheMaximumEverRecorded()
+    {
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            using var create = connection.CreateCommand();
+            create.CommandText =
+                $"CREATE TABLE IF NOT EXISTS {QueryStoreSliceRepairService.AttemptTable} " +
+                "(attempted_at TIMESTAMP NOT NULL, hot_groups BIGINT NOT NULL, archive_files BIGINT NOT NULL, unreadable_files BIGINT NOT NULL)";
+            await create.ExecuteNonQueryAsync();
+
+            using var insert = connection.CreateCommand();
+            insert.CommandText =
+                $"INSERT INTO {QueryStoreSliceRepairService.AttemptTable} VALUES " +
+                "(TIMESTAMP '2026-09-02 10:00:00', 100, 3, 1), " +
+                "(TIMESTAMP '2026-09-02 11:00:00', 0, 2, 1)";
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        var recorded = await service.ReadAttemptsAsync();
+
+        Assert.Equal(2L, recorded.Count);
+
+        /* The whole point: 0, not 100. The hot store was repaired by the first attempt. */
+        Assert.Equal(0L, recorded.HotGroups);
+        Assert.Equal(2L, recorded.ArchiveFiles);
+        Assert.Equal(1L, recorded.UnreadableFiles);
+    }
+
     /// <summary>A store with nothing to repair records the marker anyway, so the survey stops running forever.</summary>
     [Fact]
     public async Task StartupRepair_OnACleanStore_RecordsTheMarkerSoItDoesNotSurveyEveryLaunch()
