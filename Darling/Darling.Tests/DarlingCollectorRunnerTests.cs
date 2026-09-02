@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
@@ -543,5 +544,69 @@ LIMIT 1", connection);
             $"SELECT {column} FROM {table} WHERE server_id = $1 AND {column} IS NOT NULL AND {column} <> '' LIMIT 1", connection);
         command.Parameters.AddWithValue(serverId);
         return await command.ExecuteScalarAsync(ct) as string;
+    }
+}
+
+/// <summary>
+/// #2795: the SERVER-scoped watermark read must be boundable on the partitioning column, the way #2344
+/// already made the per-database one.
+///
+/// <para><b>Why this is a category pin and not a one-line regression test.</b> #2344 fixed the unbounded
+/// <c>MAX</c> over a non-partitioning column — but only in
+/// <see cref="DarlingCollectorRunner.GetLastCollectedTimeForDatabaseAsync"/>, and it pinned the POLICY
+/// (<c>WatermarkPolicyTests</c>) rather than the policy's APPLICATION. query_store declares both
+/// <c>WatermarkColumn</c> and <c>PerDatabaseWatermarkColumn</c>, so the server-scoped sibling kept running
+/// unbounded on every cycle and nothing in the suite could see it. Measured on use1: 40.7 s and 50.6 s
+/// against Npgsql's 30 s default, cancelled 2,092 times in a day while the bounded sibling was cancelled
+/// 17 times.</para>
+///
+/// <para>So these assert over the method FAMILY by reflection rather than naming one method: a third
+/// timestamp-watermark reader added later is covered without anyone remembering to come back here.</para>
+/// </summary>
+public class ServerWatermarkReadFloorTests
+{
+    /// <summary>
+    /// Every timestamp-watermark reader on the runner accepts a <c>collectedSince</c> bound. Derived from
+    /// the type, so it cannot go stale against a new sibling the way #2344's fix did.
+    /// </summary>
+    [Fact]
+    public void EveryTimestampWatermarkReader_AcceptsACollectedSinceBound()
+    {
+        var readers = typeof(DarlingCollectorRunner)
+            .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .Where(m => m.Name.StartsWith("GetLastCollectedTime", StringComparison.Ordinal)
+                        && m.Name.EndsWith("Async", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.NotEmpty(readers);
+
+        foreach (var reader in readers)
+        {
+            Assert.True(
+                reader.GetParameters().Any(p =>
+                    string.Equals(p.Name, "collectedSince", StringComparison.Ordinal)
+                    && p.ParameterType == typeof(DateTime?)),
+                $"{reader.Name} reads a MAX over a non-partitioning timestamp column; without a "
+                + "collection_time bound it scans every chunk in retention on every cycle (#2344/#2795)");
+        }
+    }
+
+    /// <summary>
+    /// The bound lands on <c>collection_time</c> — the partitioning column — because that is the only
+    /// predicate here that prunes a chunk. Asserted against the SHIPPED string, not a retyped copy.
+    /// </summary>
+    [Fact]
+    public void TheBoundedServerWatermarkSql_PredicatesOnThePartitioningColumn()
+    {
+        var bounded = DarlingCollectorRunner.BuildServerWatermarkSql("query_store_stats", "last_execution_time", bounded: true);
+        var unbounded = DarlingCollectorRunner.BuildServerWatermarkSql("query_store_stats", "last_execution_time", bounded: false);
+
+        Assert.Contains("collection_time > $2", bounded, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time", unbounded, StringComparison.Ordinal);
+
+        /* Both forms still answer the same question about the same column. */
+        Assert.Contains("MAX(last_execution_time)", bounded, StringComparison.Ordinal);
+        Assert.Contains("MAX(last_execution_time)", unbounded, StringComparison.Ordinal);
+        Assert.Contains("server_id = $1", bounded, StringComparison.Ordinal);
     }
 }
