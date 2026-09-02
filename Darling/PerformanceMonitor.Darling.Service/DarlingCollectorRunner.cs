@@ -1590,26 +1590,6 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
-    /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
-    /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
-    /// id, budget-bounded, and land them into the shared dimension plus the map. The store is the
-    /// watermark: a caught-up database's missing set is EMPTY and no target query runs at all, which is the
-    /// property the retired catalog walk lacked (measured 23s per cycle to discover "nothing new").
-    ///
-    /// <para>Failure-isolated, and that is load-bearing rather than defensive: plan XML is an enrichment on
-    /// top of runtime statistics, so a fetch that throws must not cost the database its runtime stats. It
-    /// logs and returns; whatever did not land is still missing from the store, so the next cycle that
-    /// references it re-selects it by construction.</para>
-    ///
-    /// <para>Budget-deferred and capped ids go to <see cref="_planFetchCarryover"/>, because the probe's
-    /// input is each cycle's batch references: a plan referenced ONCE whose fetch was deferred would
-    /// otherwise never re-enter the probe. Ids the target no longer has (Query Store cleanup took the plan
-    /// between reference and fetch) are dropped from the debt — but only on a pass that provably completed
-    /// uncut, because inside a cut pass "absent from the result" and "excluded by the budget predicate" are
-    /// indistinguishable from the client.</para>
-    /// </summary>
-    /// <summary>
     /// Clears this database's plan-fetch backoff (#2776) without disturbing the size it learned.
     /// </summary>
     /// <remarks>
@@ -1629,6 +1609,26 @@ public sealed class DarlingCollectorRunner
         }
     }
 
+    /// <summary>
+    /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
+    /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
+    /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
+    /// id, budget-bounded, and land them into the shared dimension plus the map. The store is the
+    /// watermark: a caught-up database's missing set is EMPTY and no target query runs at all, which is the
+    /// property the retired catalog walk lacked (measured 23s per cycle to discover "nothing new").
+    ///
+    /// <para>Failure-isolated, and that is load-bearing rather than defensive: plan XML is an enrichment on
+    /// top of runtime statistics, so a fetch that throws must not cost the database its runtime stats. It
+    /// logs and returns; whatever did not land is still missing from the store, so the next cycle that
+    /// references it re-selects it by construction.</para>
+    ///
+    /// <para>Budget-deferred and capped ids go to <see cref="_planFetchCarryover"/>, because the probe's
+    /// input is each cycle's batch references: a plan referenced ONCE whose fetch was deferred would
+    /// otherwise never re-enter the probe. Ids the target no longer has (Query Store cleanup took the plan
+    /// between reference and fetch) are dropped from the debt — but only on a pass that provably completed
+    /// uncut, because inside a cut pass "absent from the result" and "excluded by the budget predicate" are
+    /// indistinguishable from the client.</para>
+    /// </summary>
     private async Task FetchAndStorePlansAsync(
         SqlConnection sqlConnection,
         ServerRuntime server,
