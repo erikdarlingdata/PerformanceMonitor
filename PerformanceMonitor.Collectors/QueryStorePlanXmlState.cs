@@ -100,8 +100,97 @@ public static class QueryStorePlanXmlState
     /// caps its id list from, and whether the fetch is mid-backlog (which biases the sample small — the
     /// <see cref="CandidatePlanCount(long?, long, bool, out bool)"/> overload floors it).
     /// <c>AvgBytes</c> of zero means "never learned"; callers pass null to CandidatePlanCount then.
+    ///
+    /// <para><c>ConsecutiveFetchFailures</c> (#2776) is the backoff counter — how many passes in a row have
+    /// thrown before settling their debt. It rides in this record rather than a dictionary of its own so it
+    /// is carried and pruned with the estimate it belongs to; a parallel dictionary would be a second thing
+    /// to remember to clear. Defaulted so every existing construction site still compiles and still means
+    /// "no failures".</para>
     /// </summary>
-    public readonly record struct PlanSizeEstimate(long AvgBytes, bool CatchUpInProgress);
+    public readonly record struct PlanSizeEstimate(
+        long AvgBytes, bool CatchUpInProgress, int ConsecutiveFetchFailures = 0);
+
+    /// <summary>
+    /// How many consecutive failures it takes to reach <see cref="MinCandidatePlans"/> from
+    /// <see cref="MaxCandidatePlans"/> by halving: 512 → 256 → 128 → 64 → 32.
+    ///
+    /// <para>Counting past it is pointless — the width is already floored — so
+    /// <see cref="RecordFetchFailure"/> saturates here rather than growing without bound. Saturating also
+    /// keeps the number meaningful to a human reading state: 4 means "at the floor", not "has been failing
+    /// since Tuesday".</para>
+    /// </summary>
+    public const int MaxBackoffHalvings = 4;
+
+    /// <summary>
+    /// Folds a THROWN pass into the estimate (#2776): the size estimate is left exactly as it was — a pass
+    /// that failed measured nothing — and the failure counter advances, saturating at
+    /// <see cref="MaxBackoffHalvings"/>.
+    /// </summary>
+    public static PlanSizeEstimate RecordFetchFailure(PlanSizeEstimate previous) =>
+        previous with
+        {
+            ConsecutiveFetchFailures = previous.ConsecutiveFetchFailures >= MaxBackoffHalvings
+                ? MaxBackoffHalvings
+                : previous.ConsecutiveFetchFailures + 1,
+        };
+
+    /// <summary>
+    /// Folds a pass that COMPLETED into the estimate (#2776): full width is restored immediately rather than
+    /// decayed. One success proves the narrowed width fits, and the cheapest way to find the real ceiling
+    /// again is to try it — a database recovering from a transient store stall should not spend four more
+    /// cycles crawling back up. If the full width genuinely does not fit, the next pass throws and narrows
+    /// again, which costs one pass and is self-correcting; decaying slowly would charge every database that
+    /// ever blipped a standing tax instead.
+    /// </summary>
+    public static PlanSizeEstimate RecordFetchSuccess(PlanSizeEstimate previous) =>
+        previous with { ConsecutiveFetchFailures = 0 };
+
+    /// <summary>
+    /// The backoff itself (#2776): halve the attempt width once per consecutive failure, floored so a
+    /// database always keeps working — NEVER a stop.
+    ///
+    /// <para><b>Why narrowing the width is the right lever for a store-write timeout.</b> The failures this
+    /// exists for are Npgsql cancels on the STORE side: <c>QueryStorePlanWriter</c> writes up to the whole
+    /// per-pass byte budget of plan XML plus the map upsert inside ONE transaction, and on a store serving a
+    /// 4-wide sweep that can exceed the command timeout. Bytes shipped track the id count (count × average
+    /// size, until the in-SQL budget binds), so halving the count halves the write — the operation that is
+    /// actually timing out. The backoff therefore converges on a width the store CAN commit rather than
+    /// retrying the same impossible one forever, and it halves what the target decompresses to produce it,
+    /// which is the cost #2776 measured being re-paid every cycle.</para>
+    ///
+    /// <para><b>Why a floor and not a give-up.</b> A latch that is never re-probed turns a TRANSIENT failure
+    /// into a restart-only outage — this codebase has been bitten by that shape before. At the floor a
+    /// database still attempts <see cref="MinCandidatePlans"/> ids every cycle, so it recovers on its own the
+    /// moment the store does, with no operator action and no restart. The floor is the constant the candidate
+    /// cap already floors at, so a maximally-backed-off pass is exactly a minimum-width pass — nothing new to
+    /// reason about.</para>
+    ///
+    /// <para>Zero failures returns <paramref name="fullWidth"/> unchanged, so this is inert on every healthy
+    /// database: shipped behaviour is identical to before #2776 until something actually throws.</para>
+    /// </summary>
+    public static int NarrowForFailures(int fullWidth, int consecutiveFetchFailures)
+    {
+        if (consecutiveFetchFailures <= 0 || fullWidth <= MinCandidatePlans)
+        {
+            return fullWidth;
+        }
+
+        var halvings = consecutiveFetchFailures >= MaxBackoffHalvings
+            ? MaxBackoffHalvings
+            : consecutiveFetchFailures;
+
+        var narrowed = fullWidth;
+        for (var halving = 0; halving < halvings; halving++)
+        {
+            narrowed /= 2;
+            if (narrowed <= MinCandidatePlans)
+            {
+                return MinCandidatePlans;
+            }
+        }
+
+        return narrowed;
+    }
 
     /// <summary>
     /// Folds one pass's outcome into the carried estimate. The rules, each load-bearing:
@@ -129,7 +218,12 @@ public static class QueryStorePlanXmlState
             ? ObservedAvgPlanBytes(bytesShipped, plansMeasured) ?? previous.AvgBytes
             : previous.AvgBytes;
 
-        return new PlanSizeEstimate(avg, catchUp);
+        /* #2776: the failure counter is NOT this fold's business and must survive it. Learn runs mid-pass,
+           before the store write that is the thing most likely to throw — so returning a fresh record here
+           (dropping the count to zero) would clear the backoff on exactly the pass about to fail, and the
+           narrowing would never engage. Success is recorded separately, once the pass has actually
+           completed. */
+        return new PlanSizeEstimate(avg, catchUp, previous.ConsecutiveFetchFailures);
     }
 
     /// <summary>
