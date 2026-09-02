@@ -411,6 +411,33 @@ public sealed class ServerPageTabsTests
     }
 
     /// <summary>
+    /// Dogfood web-polish pins (#2780, #2781).
+    ///
+    /// <para>#2780: a read window wider than the read can serve comes back as a raw "hours_back value 'N' exceeds
+    /// maximum of M hours" validation string. The panel loader turns that specific error into a NOTICE naming the
+    /// window the view keeps, instead of mounting the API's developer wording as a red error — so picking "last 30
+    /// days" on a 7-day read reads as a range hint, not a fault.</para>
+    ///
+    /// <para>#2781: the Alert History status cell drops the "tray" channel (the Lite/Dashboard system-tray toast,
+    /// which the headless web surface has no equivalent for) rather than appending a meaningless "· tray"; a real
+    /// channel still renders. Pinned as source (no JS/DOM runner); both were verified live.</para>
+    /// </summary>
+    [Fact]
+    public void WebDashboard_DegradesOverRangeGracefully_AndDropsTheTrayChannel()
+    {
+        var panels = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
+        /* The over-range error is matched and re-rendered as a notice, not mounted as the raw errorStrip string. */
+        Assert.Contains("exceeds maximum of (\\d+) hours", panels, StringComparison.Ordinal);
+        Assert.Contains("noticeStrip(", panels, StringComparison.Ordinal);
+
+        var alerts = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "alerts.js"));
+        /* The channel span renders only when the channel is not the surface-less "tray". */
+        Assert.Contains("a.notification_type !== \"tray\"", alerts, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Every PostgreSQL read the service serves is reachable from the PostgreSQL registry, and from nowhere
     /// else. Both directions matter and they fail differently.
     ///

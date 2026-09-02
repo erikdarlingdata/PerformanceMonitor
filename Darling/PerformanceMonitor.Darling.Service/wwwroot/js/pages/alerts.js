@@ -38,7 +38,10 @@ function triageCell(a) {
   });
 }
 
-/* Channel (always tray) + Sent + Muted + Delivery Error collapse into one glyph+text status cell (B2). */
+/* Sent + Muted + Delivery Error collapse into one glyph+text status cell (B2). The channel is appended only
+   when it means something on THIS surface: the store records "tray" (the Lite/Dashboard system-tray toast),
+   which the headless web dashboard has no equivalent for, so a bare "tray" is dropped rather than shown as a
+   meaningless delivery channel (#2781). A real channel (smtp/teams/slack/...) still renders. */
 function statusCell(a) {
   let glyph, label, sev;
   if (a.muted) {
@@ -61,7 +64,7 @@ function statusCell(a) {
   return el("span", { class: "status-cell sev-" + sev, title: a.send_error || null }, [
     el("span", { class: "glyph", text: glyph }),
     el("span", { text: label }),
-    a.notification_type ? el("span", { class: "channel", text: a.notification_type }) : null,
+    a.notification_type && a.notification_type !== "tray" ? el("span", { class: "channel", text: a.notification_type }) : null,
   ]);
 }
 

@@ -27,6 +27,7 @@ import {
   loadingStrip,
   errorStrip,
   emptyStrip,
+  noticeStrip,
   readTool,
   apiGet,
   buildQuery,
@@ -55,6 +56,18 @@ async function loadPanel(desc, body) {
   const res = desc.read ? await readTool(desc.read, desc.params) : await apiGet(desc.path + buildQuery(desc.params));
 
   if (res.kind === "error") {
+    /* A window wider than a read can serve comes back as a raw "hours_back value 'N' exceeds maximum of M
+       hours (D days)..." validation string. That is a range choice, not a fault: render it as a notice naming
+       the window this view keeps, rather than a red error carrying the API's own wording (#2780). */
+    const overRange = /exceeds maximum of (\d+) hours/.exec(res.message);
+    if (overRange) {
+      const maxHours = Number(overRange[1]);
+      const days = Math.round(maxHours / 24);
+      mount(body, noticeStrip(
+        "This view keeps up to " + maxHours + " hours (~" + days + " day" + (days === 1 ? "" : "s") +
+        ") of history — pick a shorter range."));
+      return;
+    }
     mount(body, errorStrip(res.message));
     return;
   }
