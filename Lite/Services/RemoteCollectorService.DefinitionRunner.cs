@@ -791,7 +791,8 @@ public partial class RemoteCollectorService
                     _ = ex;
                     var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
                     telemetry.SqlMs = sqlSlice.ElapsedMilliseconds;
-                    telemetry.Note = $"wall-clock budget ({budgetSeconds}s) reached; cycle abandoned";
+                    telemetry.Note = EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds);
+                    telemetry.Abandoned = true;
                     _logger?.LogWarning(
                         "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
                         definition.Name, context.ServerName, budgetSeconds);

@@ -101,11 +101,16 @@ public sealed class DarlingEmptyEnumerationNoteTests
     [Fact]
     public void Worker_Passes_The_Note_To_The_Collection_Log_Write()
     {
-        /* The note reaches error_message through LogCollectionAsync's message parameter, on the SUCCESS
-           write only — the status argument on that same call must stay "SUCCESS". */
+        /* The note reaches error_message through LogCollectionAsync's message parameter, on the write for
+           a run that RETURNED rather than threw. That write's status was a hardcoded "SUCCESS" until #2801,
+           which is how a cycle abandoned by the #2673 wall-clock budget — storing nothing, advancing no
+           watermark — inherited a success status. Pinned as the shared classifier rather than a literal so
+           it cannot quietly go back to one; the note still rides this same write, which is the original
+           claim and is unchanged. */
         var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
-        Assert.Contains("\"SUCCESS\", result.Rows, result.SqlMs, result.StorageMs, result.Note", source);
+        Assert.Contains("status, result.Rows, result.SqlMs, result.StorageMs, result.Note", source);
+        Assert.Contains("EnumeratedCollectorDriver.ClassifyReturnedRun(result.Abandoned)", source);
     }
 
     [Fact]
@@ -336,5 +341,25 @@ public sealed class DarlingEmptyEnumerationNoteTests
 
         Assert.NotNull(dir);
         return File.ReadAllText(Path.Combine(dir!, relative));
+    }
+
+    /// <summary>
+    /// #2801: the Darling half of the abandonment wiring. The runner must MARK the budget-expiry return
+    /// as abandoned, because the worker classifies from that flag rather than from the note text -- the
+    /// two are separately editable, and a note reworded while the flag went unset would put the status
+    /// silently back to SUCCESS with nothing failing.
+    ///
+    /// <para>Source-text pinned, matching every other pin in this class: the abandonment sits inside a
+    /// catch filter on a live provider cancellation deep in RunOneAsync, which no unit test here can
+    /// reach. Lite.Tests covers the same path end-to-end and pins ClassifyReturnedRun as a pure
+    /// function; this asserts the one thing neither of those can see, that THIS host sets the flag.</para>
+    /// </summary>
+    [Fact]
+    public void Runner_Marks_The_BudgetExpiry_Return_As_Abandoned()
+    {
+        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+
+        Assert.Contains("Abandoned: true", source, StringComparison.Ordinal);
+        Assert.Contains("EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds)", source, StringComparison.Ordinal);
     }
 }
