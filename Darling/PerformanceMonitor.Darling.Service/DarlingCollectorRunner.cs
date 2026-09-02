@@ -12,7 +12,6 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
-using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -1229,7 +1228,7 @@ public sealed class DarlingCollectorRunner
                         0,
                         sqlSlice.ElapsedMilliseconds,
                         0,
-                        string.Format(CultureInfo.InvariantCulture, EnumeratedCollectorDriver.WholeCycleBudgetNoteFormat, budgetSeconds),
+                        EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds),
                         Abandoned: true);
                 }
 

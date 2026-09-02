@@ -366,6 +366,17 @@ public static class EnumeratedCollectorDriver
     /// <summary><see cref="UnreadableFailureSetErrorFormat"/> parsed once (CA1863).</summary>
     private static readonly CompositeFormat s_unreadableFailureSet = CompositeFormat.Parse(UnreadableFailureSetErrorFormat);
 
+    /// <summary><see cref="WholeCycleBudgetNoteFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_wholeCycleBudgetNote = CompositeFormat.Parse(WholeCycleBudgetNoteFormat);
+
+    /// <summary>
+    /// The #2673 whole-cycle abandonment note, rendered. A method rather than the bare format string
+    /// because both HOSTS build this one (the other format constants here are consumed in-file), so
+    /// exposing the string would leave each host to parse it and to pick its own culture.
+    /// </summary>
+    public static string WholeCycleBudgetNote(int budgetSeconds) =>
+        string.Format(CultureInfo.InvariantCulture, s_wholeCycleBudgetNote, budgetSeconds);
+
     /// <summary>
     /// Reads an enumeration query's result: the item list, then the OPTIONAL SECOND RESULT SET of
     /// (item_name, error_text) rows describing items the enumeration could not probe (#1837).

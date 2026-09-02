@@ -339,6 +339,16 @@ public partial class RemoteCollectorService
                    worked as designed, so the streak does not grow). The collection_log row is
                    the visible record. */
             }
+            else if (status == EnumeratedCollectorDriver.AbandonedStatus)
+            {
+                /* #2801: a cycle the #2673 wall-clock budget abandoned. Exactly the YIELDED reasoning
+                   above and for the same reason: the guard worked as designed, so the error streak must
+                   not grow, and nothing was collected, so it is not proof the collector works and must
+                   not reset the streak either. This arm is load-bearing rather than tidy -- the chain
+                   ends in an ELSE, so without it a new status silently becomes an error here and shows
+                   the collector FAILING. The message still reaches the collection_log row, which is the
+                   visible record. */
+            }
             else
             {
                 entry.LastErrorMessage = errorMessage;
