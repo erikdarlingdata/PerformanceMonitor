@@ -100,6 +100,12 @@ namespace PerformanceMonitorDashboard.Models
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(ConnectionSeverity));
                 OnPropertyChanged(nameof(ConnectionStatusText));
+                // #2784: the collectors verdict now reads IsOnline too — an offline server's collectors show a
+                // neutral "Stale" instead of a green "OK", so the dot / value / detail must repaint when the
+                // connection flips.
+                OnPropertyChanged(nameof(CollectorSeverity));
+                OnPropertyChanged(nameof(CollectorDisplayText));
+                OnPropertyChanged(nameof(CollectorDetailText));
             }
         }
 
@@ -505,14 +511,23 @@ namespace PerformanceMonitorDashboard.Models
         {
             get
             {
+                // #2784 (parity with the web #2779/#2783 fix): an offline server's collectors are unmeasured,
+                // not healthy — a neutral Unknown, never a green "healthy" dot. OverallSeverity already returns
+                // Critical when offline, so this governs only the per-metric Collectors dot.
+                if (_isOnline == false) return HealthSeverity.Unknown;
                 if (_failedCollectorCount > 0) return HealthSeverity.Warning;
                 return HealthSeverity.Healthy;
             }
         }
 
-        public string CollectorDisplayText => _failedCollectorCount > 0 ? $"{_failedCollectorCount} failed" : "OK";
+        // #2784: offline reads a neutral "Stale" instead of a green "OK" — its collector counts are stale, not
+        // measured. Reuses IsOnline (a live connection ping here), the same signal ConnectionStatusText and the
+        // offline overlay read, rather than inventing a stale-count threshold.
+        public string CollectorDisplayText =>
+            _isOnline == false ? "Stale" : _failedCollectorCount > 0 ? $"{_failedCollectorCount} failed" : "OK";
 
-        public string CollectorDetailText => $"Healthy: {_healthyCollectorCount}, Failing: {_failedCollectorCount}";
+        public string CollectorDetailText =>
+            _isOnline == false ? "No recent collection" : $"Healthy: {_healthyCollectorCount}, Failing: {_failedCollectorCount}";
 
         /* Low-disk / failed-job alert presence, for the server-level tab badge (#754/#749).
            Injected from the alert engine's per-server state in UpdateTabBadge; not bound (the
