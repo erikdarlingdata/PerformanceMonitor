@@ -316,10 +316,21 @@ public sealed class DarlingCollectorRunner
         }
 
         /* Watermark = the newest already-collected value of the definition's time column,
-           read from Postgres (Lite reads DuckDB here). */
+           read from Postgres (Lite reads DuckDB here).
+
+           #2344's read floor, applied to the SERVER-scoped read the way it already is to the
+           per-database one below. Name-guarded on the same collector and for the same reason
+           WatermarkPolicy's remarks give: the bound is only sound where the caller CLAMPS, and a
+           ring-buffer source whose legitimate catch-up spans days must keep reading its whole history.
+           The clamp and the bound travel together. query_store declares both watermark columns, so
+           before this guard it paid the unbounded server-scoped cost on top of the bounded
+           per-database reads — the 2,092-cancellations-a-day the method's remarks record. */
+        var serverReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+            ? WatermarkPolicy.ReadFloor(collectionTime)
+            : null;
         DateTime? watermark = definition.WatermarkColumn is null
             ? null
-            : await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken);
+            : await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
 
         /* Numeric (bigint) watermark = the newest already-collected value of the definition's monotonic
            identity column (job_history's instance_id), read from Postgres — the bigint twin of the timestamp
@@ -1460,25 +1471,70 @@ public sealed class DarlingCollectorRunner
     /// Gets the most recent value of a timestamp column from Postgres for incremental collection.
     /// Returns null on first run or if the query fails (caller uses a fallback window) — the
     /// Postgres twin of Lite's GetLastCollectedTimeAsync.
+    ///
+    /// <para><paramref name="collectedSince"/> bounds the read on <c>collection_time</c> — the
+    /// PARTITIONING column, so the bound actually prunes chunks. This is #2344's bound applied to the
+    /// SERVER-scoped read; #2344 fixed only the per-database sibling
+    /// (<see cref="GetLastCollectedTimeForDatabaseAsync"/>), and query_store declares BOTH watermark
+    /// columns, so it kept paying the unbounded cost here on every cycle. Pass
+    /// <see cref="WatermarkPolicy.ReadFloor"/> only from a caller whose value is clamped, and read that
+    /// method's remarks for why the bound provably changes no answer. Null keeps the unbounded
+    /// behaviour, which stays correct for any reader whose watermark is NOT clamped.</para>
+    ///
+    /// <para>Measured on use1 before the bound (query_store_stats, 62.5 GB, 19 chunks): 40.7 s and
+    /// 50.6 s cold, 9.3 s warm, against Npgsql's 30 s default CommandTimeout — so the read was being
+    /// cancelled mid-flight, which the store's own log recorded 2,092 times in one day while the
+    /// per-database bounded sibling was cancelled 17 times. Every one of those cancellations returned
+    /// null here, and null is indistinguishable from a first run: the caller fell back to
+    /// query_store's 60-minute window instead of the ~5-minute incremental one, re-collected what it
+    /// already had, and grew the table that made the next read slower.</para>
     /// </summary>
+    /// <summary>
+    /// The server-scoped watermark SQL, exposed so a pin can assert the SHIPPED string rather than a
+    /// retyped copy of it. <paramref name="bounded"/> adds the <c>collection_time</c> predicate — the
+    /// partitioning column, and the only thing here that prunes a chunk.
+    /// </summary>
+    internal static string BuildServerWatermarkSql(string tableName, string columnName, bool bounded) =>
+        bounded
+            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
+            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+
     public async Task<DateTime?> GetLastCollectedTimeAsync(
-        int serverId, string tableName, string columnName, CancellationToken cancellationToken)
+        int serverId, string tableName, string columnName, CancellationToken cancellationToken,
+        DateTime? collectedSince = null)
     {
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1", connection);
+            var sql = BuildServerWatermarkSql(tableName, columnName, collectedSince is not null);
+            using var command = new NpgsqlCommand(sql, connection);
+            /* Explicit rather than Npgsql's 30 s default: that default was never a decision anyone made
+               here, and it silently governed a read whose measured cost exceeded it. */
+            command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
+            if (collectedSince is DateTime floor)
+            {
+                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+                   timestamptz and Postgres would convert it into the session zone on the way in. */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+            }
+
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is DateTime dt)
             {
                 return dt;
             }
         }
-        catch
+        catch (Exception ex)
         {
-            /* If the Postgres query fails, caller uses fallback window */
+            /* Caller still uses its fallback window — but SAY SO. Swallowing this silently is what let a
+               permanently-failing watermark read look identical to a healthy first run for an unknown
+               length of time: nothing reached collection_log, nothing reached this log, and the only
+               trace was a cancellation line in the store's own Postgres log. */
+            _logger?.LogWarning(
+                "Watermark read failed for server {ServerId} on {Table}.{Column} — falling back to the "
+                + "collector's default window, which re-collects data already stored: {Message}",
+                serverId, tableName, columnName, ex.Message);
         }
         return null;
     }
