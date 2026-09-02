@@ -26,8 +26,8 @@ import { suggestViz, deriveVizConfig } from "../derive.js";
 
 /* The get_alert_history wire shape's status collapse, matching the Alert History page's own cell — including
    its #2781 rule: the "tray" channel (the Lite/Dashboard system-tray toast) is meaningless on the headless web,
-   so it is dropped rather than shown; a real channel still renders. Kept in lockstep with statusCell in
-   alerts.js so this deep-link landing page never diverges from the page it mirrors. */
+   so it is dropped rather than shown; a real channel still renders. The tray rule here is kept in lockstep
+   with statusCell in alerts.js (the two collapse the status slightly differently otherwise). */
 function alertStatusText(a) {
   if (a.muted) return "Muted";
   if (a.send_error) return "Delivery failed: " + a.send_error;
