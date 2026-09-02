@@ -1285,6 +1285,22 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            purpose: the estimate says the seek is 91% of the cost and the actual plan says it is 6% of a
            half-second, so the operator the estimate points at is not the one that matters.
 
+           The cost of forcing it: a Hash Match needs a workspace memory grant where the Nested Loops it
+           replaces needs none, and that applies on EVERY invocation, including small ones the optimizer
+           would have served grant-free (review catch). Measured rather than waved through - grants on a
+           40,882-plan Query Store, no spill in any case:
+
+             4 candidate ids  : unhinted 0KB (pure loops)                -> hinted 1,264KB
+             512 candidate ids: unhinted 1,760KB (already a hash anyway) -> hinted 3,624KB
+
+           So the hint does introduce a grant on small candidate sets, and it is ~1.2MB; at the other end
+           MaxCandidatePlans caps the input at 512 and the grant at ~3.6MB, where the optimizer was already
+           choosing a hash and paying 1.8MB of it regardless. The cap is what makes this bounded rather than
+           a function of Query Store size. Sweeps are concurrent across servers but sequential within one, so
+           the fleet-wide worst case is a few concurrent sweeps' worth, single-digit MB - against a statement
+           that was burning 55,000-61,000ms of CPU. If this were ever wrong it would show as RESOURCE_SEMAPHORE
+           waits or a hash spill on the monitored instance, neither of which appears here.
+
            The SECOND statement below keeps plain OPTION(RECOMPILE): it reads only #plan_fetch and joins
            nothing, so there is no join strategy to force. Not an oversight - checked. */
         var body = $@"SET NOCOUNT ON;
@@ -1402,7 +1418,11 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            fetch on the inner side of a loop 512 times over. The plan fetch is the variant that carries the
            AYR measurement; this one is the same defect treated the same way, and that distinction is stated
            rather than blurred - the join-strategy change and the identical-rowset property are verified
-           here, the 60s->0.5s number is not this statement's and is not claimed for it. */
+           here, the 60s->0.5s number is not this statement's and is not claimed for it.
+
+           Same memory-grant trade as the plan fetch above, and the same bound: the id list is capped by the
+           caller, so the hash input does not scale with Query Store size. Measured on the same 40,882-plan
+           catalog with no spill. */
         var body = $@"SET NOCOUNT ON;
 
 SELECT
