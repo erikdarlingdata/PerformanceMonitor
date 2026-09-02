@@ -1525,12 +1525,17 @@ public sealed class DarlingCollectorRunner
                 return dt;
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* Caller still uses its fallback window — but SAY SO. Swallowing this silently is what let a
-               permanently-failing watermark read look identical to a healthy first run for an unknown
+            /* Caller still uses its fallback window — but SAY SO. Swallowing this silently is what let
+               a permanently-failing watermark read look identical to a healthy first run for an unknown
                length of time: nothing reached collection_log, nothing reached this log, and the only
-               trace was a cancellation line in the store's own Postgres log. */
+               trace was a cancellation line in the store's own Postgres log.
+
+               The OperationCanceledException guard is the shape this file already uses at its
+               collector-run catches: a cancelled read is a service shutdown, not a watermark failure,
+               and logging it as one would put a misleading warning per in-flight collector on every
+               normal stop. */
             _logger?.LogWarning(
                 "Watermark read failed for server {ServerId} on {Table}.{Column} — falling back to the "
                 + "collector's default window, which re-collects data already stored: {Message}",
@@ -2466,7 +2471,7 @@ RETURNING s.state_key";
                 return dt;
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* Parity with the server-scoped twin (#2795). #2344's bound makes a TIMEOUT unlikely here,
                but every other failure — dropped connection, bad SQL — still returned a null that reads
@@ -2504,7 +2509,7 @@ RETURNING s.state_key";
                 return Convert.ToInt64(result);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* Parity with both timestamp twins (#2795). job_history is small enough that this is
                unlikely to time out, but a swallowed failure here sets HasCollectedBefore down the
