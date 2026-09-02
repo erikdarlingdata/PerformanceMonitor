@@ -140,6 +140,14 @@ public partial class RemoteCollectorService
         public long StorageMs { get; set; }
         public string? Note { get; set; }
 
+        /// <summary>
+        /// True only for a cycle the #2673 whole-server wall-clock budget gave up on. Its own field rather
+        /// than an inference from <see cref="Note"/>'s text, so the collection_log status never depends on
+        /// wording that exists to be reworded. Darling's twin is CollectorRunResult.Abandoned — parity is
+        /// the point, since both hosts previously recorded this as SUCCESS.
+        /// </summary>
+        public bool Abandoned { get; set; }
+
         /// <summary>The per-database rollup for a run that fanned out, null for one that did not (#2472).
         /// Lives beside the fetch/store split for the same reason it does: both are things one run has to
         /// hand its own collection_log row, and both are meaningless once the next run resets the slot.</summary>
@@ -495,6 +503,7 @@ public partial class RemoteCollectorService
         telemetry.SqlMs = 0;
         telemetry.StorageMs = 0;
         telemetry.Note = null;
+        telemetry.Abandoned = false;
 
         try
         {
@@ -611,6 +620,16 @@ public partial class RemoteCollectorService
                on error_message, so the note reaches the Collection Health Note column and the Collection
                Log detail grid, and is inert everywhere else. */
             errorMessage = telemetry.Note;
+
+            /* ...with the ONE exception of a cycle the #2673 whole-server wall-clock budget abandoned, which
+               arrives here on the same path because it returns normally rather than throwing. It stored
+               nothing and advanced no watermark, so leaving it SUCCESS both claimed a collection that did not
+               happen and put its message in the #1837 note channel, whose whole claim is that the run
+               succeeded. Darling's twin is the same one-line branch in DarlingWorker. */
+            if (telemetry.Abandoned)
+            {
+                status = EnumeratedCollectorDriver.ClassifyReturnedRun(abandoned: true);
+            }
 
             var elapsed = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
             AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} => {rowsCollected} rows in {elapsed}ms (sql:{telemetry.SqlMs}ms, duck:{telemetry.StorageMs}ms)");

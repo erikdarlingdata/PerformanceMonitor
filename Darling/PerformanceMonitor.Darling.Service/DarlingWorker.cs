@@ -5654,9 +5654,20 @@ LIMIT 1";
             /* result.Note is null for an ordinary run — the message column stays null as before. It is set
                only for a successful-but-empty run worth explaining (today: an enumeration that listed zero
                databases, #1837). The status stays SUCCESS, and every health/band read keys on status rather
-               than on error_message, so the note is inert outside the Collection Log detail grid. */
+               than on error_message, so the note is inert outside the Collection Log detail grid.
+
+               The ONE exception is a cycle the #2673 whole-server wall-clock budget abandoned, which reaches
+               here on the same path because it returns normally rather than throwing. It is not a successful
+               empty run: it stored nothing and advanced no watermark, so recording it SUCCESS made it the
+               newest success in ReadCollectionSignalsAsync's status IN ('SUCCESS', 'SKIPPED') — a collector
+               abandoning every cycle read as perpetually fresh — and put its message in the #1837 note
+               channel, whose whole claim is that the run succeeded. Same reasoning as the RDS/PI
+               authorization arms below: nothing was read, so it must not be recorded as a successful empty
+               read. */
+            var status = EnumeratedCollectorDriver.ClassifyReturnedRun(result.Abandoned);
+
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, result.Note,
+                _postgres!, runtime, collectorName, status, result.Rows, result.SqlMs, result.StorageMs, result.Note,
                 result.Fanout, _logger, cancellationToken);
 
             /* #2674: record this run's cost for the hourly collector_cost aggregate — the same numbers that
