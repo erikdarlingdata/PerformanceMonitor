@@ -388,6 +388,76 @@ END;
     /// </summary>
     public const string SelfQueryMarker = "PerformanceMonitorLite";
 
+    /// <summary>
+    /// Prefix of the informational message the payload raises BETWEEN its two statements, carrying the
+    /// <c>#pm_qs_slice</c> build's own duration and row count (#2789). Split out because <c>open:</c>
+    /// cannot: the shipping SELECT ends <c>ORDER BY qsrs.last_execution_time</c>, a blocking sort, so
+    /// the server produces every row before the client sees one and <c>open:</c> is BOTH statements
+    /// plus the sort. A 0-row database taking 120 s is therefore unattributable from the existing
+    /// split, which is the whole reason this exists.
+    ///
+    /// <para>Carried as a <c>RAISERROR ... WITH NOWAIT</c> info message rather than extra columns or a
+    /// second result set, for three reasons that each rule out the alternatives outright. It costs no
+    /// extra round trip — the token rides the TDS stream already in flight. It survives the on-prem
+    /// nesting, where the body runs inside <c>[db].sys.sp_executesql</c> and a <c>#temp</c> dies with
+    /// the invocation, so the two statements CANNOT be split into two client commands without changing
+    /// the query. And it fires when the payload returns NO ROWS, which extra columns cannot — the runs
+    /// this was built to explain are 0-row runs, so a timing that rides on a returned row would be
+    /// absent from exactly the cases in question.</para>
+    ///
+    /// <para>Raised BEFORE the shipping SELECT on purpose: the client must read the stream to reach the
+    /// first result set, so <c>ExecuteReaderAsync</c> is guaranteed to have processed this token by the
+    /// time it returns. A trailing message after the final result set would be at the mercy of when the
+    /// reader is drained or disposed, which is not a guarantee worth building a measurement on.</para>
+    ///
+    /// <para>Severity 10 keeps it informational — it raises no exception and reaches the client purely
+    /// through <c>SqlConnection.InfoMessage</c>. Deliberately NOT <see cref="SelfQueryMarker"/>: that
+    /// string is matched against collected query TEXT, and reusing it here would put a collector's own
+    /// diagnostic into the namespace of a row-filtering predicate.</para>
+    /// </summary>
+    public const string SliceTimingMarker = "PMQS_PHASE";
+
+    /// <summary>
+    /// Parses the <see cref="SliceTimingMarker"/> message body back into (slice ms, slice rows), or null
+    /// when the message is not ours. Lives here, next to the T-SQL that formats it, so the producer and
+    /// the consumer cannot drift — and so the round trip is testable without a live SQL Server, which is
+    /// the only way it gets tested at all on a macOS checkout.
+    /// </summary>
+    public static (long SliceMs, long SliceRows)? TryParseSliceTiming(string? message)
+    {
+        if (string.IsNullOrEmpty(message) || !message.Contains(SliceTimingMarker, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var sliceMs = ExtractLong(message, "slice_ms=");
+        var sliceRows = ExtractLong(message, "slice_rows=");
+
+        return sliceMs is null || sliceRows is null
+            ? null
+            : (sliceMs.Value, sliceRows.Value);
+
+        static long? ExtractLong(string text, string key)
+        {
+            var start = text.IndexOf(key, StringComparison.Ordinal);
+            if (start < 0)
+            {
+                return null;
+            }
+
+            start += key.Length;
+            var end = start;
+            while (end < text.Length && char.IsAsciiDigit(text[end]))
+            {
+                end++;
+            }
+
+            return end == start
+                ? null
+                : long.Parse(text.AsSpan(start, end - start), CultureInfo.InvariantCulture);
+        }
+    }
+
     public override string Name => "query_store";
 
     public override string TargetTable => "query_store_stats";
@@ -937,7 +1007,13 @@ END;
            failure mode this rewrite removes, reintroduced one statement earlier. */
         return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+DECLARE @pm_phase_start datetime2(7),
+        @pm_slice_ms int,
+        @pm_slice_rows int;
+
 DROP TABLE IF EXISTS #pm_qs_slice;
+
+SET @pm_phase_start = SYSUTCDATETIME();
 
 SELECT /* PerformanceMonitorLite */
     qsrs.plan_id,
@@ -988,6 +1064,10 @@ GROUP BY
 HAVING
     {intervalHaving}
 OPTION(RECOMPILE);
+
+SET @pm_slice_rows = @@ROWCOUNT;
+SET @pm_slice_ms = DATEDIFF(millisecond, @pm_phase_start, SYSUTCDATETIME());
+RAISERROR(N'{SliceTimingMarker} slice_ms=%d slice_rows=%d', 10, 1, @pm_slice_ms, @pm_slice_rows) WITH NOWAIT;
 
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     query_id = qsq.query_id,

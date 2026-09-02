@@ -263,6 +263,35 @@ public sealed class CollectorContext
     public long PerItemTextFetchMs { get; set; }
 
     /// <summary>
+    /// Milliseconds the <c>#pm_qs_slice</c> staging statement took, as measured BY THE SERVER and reported
+    /// through <c>QueryStoreCollector.SliceTimingMarker</c> (#2789). Zero for every collector that raises no
+    /// such message, and for a host that does not listen — so zero means "not measured", never "instant".
+    ///
+    /// <para>This is a SUBSET of <see cref="PerItemOpenMs"/>, not a sibling of it, which is why it is not in
+    /// <see cref="DrainMsFrom"/>'s subtraction — adding it there would double-count the same milliseconds and
+    /// silently deflate drain. <c>open:</c> is both payload statements plus the shipping SELECT's blocking
+    /// <c>ORDER BY</c>; this says how much of that was the staging aggregate alone.</para>
+    /// </summary>
+    public long PerItemSliceMs { get; set; }
+
+    /// <summary>
+    /// Rows the <c>#pm_qs_slice</c> staging statement produced (#2789) — the OUTER cardinality the shipping
+    /// SELECT then joins to five catalog views. The number that decides the open question: a large slice with
+    /// a slow payload is the loop-join-into-TVF story, while a slice of 3 rows costing two minutes says the
+    /// staging scan is the cost and the join shape is a red herring. Zero when not measured.
+    /// </summary>
+    public long PerItemSliceRows { get; set; }
+
+    /// <summary>
+    /// The shipping SELECT's own share of <see cref="PerItemOpenMs"/>: everything the server did before the
+    /// first row that was NOT the staging statement (#2789). Derived rather than measured for the same reason
+    /// <see cref="DrainMsFrom"/> is — one definition, testable, and it cannot drift from the numbers it is
+    /// derived from. Clamped at zero: the two come from different clocks (server-side DATEDIFF vs the host's
+    /// stopwatch), so skew must never surface as a negative phase.
+    /// </summary>
+    public long PayloadMsFromOpen() => Math.Max(0, PerItemOpenMs - PerItemSliceMs);
+
+    /// <summary>
     /// The item's row-STREAMING time: the driver's blended per-item total minus the phases that are not
     /// streaming (<see cref="PerItemWatermarkMs"/>, <see cref="PerItemOpenMs"/>,
     /// <see cref="PerItemPlanFetchMs"/>, <see cref="PerItemTextFetchMs"/>). Lives here rather than at

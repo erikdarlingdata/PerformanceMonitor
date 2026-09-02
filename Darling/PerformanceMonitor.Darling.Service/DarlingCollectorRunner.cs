@@ -174,6 +174,21 @@ public sealed class DarlingCollectorRunner
 
     public const int CommandTimeoutSeconds = 60;
 
+    /// <summary>
+    /// Milliseconds above which a per-database read is logged even though it returned NO ROWS (#2789).
+    /// The per-database line is otherwise gated on <c>batchCount &gt; 0</c>, because the quiet 2-of-3 cycles
+    /// between Query Store's 900 s flushes would otherwise treble the log for nothing — but that gate is
+    /// precisely why the expensive runs are invisible: the ones under investigation returned 0 and 3 rows
+    /// while costing 120,471 ms, 123,745 ms and 72,454 ms, and not one of them printed a line.
+    ///
+    /// <para>10 s sits two orders of magnitude above the quiet cycles it must not un-silence (median 48 ms
+    /// measured on ayr-01 over 3.2 h) and an order of magnitude below the pathology it must catch, so it
+    /// separates them without tuning. A threshold rather than removing the gate: the gate is load-bearing
+    /// for log volume at 42 servers, and an expensive 0-row read is a genuinely different event from a
+    /// cheap one.</para>
+    /// </summary>
+    private const long EmptyItemLogThresholdMs = 10_000;
+
     /// <param name="capturePlans">
     /// Live provider for the plan-capture flag; null defaults to always-on (Darling's SKU default).
     /// The worker passes <c>() =&gt; config.CapturePlans</c> so a store reload takes effect next cycle;
@@ -1010,10 +1025,47 @@ public sealed class DarlingCollectorRunner
                         context.PerItemOpenMs = 0;
                         context.PerItemPlanFetchMs = 0;
                         context.PerItemTextFetchMs = 0;
+                        context.PerItemSliceMs = 0;
+                        context.PerItemSliceRows = 0;
+
+                        /* #2789: the payload reports its own staging-statement cost as an informational
+                           message raised BETWEEN its two statements, so the handler has to be live across
+                           the open — that token arrives before the first result set and is processed by
+                           ExecuteReaderAsync on its way to the metadata. Subscribed per item and removed in
+                           the finally so a fault cannot leave a closure holding this item's context alive on
+                           a pooled connection, and so the next item's message can never land on this one.
+                           Only SqlConnection raises these; the PostgreSQL targets #2213 added reach the same
+                           enumerated path and simply never enter this branch. */
+                        var sliceListenerConnection = targetConnection as SqlConnection;
+                        SqlInfoMessageEventHandler? sliceListener = null;
+                        if (sliceListenerConnection is not null)
+                        {
+                            sliceListener = (_, args) =>
+                            {
+                                foreach (SqlError error in args.Errors)
+                                {
+                                    if (QueryStoreCollector.TryParseSliceTiming(error.Message) is { } timing)
+                                    {
+                                        context.PerItemSliceMs = timing.SliceMs;
+                                        context.PerItemSliceRows = timing.SliceRows;
+                                    }
+                                }
+                            };
+                            sliceListenerConnection.InfoMessage += sliceListener;
+                        }
+
                         var openWatch = Stopwatch.StartNew();
-                        using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
+                        /* The listener comes off as soon as the open returns, NOT at the end of the item:
+                           the message is raised before the shipping SELECT, so ExecuteReaderAsync has
+                           already processed it by then, and holding the subscription across the plan/text
+                           fetches would only give their own messages a chance to overwrite this item's
+                           numbers. The reader itself deliberately stays open past this point, exactly as
+                           before — the fetches below run on the same connection and #2210/#2150 sequence
+                           them against a drained reader. */
+                        using var itemReader = await OpenItemReaderAsync();
                         context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
+
                         /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
                            query on purpose — it ships in plan_id order, so a budget cut truncates a SUFFIX,
                            which is the only reason the watermark can advance from a cut pass at all. */
@@ -1054,8 +1106,24 @@ public sealed class DarlingCollectorRunner
                         }
 
                         return batch;
+
+                        async Task<DbDataReader> OpenItemReaderAsync()
+                        {
+                            try
+                            {
+                                return await itemCommand.ExecuteReaderAsync(ct);
+                            }
+                            finally
+                            {
+                                if (sliceListenerConnection is not null && sliceListener is not null)
+                                {
+                                    sliceListenerConnection.InfoMessage -= sliceListener;
+                                }
+                            }
+                        }
                     },
                     writeBatch: (batch, ct) => WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, ct),
+
                     onItemComplete: (item, batchCount, itemSqlMs, itemStorageMs) =>
                     {
                         /* #2472: the per-database cost the blended collection_log row cannot carry. Counted
@@ -1082,8 +1150,13 @@ public sealed class DarlingCollectorRunner
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, which hid a single busy database's 50s burst
                            behind four quiet siblings. Quiet databases (0 rows — the 2-of-3 cycles between
-                           Query Store's 900s flushes) stay silent. */
-                        if (batchCount > 0)
+                           Query Store's 900s flushes) stay silent.
+
+                           #2789: unless the empty read was EXPENSIVE. A 0-row database is quiet in the sense
+                           that matters here only if it was also cheap; one that returned nothing after two
+                           minutes is the single most interesting event this collector produces, and the
+                           row-count gate alone hid every instance of it. See EmptyItemLogThresholdMs. */
+                        if (batchCount > 0 || itemSqlMs >= EmptyItemLogThresholdMs)
                         {
                             /* #2164: open vs drain, because they have different fixes. A pass that is nearly
                                all OPEN is bound by server-side work before the first row (for query_store,
@@ -1096,10 +1169,26 @@ public sealed class DarlingCollectorRunner
                                    so every other collector's line is byte-identical to before. */
                                 if (context.PerItemPlanFetchMs > 0 || context.PerItemTextFetchMs > 0)
                                 {
-                                    _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + plan_fetch:{PlanFetchMs}ms + text_fetch:{TextFetchMs}ms, pg:{PgMs}ms)",
-                                        server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
-                                        context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
-                                        context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs);
+                                    /* #2789: open: splits further when the payload reported its own staging
+                                       cost, appended rather than substituted so every existing consumer of
+                                       this line keeps parsing it unchanged. slice + payload sum to open by
+                                       construction (payload is derived from it), which is what makes the
+                                       pair readable as an attribution rather than two unrelated numbers. */
+                                    if (context.PerItemSliceMs > 0 || context.PerItemSliceRows > 0)
+                                    {
+                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + plan_fetch:{PlanFetchMs}ms + text_fetch:{TextFetchMs}ms, pg:{PgMs}ms; open = slice:{SliceMs}ms + payload:{PayloadMs}ms, slice_rows:{SliceRows})",
+                                            server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
+                                            context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
+                                            context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs,
+                                            context.PerItemSliceMs, context.PayloadMsFromOpen(), context.PerItemSliceRows);
+                                    }
+                                    else
+                                    {
+                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + plan_fetch:{PlanFetchMs}ms + text_fetch:{TextFetchMs}ms, pg:{PgMs}ms)",
+                                            server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
+                                            context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
+                                            context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs);
+                                    }
                                 }
                                 else
                                 {
