@@ -53,11 +53,19 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
            ResetData does not know to clear it, so it would leak between tests in this class and make the
            second one see a store that had "already been repaired". Dropped here rather than taught to
            ResetData, because the production behavior being relied on is precisely that nothing routine
-           removes it. */
+           removes it.
+
+           #2748's attempt table has the same property and needs the same treatment: created on demand,
+           survives normal operation by design, unknown to ResetData. Left behind, the two attempts the cap
+           test records are still there for whichever test runs next, that test trips the cap and returns
+           before repairing anything, and it fails on an assertion about the completion marker that has
+           nothing to do with what it was testing. */
         using var connection = _duckDb.CreateConnection();
         connection.Open();
         using var drop = connection.CreateCommand();
-        drop.CommandText = $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.MarkerTable}";
+        drop.CommandText =
+            $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.MarkerTable}; " +
+            $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.AttemptTable}";
         drop.ExecuteNonQuery();
     }
 
@@ -429,26 +437,40 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         /* Not one silent acquisition left. This is the assertion that goes red on the pre-#2465 file. */
         Assert.Empty(Regex.Matches(source, @"_duckDb\.AcquireReadLock\(\)"));
 
-        /* Three FORWARD it: the marker read, the survey, and the archive rewrite-to-temp. Each abandons into
-           a state the next launch reproduces for free, so there is nothing to protect by waiting. */
-        Assert.Equal(3, Regex.Matches(source, @"_duckDb\.AcquireReadLock\(cancellationToken\)").Count);
+        /* FOUR forward it: the marker read, the survey, the archive rewrite-to-temp, and #2748's attempt
+           COUNT. Each abandons into a state the next launch reproduces for free, so there is nothing to
+           protect by waiting — the attempt count is a question, and a question dropped is just re-asked. */
+        Assert.Equal(4, Regex.Matches(source, @"_duckDb\.AcquireReadLock\(cancellationToken\)").Count);
 
-        /* Two DECLINE it, and both are the marker write — the only thing here that records work already done
-           and irreversible, where abandoning costs the next launch the whole survey to learn nothing. */
+        /* THREE decline it, and all three are marker writes: the two completion markers, plus #2748's attempt
+           marker. Same reason in each case — they record something that abandoning does not undo.
+
+           The attempt marker's version of that is the sharpest one in the file, and it is worth stating
+           because #2761 has this service holding an uncancelable lock under review. This decline is NOT the
+           uncancelable-survey shape #2761 is about: it is two statements against a table with at most a
+           handful of rows, not a full GROUP BY over the hot store. What it protects is the crash gate itself.
+           If this write is abandoned, no attempt is recorded, and a store that then takes duckdb.dll down
+           natively comes back on the next launch with its attempt count unchanged — which is precisely the
+           infinite crash loop #2748 exists to end. Forwarding the token here would make the protection
+           abandonable at the one moment it is about to be needed. */
         var declined = Regex.Matches(source, @"_duckDb\.AcquireReadLock\(CancellationToken\.None\)");
-        Assert.Equal(2, declined.Count);
+        Assert.Equal(3, declined.Count);
 
         foreach (Match site in declined)
         {
             var reason = source[Math.Max(0, site.Index - 1500)..site.Index];
-            Assert.Contains("#2465", reason, StringComparison.Ordinal);
             Assert.Contains("marker", reason, StringComparison.Ordinal);
+            Assert.True(
+                reason.Contains("#2465", StringComparison.Ordinal) || reason.Contains("#2748", StringComparison.Ordinal),
+                "every declining acquisition must cite the issue whose reasoning it is following");
         }
 
         /* And each decline is WHOLE. A lock that will not be abandoned in front of a write that will be is
-           worse than either choice made consistently, so the open and both statements decline too. */
-        Assert.Equal(2, Regex.Matches(source, @"await connection\.OpenAsync\(CancellationToken\.None\);").Count);
+           worse than either choice made consistently, so the open and the statements decline too. Three opens
+           now: the two completion markers and the attempt marker. */
+        Assert.Equal(3, Regex.Matches(source, @"await connection\.OpenAsync\(CancellationToken\.None\);").Count);
         Assert.Equal(2, Regex.Matches(source, @"await MarkRepairedAsync\(connection, [^;]*CancellationToken\.None\);").Count);
+        Assert.Equal(2, Regex.Matches(source, @"await (create|insert)\.ExecuteNonQueryAsync\(CancellationToken\.None\);").Count);
 
         /* The write locks stay out of this: AcquireWriteLock has no token-taking overload, so there is no
            decision to state at those two. Their timeout question is #2463's, not this test's. */

@@ -14,4 +14,11 @@
     <PackageReference Include="DuckDB.NET.Data" VersionOverride="1.5.5" />
     <PackageReference Include="DuckDB.NET.Bindings.Full" VersionOverride="1.5.5" />
   </ItemGroup>
+
+  <!-- Link the real collapse logic so the reproducer exercises the EXACT expressions production
+       builds. Do NOT restate them here - tools/CompactionRepro exists because a repro that
+       reimplements what it reproduces drifts from production and quietly stops proving anything. -->
+  <ItemGroup>
+    <Compile Include="..\..\Lite\Services\QueryStoreSliceRepairService.Collapse.cs" Link="QueryStoreSliceRepairService.Collapse.cs" />
+  </ItemGroup>
 </Project>

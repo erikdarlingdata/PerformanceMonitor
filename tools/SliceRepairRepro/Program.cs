@@ -22,6 +22,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using DuckDB.NET.Data;
+using PerformanceMonitorLite.Services;
 
 var groups = args.Length > 0 && int.TryParse(args[0], out var g) ? g : 31426;
 var textKb = args.Contains("--fat") ? 64 : 0;
@@ -114,15 +115,11 @@ Console.WriteLine($"seeded {groups * 2:N0} rows in {sw.ElapsedMilliseconds:N0} m
 var allCols = ReadStrings("SELECT column_name FROM information_schema.columns WHERE table_name = 'query_store_stats' ORDER BY ordinal_position");
 var keySet = new HashSet<string>(keyCols, StringComparer.OrdinalIgnoreCase);
 
-/* Mirrors QueryStoreSliceRepairService.CombineExpression. */
-string Combine(string c) =>
-    sumCols.Contains(c) ? $"SUM({c})"
-    : avgCols.Contains(c) ? $"CAST(SUM(CAST({c} AS DOUBLE) * execution_count) / NULLIF(SUM(execution_count), 0) AS BIGINT)"
-    : minCols.Contains(c) ? $"MIN({c})"
-    : maxCols.Contains(c) || c == "last_execution_time" ? $"MAX({c})"
-    : $"ANY_VALUE({c})";
-
-var projection = string.Join(", ", allCols.Select(c => keySet.Contains(c) ? c : $"{Combine(c)} AS {c}"));
+/* The SHIPPED expressions, linked from Lite/Services/QueryStoreSliceRepairService.Collapse.cs -
+   not a copy. If production's collapse changes, this reproducer changes with it. */
+var projection = string.Join(
+    ", ",
+    allCols.Select(c => keySet.Contains(c) ? c : $"{QueryStoreSliceRepairService.CombineExpression(c)} AS {c}"));
 var match = string.Join(" AND ", keyCols.Select(k => $"t.{k} IS NOT DISTINCT FROM r.{k}"));
 
 using var transaction = connection.BeginTransaction();

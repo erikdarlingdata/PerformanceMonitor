@@ -58,7 +58,7 @@ namespace PerformanceMonitorLite.Services;
 /// maintenance-shaped acquisitions — the hot-table mutation with its CHECKPOINT, and the instant a live
 /// path's bytes are replaced — which is the one category #2463 does not put in question.</para>
 /// </summary>
-public sealed class QueryStoreSliceRepairService
+public sealed partial class QueryStoreSliceRepairService
 {
     private const string Table = "query_store_stats";
 
@@ -71,89 +71,6 @@ public sealed class QueryStoreSliceRepairService
         _duckDb = duckDb ?? throw new ArgumentNullException(nameof(duckDb));
         _archivePath = archivePath ?? throw new ArgumentNullException(nameof(archivePath));
         _logger = logger;
-    }
-
-    /// <summary>
-    /// The dedup key at its FULLEST — the read side's partition plus the two columns every stored row carries.
-    /// <c>collection_time</c> is what makes it the pre-fix signature rather than merely "the same interval":
-    /// since #1907 the collector emits at most one row per interval per cycle, so no correctly-collected row
-    /// can join such a group, which is why the repair is idempotent and safe to re-run.
-    /// </summary>
-    private static readonly string[] FullKeyColumns =
-    [
-        "server_id",
-        "database_name",
-        "query_id",
-        "plan_id",
-        "runtime_stats_interval_id",
-        "first_execution_time",
-        "execution_type_desc",
-        "replica_role",
-        "collection_time",
-    ];
-
-    /// <summary>
-    /// The key columns that actually exist in <paramref name="available"/>.
-    ///
-    /// <para><b>This is why the archive needs per-file handling rather than one key.</b> Archive files are
-    /// written per month and the SCHEMA CHANGED underneath them: <c>runtime_stats_interval_id</c> arrived with
-    /// #1841 tier 2 and <c>replica_role</c> with #1844/#1872, so a file written before those has neither — a
-    /// real one on this machine (June 2026) is missing both. It is also why the archive views read with
-    /// <c>union_by_name</c>. Naming a column an old file does not have would fail the rewrite outright; worse,
-    /// silently assuming the newest schema on an old file would group on a key that is not the era's dedup key
-    /// at all, and quietly combine rows that are not slices of one interval.</para>
-    /// </summary>
-    internal static IReadOnlyList<string> KeyColumnsFor(IEnumerable<string> available)
-    {
-        ArgumentNullException.ThrowIfNull(available);
-
-        var present = new HashSet<string>(available, StringComparer.OrdinalIgnoreCase);
-        return FullKeyColumns.Where(present.Contains).ToList();
-    }
-
-    /// <summary>
-    /// How one column combines, mirroring <c>QueryStoreCollector.BuildPayloadBody</c> and Darling's
-    /// <c>QueryStoreSliceRepair</c>: the additive counter sums, every <c>avg_</c> takes the count-WEIGHTED
-    /// mean, <c>min_</c>/<c>max_</c> take the extreme, <c>last_execution_time</c> is the interval's span end.
-    ///
-    /// <para>The weighted mean is the part that is easy to get wrong and impossible to see afterwards: Query
-    /// Store stores an average and a count but never a total, so <c>avg * count</c> is what recovers a slice's
-    /// total. A plain average of the slice averages weights a 25-execution sliver the same as a
-    /// 100-execution flush.</para>
-    /// </summary>
-    internal static string CombineExpression(string column)
-    {
-        ArgumentNullException.ThrowIfNull(column);
-
-        if (string.Equals(column, "execution_count", StringComparison.OrdinalIgnoreCase))
-        {
-            return "SUM(execution_count)";
-        }
-
-        if (string.Equals(column, "last_execution_time", StringComparison.OrdinalIgnoreCase))
-        {
-            return "MAX(last_execution_time)";
-        }
-
-        if (column.StartsWith("avg_", StringComparison.OrdinalIgnoreCase))
-        {
-            return $"CAST(SUM(CAST({column} AS DOUBLE) * execution_count) / NULLIF(SUM(execution_count), 0) AS BIGINT)";
-        }
-
-        if (column.StartsWith("min_", StringComparison.OrdinalIgnoreCase))
-        {
-            return $"MIN({column})";
-        }
-
-        if (column.StartsWith("max_", StringComparison.OrdinalIgnoreCase))
-        {
-            return $"MAX({column})";
-        }
-
-        /* Attributes of the interval rather than measurements of it — query text, hashes, the forced-plan
-           flags. Every slice carries the same value, so ANY_VALUE is correct; DuckDB has it, which is why this
-           does not need Postgres' bool_or special case. */
-        return $"ANY_VALUE({column})";
     }
 
     /// <summary>
@@ -293,11 +210,18 @@ public sealed class QueryStoreSliceRepairService
     }
 
     /// <summary>
-    /// Records an attempt and COMMITS it before the caller does anything dangerous.
+    /// Records an attempt marker and COMMITS it before the caller does anything dangerous.
     ///
-    /// <para><see cref="CancellationToken.None"/> throughout, for the reason the completion marker uses it: this
-    /// is bookkeeping whose entire value is that it is already durable when the next thing goes wrong. A write
-    /// abandoned here buys a microsecond and costs the protection.</para>
+    /// <para>#2748: <see cref="CancellationToken.None"/> throughout, for the reason the completion marker uses
+    /// it and one that is sharper here. This is bookkeeping whose entire value is that it is already durable
+    /// when the next thing goes wrong. Abandon this write and no attempt is recorded, so a store that then
+    /// takes <c>duckdb.dll</c> down natively comes back on the next launch with its count unchanged — the exact
+    /// infinite crash loop this marker exists to end. Forwarding the token would make the protection
+    /// abandonable at the one moment it is about to be needed.</para>
+    ///
+    /// <para>Noted for #2761, which has this service's uncancelable lock under review: this is not that shape.
+    /// It is two statements against a table holding at most a handful of rows, not the survey's full GROUP BY
+    /// over the hot store, so the window that cannot be abandoned is bounded and short.</para>
     ///
     /// <para><b>The commit is the durability, not a CHECKPOINT.</b> This wants to survive the process being
     /// killed mid-repair without unwinding, and a committed DuckDB transaction already does: the WAL is written
@@ -381,14 +305,20 @@ public sealed class QueryStoreSliceRepairService
             var attempts = await AttemptCountAsync(cancellationToken);
             if (attempts >= MaxStartupAttempts)
             {
+                /* Report BOTH halves of the outstanding work. Naming only the hot groups would read as "0 left
+                   undone" on a store whose hot table is already clean but whose archive files are not — the
+                   repair reaches both, and the archive half is the half that can be left behind by a partial
+                   pass, which is exactly the state a skipped store is most likely to be in. */
                 _logger?.LogError(
                     "#1912 Query Store repair SKIPPED: {Attempts} previous attempt(s) on this store did not complete, " +
                     "so it will not be retried automatically — see issue #2748. The app starts normally and collects " +
-                    "normally; only the one-time collapse of {HotGroups} pre-#1907 split interval(s) is left undone, " +
-                    "and #1907's read-side tie-break still resolves those rows deterministically. To retry after " +
-                    "upgrading, drop the '{Table}' table from the store.",
+                    "normally; what is left undone is the one-time collapse of {HotGroups} pre-#1907 split interval(s) " +
+                    "in the hot store and {ArchiveFiles} archive file(s), and #1907's read-side tie-break still " +
+                    "resolves those rows deterministically. To retry after upgrading, drop the '{Table}' table " +
+                    "from the store.",
                     attempts,
                     survey.HotGroups,
+                    survey.Archive.Count(a => a.Groups > 0),
                     AttemptTable);
                 return;
             }
@@ -804,13 +734,6 @@ COPY (
     }
 
     /// <summary>The full projection: key columns as-is, everything else combined, in the source's own order.</summary>
-    private static string BuildProjection(IReadOnlyList<string> columns, IReadOnlyList<string> key)
-    {
-        var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
-        return string.Join(
-            ", ",
-            columns.Select(c => keySet.Contains(c) ? c : $"{CombineExpression(c)} AS {c}"));
-    }
 
     private static async Task<IReadOnlyList<string>> ColumnsOfTableAsync(
         DuckDBConnection connection, string table, CancellationToken cancellationToken)
