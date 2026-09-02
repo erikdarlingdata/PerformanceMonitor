@@ -211,23 +211,23 @@ public sealed partial class QueryStoreSliceRepairService
             $"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'main' AND table_name = '{AttemptTable}'";
         if (Convert.ToInt64(await exists.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture) == 0)
         {
-            return new AttemptState(0, 0, 0);
+            return new AttemptState(0, 0, 0, 0);
         }
 
         using var rows = connection.CreateCommand();
         rows.CommandText =
-            $"SELECT COUNT(*), COALESCE(MAX(hot_groups), 0), COALESCE(MAX(archive_files), 0) FROM {AttemptTable}";
+            $"SELECT COUNT(*), COALESCE(MAX(hot_groups), 0), COALESCE(MAX(archive_files), 0), COALESCE(MAX(unreadable_files), 0) FROM {AttemptTable}";
         using var reader = await rows.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return new AttemptState(0, 0, 0);
+            return new AttemptState(0, 0, 0, 0);
         }
 
-        return new AttemptState(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
+        return new AttemptState(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3));
     }
 
     /// <summary>What the attempt table knows: how many attempts, and how much work the last one saw.</summary>
-    internal readonly record struct AttemptState(long Count, long HotGroups, long ArchiveFiles);
+    internal readonly record struct AttemptState(long Count, long HotGroups, long ArchiveFiles, long UnreadableFiles);
 
     /// <summary>
     /// Records an attempt marker and COMMITS it before the caller does anything dangerous.
@@ -263,7 +263,7 @@ public sealed partial class QueryStoreSliceRepairService
     /// startup precisely so the UI stays interactive and reading. Taking the write lock for two rows of
     /// bookkeeping would stall those readers for no durability gain.</para>
     /// </summary>
-    private async Task RecordAttemptAsync(long hotGroups, long archiveFiles)
+    private async Task RecordAttemptAsync(long hotGroups, long archiveFiles, long unreadableFiles)
     {
         /* #2748 DECLINES the token: this attempt marker is NOT abandonable, deliberately. Abandon the write
            and no attempt is recorded, so a store that then aborts natively comes back with its count
@@ -280,12 +280,12 @@ public sealed partial class QueryStoreSliceRepairService
 
         using var create = connection.CreateCommand();
         create.CommandText =
-            $"CREATE TABLE IF NOT EXISTS {AttemptTable} (attempted_at TIMESTAMP NOT NULL, hot_groups BIGINT NOT NULL, archive_files BIGINT NOT NULL)";
+            $"CREATE TABLE IF NOT EXISTS {AttemptTable} (attempted_at TIMESTAMP NOT NULL, hot_groups BIGINT NOT NULL, archive_files BIGINT NOT NULL, unreadable_files BIGINT NOT NULL)";
         await create.ExecuteNonQueryAsync(CancellationToken.None);
 
         using var insert = connection.CreateCommand();
         insert.CommandText =
-            $"INSERT INTO {AttemptTable} (attempted_at, hot_groups, archive_files) VALUES (CURRENT_TIMESTAMP, {hotGroups}, {archiveFiles})";
+            $"INSERT INTO {AttemptTable} (attempted_at, hot_groups, archive_files, unreadable_files) VALUES (CURRENT_TIMESTAMP, {hotGroups}, {archiveFiles}, {unreadableFiles})";
         await insert.ExecuteNonQueryAsync(CancellationToken.None);
     }
 
@@ -332,12 +332,13 @@ public sealed partial class QueryStoreSliceRepairService
                     "#1912 Query Store repair SKIPPED: {Attempts} previous attempt(s) on this store did not complete, " +
                     "so it will not be retried automatically — see issue #2748. The app starts normally and collects " +
                     "normally; what is left undone is the one-time collapse of {HotGroups} pre-#1907 split interval(s) " +
-                    "in the hot store and {ArchiveFiles} archive file(s) as of the last attempt, and #1907's read-side " +
-                    "tie-break still resolves those rows deterministically. To retry after upgrading, drop the " +
-                    "'{Table}' table from the store.",
+                    "in the hot store, {ArchiveFiles} archive file(s), and {UnreadableFiles} unreadable archive file(s) " +
+                    "as of the last attempt, and #1907's read-side tie-break still resolves those rows " +
+                    "deterministically. To retry after upgrading, drop the '{Table}' table from the store.",
                     attempts.Count,
                     attempts.HotGroups,
                     attempts.ArchiveFiles,
+                    attempts.UnreadableFiles,
                     AttemptTable);
                 return;
             }
@@ -373,7 +374,7 @@ public sealed partial class QueryStoreSliceRepairService
                 survey.HotGroups,
                 archiveFiles);
 
-            await RecordAttemptAsync(survey.HotGroups, archiveFiles);
+            await RecordAttemptAsync(survey.HotGroups, archiveFiles, survey.Unreadable.Count);
 
             var result = await RepairAsync(
                 new Progress<string>(message => _logger?.LogInformation("#1912 {Message}", message)),

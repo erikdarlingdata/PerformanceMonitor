@@ -355,11 +355,20 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
 
         /* And a capped launch must not SURVEY either. The survey is the expensive thing this service has, so a
            capped store paying it on every launch forever would contradict the "app starts and collects
-           normally" this fix promises. What makes that possible is here: the recorded shape carries BOTH
-           halves, so the skip message can still name the outstanding work without a fresh survey to find it. */
+           normally" this fix promises. What makes skipping it possible is that the attempt row carries the
+           shape the last attempt SAW, so the message can still name the outstanding work.
+
+           This store is capped because of an UNREADABLE archive file, and that is the case worth pinning: it
+           is counted in survey.Unreadable, not in Archive (which counts files with repairable groups). Record
+           only the hot and archive halves and this very store — the archetype of a capped one, since an
+           unrepairable file is what makes every pass partial forever — would report "0 archive file(s)" and
+           read as though nothing were outstanding. That is the same misreporting the earlier review caught for
+           the hot/archive split, one case further along. */
         var recorded = await service.ReadAttemptsAsync();
         Assert.Equal((long)QueryStoreSliceRepairService.MaxStartupAttempts, recorded.Count);
-        Assert.True(recorded.ArchiveFiles > 0, "the recorded shape must carry the archive half, not just the hot half");
+        Assert.True(
+            recorded.UnreadableFiles > 0,
+            "a store capped by an unrepairable file must record that, or the skip message claims nothing is left undone");
     }
 
     /// <summary>A store with nothing to repair records the marker anyway, so the survey stops running forever.</summary>
