@@ -309,6 +309,18 @@ public sealed class CollectorContext
     /// </summary>
     public int PerItemPlanIdsAttempted { get; set; }
 
+    /// <summary>
+    /// Plan references handed to the touch/probe round trip this pass — the probe's INPUT size, which is
+    /// what <see cref="PerItemPlanProbeMs"/> actually scales with (measured ~0.61ms per reference, dead
+    /// linear across 78/272/847-reference passes). Deliberately separate from
+    /// <see cref="PerItemPlanIdsAttempted"/>, which counts only the ids that came back MISSING and were
+    /// then fetched from the target: the two differ by orders of magnitude on a healthy database, and a
+    /// pass that probes 847 references and finds nothing owed logs zero attempted ids while doing half a
+    /// second of store work. #2819 and #2822 both divided probe cost by the attempted-id count and drew a
+    /// phantom "140x gap" from it (#2823); this field is the honest denominator.
+    /// </summary>
+    public int PerItemPlanProbeIds { get; set; }
+
     /// <summary>Store-half of <see cref="PerItemTextFetchMs"/> — the touch/probe round trip. Same contract as
     /// <see cref="PerItemPlanProbeMs"/>, including borrowing the body's connection rather than opening one (#2819).</summary>
     public long PerItemTextProbeMs { get; set; }
@@ -324,6 +336,10 @@ public sealed class CollectorContext
 
     /// <summary>Query ids the text fetch attempted this pass. Same purpose as <see cref="PerItemPlanIdsAttempted"/>.</summary>
     public int PerItemTextIdsAttempted { get; set; }
+
+    /// <summary>Query references handed to the text touch/probe round trip. Same purpose and same reason
+    /// for existing separately as <see cref="PerItemPlanProbeIds"/>.</summary>
+    public int PerItemTextProbeIds { get; set; }
 
     /// <summary>
     /// The part of <see cref="PerItemPlanFetchMs"/> that is neither probe, target, nor write — the method's
