@@ -130,7 +130,7 @@ public sealed class QueryStoreSliceTieBreakSourceTests
            asserting a total, this fails rather than silently becoming a one-sided check. */
         var declared = Regex.Match(darlingSource, @"Assert\.Equal\((?<total>\d+), total\);");
         Assert.True(declared.Success, "Darling's guard no longer declares a total dedup-site count.");
-        Assert.Equal(12, int.Parse(declared.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(18, int.Parse(declared.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture));
 
         /* And it must still enumerate its files rather than globbing, for the same reason this one does. */
         Assert.Contains("DedupSites", darlingSource, StringComparison.Ordinal);
