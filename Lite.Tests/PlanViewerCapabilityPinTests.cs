@@ -51,7 +51,7 @@ public sealed class PlanViewerCapabilityPinTests
         ("multi-file-open",            "Multiselect = true"),
         ("drag-filedrop",              "DataFormats.FileDrop"),
         ("drag-copy-effect",           "DragDropEffects.Copy"),
-        ("clipboard-paste",            "Clipboard.GetText"),
+        ("clipboard-paste",            "ClipboardText.TryRead"), // #2833: reads route through the guarded helper
         ("render-loadplan",            ".LoadPlan("),
         ("open-file-dialog",           "OpenFileDialog"),
         ("ctrl-v-paste",               "Key.V"),
@@ -78,6 +78,28 @@ public sealed class PlanViewerCapabilityPinTests
     {
         var matched = ScanCapabilities();
         AssertRatchet("planviewer", matched, floor: 20);
+    }
+
+    /// <summary>
+    /// #2833 regression pin: the plan-viewer paste paths must NEVER call <c>Clipboard.GetText()</c> bare
+    /// again. An unguarded read throws <c>COMException</c> (<c>CLIPBRD_E_CANT_OPEN</c>) whenever another
+    /// process momentarily holds the clipboard and took the whole app down. Every read now routes through
+    /// <c>PerformanceMonitor.Ui.ClipboardText.TryRead</c> -- the one allowed occurrence, which lives in its
+    /// own file that this scan deliberately does not include. Guards the SHARED paste surface (the controller
+    /// and <c>PlanViewerControl.Interaction.cs</c>, used by all three front ends) plus this app's own
+    /// plan-viewer code-behind.
+    /// </summary>
+    [Fact]
+    public void PlanViewerPastePaths_NoBareClipboardGetText()
+    {
+        foreach (var file in PastePathCsFiles())
+        {
+            Assert.True(File.Exists(file), $"paste-path source not found: {file} (scan is broken -- fix the path).");
+            var source = File.ReadAllText(file);
+            Assert.False(source.Contains("Clipboard.GetText(", StringComparison.Ordinal),
+                $"a bare 'Clipboard.GetText(' reappeared in {Path.GetFileName(file)} -- route it through " +
+                "PerformanceMonitor.Ui.ClipboardText.TryRead so a CLIPBRD_E_CANT_OPEN can't crash the app (#2833).");
+        }
     }
 
     /* ---------------- scan ---------------- */
@@ -155,6 +177,17 @@ public sealed class PlanViewerCapabilityPinTests
 
     private static string ControllerCs([CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Ui", "StandalonePlanViewerController.cs"));
+
+    private static string InteractionCs([CallerFilePath] string thisFile = "") =>
+        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Ui", "PlanViewerControl.Interaction.cs"));
+
+    // The .cs paste-path sources #2833 guards (XAML carries no clipboard read, so it is excluded here).
+    private static IEnumerable<string> PastePathCsFiles()
+    {
+        yield return AppPlanViewerCs();
+        yield return ControllerCs();
+        yield return InteractionCs();
+    }
 
     private static string BaselineDir([CallerFilePath] string thisFile = "") =>
         Path.Combine(Path.GetDirectoryName(thisFile)!, "CapabilityPins");

@@ -445,8 +445,7 @@ public partial class ServerTab : UserControl
             e.OriginalSource is not System.Windows.Controls.TextBox &&
             PlanViewerTabItem.IsSelected)
         {
-            var xml = System.Windows.Clipboard.GetText();
-            if (!string.IsNullOrWhiteSpace(xml))
+            if (ClipboardText.TryRead(out var xml) && !string.IsNullOrWhiteSpace(xml))
             {
                 e.Handled = true;
                 OpenPlanTab(xml, "Pasted Plan");

@@ -253,7 +253,12 @@ public sealed class StandalonePlanViewerController
 
         pasteBtn.Click += (_, _) =>
         {
-            var xml = Clipboard.GetText();
+            if (!ClipboardText.TryRead(out var xml))
+            {
+                MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
+                    "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
             if (!string.IsNullOrWhiteSpace(xml))
             {
                 LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
@@ -411,8 +416,7 @@ public sealed class StandalonePlanViewerController
             Keyboard.Modifiers == ModifierKeys.Control &&
             e.OriginalSource is not TextBox)
         {
-            var xml = Clipboard.GetText();
-            if (!string.IsNullOrWhiteSpace(xml))
+            if (ClipboardText.TryRead(out var xml) && !string.IsNullOrWhiteSpace(xml))
             {
                 e.Handled = true;
                 LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
