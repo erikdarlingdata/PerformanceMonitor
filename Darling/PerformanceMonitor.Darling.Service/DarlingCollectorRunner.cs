@@ -1756,6 +1756,16 @@ public sealed class DarlingCollectorRunner
            handler needs the same key the body uses. */
         var carryKey = (server.ServerId, databaseName);
 
+        /* Hoisted for the same shape of reason (#2816): the probe stamp sits at the END of the probe phase,
+           so a probe that THROWS jumps clean over it and reports probe:0ms. The residual then absorbs the
+           whole cost into other:, which is documented as this method's own bookkeeping — "the cost would be
+           in our own code, not in either database" — and that is the exact INVERSE of the truth for a store
+           round trip that timed out. The target and write phases already stamp from finally blocks for
+           precisely this reason (#2811); the probe was the one phase that did not. Measured on 2026-09-03:
+           one failed probe put 43,053ms into other:, 97% of the whole fleet's other: budget that day. */
+        var probeWatch = new Stopwatch();
+        var probeStamped = false;
+
         try
         {
             var hasCarryover = _planFetchCarryover.TryGetValue(carryKey, out var carriedIds);
@@ -1769,8 +1779,9 @@ public sealed class DarlingCollectorRunner
 
             /* #2811: the probe phase is the store connection open PLUS the touch/probe round trip. Timed
                together because they are one logical "ask the store what it already has" — splitting them
-               further would name a connection pool rather than a cost. */
-            var probeWatch = Stopwatch.StartNew();
+               further would name a connection pool rather than a cost. Started HERE rather than at the
+               declaration so the quiet-cycle return above stays outside the measurement. */
+            probeWatch.Restart();
             await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             var missing = new SortedSet<long>();
@@ -1804,6 +1815,7 @@ public sealed class DarlingCollectorRunner
                reports where its milliseconds went. That pass is the interesting one: it issues no target
                query at all, so anything it costs is unambiguously the store. */
             context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
+            probeStamped = true;
 
             if (missing.Count == 0)
             {
@@ -1987,6 +1999,15 @@ public sealed class DarlingCollectorRunner
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #2816: the probe stamp is unreachable once its own await throws, so stamp it here instead.
+               Guarded by the flag rather than by `== 0` because a throw in the LATER target or write phases
+               must not overwrite an already-honest probe reading with the whole elapsed span — and a probe
+               that genuinely measured 0ms is not distinguishable from an unstamped one by value alone. */
+            if (!probeStamped)
+            {
+                context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
+            }
+
             /* #2776: advance the backoff so the next pass attempts a narrower width. Read-modify-write
                through the dictionary rather than the local `estimate`, because Learn may already have
                written a newer record for this key and clobbering it would discard this pass's size
@@ -2034,6 +2055,11 @@ public sealed class DarlingCollectorRunner
         /* Hoisted out of the try (#2776), same reason as the plan side: the catch advances the backoff. */
         var carryKey = (server.ServerId, databaseName);
 
+        /* #2816: hoisted for the same reason as the plan side — a probe that throws would otherwise report
+           probe:0ms and hand its whole cost to the other: residual, inverting where the time was spent. */
+        var probeWatch = new Stopwatch();
+        var probeStamped = false;
+
         try
         {
             var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
@@ -2044,8 +2070,9 @@ public sealed class DarlingCollectorRunner
                 return;
             }
 
-            /* #2811: same probe split as the plan side. */
-            var probeWatch = Stopwatch.StartNew();
+            /* #2811: same probe split as the plan side. Started here, not at the declaration, so the
+               quiet-cycle return above stays outside the measurement. */
+            probeWatch.Restart();
             await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             var missing = new SortedSet<long>();
@@ -2075,6 +2102,7 @@ public sealed class DarlingCollectorRunner
             }
 
             context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
+            probeStamped = true;
 
             if (missing.Count == 0)
             {
@@ -2216,6 +2244,13 @@ public sealed class DarlingCollectorRunner
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #2816: same as the plan side — an unstamped probe would otherwise report probe:0ms and push
+               its cost into the other: residual. */
+            if (!probeStamped)
+            {
+                context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
+            }
+
             /* #2776: advance the backoff so the next pass attempts a narrower width. Saturates at the same
                halving count the plan side uses, so the counter stays meaningful rather than unbounded. */
             var failures = _textFetchFailures.AddOrUpdate(
