@@ -10,9 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -34,17 +36,44 @@ namespace Darling.Tests;
 /// probe's arithmetic pin passed throughout that defect, because the arithmetic was never wrong. A plain
 /// assignment after a throwing <c>await</c> left the phase at zero and the residual silently absorbed the
 /// cost, which for a timed-out store round trip is precisely inverted.</para>
+///
+/// <para><b>#2854 widened the IL pin to every phase stamp, both paths.</b> Naming only the two server-scoped
+/// stamps left four ENUMERATED ones bare, and two of those — <c>PerItemPlanFetchMs</c> and
+/// <c>PerItemTextFetchMs</c> — are the parents of the sub-split #2816 fixed. A throwing fetch therefore
+/// printed a zero parent above non-zero children that stamp from their own handlers, which is not merely
+/// missing but arithmetically impossible, and <c>PlanFetchOtherMs</c> clamped the negative residual to zero
+/// so the line still read as precise. <c>DrainMsFrom</c> made it worse again: it subtracts the phases from
+/// the item total, so a timed-out open reported its whole cost as <c>drain:</c> — blaming row streaming for a
+/// statement that never returned a row.</para>
 /// </summary>
 public sealed class ServerScopePhaseSplitTests
 {
-    /* The two server-scoped stamps. Named rather than enumerated off the type so that DELETING a stamp fails
-       loudly instead of quietly shrinking the set this test checks — the failure mode where a guard keeps
-       passing while covering less. */
+    /* EVERY phase stamp, derived from the type rather than listed (#2854). The first cut of this pin named
+       the two server-scoped stamps, which is why it did not notice that four stamps on the ENUMERATED path
+       were still trailing assignments — including PerItemPlanFetchMs and PerItemTextFetchMs, the parents of
+       the sub-split #2816 had already fixed. An enumerated list is how a sibling has survived a green suite
+       four separate times in this repo; a derived one covers a stamp added tomorrow without anyone
+       remembering to come back here.
+
+       Derivation cannot silently SHRINK, which is the objection to deriving: MinimumPhaseStamps below fails
+       loudly if a stamp is deleted or renamed out of the pattern, so the set can grow on its own but cannot
+       quietly cover less. */
     private static readonly string[] PhaseSetters =
-    [
-        "set_ServerScopeOpenMs",
-        "set_ServerScopeDrainMs",
-    ];
+        typeof(CollectorContext)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.PropertyType == typeof(long)
+                        && p.CanWrite
+                        && p.Name.EndsWith("Ms", StringComparison.Ordinal)
+                        && (p.Name.StartsWith("PerItem", StringComparison.Ordinal)
+                            || p.Name.StartsWith("ServerScope", StringComparison.Ordinal)))
+            .Select(p => "set_" + p.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+    /* The count at the time this pin was written: 10 enumerated + 2 server-scoped. Deleting a stamp, or
+       renaming one out of the pattern above, drops the derived set and fails HERE with a number rather than
+       silently checking less. */
+    private const int MinimumPhaseStamps = 12;
 
     /* A setter assigned WITHOUT an exception handler, in the same assembly, resolved through the same
        metadata tables and the same IL walk. Two jobs: if the scanner stops resolving tokens its Total goes to
@@ -137,8 +166,75 @@ public sealed class ServerScopePhaseSplitTests
     }
 
     [Fact]
+    public void TheEnumeratedResidualIsHonest_WhenEveryPhaseOnThatPathIsStamped()
+    {
+        /* #2854. The enumerated arithmetic has two consumers and both mis-attribute when a phase is missing,
+           so pin the shipped expressions rather than a copy: DrainMsFrom subtracts the non-streaming phases
+           from the item total, and PlanFetchOtherMs subtracts the sub-phases from their parent. */
+        var context = new CollectorContext
+        {
+            ServerId = 1, ServerName = "s", CollectionTime = new DateTime(2026, 9, 3, 0, 0, 0, DateTimeKind.Utc),
+            Deltas = new CollectorDeltaCalculator(),
+            PerItemPhasesMeasured = true,
+            PerItemWatermarkMs = 120,
+            PerItemOpenMs = 900,
+            PerItemPlanFetchMs = 1_500,
+            PerItemTextFetchMs = 400,
+            PerItemPlanProbeMs = 1_100,
+            PerItemPlanTargetMs = 250,
+            PerItemPlanWriteMs = 100,
+        };
+
+        /* 4,000 total: 120 wm + 900 open + 1,500 plan + 400 text leaves 1,080 genuinely streaming. */
+        Assert.Equal(1_080, context.DrainMsFrom(4_000));
+
+        /* And the sub-split sums to its parent: 1,500 - 1,100 - 250 - 100. */
+        Assert.Equal(50, context.PlanFetchOtherMs);
+        Assert.Equal(
+            context.PerItemPlanFetchMs,
+            context.PerItemPlanProbeMs + context.PerItemPlanTargetMs
+                + context.PerItemPlanWriteMs + context.PlanFetchOtherMs);
+    }
+
+    [Fact]
+    public void AZeroParentAboveNonZeroChildren_IsTheShapeTheStampFixPrevents()
+    {
+        /* The defect this issue fixed, expressed as arithmetic. If PerItemPlanFetchMs is skipped by a
+           throwing await while the #2816-fixed sub-phases stamp from their handlers, the parent is zero and
+           the children are not. The clamp then hides it: a negative residual prints as 0, so the line reads
+           as a precise decomposition of a parent that is smaller than its own parts.
+
+           Pinned as a NEGATIVE — this asserts the clamp still protects the log line from printing nonsense,
+           and documents why a zero parent can never be trusted as "instant". The IL pin below is what stops
+           the state arising; this one records what it looks like if it ever does. */
+        var skipped = new CollectorContext
+        {
+            ServerId = 1, ServerName = "s", CollectionTime = new DateTime(2026, 9, 3, 0, 0, 0, DateTimeKind.Utc),
+            Deltas = new CollectorDeltaCalculator(),
+            PerItemPhasesMeasured = true,
+            PerItemPlanFetchMs = 0,
+            PerItemPlanProbeMs = 1_100,
+            PerItemPlanTargetMs = 250,
+            PerItemPlanWriteMs = 100,
+        };
+
+        Assert.Equal(0, skipped.PlanFetchOtherMs);
+        Assert.True(
+            skipped.PerItemPlanProbeMs + skipped.PerItemPlanTargetMs + skipped.PerItemPlanWriteMs
+                > skipped.PerItemPlanFetchMs,
+            "The children exceeding the parent is the tell. If this ever stops holding, the arithmetic " +
+            "changed and the IL pin below is the only thing left guarding the stamps.");
+    }
+
+    [Fact]
     public void PhaseStamps_AreReachableFromExceptionHandlers_SoAThrowingPhaseStillReportsItsTime()
     {
+        Assert.True(
+            PhaseSetters.Length >= MinimumPhaseStamps,
+            $"Only {PhaseSetters.Length} phase stamps were derived from CollectorContext, expected at least " +
+            $"{MinimumPhaseStamps}. A stamp was deleted or renamed out of the PerItem*Ms / ServerScope*Ms " +
+            "pattern, so this pin is now guarding less than it was written to guard.");
+
         var counts = ScanServiceAssembly();
 
         var (controlTotal, controlInHandler) = counts[ControlSetter];
