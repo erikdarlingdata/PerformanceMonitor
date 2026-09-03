@@ -87,7 +87,10 @@ AND   delta_execution_count > 0";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -197,7 +200,10 @@ LIMIT 20";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -423,7 +429,10 @@ LIMIT 20";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -486,7 +495,10 @@ AND   delta_execution_count > 0";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -572,6 +584,7 @@ LIMIT 10";
         {
             // query_stats / plan parse may be unavailable — skip, the advisory is best-effort.
             // An abandonment is NOT swallowed here (#2443).
+            ReportCollectionFailure(ex, context);
         }
     }
 

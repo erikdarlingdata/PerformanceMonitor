@@ -113,7 +113,10 @@ AND   v.delta_execution_count > 0";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -221,7 +224,10 @@ LIMIT 20";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -266,6 +272,20 @@ WITH deduped AS
     -- something running against a deadline, far less variable (38.9-40.9s against 33.6-83.9s).
     -- DISTINCT ON needs the same global sort and measured WORSE (49.8s). Raising work_mem is not the
     -- answer either -- 512MB took it from 25.6s to 59.3s. Do not revert to any of those.
+    --
+    -- ASSUMPTION, written down because PostgreSQL does not contract it: the seven aggregates below each
+    -- sort their own group, so taking [1] from each is only coherent if they all resolve a TIE -- two rows
+    -- equal on BOTH collection_time and execution_count -- to the same physical row. PostgreSQL shares one
+    -- sort across aggregates carrying an identical ORDER BY, so in practice they do; that is implementation
+    -- behaviour, not a documented guarantee, and a drifted ORDER BY on any one of them would break it. The
+    -- window form this replaces could not blend at all, because it picks one physical row.
+    --
+    -- Safe here on two counts. A tie is the #1907 flushed/in-memory pair sharing a collection_time, and the
+    -- collector has COMBINED those slices before storing since #1907, so newly collected rows cannot tie.
+    -- And measured on the busiest server's 14-day slice, grouping by (dedup key, collection_time,
+    -- execution_count) yields ZERO groups holding more than one row. Removing the assumption outright by
+    -- aggregating the composite row once was tried and is far worse -- 26.4s -> 91.2s, slower than the
+    -- window form -- so this risk is accepted deliberately rather than missed.
     SELECT
         database_name,
         query_id,
@@ -486,7 +506,10 @@ LIMIT 20";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -547,7 +570,10 @@ AND   delta_execution_count > 0";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -634,6 +660,7 @@ LIMIT 10";
         {
             // query_stats / plan parse may be unavailable — skip, the advisory is best-effort.
             // An abandonment is NOT swallowed here (#2443).
+            ReportCollectionFailure(ex, context);
         }
     }
 
