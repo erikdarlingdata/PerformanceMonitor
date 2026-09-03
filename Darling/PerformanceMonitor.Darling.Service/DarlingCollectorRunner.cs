@@ -1896,7 +1896,14 @@ public sealed class DarlingCollectorRunner
             if (references.Count == 0 && !hasCarryover)
             {
                 /* The steady quiet cycle: nothing referenced, nothing owed. Zero store reads, zero target
-                   queries — the whole point of the reshape. */
+                   queries — the whole point of the reshape.
+
+                   Stamped anyway, matching the missing.Count == 0 return below. Normally this is 0ms, but
+                   the repair above CAN have reconnected a connection a previous item broke, and that is
+                   real store time: leaving it unstamped would drop it into the other: residual, which is
+                   documented as work in neither database. A quiet cycle should read as free because it WAS
+                   free, not because its one real cost went unattributed. */
+                context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
                 ClearPlanFetchBackoff(carryKey);
                 return;
             }
@@ -2274,7 +2281,10 @@ public sealed class DarlingCollectorRunner
             var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
             {
-                /* Nothing referenced, nothing owed — so any carried failure count is stale (#2776). */
+                /* Nothing referenced, nothing owed — so any carried failure count is stale (#2776).
+                   Probe stamped for the same reason as the plan side: 0ms normally, but a reconnect
+                   performed by the repair above is store time and must not fall into other:. */
+                context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
                 _textFetchFailures.TryRemove(carryKey, out _);
                 return;
             }
