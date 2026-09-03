@@ -1731,26 +1731,6 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
-    /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
-    /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
-    /// id, budget-bounded, and land them into the shared dimension plus the map. The store is the
-    /// watermark: a caught-up database's missing set is EMPTY and no target query runs at all, which is the
-    /// property the retired catalog walk lacked (measured 23s per cycle to discover "nothing new").
-    ///
-    /// <para>Failure-isolated, and that is load-bearing rather than defensive: plan XML is an enrichment on
-    /// top of runtime statistics, so a fetch that throws must not cost the database its runtime stats. It
-    /// logs and returns; whatever did not land is still missing from the store, so the next cycle that
-    /// references it re-selects it by construction.</para>
-    ///
-    /// <para>Budget-deferred and capped ids go to <see cref="_planFetchCarryover"/>, because the probe's
-    /// input is each cycle's batch references: a plan referenced ONCE whose fetch was deferred would
-    /// otherwise never re-enter the probe. Ids the target no longer has (Query Store cleanup took the plan
-    /// between reference and fetch) are dropped from the debt — but only on a pass that provably completed
-    /// uncut, because inside a cut pass "absent from the result" and "excluded by the budget predicate" are
-    /// indistinguishable from the client.</para>
-    /// </summary>
-    /// <summary>
     /// Puts the BORROWED store connection back into a usable state after a fetch faulted on it (#2819).
     ///
     /// <para><b>Why this is required rather than tidy.</b> The fetches swallow their own exceptions and
@@ -1803,6 +1783,26 @@ public sealed class DarlingCollectorRunner
         }
     }
 
+    /// <summary>
+    /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
+    /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
+    /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
+    /// id, budget-bounded, and land them into the shared dimension plus the map. The store is the
+    /// watermark: a caught-up database's missing set is EMPTY and no target query runs at all, which is the
+    /// property the retired catalog walk lacked (measured 23s per cycle to discover "nothing new").
+    ///
+    /// <para>Failure-isolated, and that is load-bearing rather than defensive: plan XML is an enrichment on
+    /// top of runtime statistics, so a fetch that throws must not cost the database its runtime stats. It
+    /// logs and returns; whatever did not land is still missing from the store, so the next cycle that
+    /// references it re-selects it by construction.</para>
+    ///
+    /// <para>Budget-deferred and capped ids go to <see cref="_planFetchCarryover"/>, because the probe's
+    /// input is each cycle's batch references: a plan referenced ONCE whose fetch was deferred would
+    /// otherwise never re-enter the probe. Ids the target no longer has (Query Store cleanup took the plan
+    /// between reference and fetch) are dropped from the debt — but only on a pass that provably completed
+    /// uncut, because inside a cut pass "absent from the result" and "excluded by the budget predicate" are
+    /// indistinguishable from the client.</para>
+    /// </summary>
     private async Task FetchAndStorePlansAsync(
         SqlConnection sqlConnection,
         NpgsqlConnection storeConnection,
@@ -1826,6 +1826,14 @@ public sealed class DarlingCollectorRunner
            one failed probe put 43,053ms into other:, 97% of the whole fleet's other: budget that day. */
         var probeWatch = new Stopwatch();
         var probeStamped = false;
+
+        /* #2819: set by the catch, acted on AFTER it. The restore needs an await, and an await inside a
+           catch makes the compiler lift the handler's body out of the exception region — which would break
+           #2816's pin that the probe stamp is reachable from inside a handler, and with it the guarantee
+           that a throwing probe reports its own time instead of donating it to other:. Flag here, await
+           below: the property #2816 holds and the recovery #2819 needs are not in tension, they just cannot
+           share a block. */
+        var storeConnectionSuspect = false;
 
         try
         {
@@ -2097,7 +2105,7 @@ public sealed class DarlingCollectorRunner
                 context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
             }
 
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+            storeConnectionSuspect = true;
 
             /* #2776: advance the backoff so the next pass attempts a narrower width. Read-modify-write
                through the dictionary rather than the local `estimate`, because Learn may already have
@@ -2112,6 +2120,14 @@ public sealed class DarlingCollectorRunner
             _logger?.LogWarning(ex,
                 "query_store plan fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are unaffected, and whatever did not land is still missing from the store, so the next cycle that references it re-selects it at a narrower width.",
                 server.Config.DisplayName, databaseName, failed.ConsecutiveFetchFailures);
+        }
+
+        /* Outside the catch on purpose — see the flag's declaration. Runs before this method returns, so
+           the caller's writeBatch (which propagates, and would abort the whole sweep) never meets a broken
+           borrowed connection that a reopen could have saved. */
+        if (storeConnectionSuspect)
+        {
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
         }
     }
 
@@ -2151,6 +2167,14 @@ public sealed class DarlingCollectorRunner
            probe:0ms and hand its whole cost to the other: residual, inverting where the time was spent. */
         var probeWatch = new Stopwatch();
         var probeStamped = false;
+
+        /* #2819: set by the catch, acted on AFTER it. The restore needs an await, and an await inside a
+           catch makes the compiler lift the handler's body out of the exception region — which would break
+           #2816's pin that the probe stamp is reachable from inside a handler, and with it the guarantee
+           that a throwing probe reports its own time instead of donating it to other:. Flag here, await
+           below: the property #2816 holds and the recovery #2819 needs are not in tension, they just cannot
+           share a block. */
+        var storeConnectionSuspect = false;
 
         try
         {
@@ -2348,7 +2372,7 @@ public sealed class DarlingCollectorRunner
                 context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
             }
 
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+            storeConnectionSuspect = true;
 
             /* #2776: advance the backoff so the next pass attempts a narrower width. Saturates at the same
                halving count the plan side uses, so the counter stays meaningful rather than unbounded. */
@@ -2362,6 +2386,14 @@ public sealed class DarlingCollectorRunner
             _logger?.LogWarning(ex,
                 "query_store text fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are already written, and whatever did not land is still missing from the store, so the next cycle that references those statements re-selects them at a narrower width.",
                 server.Config.DisplayName, databaseName, failures);
+        }
+
+        /* Outside the catch on purpose — see the flag's declaration. Runs before this method returns, so
+           the caller's writeBatch (which propagates, and would abort the whole sweep) never meets a broken
+           borrowed connection that a reopen could have saved. */
+        if (storeConnectionSuspect)
+        {
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
         }
     }
 
