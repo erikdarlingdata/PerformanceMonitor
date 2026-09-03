@@ -57,9 +57,17 @@ function svg(tag, attrs) {
  *   onZoom     — optional brush-zoom callback (#1606): a pointer drag across ≥8px of plot selects a time
  *                range and calls onZoom(fromMs, toMs) so the caller can RE-RUN the panel on that window
  *                (server-side re-run keeps bucket resolution + tier routing + the partial-window notice honest).
+ *   windowStart— optional x-axis DOMAIN start, windowEnd its end, both UTC-epoch ms (#2802). When both are given
+ *   windowEnd    and windowEnd > windowStart, the axis spans [windowStart, windowEnd] — the REQUESTED time window
+ *                — instead of the data's own first/last-point extent, so a sparse discrete-event series (blocking,
+ *                deadlocks: rows only inside a short burst) plots at its true position across a "last N hours"
+ *                chart rather than the renderer zooming to the burst AND dropping the calendar date. windowEnd is
+ *                the caller's query-time "now", NEVER the last data point — anchoring to the last point would slide
+ *                an old burst to the right edge and read as current. Absent/degenerate ⇒ the original data-extent
+ *                domain, byte-for-byte. Data times stay naive-UTC-parsed and tick labels stay browser-local.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null } = spec;
+  const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null, windowStart = null, windowEnd = null } = spec;
   const stacked = mode === "stacked";
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
@@ -81,8 +89,19 @@ export function renderLineChart(spec) {
      — the same tab reading as half-broken while it warmed up. The single-point geometry (a centered x, one
      tick, a dot per series) is guarded on spanMs === 0 / linePts.length === 1 throughout. */
 
-  const tMin = rows[0].t.getTime();
-  const tMax = rows[rows.length - 1].t.getTime();
+  /* The x DOMAIN. Default: the data's own first/last-point extent. #2802: when the caller passes the window it
+     fetched over (windowStart/windowEnd, UTC-epoch ms, windowEnd = the query-time now), the axis spans THAT window
+     instead, so a sparse series (blocking/deadlocks — rows only inside a short burst) plots at its true position
+     across a "last N hours" chart rather than the renderer zooming to the burst and dropping the date. A degenerate
+     window (non-number, non-finite, or end <= start) is ignored so a bad input can never collapse the axis; with no
+     window passed the data-extent domain below is byte-for-byte the original. */
+  const dataTMin = rows[0].t.getTime();
+  const dataTMax = rows[rows.length - 1].t.getTime();
+  const hasWindow =
+    typeof windowStart === "number" && typeof windowEnd === "number" &&
+    isFinite(windowStart) && isFinite(windowEnd) && windowEnd > windowStart;
+  const tMin = hasWindow ? windowStart : dataTMin;
+  const tMax = hasWindow ? windowEnd : dataTMax;
   const spanMs = tMax - tMin;
 
   /* A dual-axis overlay reserves a right gutter for its own tick labels + unit caption (#1606); without
@@ -164,7 +183,10 @@ export function renderLineChart(spec) {
 
   /* Vertical gridlines + x labels (6 ticks). The label widens to include the calendar date when the domain
      spans more than one day, so a window crossing midnight is unambiguous even if it is under 24h wide. */
-  const crossesDay = rows[0].t.toDateString() !== rows[rows.length - 1].t.toDateString();
+  /* #2802: derived from the DOMAIN bounds, not the data's first/last point — a same-day burst inside a 24h window
+     that crosses midnight must still carry the calendar date. Byte-for-byte the old value with no window passed
+     (the domain bounds ARE the first/last data point then). */
+  const crossesDay = new Date(tMin).toDateString() !== new Date(tMax).toDateString();
   const X_TICKS = 5;
   /* One bucket spans no time, so the evenly-spaced loop would stack X_TICKS identical labels on the centered
      point. Draw a single centered gridline + time label instead. */
@@ -223,7 +245,21 @@ export function renderLineChart(spec) {
     /* Time-series stacked BAR: one vertical bar per bucket, segmented bottom-up by series using the same cumulative
        tops as the stacked area. Bar width is a fraction of the per-bucket spacing, centered on the bucket and clamped
        into the plot; a sub-pixel segment is dropped so a dense window degrades cleanly toward a filled band. */
-    const barW = Math.max(1, (plotW / rows.length) * 0.7);
+    /* Bar width = one bucket's on-screen width. With no window the buckets tile the axis, so plotW/rows.length IS
+       the bucket width (byte-for-byte the original). With a #2802 window the buckets can be sparse — plotW/rows.length
+       would then draw each bar far wider than a bucket and overlap its neighbours — so measure the tightest adjacent
+       gap (one bucket) and use that; fall back to the tiling width when there is only one bar to place. */
+    let barW;
+    if (hasWindow && xs.length > 1) {
+      let minGap = Infinity;
+      for (let i = 1; i < xs.length; i++) {
+        const g = xs[i] - xs[i - 1];
+        if (g > 0 && g < minGap) minGap = g;
+      }
+      barW = Math.max(1, (isFinite(minGap) ? minGap : plotW / rows.length) * 0.7);
+    } else {
+      barW = Math.max(1, (plotW / rows.length) * 0.7);
+    }
     for (let i = 0; i < rows.length; i++) {
       const bx = Math.max(M.l, Math.min(M.l + plotW - barW, xs[i] - barW / 2));
       for (let k = 0; k < series.length; k++) {

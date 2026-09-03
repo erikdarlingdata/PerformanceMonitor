@@ -20,7 +20,7 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend, noticeStrip } from "./util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend, noticeStrip, parseUtc } from "./util.js";
 import { renderLineChart, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer } from "./panels.js";
 import { getCatalog } from "./views-api.js";
@@ -85,6 +85,67 @@ function effectivePin(spec) {
  *  panel model's own field, so folding them together there would double-store the pin and break Unpin. */
 function legacyHoursPin(spec) {
   return spec && typeof spec.hours === "number" && spec.hours >= 1 ? { hours: spec.hours } : null;
+}
+
+/** The compose run endpoint's default window (hours) when a request omits one — kept in lockstep with
+ *  DarlingWebEndpoints.DefaultComposeHours so a live panel's drawn axis matches the server's default window. */
+const DEFAULT_COMPOSE_HOURS = 24;
+
+/** The widest window a composed panel may query (hours) — MIRRORS ComposeLimits.MaxWindowHours (ComposeSpec.cs),
+ *  the ceiling the run endpoint clamps a relative `hours` to (Math.Clamp). resolveChartWindow clamps to the SAME
+ *  value, so a stored/imported `range.hours` (or a legacy per-panel `hours`) beyond it draws an axis no wider than
+ *  the window the server actually serves — the "axis can never disagree with the query window" guarantee held even
+ *  for an out-of-range stored value the UI's own pickers can't produce (#2802 review). 24 * 90 = 90 days. */
+const MAX_COMPOSE_WINDOW_HOURS = 24 * 90;
+
+/**
+ * The x-axis DOMAIN window for a composed TIME-SERIES panel (#2802) — the window the rows were actually fetched
+ * over, so a sparse series plots at its true position instead of the renderer zooming to the data's own extent
+ * (which slid an old burst to the axis edge and dropped the date). MIRRORS buildRunBody's window precedence
+ * EXACTLY so the drawn axis can never disagree with the query window: a brush-zoom (absolute) wins, then the
+ * per-panel pin (#2735/#2788 effectivePin — absolute {windowStart,windowEnd} or relative {hours}), then the live
+ * view scope's hours (default DEFAULT_COMPOSE_HOURS, mirroring the run endpoint). Relative windows end at the
+ * client's render-time now: the run response echoes no window/as-of, and the endpoint anchors a relative `hours`
+ * at ITS now, which the render-time now matches to within request latency (negligible at minute-granularity
+ * ticks); anchoring to the last bucket instead would reintroduce the #2802 bug. Absolute windows (zoom, absolute
+ * pin) carry their own explicit end. Every ISO instant is parseUtc'd (naive == UTC), matching how the buckets are
+ * parsed, so the domain and the plotted points share one clock. Returns {windowStart, windowEnd} UTC-epoch ms.
+ */
+function resolveChartWindow(panelSpec, scope, zoom) {
+  const ms = (iso) => {
+    const d = parseUtc(iso);
+    return d ? d.getTime() : null;
+  };
+  /* 1. A transient brush-zoom is the viewer's explicit request on THIS panel — it wins, exactly as it does in
+        buildRunBody (an absolute window overrides the relative `hours` server-side). */
+  if (zoom && zoom.startIso && zoom.endIso) {
+    const a = ms(zoom.startIso);
+    const b = ms(zoom.endIso);
+    if (a != null && b != null && b > a) return { windowStart: a, windowEnd: b };
+  }
+  /* 2. The per-panel pin (the #2788 effectivePin the "Pinned" badge also reads): absolute wins with its own end;
+        relative rides the now-anchored branch below. */
+  const pin = effectivePin(panelSpec);
+  if (pin && pin.windowStart) {
+    const a = ms(pin.windowStart);
+    const b = ms(pin.windowEnd);
+    if (a != null && b != null && b > a) return { windowStart: a, windowEnd: b };
+  }
+  /* 3. Relative: a relative pin's hours, else the live view scope's hours, else the endpoint's own default —
+        then CLAMPED to the same [1, MaxWindowHours] ceiling the run endpoint applies (Math.Clamp there). The
+        server clamps a relative `hours` unconditionally at run time and serves at most MaxWindowHours of data, so
+        an unclamped axis over a larger stored/imported `range.hours` (or legacy per-panel `hours`) would be wider
+        than the window actually served — the exact axis-vs-window disagreement this fix forbids. In-range values
+        (everything the UI pickers can produce) pass through unchanged. */
+  const rawHours =
+    pin && typeof pin.hours === "number" && pin.hours >= 1
+      ? pin.hours
+      : scope && typeof scope.hours === "number" && scope.hours >= 1
+        ? scope.hours
+        : DEFAULT_COMPOSE_HOURS;
+  const hours = Math.max(1, Math.min(rawHours, MAX_COMPOSE_WINDOW_HOURS));
+  const windowEnd = Date.now();
+  return { windowStart: windowEnd - hours * 3600000, windowEnd };
 }
 
 /**
@@ -185,7 +246,11 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
     annotationMeta = await annotationMetaMap().catch(() => null);
   }
   try {
-    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta })];
+    /* #2802: resolve the panel's x-axis DOMAIN window from the SAME inputs buildRunBody used (zoom → pin →
+       scope), so the drawn axis matches the window the rows were fetched over. renderComposedResult has no
+       `scope`, so it is resolved here (where scope + zoom both live) and threaded through opts. */
+    const chartWindow = resolveChartWindow(panelSpec, scope, opts.zoom);
+    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow })];
     /* The run endpoint's partial-window notice (#1665): the chosen tier could not retain the whole
        requested window on this store — good data, honestly caveated, above the chart. */
     if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(data.notice));
@@ -338,6 +403,11 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           onSelect,
           series2: overlaySeries,
           onZoom,
+          /* #2802: the domain window resolved in renderComposedInto (zoom → pin → scope), so a sparse composed
+             series plots at its true position across the requested window. A brush-zoom re-runs the panel on its
+             absolute window, and resolveChartWindow returns that same window — the zoom keeps winning. */
+          windowStart: opts.chartWindow ? opts.chartWindow.windowStart : null,
+          windowEnd: opts.chartWindow ? opts.chartWindow.windowEnd : null,
         })
       );
       if (hidden > 0) {
