@@ -523,7 +523,7 @@ public sealed class DarlingManagedPostgresTests
     /// </summary>
     [Fact]
     public void HardwareFingerprint_RamChange_TriggersRederivation()
-        {
+    {
         const long sixteenGb = 16L * 1024 * 1024 * 1024;
         const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
         const int hypertables = 40;
