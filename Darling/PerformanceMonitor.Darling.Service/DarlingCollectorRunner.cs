@@ -1743,6 +1743,11 @@ public sealed class DarlingCollectorRunner
     /// structurally impossible, and borrowing must not buy pool headroom at the price of a whole-cycle
     /// abort.</para>
     ///
+    /// <para><b>Takes no CancellationToken on purpose.</b> Every call site has one — query_store's per-item
+    /// wall-clock budget — and an expired budget is the likeliest reason this runs at all, so reopening
+    /// under it would fail on a token check before attempting a connection. Recovery of a connection SHARED
+    /// by every remaining database must not be abandoned because one slow database ran out of time.</para>
+    ///
     /// <para>A transient fault — a cancelled command, a dropped socket — leaves the pooled connection
     /// unusable but the store perfectly reachable, and that is the case this recovers: reopen, and the
     /// caller's write proceeds as if the fetch had its own connection. If the reopen ALSO fails the store is
@@ -1753,8 +1758,7 @@ public sealed class DarlingCollectorRunner
     private async Task RestoreBorrowedStoreConnectionAsync(
         NpgsqlConnection storeConnection,
         ServerRuntime server,
-        string databaseName,
-        CancellationToken cancellationToken)
+        string databaseName)
     {
         if (storeConnection.State == ConnectionState.Open)
         {
@@ -1766,7 +1770,19 @@ public sealed class DarlingCollectorRunner
             /* Close first: Npgsql will not reopen a Broken connection in place, and Close on an already
                closed one is a no-op rather than a fault. */
             await storeConnection.CloseAsync();
-            await storeConnection.OpenAsync(cancellationToken);
+
+            /* CancellationToken.None, deliberately, and this method takes no token so a caller cannot pass
+               a cancelled one by reflex. The token available at every call site is query_store's per-item
+               wall-clock budget, and an EXPIRED budget is the single most likely reason we are here — so
+               reopening under it would make OpenAsync throw OperationCanceledException off a token check
+               before it ever attempted a connection. That is recovery failing closed at exactly the moment
+               it is needed, and worse than not trying: the OCE would escape this method's own non-OCE catch
+               and skip the caller's remaining backoff bookkeeping too.
+
+               One slow database's budget is not a reason to abandon a connection SHARED by every database
+               still to come in this sweep. Real shutdown is still respected — it tears the process down
+               regardless, and this is one short reconnect, not a loop. */
+            await storeConnection.OpenAsync(CancellationToken.None);
 
             _logger?.LogWarning(
                 "Reopened the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the fetch borrows the collector body's connection, and leaving it broken would fail this item's runtime-stats write and abort the rest of the sweep.",
@@ -1856,7 +1872,7 @@ public sealed class DarlingCollectorRunner
                and the connection know, the exception type does not. Free when nothing is wrong — the helper
                returns immediately on an Open connection — and outside the probe measurement on purpose,
                since a reopen is recovery rather than store work. */
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
 
             var hasCarryover = _planFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
@@ -2148,7 +2164,7 @@ public sealed class DarlingCollectorRunner
            borrowed connection that a reopen could have saved. */
         if (storeConnectionSuspect)
         {
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
         }
     }
 
@@ -2218,7 +2234,7 @@ public sealed class DarlingCollectorRunner
                and the connection know, the exception type does not. Free when nothing is wrong — the helper
                returns immediately on an Open connection — and outside the probe measurement on purpose,
                since a reopen is recovery rather than store work. */
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
 
             var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
@@ -2435,7 +2451,7 @@ public sealed class DarlingCollectorRunner
            borrowed connection that a reopen could have saved. */
         if (storeConnectionSuspect)
         {
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
         }
     }
 
