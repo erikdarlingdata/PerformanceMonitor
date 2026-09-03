@@ -61,12 +61,19 @@ public sealed class SweepBodyDetachPolicyTests
     /// <para>This is what would fire if someone "fixed" the residual ~1.5-minute floor (#2841) by
     /// detaching <c>procedure_stats</c> (p90 11,964ms, 1-minute tier) instead of addressing the body's
     /// sequential execution.</para>
+    ///
+    /// <para>Scoped to <c>FrequencyMinutes is &gt; 0 and &lt; 2</c>: cadence 0 is the on-load-only tier,
+    /// which runs once per connect and so has no relaunch to skip — detaching one is harmless and this
+    /// invariant would misdiagnose it as a 1-minute-tier hazard.</para>
     /// </summary>
     [Fact]
     public void NoDetachedCollectorSitsOnTheOneMinuteTier()
     {
+        /* > 0 deliberately: FrequencyMinutes 0 is the on-load-only tier (config snapshots), which runs
+           once per connect and has no relaunch cadence to skip against — so detaching one cannot cause
+           the starvation this guards, and flagging it here would report the wrong diagnosis. */
         var offenders = CollectorScheduleDefaults.All
-            .Where(kv => IsDetached(kv.Key) && kv.Value.FrequencyMinutes < 2)
+            .Where(kv => IsDetached(kv.Key) && kv.Value.FrequencyMinutes is > 0 and < 2)
             .Select(kv => $"{kv.Key} (every {kv.Value.FrequencyMinutes}min)")
             .OrderBy(s => s)
             .ToList();
