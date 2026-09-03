@@ -622,9 +622,12 @@ public sealed class DarlingManagedPostgres
     /// the comparison is a plain ordinal string match on a machine with any locale.
     ///
     /// <para>RAM is normalised through the same non-positive fallback <see cref="DeriveMemorySettings"/>
-    /// applies, so a transient <c>GlobalMemoryStatusEx</c> failure fingerprints as the 4 GB fallback it
-    /// actually derived under rather than as "0" — otherwise the next successful reading would look like a
-    /// hardware change and append a block on every alternating start.</para>
+    /// applies, so a zero reading fingerprints as the 4 GB value it would actually have derived under. Note
+    /// that normalisation is NOT what makes the fingerprint stable across a failed read, and must not be
+    /// relied on for it: <see cref="GetTotalPhysicalMemoryBytes"/> falls back to a LIVE GC figure before it
+    /// reaches that sentinel, so a failed read arrives here as a varying positive number this guard cannot
+    /// see. Stability comes from <see cref="ShouldAppendHardwareSizing"/> refusing to act at all without an
+    /// authoritative reading.</para>
     /// </summary>
     public static string BuildHardwareFingerprint(long totalPhysicalMemoryBytes, int hypertableCount)
     {
@@ -644,6 +647,19 @@ public sealed class DarlingManagedPostgres
     /// 32 GB. Comparing only the last fingerprint makes the check ask the question that matches the file's
     /// own semantics, and is what lets this converge instead of latching.</para>
     /// </summary>
+    public static bool ConfHasCurrentHardwareFingerprint(string conf, string expectedFingerprint)
+    {
+        var lastIndex = conf.LastIndexOf(ConfHardwareFingerprintPrefix, StringComparison.Ordinal);
+        if (lastIndex < 0)
+        {
+            return false;
+        }
+
+        var lineEnd = conf.IndexOf('\n', lastIndex);
+        var line = lineEnd < 0 ? conf[lastIndex..] : conf[lastIndex..lineEnd];
+        return string.Equals(line.TrimEnd('\r'), expectedFingerprint, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// Whether the v8 block should be appended on this start (#2845) — the whole decision as one pure
     /// function so the property can be pinned without a data directory.
@@ -658,19 +674,6 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     public static bool ShouldAppendHardwareSizing(string conf, bool ramReadingIsAuthoritative, string expectedFingerprint)
         => ramReadingIsAuthoritative && !ConfHasCurrentHardwareFingerprint(conf, expectedFingerprint);
-
-    public static bool ConfHasCurrentHardwareFingerprint(string conf, string expectedFingerprint)
-    {
-        var lastIndex = conf.LastIndexOf(ConfHardwareFingerprintPrefix, StringComparison.Ordinal);
-        if (lastIndex < 0)
-        {
-            return false;
-        }
-
-        var lineEnd = conf.IndexOf('\n', lastIndex);
-        var line = lineEnd < 0 ? conf[lastIndex..] : conf[lastIndex..lineEnd];
-        return string.Equals(line.TrimEnd('\r'), expectedFingerprint, StringComparison.Ordinal);
-    }
 
     /// <summary>
     /// The v8 hardware-sizing block (#2845): re-states the settings that are a pure function of the
