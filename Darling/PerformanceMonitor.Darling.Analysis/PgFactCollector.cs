@@ -94,10 +94,16 @@ public sealed partial class PgFactCollector : IFactCollector
     /// STRUCTURALLY (57014, or a <see cref="TimeoutException"/> in the chain) rather than by message
     /// text, because Npgsql renders its own client-side deadline as "Exception while reading from
     /// stream", which read literally says the network broke.</description></item>
-    /// <item><description><b>Undefined table</b> (42P01) — DEBUG. This is the case the original
-    /// comment was actually written for, and it stays quiet by default: a genuinely absent table
-    /// degrading to "no facts" is the documented contract. Quiet is not the same as invisible,
-    /// though, so it is still emitted and can be turned up.</description></item>
+    /// <item><description><b>The schema does not have what the query asked for</b> — DEBUG. Two
+    /// SQLSTATEs, and BOTH are needed: 42P01 undefined_table and 42703 undefined_column. This is the
+    /// case the original comments were actually written for, and they name both shapes —
+    /// "Table may not exist" at most sites, "Columns may not exist yet (pre-migration)" at
+    /// <c>CollectServerMetadataFactsAsync</c>, whose <c>engine_edition</c> / <c>product_version</c>
+    /// arrived in a later migration rung. A rolling deploy that puts the analysis service ahead of a
+    /// not-yet-migrated store (or the reverse) raises 42703 there, NOT 42P01, and classifying only
+    /// the table case would log an ERROR every pass for the whole migration window — for exactly the
+    /// transient, self-resolving condition this arm exists to keep quiet. It stays quiet by default;
+    /// quiet is not the same as invisible, so it is still emitted and can be turned up.</description></item>
     /// <item><description><b>Anything else</b> — ERROR. Assuming a fault is a missing table is what
     /// produced this defect; an unrecognised failure is a fault until someone says otherwise.</description></item>
     /// </list>
@@ -116,11 +122,12 @@ public sealed partial class PgFactCollector : IFactCollector
                 "[PgFactCollector] {CollectMethod} did not finish within its command timeout on server {ServerId} ({ServerName}) — that analysis input is MISSING for this pass, which is not the same as the server having none. The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
                 collectMethod, context.ServerId, context.ServerName, ex.Message);
         }
-        else if (ex is PostgresException { SqlState: "42P01" })
+        else if (ex is PostgresException { SqlState: "42P01" or "42703" })
         {
             _logger?.LogDebug(
-                "[PgFactCollector] {CollectMethod} skipped on server {ServerId} ({ServerName}): a table it reads does not exist, so it contributes no facts. {Message}",
-                collectMethod, context.ServerId, context.ServerName, ex.Message);
+                "[PgFactCollector] {CollectMethod} skipped on server {ServerId} ({ServerName}): the store does not have a table or column it reads (SQLSTATE {SqlState}), which is the pre-migration / version-skew case, so it contributes no facts. {Message}",
+                collectMethod, context.ServerId, context.ServerName,
+                ((PostgresException)ex).SqlState, ex.Message);
         }
         else
         {

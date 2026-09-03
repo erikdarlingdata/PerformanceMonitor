@@ -46,13 +46,17 @@ public partial class DuckDbFactCollector : IFactCollector
     /// to <c>AnalysisService</c>'s own abandon handling rather than reaching this method. An arm for
     /// it would be dead code carrying a false explanation, which is the defect this issue is about
     /// pointing the other way.</description></item>
-    /// <item><description><b>No 42P01 counterpart.</b> DuckDB surfaces a missing relation
-    /// distinguishably only by MESSAGE TEXT, and this project detects exception meaning structurally,
-    /// never by message (the <c>PgBaselineProvider.IsCommandTimeout</c> discipline). It would also be
-    /// the wrong call: Lite creates every one of these tables at startup from
-    /// <c>Schema.GetAllTableStatements()</c>, so a missing table here is a defect and not the expected
-    /// condition the old comment claimed — which is exactly the assumption that let a real fault read
-    /// as "no data" for as long as it did.</description></item>
+    /// <item><description><b>No 42P01/42703 counterpart.</b> DuckDB surfaces a missing relation or
+    /// column distinguishably only by MESSAGE TEXT, and this project detects exception meaning
+    /// structurally, never by message (the <c>PgBaselineProvider.IsCommandTimeout</c> discipline).
+    /// The condition Darling keeps quiet for also does not arise here: Darling's is a ROLLING-DEPLOY
+    /// skew, an analysis service running against a store some other process migrates, so the two can
+    /// legitimately disagree for a window. Lite's store is an embedded file migrated in-process by
+    /// <c>DuckDbInitializer</c> before any analysis runs, so there is no window in which a column can
+    /// be missing — every one of these tables comes from <c>Schema.GetAllTableStatements()</c> at
+    /// startup. A missing table or column here is a defect, not the expected condition the old
+    /// comments claimed, and that assumption is exactly what let a real fault read as "no data" for
+    /// as long as it did.</description></item>
     /// </list>
     ///
     /// <para>So everything that actually reaches here is a fault, and ERROR is the honest level.

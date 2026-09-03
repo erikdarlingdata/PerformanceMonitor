@@ -130,6 +130,36 @@ public sealed class FactCollectorFailureReportingTests
         /* 42P01 is the case the old comment was written for, and it must NOT read as a timeout. */
         Assert.False(PgBaselineProvider.IsCommandTimeout(
             new PostgresException("no such table", "ERROR", "ERROR", "42P01")));
+
+        /* Nor 42703. Review catch on this PR: the site whose comment reads "Columns may not exist
+           yet (pre-migration)" selects engine_edition / product_version, which a later migration rung
+           added — so a rolling deploy raises undefined_COLUMN there, not undefined_TABLE. Classifying
+           only 42P01 would have logged an ERROR every pass for the whole migration window, for
+           precisely the transient condition the quiet arm exists to hold. */
+        Assert.False(PgBaselineProvider.IsCommandTimeout(
+            new PostgresException("no such column", "ERROR", "ERROR", "42703")));
+    }
+
+    /// <summary>
+    /// Both pre-migration SQLSTATEs stay in the quiet arm. Pinned on the SHIPPED source rather than a
+    /// retyped copy of the condition, so a future edit that drops one goes red here.
+    /// </summary>
+    [Fact]
+    public void TheQuietArmCoversMissingColumnsAndNotJustMissingTables()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.cs"));
+
+        var arm = new Regex(
+            @"ex is PostgresException \{ SqlState: (?<states>[^}]*) \}",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        var m = arm.Match(source);
+        Assert.True(m.Success, "the SQLSTATE-classifying arm should still exist in ReportCollectionFailure");
+
+        var states = m.Groups["states"].Value;
+        Assert.Contains("42P01", states, StringComparison.Ordinal);
+        Assert.Contains("42703", states, StringComparison.Ordinal);
     }
 
     private static IEnumerable<string> FactCollectorSources()
