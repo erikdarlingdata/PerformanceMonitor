@@ -1879,6 +1879,23 @@ public sealed class DarlingCollectorRunner
                probeWatch now times the probe ROUND TRIP only, which is what the phase name always claimed.
                Started HERE rather than at the declaration so the quiet-cycle return above stays outside the
                measurement. */
+            /* Repair BEFORE use, not only after a fault, because the catch below filters out
+               OperationCanceledException — and that is the fault most likely to happen here. This method's
+               token is the per-item wall-clock budget, not host shutdown, and Npgsql throws OCE when a
+               caller-supplied token fires, so a database that simply ran slow mid-probe cancels, propagates
+               past that catch, and never reaches the restore at the bottom. The driver then moves to the
+               NEXT database on the same borrowed connection.
+
+               Classifying on connection STATE here rather than on exception type is the same discipline
+               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
+               and the connection know, the exception type does not. Free when nothing is wrong — the helper
+               returns immediately on an Open connection — and it means no database can be charged a
+               spurious probe failure and backoff for the previous one's timeout.
+
+               Outside the probe measurement on purpose: a reopen is recovery, not store work, and folding
+               it into probe: would re-blur exactly the phase #2819 just sharpened. */
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+
             probeWatch.Restart();
 
             var missing = new SortedSet<long>();
@@ -2194,6 +2211,23 @@ public sealed class DarlingCollectorRunner
 
                probeWatch now times the probe round trip only. Started here, not at the declaration, so the
                quiet-cycle return above stays outside the measurement. */
+            /* Repair BEFORE use, not only after a fault, because the catch below filters out
+               OperationCanceledException — and that is the fault most likely to happen here. This method's
+               token is the per-item wall-clock budget, not host shutdown, and Npgsql throws OCE when a
+               caller-supplied token fires, so a database that simply ran slow mid-probe cancels, propagates
+               past that catch, and never reaches the restore at the bottom. The driver then moves to the
+               NEXT database on the same borrowed connection.
+
+               Classifying on connection STATE here rather than on exception type is the same discipline
+               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
+               and the connection know, the exception type does not. Free when nothing is wrong — the helper
+               returns immediately on an Open connection — and it means no database can be charged a
+               spurious probe failure and backoff for the previous one's timeout.
+
+               Outside the probe measurement on purpose: a reopen is recovery, not store work, and folding
+               it into probe: would re-blur exactly the phase #2819 just sharpened. */
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+
             probeWatch.Restart();
 
             var missing = new SortedSet<long>();
