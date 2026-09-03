@@ -1755,14 +1755,14 @@ public sealed class DarlingCollectorRunner
     /// behaviour exists for, so the failure is left to travel — swallowed here, surfaced there, unchanged
     /// from before this borrowing.</para>
     /// </summary>
-    private async Task RestoreBorrowedStoreConnectionAsync(
+    private async Task<bool> RestoreBorrowedStoreConnectionAsync(
         NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName)
     {
         if (storeConnection.State == ConnectionState.Open)
         {
-            return;
+            return true;
         }
 
         try
@@ -1787,6 +1787,8 @@ public sealed class DarlingCollectorRunner
             _logger?.LogWarning(
                 "Reopened the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the fetch borrows the collector body's connection, and leaving it broken would fail this item's runtime-stats write and abort the rest of the sweep.",
                 server.Config.DisplayName, databaseName);
+
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1796,6 +1798,8 @@ public sealed class DarlingCollectorRunner
             _logger?.LogWarning(ex,
                 "Could not reopen the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the store looks unreachable, so this cycle's remaining writes will fail systemically.",
                 server.Config.DisplayName, databaseName);
+
+            return false;
         }
     }
 
@@ -1872,7 +1876,21 @@ public sealed class DarlingCollectorRunner
                and the connection know, the exception type does not. Free when nothing is wrong — the helper
                returns immediately on an Open connection — and outside the probe measurement on purpose,
                since a reopen is recovery rather than store work. */
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
+            /* Timed into probe:, not left to other:. A reconnect is store-connection time — the very cost
+               this PR removed from the steady-state path — and other: is documented as work in NEITHER
+               database, so letting a reopen land there would recreate the misattribution #2816 fixed for
+               the probe stamp. Zero on the ordinary pass: the helper returns on a state check. */
+            probeWatch.Restart();
+            if (!await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName))
+            {
+                /* The store is still down. Returning beats falling through: the probe below would fault on
+                   the same Broken connection, log a second "could not reopen" for one underlying outage,
+                   and the text sibling would double it again per item. This codebase caps repetitive
+                   failure logging deliberately (MaxLoggedProbeFailures), and attempting store work already
+                   known to be doomed is not diagnosis. The carryover is untouched, so nothing is forgotten
+                   and the next cycle re-selects it. */
+                return;
+            }
 
             var hasCarryover = _planFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
@@ -1915,8 +1933,7 @@ public sealed class DarlingCollectorRunner
 
                probeWatch now times the probe ROUND TRIP only, which is what the phase name always claimed.
                Started HERE rather than at the declaration so the quiet-cycle return above stays outside the
-               measurement. */
-            probeWatch.Restart();
+               measurement, while a reconnect above it does not vanish into the residual. */
 
             var missing = new SortedSet<long>();
             if (hasCarryover)
@@ -2164,7 +2181,11 @@ public sealed class DarlingCollectorRunner
            borrowed connection that a reopen could have saved. */
         if (storeConnectionSuspect)
         {
+            /* Charged to probe: for the same reason as the top-of-try repair — a reconnect is store time,
+               and other: is documented as work in neither database. */
+            var reopenWatch = Stopwatch.StartNew();
             await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
+            context.PerItemPlanProbeMs += reopenWatch.ElapsedMilliseconds;
         }
     }
 
@@ -2234,7 +2255,21 @@ public sealed class DarlingCollectorRunner
                and the connection know, the exception type does not. Free when nothing is wrong — the helper
                returns immediately on an Open connection — and outside the probe measurement on purpose,
                since a reopen is recovery rather than store work. */
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
+            /* Timed into probe:, not left to other:. A reconnect is store-connection time — the very cost
+               this PR removed from the steady-state path — and other: is documented as work in NEITHER
+               database, so letting a reopen land there would recreate the misattribution #2816 fixed for
+               the probe stamp. Zero on the ordinary pass: the helper returns on a state check. */
+            probeWatch.Restart();
+            if (!await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName))
+            {
+                /* The store is still down. Returning beats falling through: the probe below would fault on
+                   the same Broken connection, log a second "could not reopen" for one underlying outage,
+                   and the text sibling would double it again per item. This codebase caps repetitive
+                   failure logging deliberately (MaxLoggedProbeFailures), and attempting store work already
+                   known to be doomed is not diagnosis. The carryover is untouched, so nothing is forgotten
+                   and the next cycle re-selects it. */
+                return;
+            }
 
             var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
@@ -2250,9 +2285,8 @@ public sealed class DarlingCollectorRunner
                and then awaits its write, so the caller's connection is idle across this window) and what it
                trades (a store fault here breaks the caller's connection rather than a private one).
 
-               probeWatch now times the probe round trip only. Started here, not at the declaration, so the
-               quiet-cycle return above stays outside the measurement. */
-            probeWatch.Restart();
+               probeWatch covers the probe round trip and, on a pass that needed one, the recovery reconnect
+               above — both are store time, and neither belongs in the other: residual. */
 
             var missing = new SortedSet<long>();
             if (hasCarryover)
@@ -2451,7 +2485,11 @@ public sealed class DarlingCollectorRunner
            borrowed connection that a reopen could have saved. */
         if (storeConnectionSuspect)
         {
+            /* Charged to probe: for the same reason as the top-of-try repair — a reconnect is store time,
+               and other: is documented as work in neither database. */
+            var reopenWatch = Stopwatch.StartNew();
             await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
+            context.PerItemTextProbeMs += reopenWatch.ElapsedMilliseconds;
         }
     }
 
