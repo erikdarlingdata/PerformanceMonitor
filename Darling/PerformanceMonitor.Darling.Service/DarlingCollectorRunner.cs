@@ -898,7 +898,14 @@ public sealed class DarlingCollectorRunner
                 var itemTimeout = definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds;
 
                 /* One pooled store connection for the whole body; the driver writes one binary COPY per
-                   database on it, flushing each before reading the next. */
+                   database on it, flushing each before reading the next.
+
+                   #2819: "for the whole body" is now literally true. The Query Store plan and text fetches
+                   used to open their own on every item — a third and a fourth connection per database, ~228
+                   acquisitions per cycle against MaxPoolSize=24, at a measured 673-893ms floor each — and
+                   they now borrow this one. Safe precisely because of the flushing order named above: the
+                   driver reads an item and then awaits its write, so this connection is idle for the whole
+                   read, which is when those fetches run. */
                 await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
                 /* #2312: open-interval stamps STAGED at decision time (perItemWatermark, below), landed
@@ -1068,7 +1075,7 @@ public sealed class DarlingCollectorRunner
                                per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
                                blended sql: could not distinguish them. */
                             var planFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStorePlansAsync(planFetchConnection,
+                            await FetchAndStorePlansAsync(planFetchConnection, pgConnection,
                                 server, item, context, itemTimeout, ExtractPlanReferences(batch), ct);
                             context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
                         }
@@ -1086,7 +1093,7 @@ public sealed class DarlingCollectorRunner
                         {
                             /* #2312 investigation: same split as the plan fetch above. */
                             var textFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStoreQueryTextAsync(textFetchConnection,
+                            await FetchAndStoreQueryTextAsync(textFetchConnection, pgConnection,
                                 server, item, context, itemTimeout, ExtractTextReferences(batch), ct);
                             context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
                         }
@@ -1724,6 +1731,79 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// Puts the BORROWED store connection back into a usable state after a fetch faulted on it (#2819).
+    ///
+    /// <para><b>Why this is required rather than tidy.</b> The fetches swallow their own exceptions and
+    /// return normally, so <c>readItem</c> still hands the driver a non-null batch built from the target rows
+    /// it already read. <c>EnumeratedCollectorDriver.RunAsync</c> then calls <c>writeBatch</c> OUTSIDE its
+    /// per-item try/catch, and that path is documented to propagate — "a flush failure PROPAGATES, storage
+    /// failure is systemic". So a fetch that broke the connection would not cost one database its plan XML;
+    /// it would fail the runtime-stats write for that item and abort the REST OF THE SWEEP, every remaining
+    /// database for that collector this cycle. While the fetches held private connections that was
+    /// structurally impossible, and borrowing must not buy pool headroom at the price of a whole-cycle
+    /// abort.</para>
+    ///
+    /// <para><b>Takes no CancellationToken on purpose.</b> Every call site has one — query_store's per-item
+    /// wall-clock budget — and an expired budget is the likeliest reason this runs at all, so reopening
+    /// under it would fail on a token check before attempting a connection. Recovery of a connection SHARED
+    /// by every remaining database must not be abandoned because one slow database ran out of time.</para>
+    ///
+    /// <para>A transient fault — a cancelled command, a dropped socket — leaves the pooled connection
+    /// unusable but the store perfectly reachable, and that is the case this recovers: reopen, and the
+    /// caller's write proceeds as if the fetch had its own connection. If the reopen ALSO fails the store is
+    /// genuinely unreachable, which is exactly the systemic condition the driver's propagate-on-flush
+    /// behaviour exists for, so the failure is left to travel — swallowed here, surfaced there, unchanged
+    /// from before this borrowing.</para>
+    /// </summary>
+    private async Task<bool> RestoreBorrowedStoreConnectionAsync(
+        NpgsqlConnection storeConnection,
+        ServerRuntime server,
+        string databaseName)
+    {
+        if (storeConnection.State == ConnectionState.Open)
+        {
+            return true;
+        }
+
+        try
+        {
+            /* Close first: Npgsql will not reopen a Broken connection in place, and Close on an already
+               closed one is a no-op rather than a fault. */
+            await storeConnection.CloseAsync();
+
+            /* CancellationToken.None, deliberately, and this method takes no token so a caller cannot pass
+               a cancelled one by reflex. The token available at every call site is query_store's per-item
+               wall-clock budget, and an EXPIRED budget is the single most likely reason we are here — so
+               reopening under it would make OpenAsync throw OperationCanceledException off a token check
+               before it ever attempted a connection. That is recovery failing closed at exactly the moment
+               it is needed, and worse than not trying: the OCE would escape this method's own non-OCE catch
+               and skip the caller's remaining backoff bookkeeping too.
+
+               One slow database's budget is not a reason to abandon a connection SHARED by every database
+               still to come in this sweep. Real shutdown is still respected — it tears the process down
+               regardless, and this is one short reconnect, not a loop. */
+            await storeConnection.OpenAsync(CancellationToken.None);
+
+            _logger?.LogWarning(
+                "Reopened the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the fetch borrows the collector body's connection, and leaving it broken would fail this item's runtime-stats write and abort the rest of the sweep.",
+                server.Config.DisplayName, databaseName);
+
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The store itself is unreachable. Deliberately swallowed: the write that follows will fail on
+               the same connection and PROPAGATE, which is the correct handling of a systemic store failure
+               and the behaviour that predates this borrowing. Logged so the cause is visible there. */
+            _logger?.LogWarning(ex,
+                "Could not reopen the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the store looks unreachable, so this cycle's remaining writes will fail systemically.",
+                server.Config.DisplayName, databaseName);
+
+            return false;
+        }
+    }
+
+    /// <summary>
     /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
     /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
     /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
@@ -1745,6 +1825,7 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private async Task FetchAndStorePlansAsync(
         SqlConnection sqlConnection,
+        NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
         CollectorContext context,
@@ -1766,23 +1847,105 @@ public sealed class DarlingCollectorRunner
         var probeWatch = new Stopwatch();
         var probeStamped = false;
 
+        /* #2819: set by the catch, acted on AFTER it. The restore needs an await, and an await inside a
+           catch makes the compiler lift the handler's body out of the exception region — which would break
+           #2816's pin that the probe stamp is reachable from inside a handler, and with it the guarantee
+           that a throwing probe reports its own time instead of donating it to other:. Flag here, await
+           below: the property #2816 holds and the recovery #2819 needs are not in tension, they just cannot
+           share a block. */
+        var storeConnectionSuspect = false;
+
         try
         {
+            /* FIRST statement in the try, ahead of the quiet-cycle return below, and that ordering is
+               the whole point. The catch further down filters out OperationCanceledException, and OCE is
+               the fault most likely here: this method's token is the per-item wall-clock budget, not host
+               shutdown, and Npgsql throws OCE when a caller-supplied token fires. So a database that simply
+               ran slow mid-probe cancels, propagates past that catch, and never reaches the restore at the
+               bottom — leaving the BORROWED connection broken for whoever runs next.
+
+               Putting the repair after the early return would have missed exactly the case that matters.
+               "Nothing referenced, nothing owed" is derived from this database's own just-read rows and is
+               completely independent of whether it has runtime stats to WRITE, so a busy-but-stable database
+               routinely returns early here while still handing the driver a non-empty batch. writeBatch then
+               runs on the still-broken connection, outside any per-item try/catch, and propagates — aborting
+               the rest of the sweep. That is precisely the whole-cycle abort this borrowing must not buy.
+
+               Classifying on connection STATE rather than exception type is the discipline
+               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
+               and the connection know, the exception type does not. Free when nothing is wrong — the helper
+               returns immediately on an Open connection — and outside the probe measurement on purpose,
+               since a reopen is recovery rather than store work. */
+            /* Timed into probe:, not left to other:. A reconnect is store-connection time — the very cost
+               this PR removed from the steady-state path — and other: is documented as work in NEITHER
+               database, so letting a reopen land there would recreate the misattribution #2816 fixed for
+               the probe stamp. Zero on the ordinary pass: the helper returns on a state check. */
+            probeWatch.Restart();
+            if (!await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName))
+            {
+                /* The store is still down. Returning beats falling through: the probe below would fault on
+                   the same Broken connection, log a second "could not reopen" for one underlying outage,
+                   and the text sibling would double it again per item. This codebase caps repetitive
+                   failure logging deliberately (MaxLoggedProbeFailures), and attempting store work already
+                   known to be doomed is not diagnosis. The carryover is untouched, so nothing is forgotten
+                   and the next cycle re-selects it.
+
+                   Stamped before returning, like every other exit from this method: the failed reconnect
+                   still took real wall clock, the caller's fetch watch still counted it, and leaving it
+                   unstamped would hand the one measurable part of an outage to the other: residual. */
+                context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
+                return;
+            }
+
             var hasCarryover = _planFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
             {
                 /* The steady quiet cycle: nothing referenced, nothing owed. Zero store reads, zero target
-                   queries — the whole point of the reshape. */
+                   queries — the whole point of the reshape.
+
+                   Stamped anyway, matching the missing.Count == 0 return below. Normally this is 0ms, but
+                   the repair above CAN have reconnected a connection a previous item broke, and that is
+                   real store time: leaving it unstamped would drop it into the other: residual, which is
+                   documented as work in neither database. A quiet cycle should read as free because it WAS
+                   free, not because its one real cost went unattributed. */
+                context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
                 ClearPlanFetchBackoff(carryKey);
                 return;
             }
 
-            /* #2811: the probe phase is the store connection open PLUS the touch/probe round trip. Timed
-               together because they are one logical "ask the store what it already has" — splitting them
-               further would name a connection pool rather than a cost. Started HERE rather than at the
-               declaration so the quiet-cycle return above stays outside the measurement. */
-            probeWatch.Restart();
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            /* #2811 named this phase "the store connection open PLUS the touch/probe round trip", and
+               declined to split them because doing so "would name a connection pool rather than a cost".
+               #2819 measured it and it WAS the connection pool: the probe SQL runs in 0.4ms (nothing stale)
+               to 37ms (40 stale ids), while the phase measured 673-6,663ms — and a cycle with zero ids,
+               which issues no SQL at all, still cost 673ms. That is acquisition, not work.
+
+               So this method no longer acquires. It borrows the caller's connection — the one opened once
+               per collector body at the top of RunEnumeratedAsync and described there as "one pooled store
+               connection for the whole body", a promise this method and its text sibling were quietly
+               breaking by opening a second and third. The driver is strictly sequential (read an item, then
+               await its write), so that connection is provably IDLE across exactly the window this fetch
+               occupies; there is no concurrent use to collide with.
+
+               What that buys: ~228 acquisitions per cycle (114 (server, database) pairs x two fetches)
+               against a MaxPoolSize of 24 collapse to zero, and the pool slot that used to be held across
+               the SQL Server target fetch — measured at 104,799ms on one database — is no longer held at
+               all, because it was already held by the caller regardless.
+
+               The trade, stated at its real size rather than a flattering one: the borrowed connection is
+               the BODY's, opened once per collector run and reused for every database in the sweep — so a
+               store fault in here does not just cost this item its write, it breaks the connection every
+               SUBSEQUENT item in the cycle will probe and write on. That is a larger blast radius than a
+               private connection had, and worth naming plainly.
+
+               It is still the right trade, because the write path already had exactly this shape: writeBatch
+               has always run on this same shared connection, so those later writes were going to fail on it
+               regardless. What changes is that their probes fail alongside, and a broken store connection
+               means the store is unreachable anyway. The driver's per-item catch skips each affected item
+               and the next cycle re-selects it, which is the recovery either arm takes.
+
+               probeWatch now times the probe ROUND TRIP only, which is what the phase name always claimed.
+               Started HERE rather than at the declaration so the quiet-cycle return above stays outside the
+               measurement, while a reconnect above it does not vanish into the residual. */
 
             var missing = new SortedSet<long>();
             if (hasCarryover)
@@ -1796,7 +1959,7 @@ public sealed class DarlingCollectorRunner
             if (references.Count > 0)
             {
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
-                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
+                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
                 {
                     if (!verdict.Resolved || verdict.HashStale)
@@ -1940,7 +2103,7 @@ public sealed class DarlingCollectorRunner
                 try
                 {
                     landed = await QueryStorePlanWriter.WriteAsync(
-                        pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
                 }
                 finally
                 {
@@ -2008,6 +2171,8 @@ public sealed class DarlingCollectorRunner
                 context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
             }
 
+            storeConnectionSuspect = true;
+
             /* #2776: advance the backoff so the next pass attempts a narrower width. Read-modify-write
                through the dictionary rather than the local `estimate`, because Learn may already have
                written a newer record for this key and clobbering it would discard this pass's size
@@ -2021,6 +2186,18 @@ public sealed class DarlingCollectorRunner
             _logger?.LogWarning(ex,
                 "query_store plan fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are unaffected, and whatever did not land is still missing from the store, so the next cycle that references it re-selects it at a narrower width.",
                 server.Config.DisplayName, databaseName, failed.ConsecutiveFetchFailures);
+        }
+
+        /* Outside the catch on purpose — see the flag's declaration. Runs before this method returns, so
+           the caller's writeBatch (which propagates, and would abort the whole sweep) never meets a broken
+           borrowed connection that a reopen could have saved. */
+        if (storeConnectionSuspect)
+        {
+            /* Charged to probe: for the same reason as the top-of-try repair — a reconnect is store time,
+               and other: is documented as work in neither database. */
+            var reopenWatch = Stopwatch.StartNew();
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
+            context.PerItemPlanProbeMs += reopenWatch.ElapsedMilliseconds;
         }
     }
 
@@ -2045,6 +2222,7 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private async Task FetchAndStoreQueryTextAsync(
         SqlConnection sqlConnection,
+        NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
         CollectorContext context,
@@ -2060,20 +2238,75 @@ public sealed class DarlingCollectorRunner
         var probeWatch = new Stopwatch();
         var probeStamped = false;
 
+        /* #2819: set by the catch, acted on AFTER it. The restore needs an await, and an await inside a
+           catch makes the compiler lift the handler's body out of the exception region — which would break
+           #2816's pin that the probe stamp is reachable from inside a handler, and with it the guarantee
+           that a throwing probe reports its own time instead of donating it to other:. Flag here, await
+           below: the property #2816 holds and the recovery #2819 needs are not in tension, they just cannot
+           share a block. */
+        var storeConnectionSuspect = false;
+
         try
         {
+            /* FIRST statement in the try, ahead of the quiet-cycle return below, and that ordering is
+               the whole point. The catch further down filters out OperationCanceledException, and OCE is
+               the fault most likely here: this method's token is the per-item wall-clock budget, not host
+               shutdown, and Npgsql throws OCE when a caller-supplied token fires. So a database that simply
+               ran slow mid-probe cancels, propagates past that catch, and never reaches the restore at the
+               bottom — leaving the BORROWED connection broken for whoever runs next.
+
+               Putting the repair after the early return would have missed exactly the case that matters.
+               "Nothing referenced, nothing owed" is derived from this database's own just-read rows and is
+               completely independent of whether it has runtime stats to WRITE, so a busy-but-stable database
+               routinely returns early here while still handing the driver a non-empty batch. writeBatch then
+               runs on the still-broken connection, outside any per-item try/catch, and propagates — aborting
+               the rest of the sweep. That is precisely the whole-cycle abort this borrowing must not buy.
+
+               Classifying on connection STATE rather than exception type is the discipline
+               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
+               and the connection know, the exception type does not. Free when nothing is wrong — the helper
+               returns immediately on an Open connection — and outside the probe measurement on purpose,
+               since a reopen is recovery rather than store work. */
+            /* Timed into probe:, not left to other:. A reconnect is store-connection time — the very cost
+               this PR removed from the steady-state path — and other: is documented as work in NEITHER
+               database, so letting a reopen land there would recreate the misattribution #2816 fixed for
+               the probe stamp. Zero on the ordinary pass: the helper returns on a state check. */
+            probeWatch.Restart();
+            if (!await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName))
+            {
+                /* The store is still down. Returning beats falling through: the probe below would fault on
+                   the same Broken connection, log a second "could not reopen" for one underlying outage,
+                   and the text sibling would double it again per item. This codebase caps repetitive
+                   failure logging deliberately (MaxLoggedProbeFailures), and attempting store work already
+                   known to be doomed is not diagnosis. The carryover is untouched, so nothing is forgotten
+                   and the next cycle re-selects it.
+
+                   Stamped before returning, like every other exit from this method: the failed reconnect
+                   still took real wall clock, the caller's fetch watch still counted it, and leaving it
+                   unstamped would hand the one measurable part of an outage to the other: residual. */
+                context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
+                return;
+            }
+
             var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
             {
-                /* Nothing referenced, nothing owed — so any carried failure count is stale (#2776). */
+                /* Nothing referenced, nothing owed — so any carried failure count is stale (#2776).
+                   Probe stamped for the same reason as the plan side: 0ms normally, but a reconnect
+                   performed by the repair above is store time and must not fall into other:. */
+                context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
                 _textFetchFailures.TryRemove(carryKey, out _);
                 return;
             }
 
-            /* #2811: same probe split as the plan side. Started here, not at the declaration, so the
-               quiet-cycle return above stays outside the measurement. */
-            probeWatch.Restart();
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            /* #2819: same borrowed connection as the plan side, for the same measured reason — this method
+               was the SECOND of the two per-item acquisitions, and its zero-id probes measured 893ms, the
+               worst floor of either. See the plan side for why borrowing is safe (the driver reads an item
+               and then awaits its write, so the caller's connection is idle across this window) and what it
+               trades (a store fault here breaks the caller's connection rather than a private one).
+
+               probeWatch covers the probe round trip and, on a pass that needed one, the recovery reconnect
+               above — both are store time, and neither belongs in the other: residual. */
 
             var missing = new SortedSet<long>();
             if (hasCarryover)
@@ -2087,7 +2320,7 @@ public sealed class DarlingCollectorRunner
             if (references.Count > 0)
             {
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
-                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
+                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
                 {
                     if (!verdict.Resolved || verdict.HashStale)
@@ -2197,7 +2430,7 @@ public sealed class DarlingCollectorRunner
                 try
                 {
                     landed = await QueryStoreTextWriter.WriteAsync(
-                        pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
                 }
                 finally
                 {
@@ -2251,6 +2484,8 @@ public sealed class DarlingCollectorRunner
                 context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
             }
 
+            storeConnectionSuspect = true;
+
             /* #2776: advance the backoff so the next pass attempts a narrower width. Saturates at the same
                halving count the plan side uses, so the counter stays meaningful rather than unbounded. */
             var failures = _textFetchFailures.AddOrUpdate(
@@ -2263,6 +2498,18 @@ public sealed class DarlingCollectorRunner
             _logger?.LogWarning(ex,
                 "query_store text fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are already written, and whatever did not land is still missing from the store, so the next cycle that references those statements re-selects them at a narrower width.",
                 server.Config.DisplayName, databaseName, failures);
+        }
+
+        /* Outside the catch on purpose — see the flag's declaration. Runs before this method returns, so
+           the caller's writeBatch (which propagates, and would abort the whole sweep) never meets a broken
+           borrowed connection that a reopen could have saved. */
+        if (storeConnectionSuspect)
+        {
+            /* Charged to probe: for the same reason as the top-of-try repair — a reconnect is store time,
+               and other: is documented as work in neither database. */
+            var reopenWatch = Stopwatch.StartNew();
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
+            context.PerItemTextProbeMs += reopenWatch.ElapsedMilliseconds;
         }
     }
 
