@@ -1268,6 +1268,11 @@ public sealed class DarlingManagedPostgres
            a simple invariant — after any start, the conf carries a fingerprint for the CURRENT host — and
            without recording one on the first start there would be nothing for the second start to compare
            against. It converges immediately: the next start finds its own fingerprint and appends nothing. */
+        /* INVARIANT this check depends on: `conf` was read ONCE at the top of this method, before v1-v7
+           may have appended. That is safe only because none of them emits a line carrying
+           ConfHardwareFingerprintPrefix, so nothing appended above can change this answer. A future version
+           block that DID write a fingerprint line would be silently invisible here and the staleness check
+           would quietly stop checking — re-read the file at that point rather than adding the block above. */
         var hypertableCount = TimescaleSupport.HypertableCount;
         var v8Authoritative = TryGetAuthoritativePhysicalMemoryBytes(out var v8RamBytes);
         var v8Fingerprint = BuildHardwareFingerprint(v8RamBytes, hypertableCount);
