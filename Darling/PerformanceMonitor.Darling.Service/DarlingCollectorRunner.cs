@@ -1050,11 +1050,13 @@ public sealed class DarlingCollectorRunner
                         context.PerItemPlanWriteMs = 0;
                         context.PerItemPlanChunks = 0;
                         context.PerItemPlanIdsAttempted = 0;
+                        context.PerItemPlanProbeIds = 0;
                         context.PerItemTextProbeMs = 0;
                         context.PerItemTextTargetMs = 0;
                         context.PerItemTextWriteMs = 0;
                         context.PerItemTextChunks = 0;
                         context.PerItemTextIdsAttempted = 0;
+                        context.PerItemTextProbeIds = 0;
                         var openWatch = Stopwatch.StartNew();
                         using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
                         context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
@@ -1153,18 +1155,20 @@ public sealed class DarlingCollectorRunner
                                        line and a fetchless collector prints none. */
                                     if (context.PerItemPlanFetchMs > 0)
                                     {
-                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids)",
+                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
                                             server.Config.DisplayName, definition.Name, item, context.PerItemPlanFetchMs,
                                             context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
-                                            context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted);
+                                            context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted,
+                                            context.PerItemPlanProbeIds);
                                     }
 
                                     if (context.PerItemTextFetchMs > 0)
                                     {
-                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids)",
+                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
                                             server.Config.DisplayName, definition.Name, item, context.PerItemTextFetchMs,
                                             context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
-                                            context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted);
+                                            context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted,
+                                            context.PerItemTextProbeIds);
                                     }
                                 }
                                 else
@@ -1958,6 +1962,12 @@ public sealed class DarlingCollectorRunner
 
             if (references.Count > 0)
             {
+                /* #2823: the probe's INPUT size, stamped where the input is known. probe: scales with
+                   this (~0.61ms/reference), not with PerItemPlanIdsAttempted, which counts only what came
+                   back missing — so a pass probing hundreds of references and owing nothing logs 0 ids
+                   while doing real store work. Logging one and dividing by the other produced a phantom
+                   140x gap twice (#2819, #2822). */
+                context.PerItemPlanProbeIds = references.Count;
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
                     storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
@@ -2319,6 +2329,8 @@ public sealed class DarlingCollectorRunner
 
             if (references.Count > 0)
             {
+                /* #2823: probe input size — see the plan-side comment. */
+                context.PerItemTextProbeIds = references.Count;
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
                     storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
