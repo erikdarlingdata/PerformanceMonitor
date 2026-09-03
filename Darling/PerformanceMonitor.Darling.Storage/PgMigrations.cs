@@ -164,6 +164,7 @@ public static class PgMigrations
         new Migration(105, "collector-cost", V105Sql),
         new Migration(106, "pg-cpu-utilization", V106Sql),
         new Migration(107, "plan-force-actions", V107Sql),
+        new Migration(108, "collection-log-phase-split", V108Sql),
     };
 
     /// <summary>
@@ -2343,6 +2344,67 @@ CREATE INDEX IF NOT EXISTS idx_plan_force_actions_query
 
 ALTER TABLE config.config_monitored_servers
     ADD COLUMN IF NOT EXISTS plan_force_bot_enabled boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V108 - the server-scoped phase split on <c>collection_log</c> (#2851 made queryable).
+    ///
+    /// <para><b>The gap.</b> #2851 decomposes a server-scoped collector's <c>sql_duration_ms</c> into
+    /// <c>open:</c> (the <c>ExecuteReaderAsync</c>) and <c>drain:</c> (the <c>ReadAsync</c> loop), and reports
+    /// the store-side watermark read beside them. All of it existed ONLY as an app-log line, so the one
+    /// question the split was built to answer - which phase owns a collector's cost, across servers and over
+    /// time - needed an SSM session onto the box and a log scrape per server. It could not be aggregated,
+    /// trended, or read through the MCP surface at all. On 2026-09-03 an investigation into where
+    /// <c>procedure_stats</c>' 4,724 ms drain goes stalled on exactly that: AWS SSO began returning
+    /// InternalServerException, SSM went unavailable, and the numbers were unreachable even though the store
+    /// itself was answering. Three columns turn that whole class of question into a store query.</para>
+    ///
+    /// <para><b>Why columns and not a jsonb blob.</b> The phase set on this path is FIXED - open, drain, and
+    /// the watermark - so jsonb's flexibility buys nothing and costs the cheap aggregation that is the entire
+    /// point (<c>avg(sql_drain_ms)</c> against <c>avg((phases-&gt;&gt;'drain')::bigint)</c>, the latter
+    /// unindexable and materially slower over a 30-day hypertable). The shape that genuinely DOES vary - the
+    /// #2811 fetch split, with its per-chunk and per-id counts - is not a candidate for this table in either
+    /// encoding: it is emitted once per DATABASE while <c>collection_log</c> holds one row per RUN, so it is
+    /// N:1 here and needs a rollup decision of its own, exactly as the V80 fan-out did. Filed separately
+    /// rather than half-answered here.</para>
+    ///
+    /// <para><b>Why <c>other:</c> is NOT stored.</b> It is a computed residual -
+    /// <c>Math.Max(0, SqlMs - open - drain)</c> - and storing it would let it drift from the parent it is
+    /// defined against, which is the one property that makes it meaningful (the terms SUM to
+    /// <c>sql_duration_ms</c> by construction, so a large residual is itself the finding rather than a
+    /// rounding artifact). Readers derive it the same way the C# property does. A stored residual can go
+    /// stale; a derived one cannot.</para>
+    ///
+    /// <para><b>Why the watermark keeps its own column and no <c>sql_</c> prefix.</b> On this path it is
+    /// genuinely outside <c>sql_duration_ms</c> - it runs before that stopwatch starts - so folding it into
+    /// the decomposition would print a permanent zero and teach every reader that a store read #2796 clocked
+    /// at 50 s cold is free. The naming carries the semantic: <c>sql_open_ms</c> and <c>sql_drain_ms</c>
+    /// decompose <c>sql_duration_ms</c>; <c>watermark_ms</c> deliberately does not.</para>
+    ///
+    /// <para><b>No Lite twin, deliberately.</b> The two-store parity rule exists so that state added to one
+    /// store does not read as permanently empty on the other, and it does not bind here because the SOURCE of
+    /// these figures is Darling-only: the open/drain split is stamped by <c>DarlingCollectorRunner</c>'s
+    /// server-scoped path, and Lite's <c>RemoteCollectorService</c> runner has no equivalent phase to report.
+    /// A DuckDB twin would therefore be three columns that are NULL on every row Lite will ever write - which
+    /// is the exact outcome the parity rule is meant to PREVENT, not produce. Said out loud here rather than
+    /// left to inference, because this rung otherwise looks precisely like the shape that rule catches.</para>
+    ///
+    /// <para>Nullable with no DEFAULT and no backfill, the V80 reasoning exactly: a catalog-only change that
+    /// stays instant on a large compressed hypertable, where adding a column WITH a default is the shape
+    /// TimescaleDB has historically refused. A row written before this rung does not know its phases, and
+    /// NULL says so where 0 would claim a measured instant open. All three are written together or not at
+    /// all, gated on the MEASURED flag rather than on a value being non-zero - the distinction #2851 added
+    /// the flag for, so a genuinely instant open records as 0 rather than vanishing.</para>
+    /// </summary>
+    private const string V108Sql = @"
+ALTER TABLE collect.collection_log
+    ADD COLUMN IF NOT EXISTS sql_open_ms integer,
+    ADD COLUMN IF NOT EXISTS sql_drain_ms integer,
+    ADD COLUMN IF NOT EXISTS watermark_ms integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so without this refresh the passthrough every
+   read goes through would keep serving the pre-V108 column list forever and the new columns would be
+   invisible to an UPGRADED store while working fine on a fresh one - the V14 lesson, and V80's too. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
 
     /// <summary>
     /// V105 — <c>collect.collector_cost</c>, the tool's own per-collector cost on the monitored servers
