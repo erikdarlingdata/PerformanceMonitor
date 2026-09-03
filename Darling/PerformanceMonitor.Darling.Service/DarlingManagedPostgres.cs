@@ -1311,12 +1311,18 @@ public sealed class DarlingManagedPostgres
         }
         else if (ShouldAppendHardwareSizing(conf, v8Authoritative, v8Fingerprint))
         {
-            File.AppendAllText(confPath, BuildHardwareSizingConfAppend(v8RamBytes, hypertableCount));
-            var v8Settings = DeriveMemorySettings(v8RamBytes);
+            /* Quantize ONCE here and pass the result down, so the values logged are necessarily the values
+               written. Deriving the log line separately from the raw reading made them disagree near a GB
+               boundary — a 31.5 GB host writes effective_cache_size 24576MB but logged 24192MB, a number that
+               appears nowhere in the file. QuantizeRam is idempotent, so the call below still quantizes and
+               still gets the same answer. */
+            var v8QuantizedRam = QuantizeRam(v8RamBytes);
+            File.AppendAllText(confPath, BuildHardwareSizingConfAppend(v8QuantizedRam, hypertableCount));
+            var v8Settings = DeriveMemorySettings(v8QuantizedRam);
             var v8Workers = DeriveWorkerSettings(hypertableCount);
             _logger.LogInformation(
                 "Appended v8 hardware sizing to postgresql.conf (host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers and work_mem deliberately NOT re-derived, see #2845)",
-                v8RamBytes / (1024L * 1024L), hypertableCount, v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses);
+                v8QuantizedRam / (1024L * 1024L), hypertableCount, v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses);
         }
     }
 
