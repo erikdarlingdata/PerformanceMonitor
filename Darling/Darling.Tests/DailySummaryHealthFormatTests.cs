@@ -26,9 +26,9 @@ public class DailySummaryHealthFormatTests
     public void NumericFormatters_GuardNonFinite()
     {
         var util = FrontendSource("util.js");
-        // fmtInt / fmtNum / fmtPct must degrade a non-finite value to "—" (the guard fmtMs/fmtMb already
-        // carry), so a stray non-numeric value can never render as "NaN" / "NaN%".
-        foreach (var fn in new[] { "fmtInt", "fmtNum", "fmtPct" })
+        // fmtInt / fmtNum / fmtPct / fmtMb must degrade a non-finite value to "—" (the guard fmtMs already
+        // carried), so a stray non-numeric value can never render as "NaN" / "NaN%" / "NaN MB".
+        foreach (var fn in new[] { "fmtInt", "fmtNum", "fmtPct", "fmtMb" })
         {
             Assert.Contains("isFinite", FunctionBody(util, fn), StringComparison.Ordinal);
         }

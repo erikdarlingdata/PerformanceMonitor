@@ -215,6 +215,7 @@ export function fmtMs(v) {
 export function fmtMb(v) {
   if (v == null) return "—";
   const n = Number(v);
+  if (!isFinite(n)) return "—";
   return n >= 1024 ? fmtNum(n / 1024, 1) + " GB" : fmtInt(n) + " MB";
 }
 export function fmtText(v) {
