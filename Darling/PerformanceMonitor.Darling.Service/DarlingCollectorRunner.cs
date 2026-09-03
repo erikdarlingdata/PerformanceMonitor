@@ -45,13 +45,54 @@ namespace PerformanceMonitor.Darling.Service;
 /// exists to be reworded — the classification and the wording have to move independently. Defaulted false so
 /// the seven ordinary construction sites are unchanged; the abandonment return is the only site that sets it.
 /// </param>
+/// <param name="ServerPhasesMeasured">
+/// True when the SERVER-SCOPED path stamped <paramref name="ServerOpenMs"/>/<paramref name="ServerDrainMs"/>
+/// (#2851). The flag exists because the enumerated path gates its own split on <c>PerItemOpenMs &gt; 0</c>,
+/// which conflates "we measured it" with "the number was non-zero" — a genuinely instant open would suppress
+/// the whole split, and a reader could not tell that from a collector that emits none. Gate on the flag, so a
+/// measured zero prints as a zero.
+/// </param>
+/// <param name="ServerOpenMs">
+/// Milliseconds the server-scoped <c>ExecuteReaderAsync</c> took — the part no client-side budget can shorten.
+/// Stamped from a <c>finally</c> rather than after the await (#2816): a throwing open must still report how
+/// long it ran, or its time silently lands in the residual and the residual is the one term nobody can
+/// attribute.
+/// </param>
+/// <param name="ServerDrainMs">
+/// Milliseconds the server-scoped <c>ReadAsync</c> took — row streaming, which the read loop and any byte
+/// budget do govern. Measured rather than inferred so <paramref name="ServerOtherMs"/> is a real residual
+/// instead of "everything we did not time".
+/// </param>
+/// <param name="ServerWatermarkMs">
+/// Milliseconds the server-scoped watermark read took. **Deliberately NOT part of the <see cref="SqlMs"/>
+/// decomposition**, because on this path it is not part of <see cref="SqlMs"/> at all: it runs before the
+/// <c>sqlSlice</c> stopwatch is even started, so folding it into the sum would print a permanent <c>wm:0ms</c>
+/// and invite exactly the wrong conclusion — that a store read which #2796 measured at 50s cold is free. It is
+/// reported alongside as its own figure, and #2851's own framing (that <c>sql:</c> is wm+open+drain here) is
+/// the misreading this parameter exists to prevent.
+/// </param>
 public sealed record CollectorRunResult(
     int Rows,
     long SqlMs,
     long StorageMs,
     string? Note = null,
     FanoutCost? Fanout = null,
-    bool Abandoned = false);
+    bool Abandoned = false,
+    bool ServerPhasesMeasured = false,
+    long ServerOpenMs = 0,
+    long ServerDrainMs = 0,
+    long ServerWatermarkMs = 0)
+{
+    /// <summary>
+    /// The part of <see cref="SqlMs"/> that is neither the open nor the drain — query building, command
+    /// construction, the optional probe-failure rowset and the supplemental query. Computed as the residual so
+    /// the printed terms SUM to <see cref="SqlMs"/> by construction rather than approximately, which is the
+    /// whole point of splitting it (#2811's argument, one seam over). A large value here is itself the finding:
+    /// it would mean the cost sits in our own code between the phases, not in the target.
+    /// Clamped at zero — the phases run on separate stopwatches, so tiny skew must never print negative.
+    /// </summary>
+    public long ServerOtherMs => Math.Max(0, SqlMs - ServerOpenMs - ServerDrainMs);
+}
 
 /// <summary>
 /// Runs a shared collector definition against one monitored server and binary-COPYs the rows
@@ -341,9 +382,25 @@ public sealed class DarlingCollectorRunner
         var serverReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
             ? WatermarkPolicy.ReadFloor(collectionTime)
             : null;
-        DateTime? watermark = definition.WatermarkColumn is null
-            ? null
-            : await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
+        /* #2851: timed because this is a STORE round trip that the server-scoped path's sql: stopwatch does
+           not cover — it runs before that stopwatch starts. #2796 measured a sibling store read at 50s cold
+           on a bounded-only-by-luck predicate, so "the watermark read is free" is an assumption worth
+           holding a number against rather than believing. finally, not a trailing assignment (#2816): a
+           throwing read must still report how long it ran. Zero when the definition declares no watermark
+           column, which is honest — no read happened. */
+        var serverWatermarkWatch = Stopwatch.StartNew();
+        long serverWatermarkMs;
+        DateTime? watermark;
+        try
+        {
+            watermark = definition.WatermarkColumn is null
+                ? null
+                : await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
+        }
+        finally
+        {
+            serverWatermarkMs = serverWatermarkWatch.ElapsedMilliseconds;
+        }
 
         /* Numeric (bigint) watermark = the newest already-collected value of the definition's monotonic
            identity column (job_history's instance_id), read from Postgres — the bigint twin of the timestamp
@@ -469,6 +526,14 @@ public sealed class DarlingCollectorRunner
         long sqlMs = 0;
         long storageMs = 0;
         var rowsWritten = 0;
+
+        /* #2851: whether the server-scoped branch ran at all. The phase VALUES live on the context (next
+           to PerItemOpenMs, the enumerated twin) so the stamps are property setters a reachability pin can
+           see; only this flag needs method scope, because the success return sits outside the branch that
+           sets it. Left false on the enumerated and Azure branches, which have their own per-item split
+           (#2164) and no server-scoped line to hang this one off — the flag, not the values, is what tells
+           a reader which of those two situations produced a zero. */
+        bool serverPhasesMeasured = false;
 
         /* The per-database rollup (#2472). Both fan-out shapes feed it — the enumeration driver's
            onItemComplete hook and the Azure per-database connection loop — so a collector that fans out on
@@ -1233,13 +1298,43 @@ public sealed class DarlingCollectorRunner
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
+                /* #2851: this branch IS the server-scoped path, so its phases are measured from here on.
+                   Set before the read rather than after it so the wall-clock-budget catch below reports the
+                   phases of the cycle it abandoned — that is the case where "where did the time go" matters
+                   most, and the one a trailing assignment would leave at zero. */
+                serverPhasesMeasured = true;
                 using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
                 var itemToken = itemBudget?.Token ?? cancellationToken;
                 try
                 {
                     using var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
-                    using var reader = await command.ExecuteReaderAsync(itemToken);
-                    rows = await definition.ReadAsync(reader, context, itemToken);
+
+                    /* Both phases stamp from finally rather than after the await (#2816). A throwing open or
+                       a drain cut short by the budget must still report the time it burned; the alternative
+                       is that its milliseconds land in the residual, and the residual is the one term whose
+                       whole job is to be small and unattributed. 97% of a day's residual budget was one such
+                       misattribution the last time this was got wrong. */
+                    var openWatch = Stopwatch.StartNew();
+                    DbDataReader opened;
+                    try
+                    {
+                        opened = await command.ExecuteReaderAsync(itemToken);
+                    }
+                    finally
+                    {
+                        context.ServerScopeOpenMs = openWatch.ElapsedMilliseconds;
+                    }
+
+                    using var reader = opened;
+                    var drainWatch = Stopwatch.StartNew();
+                    try
+                    {
+                        rows = await definition.ReadAsync(reader, context, itemToken);
+                    }
+                    finally
+                    {
+                        context.ServerScopeDrainMs = drainWatch.ElapsedMilliseconds;
+                    }
 
                     /* #1851: a definition that declares it may hand back an OPTIONAL trailing
                        (item_name, error_text) result set naming items its own server-side cursor
@@ -1275,7 +1370,14 @@ public sealed class DarlingCollectorRunner
                         sqlSlice.ElapsedMilliseconds,
                         0,
                         EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds),
-                        Abandoned: true);
+                        Abandoned: true,
+                        /* #2851: the abandoned cycle reports its phases too. A collector that blew a
+                           wall-clock budget is precisely the one worth asking "on what" — and because the
+                           stamps come from finally above, the phase it died IN is reported rather than lost. */
+                        ServerPhasesMeasured: true,
+                        ServerOpenMs: context.ServerScopeOpenMs,
+                        ServerDrainMs: context.ServerScopeDrainMs,
+                        ServerWatermarkMs: serverWatermarkMs);
                 }
 
                 /* Optional best-effort second query on the same connection (server_properties'
@@ -1340,7 +1442,12 @@ public sealed class DarlingCollectorRunner
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
-        return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result);
+        return new CollectorRunResult(
+            rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result,
+            ServerPhasesMeasured: serverPhasesMeasured,
+            ServerOpenMs: context.ServerScopeOpenMs,
+            ServerDrainMs: context.ServerScopeDrainMs,
+            ServerWatermarkMs: serverWatermarkMs);
     }
 
     /// <summary>
