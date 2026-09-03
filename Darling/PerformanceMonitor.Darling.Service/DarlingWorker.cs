@@ -5651,6 +5651,24 @@ LIMIT 1";
             _logger.LogInformation("  [{Server}] {Collector} => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
                 server.Config.DisplayName, collectorName, result.Rows, result.SqlMs, result.StorageMs);
 
+            /* #2851: the server-scoped phase split rides its OWN line, for the same reason #2811's fetch
+               sub-splits do — the line above is parsed by tooling outside this repo, and "don't break the
+               parser" outranks "one line to grep". Gated on the MEASURED flag rather than on a value being
+               non-zero: the enumerated path's `PerItemOpenMs > 0` gate cannot tell a genuinely instant open
+               from a path that emits no split at all, and this one must.
+
+               wm: sits OUTSIDE the sum and says so, because on this path it genuinely is outside: the
+               watermark read runs before the sql: stopwatch starts. Printing it inside a `sql:N = ...`
+               decomposition would have made it a permanent 0 and taught every future reader that a store
+               read #2796 clocked at 50s cold is free. */
+            if (result.ServerPhasesMeasured)
+            {
+                _logger.LogInformation(
+                    "  [{Server}] {Collector} sql:{SqlMs}ms = open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms (wm:{WatermarkMs}ms store-side, outside sql)",
+                    server.Config.DisplayName, collectorName, result.SqlMs,
+                    result.ServerOpenMs, result.ServerDrainMs, result.ServerOtherMs, result.ServerWatermarkMs);
+            }
+
             /* result.Note is null for an ordinary run — the message column stays null as before. It is set
                only for a successful-but-empty run worth explaining (today: an enumeration that listed zero
                databases, #1837). The status stays SUCCESS, and every health/band read keys on status rather

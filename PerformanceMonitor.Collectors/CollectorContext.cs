@@ -237,6 +237,30 @@ public sealed class CollectorContext
     public long PerItemOpenMs { get; set; }
 
     /// <summary>
+    /// Milliseconds the SERVER-SCOPED read's <c>ExecuteReaderAsync</c> took (#2851) — the twin of
+    /// <see cref="PerItemOpenMs"/> for the path that collects a whole server in one query rather than
+    /// enumerating databases. Separate from <see cref="PerItemOpenMs"/> rather than reusing it because the
+    /// enumerated log site gates on <c>PerItemOpenMs &gt; 0</c>: sharing the field would make a server-scoped
+    /// run start printing a per-database line it has no database name for.
+    ///
+    /// <para>Exists because the largest collector on the fleet could not be attributed at all. procedure_stats
+    /// runs 4,900ms p50 on use1 while the same query, run from the same box against the same target, takes
+    /// 247ms — an 18.8x gap with the box at 4% CPU, and no way to tell whether it was the execute, the drain,
+    /// or neither. Zero when the host does not measure it, so a zero must never be read as "instant" — see
+    /// the ServerPhasesMeasured flag that gates the log line.</para>
+    /// </summary>
+    public long ServerScopeOpenMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the server-scoped <c>ReadAsync</c> took (#2851) — row streaming. Measured on its own
+    /// stopwatch rather than inferred as the residual, so that the residual means something: on the
+    /// enumerated path drain IS the residual (see <see cref="DrainMsFrom"/>) and therefore silently absorbs
+    /// query building, command construction and the supplemental query. Here those are separated out, so a
+    /// large residual is a finding about our own code rather than an artifact of the definition.
+    /// </summary>
+    public long ServerScopeDrainMs { get; set; }
+
+    /// <summary>
     /// Milliseconds the item's watermark refresh took (#2164), set by the host when it runs one. This is NOT
     /// server think-time or streaming — for query_store it is a STORE read (and on the catch-up/adaptive
     /// path a store write too), yet the driver's <c>sql:</c> stopwatch starts before it. Measured so it can
