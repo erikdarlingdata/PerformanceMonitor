@@ -283,7 +283,12 @@ namespace PerformanceMonitorDashboard
 
             pasteBtn.Click += (_, _) =>
             {
-                var xml = Clipboard.GetText();
+                if (!ClipboardText.TryRead(out var xml))
+                {
+                    MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
+                        "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
                 if (!string.IsNullOrWhiteSpace(xml))
                 {
                     LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
@@ -441,8 +446,7 @@ namespace PerformanceMonitorDashboard
                 System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control &&
                 e.OriginalSource is not System.Windows.Controls.TextBox)
             {
-                var xml = Clipboard.GetText();
-                if (!string.IsNullOrWhiteSpace(xml))
+                if (ClipboardText.TryRead(out var xml) && !string.IsNullOrWhiteSpace(xml))
                 {
                     e.Handled = true;
                     LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");

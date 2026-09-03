@@ -91,6 +91,24 @@ public sealed class ServerTabCapabilityPinTests
         AssertRatchet("eventwires", wires, floor: 6);
     }
 
+    /// <summary>
+    /// #2833 regression pin: the ServerTab Ctrl+V plan-paste handler must never call
+    /// <c>Clipboard.GetText()</c> bare -- an unguarded read throws <c>COMException</c>
+    /// (<c>CLIPBRD_E_CANT_OPEN</c>) when another process momentarily holds the clipboard and crashed the app.
+    /// The read now routes through the guarded <c>PerformanceMonitor.Ui.ClipboardText.TryRead</c> helper.
+    /// </summary>
+    [Fact]
+    public void ServerTabPastePath_NoBareClipboardGetText()
+    {
+        foreach (var file in ServerTabCsFiles())
+        {
+            var source = File.ReadAllText(file);
+            Assert.False(source.Contains("Clipboard.GetText(", StringComparison.Ordinal),
+                $"a bare 'Clipboard.GetText(' reappeared in {Path.GetFileName(file)} -- route it through " +
+                "PerformanceMonitor.Ui.ClipboardText.TryRead so a CLIPBRD_E_CANT_OPEN can't crash the app (#2833).");
+        }
+    }
+
     /* ---------------- scans ---------------- */
 
     private static ISet<string> ScanTabs()
