@@ -2465,10 +2465,15 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
 
     private static readonly DateTime DefaultRegressionMetricTime = new(2026, 7, 1, 11, 0, 0, DateTimeKind.Utc);
 
+    /* #2846: the predicate compares cost PER RUN, so the factory carries per-run values too. Defaults keep the
+       4x shape the pre-existing cases assert on (80 ms/run against a 20 ms/run baseline), matching the 8000 vs
+       2000 totals above at 100 runs. */
     private static PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression Regression(
         long latestMs = 8000, double baselineMs = 2000.0, int serverId = 7, string collector = "query_store",
-        DateTime? latestMetricTime = null) =>
-        new(serverId, "prod-multi-19", collector, latestMs, baselineMs, latestMetricTime ?? DefaultRegressionMetricTime);
+        DateTime? latestMetricTime = null, long latestRuns = 100,
+        double latestMsPerRun = 80.0, double baselineMsPerRun = 20.0) =>
+        new(serverId, "prod-multi-19", collector, latestMs, baselineMs,
+            latestMetricTime ?? DefaultRegressionMetricTime, latestRuns, latestMsPerRun, baselineMsPerRun);
 
     [Fact]
     public async Task CollectorCostRegression_FiresOnEntry_SuppressedWithinCooldown_ResolvesWhenGone()
