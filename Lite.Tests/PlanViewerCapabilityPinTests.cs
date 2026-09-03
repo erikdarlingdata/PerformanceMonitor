@@ -68,6 +68,9 @@ public sealed class PlanViewerCapabilityPinTests
         // Per-app thin entry-method definitions
         ("entry-open",                 "OpenPlanViewerButton_Click(object sender"),
         ("entry-close",                "MainWindowPlanViewerClose_Click(object sender"),
+        // Re-entrancy guard for the "+"-sentinel auto-add (#2825): the deferral latch must stay present so the
+        // FinOps "View Stored Plan" crash (Items.Insert mid container-generation) cannot silently regress.
+        ("reentrancy-defer-add",       "_addTabInsertDeferred"),
     };
 
     [Fact]

@@ -65,6 +65,9 @@ public sealed class PlanViewerCapabilityPinTests
         ("entry-close",                "MainWindowPlanViewerClose_Click(object sender"),
         // Darling-only: the FinOps "View Plan" store->viewer entry
         ("entry-stored-plan",          "OpenStoredPlanInPlanViewer("),
+        // Re-entrancy guard for the "+"-sentinel auto-add (#2825): the deferral latch must stay present so the
+        // FinOps "View Stored Plan" crash (Items.Insert mid container-generation) cannot silently regress.
+        ("reentrancy-defer-add",       "_addTabInsertDeferred"),
     };
 
     [Fact]
