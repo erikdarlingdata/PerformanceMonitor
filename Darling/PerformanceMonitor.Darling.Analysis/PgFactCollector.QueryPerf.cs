@@ -250,28 +250,36 @@ WITH deduped AS
     -- sys.query_store_runtime_stats is keyed by (plan_id, interval, execution_type, replica_group), and
     -- on a SQL Server 2022+ AG with Query Store for secondary replicas enabled the primary holds ONE
     -- shared Query Store carrying every replica's rows. Two rows differing only in replica_role are
-    -- distinct legitimate work, so a partition without it does not de-duplicate — it DISCARDS one
-    -- replica's row at the rn = 1 filter. That is an under-count, which is strictly worse than the
+    -- distinct legitimate work, so a grouping key without it does not de-duplicate — it DISCARDS one
+    -- replica's row when the group collapses. That is an under-count, which is strictly worse than the
     -- double-count this CTE exists to fix: a double-count is visible in the number, a dropped row is
     -- silent. Same reasoning, same key as the read side (#1845).
     -- execution_type_desc is correctly absent: the WHERE pins it to 'Regular', so it is constant here.
+    --
+    -- #2827: GROUP BY + ordered array_agg, not ROW_NUMBER() ... WHERE rn = 1. Both keep the same row --
+    -- first by (collection_time DESC, execution_count DESC) within the partition key -- and the rewrite
+    -- returns a byte-identical result set (md5 over the full ordered output) on six servers, one of them
+    -- empty. What differs is the PLAN each form admits: the window function forces one global sort of the
+    -- server's whole Query Store slice on all eight keys, spilling ~548MB; the GROUP BY lets the planner
+    -- hash-aggregate at the interval grain and sort only within each small group. Measured in isolation
+    -- on the busiest server, 23.4s -> 9.6s; end to end it is faster on every server measured and, for
+    -- something running against a deadline, far less variable (38.9-40.9s against 33.6-83.9s).
+    -- DISTINCT ON needs the same global sort and measured WORSE (49.8s). Raising work_mem is not the
+    -- answer either -- 512MB took it from 25.6s to 59.3s. Do not revert to any of those.
     SELECT
         database_name,
         query_id,
         plan_id,
         replica_role,
-        query_plan_hash,
-        execution_count,
-        avg_cpu_time_us,
-        avg_duration_us,
-        last_execution_time,
-        is_forced_plan,
-        force_failure_count,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
-            ORDER BY collection_time DESC, execution_count DESC
-        ) AS rn
+        runtime_stats_interval_id,
+        first_execution_time,
+        (array_agg(query_plan_hash ORDER BY collection_time DESC, execution_count DESC))[1] AS query_plan_hash,
+        (array_agg(execution_count ORDER BY collection_time DESC, execution_count DESC))[1] AS execution_count,
+        (array_agg(avg_cpu_time_us ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_cpu_time_us,
+        (array_agg(avg_duration_us ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_duration_us,
+        (array_agg(last_execution_time ORDER BY collection_time DESC, execution_count DESC))[1] AS last_execution_time,
+        (array_agg(is_forced_plan ORDER BY collection_time DESC, execution_count DESC))[1] AS is_forced_plan,
+        (array_agg(force_failure_count ORDER BY collection_time DESC, execution_count DESC))[1] AS force_failure_count
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   execution_type_desc = 'Regular'
@@ -287,6 +295,7 @@ WITH deduped AS
     -- would be a silent under-count and a worse bug than the one this fixes. Do not delete as dead
     -- weight -- it is doing all the pruning.
     AND   collection_time >= $3
+    GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
 ),
 plan_agg AS
 (
@@ -307,7 +316,6 @@ plan_agg AS
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
     FROM deduped
-    WHERE rn = 1
     GROUP BY database_name, query_id, plan_id, replica_role
 ),
 plan_dedup AS
