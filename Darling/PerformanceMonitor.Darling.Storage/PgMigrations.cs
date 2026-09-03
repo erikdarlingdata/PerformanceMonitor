@@ -2380,6 +2380,14 @@ ALTER TABLE config.config_monitored_servers
     /// at 50 s cold is free. The naming carries the semantic: <c>sql_open_ms</c> and <c>sql_drain_ms</c>
     /// decompose <c>sql_duration_ms</c>; <c>watermark_ms</c> deliberately does not.</para>
     ///
+    /// <para><b>No Lite twin, deliberately.</b> The two-store parity rule exists so that state added to one
+    /// store does not read as permanently empty on the other, and it does not bind here because the SOURCE of
+    /// these figures is Darling-only: the open/drain split is stamped by <c>DarlingCollectorRunner</c>'s
+    /// server-scoped path, and Lite's <c>RemoteCollectorService</c> runner has no equivalent phase to report.
+    /// A DuckDB twin would therefore be three columns that are NULL on every row Lite will ever write - which
+    /// is the exact outcome the parity rule is meant to PREVENT, not produce. Said out loud here rather than
+    /// left to inference, because this rung otherwise looks precisely like the shape that rule catches.</para>
+    ///
     /// <para>Nullable with no DEFAULT and no backfill, the V80 reasoning exactly: a catalog-only change that
     /// stays instant on a large compressed hypertable, where adding a column WITH a default is the shape
     /// TimescaleDB has historically refused. A row written before this rung does not know its phases, and

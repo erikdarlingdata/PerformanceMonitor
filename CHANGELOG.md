@@ -3178,4 +3178,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#2845]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2845
 [#2851]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2851
 [#2854]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2854
-[#2859]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2860
+[#2859]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2859
