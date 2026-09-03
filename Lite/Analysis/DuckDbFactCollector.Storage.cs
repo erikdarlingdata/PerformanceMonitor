@@ -50,7 +50,10 @@ WHERE rn = 1";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -129,7 +132,10 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -214,7 +220,10 @@ AND   collection_time <= $3";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -276,7 +285,10 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -341,7 +353,10 @@ FROM latest WHERE rn = 1";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 }

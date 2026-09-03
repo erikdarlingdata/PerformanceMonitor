@@ -262,7 +262,10 @@ LIMIT 5000";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
