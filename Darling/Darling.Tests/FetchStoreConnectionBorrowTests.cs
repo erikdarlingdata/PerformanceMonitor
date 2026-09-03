@@ -10,9 +10,15 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Data;
+using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using Xunit;
 
 namespace Darling.Tests;
@@ -107,6 +113,68 @@ public sealed class FetchStoreConnectionBorrowTests
         }
     }
 
+
+    /// <summary>
+    /// Pins the arm both fetch paths depend on: when the store is genuinely unreachable, the recovery
+    /// must report failure rather than throw (#2819).
+    ///
+    /// <para>This is the safety net that keeps a broken borrowed connection out of <c>writeBatch</c>, which
+    /// runs outside the driver's per-item try/catch and propagates — so a throw from HERE would abort the
+    /// sweep it exists to protect, and a <c>true</c> return would send the callers on to a probe that cannot
+    /// work. Both callers branch on the result: <c>false</c> short-circuits before attempting store work
+    /// already known to be doomed, which is what stops one outage producing a doubled failure log per
+    /// item.</para>
+    ///
+    /// <para>No live store needed, which is the point — a connection built on an unroutable address starts
+    /// <c>Closed</c> and faults on open, exercising exactly the down-store path. The reopen deliberately
+    /// runs under <c>CancellationToken.None</c>, so nothing here depends on a token either.</para>
+    /// </summary>
+    [Fact]
+    public async Task RestoringABorrowedConnection_ReportsFailureRatherThanThrowing_WhenTheStoreIsUnreachable()
+    {
+        /* Port 1 on loopback: nothing listens, so the connect fails fast and locally — no DNS, no wait on a
+           routable host, and no dependency on the environment having a store at all. */
+        const string unreachable = "Host=127.0.0.1;Port=1;Username=x;Password=x;Database=x;Timeout=1;";
+
+        await using var dataSource = NpgsqlDataSource.Create(unreachable);
+        var runner = new DarlingCollectorRunner(
+            dataSource, new CollectorDeltaCalculator());
+
+        var method = typeof(DarlingCollectorRunner).GetMethod(
+            "RestoreBorrowedStoreConnectionAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.True(
+            method is not null,
+            "RestoreBorrowedStoreConnectionAsync was not found — it was renamed or removed, and the recovery " +
+            "path both fetches rely on is no longer under test.");
+
+        await using var broken = new NpgsqlConnection(unreachable);
+        Assert.Equal(ConnectionState.Closed, broken.State);
+
+        var server = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "borrow-test", Host = "borrow-test-host" },
+            ConnectionString = "Server=borrow-test-host",
+            Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+            StorageName = "borrow-test-host",
+            ServerId = 1,
+            EngineEdition = 3,
+        };
+
+        /* The assertion is as much "does not throw" as it is the return value: a throw here escapes into the
+           caller's catch and, on the top-of-try call site, past it. */
+        var task = (Task<bool>)method!.Invoke(runner, [broken, server, "AnyDatabase"])!;
+        var restored = await task;
+
+        Assert.False(
+            restored,
+            "A store that cannot be reached must report false so the callers skip the doomed probe. Returning " +
+            "true sends them on to store work that cannot succeed and doubles the failure log for one outage.");
+
+        Assert.NotEqual(ConnectionState.Open, broken.State);
+    }
+
     /// <summary>
     /// Returns, per fetch state machine, a count of calls to each name of interest. Walks the compiler
     /// -generated state machine types rather than the source methods, because that is where an async
@@ -114,7 +182,7 @@ public sealed class FetchStoreConnectionBorrowTests
     /// </summary>
     private static Dictionary<string, Dictionary<string, int>> ScanFetchStateMachines()
     {
-        var assemblyPath = typeof(PerformanceMonitor.Darling.Service.DarlingCollectorRunner).Assembly.Location;
+        var assemblyPath = typeof(DarlingCollectorRunner).Assembly.Location;
         Assert.True(File.Exists(assemblyPath), $"Service assembly not found at '{assemblyPath}'.");
 
         var wanted = new HashSet<string>(Controls, StringComparer.Ordinal) { Acquire };
