@@ -262,6 +262,73 @@ public sealed class CollectorContext
     /// </summary>
     public long PerItemTextFetchMs { get; set; }
 
+    /* #2811: the fetch phases above are each a whole METHOD, not a query. FetchAndStorePlansAsync opens a
+       store connection, round-trips the store to learn what is already held, issues at most two target
+       statements, and writes the results back — three of those four steps are Postgres. A 189,562ms
+       plan_fetch on a production database was read as SQL Server query time for a full day and tuned on that
+       premise; the tuning was measured at 0.508s in isolation and moved production nothing, because nobody
+       could see which step held the time. These sub-phases exist so that question is answered by the log
+       rather than by argument. Same zero-means-unmeasured contract as their parent. */
+
+    /// <summary>
+    /// Milliseconds of <see cref="PerItemPlanFetchMs"/> spent opening the store connection and running the
+    /// touch/probe round trip that decides which plans are still owed — the STORE half that runs before any
+    /// target query is issued.
+    /// </summary>
+    public long PerItemPlanProbeMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds of <see cref="PerItemPlanFetchMs"/> spent in the TARGET statements only, summed across
+    /// chunks: <c>ExecuteReaderAsync</c> plus the row-read loop against <c>sys.query_store_plan</c>. This is
+    /// the number a hint on that query can move, and the only one comparable to a benchmark of the statement.
+    /// </summary>
+    public long PerItemPlanTargetMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds of <see cref="PerItemPlanFetchMs"/> spent writing the fetched plans back to the store.
+    /// </summary>
+    public long PerItemPlanWriteMs { get; set; }
+
+    /// <summary>Target statements issued for the plan fetch (chunk count) — 0, 1 or 2 at today's cap.</summary>
+    public int PerItemPlanChunks { get; set; }
+
+    /// <summary>
+    /// Plan ids the fetch attempted this pass. Paired with <see cref="PerItemPlanTargetMs"/> it gives a
+    /// per-id cost, which is the only honest way to compare a cold production pass against a benchmark run
+    /// over hot recently-executed plans — the two differ by orders of magnitude and the totals alone hide it.
+    /// </summary>
+    public int PerItemPlanIdsAttempted { get; set; }
+
+    /// <summary>Store-half of <see cref="PerItemTextFetchMs"/>. Same contract as <see cref="PerItemPlanProbeMs"/>.</summary>
+    public long PerItemTextProbeMs { get; set; }
+
+    /// <summary>Target-half of <see cref="PerItemTextFetchMs"/>. Same contract as <see cref="PerItemPlanTargetMs"/>.</summary>
+    public long PerItemTextTargetMs { get; set; }
+
+    /// <summary>Store-write half of <see cref="PerItemTextFetchMs"/>. Same contract as <see cref="PerItemPlanWriteMs"/>.</summary>
+    public long PerItemTextWriteMs { get; set; }
+
+    /// <summary>Target statements issued for the text fetch (chunk count).</summary>
+    public int PerItemTextChunks { get; set; }
+
+    /// <summary>Query ids the text fetch attempted this pass. Same purpose as <see cref="PerItemPlanIdsAttempted"/>.</summary>
+    public int PerItemTextIdsAttempted { get; set; }
+
+    /// <summary>
+    /// The part of <see cref="PerItemPlanFetchMs"/> that is neither probe, target, nor write — the method's
+    /// own bookkeeping (candidate capping, the size estimator, the carry-over set maths). Exists so the
+    /// sub-split SUMS to its parent by construction rather than approximately: a residual that has to be
+    /// inferred by subtracting printed terms is exactly the ambiguity this whole change exists to remove, and
+    /// a large value here is itself the finding (the cost would be in our own code, not in either database).
+    /// Clamped at zero for the same stopwatch-skew reason as <see cref="DrainMsFrom"/>.
+    /// </summary>
+    public long PlanFetchOtherMs =>
+        Math.Max(0, PerItemPlanFetchMs - PerItemPlanProbeMs - PerItemPlanTargetMs - PerItemPlanWriteMs);
+
+    /// <summary>Text-fetch twin of <see cref="PlanFetchOtherMs"/>.</summary>
+    public long TextFetchOtherMs =>
+        Math.Max(0, PerItemTextFetchMs - PerItemTextProbeMs - PerItemTextTargetMs - PerItemTextWriteMs);
+
     /// <summary>
     /// The item's row-STREAMING time: the driver's blended per-item total minus the phases that are not
     /// streaming (<see cref="PerItemWatermarkMs"/>, <see cref="PerItemOpenMs"/>,
