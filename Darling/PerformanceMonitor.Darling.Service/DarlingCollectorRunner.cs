@@ -1803,11 +1803,17 @@ public sealed class DarlingCollectorRunner
                the SQL Server target fetch — measured at 104,799ms on one database — is no longer held at
                all, because it was already held by the caller regardless.
 
-               The trade: a store fault inside this method now leaves the caller's connection broken rather
-               than a private one, so the item's subsequent write fails too. That is acceptable and close to
-               honest — a broken store connection means the store is unreachable, and the write was going to
-               fail on its own connection anyway. The driver's per-item catch skips the item and the next
-               cycle re-selects it, which is the same recovery either arm takes.
+               The trade, stated at its real size rather than a flattering one: the borrowed connection is
+               the BODY's, opened once per collector run and reused for every database in the sweep — so a
+               store fault in here does not just cost this item its write, it breaks the connection every
+               SUBSEQUENT item in the cycle will probe and write on. That is a larger blast radius than a
+               private connection had, and worth naming plainly.
+
+               It is still the right trade, because the write path already had exactly this shape: writeBatch
+               has always run on this same shared connection, so those later writes were going to fail on it
+               regardless. What changes is that their probes fail alongside, and a broken store connection
+               means the store is unreachable anyway. The driver's per-item catch skips each affected item
+               and the next cycle re-selects it, which is the recovery either arm takes.
 
                probeWatch now times the probe ROUND TRIP only, which is what the phase name always claimed.
                Started HERE rather than at the declaration so the quiet-cycle return above stays outside the
