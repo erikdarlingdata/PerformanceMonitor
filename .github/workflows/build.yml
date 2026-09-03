@@ -122,7 +122,21 @@ jobs:
               # dictionaries to assert the two apps' shared brush keys still resolve to the same
               # colors. A Darling-theme-only edit is exactly the drift that guard exists to catch,
               # so it has to reach the suite.
-              - 'Darling/PerformanceMonitor.Darling.Viewer/Themes/*.xaml'
+              #
+              # WIDENED from Themes/*.xaml to the whole Viewer tree (#2839): Lite.Tests reads eight
+              # other Viewer files as source - MainWindow.xaml, SettingsWindow.xaml.cs,
+              # CollectorSchedulePresets.cs, ViewerDataService.AlertSettings.cs,
+              # ViewerDataService.Fleet.cs, AvailabilityGroupsTab.xaml, ViewerServerTab.xaml and
+              # AddServerDialog.xaml.cs - so the Themes-only pattern left every guard reading any of
+              # them unable to run on the edit it exists to catch.
+              - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
+              # #2839, and the one that actually broke dev: Lite.Tests/QueryStoreSliceTieBreakSourceTests.cs
+              # reads DARLING'S counterpart guard as source and asserts on the site total declared
+              # there. #2830 raised that total 12 -> 18 touching only Darling/**, which fires `darling`
+              # but not `lite`, so the mirror half was skipped and the merge went green before the
+              # nightly failed on it. A guard that compares the two apps CANNOT live behind a filter
+              # that only fires for one of them.
+              - 'Darling/Darling.Tests/**/!(*.md)'
               # Same reason again, and a whole tree this time: WatermarkPolicyTests'
               # TheCatchUpHorizon_IsWrittenDownInExactlyOnePlace (#2468) scans the Darling SERVICE for
               # comments that restate the catch-up horizon's number instead of pointing at
@@ -160,6 +174,13 @@ jobs:
               # regression in one outside the six named above must still trigger the Darling job
               # that runs the guard, or it slips to the nightly.
               - 'Lite/**/*.xaml'
+              # #2839, mirror of the lite filter's Darling entries: Darling.Tests reads Lite .cs
+              # source too, not just XAML - Lite/Analysis, Lite/Mcp/McpHealthTools.cs and
+              # Lite/Services. Naming only *.xaml meant a Lite .cs-only edit skipped the Darling
+              # job that runs those parity guards. Derived (**/*.cs) rather than the three
+              # directories, for the same reason #2114 added the *.xaml catch-all above an
+              # enumerated six: an enumerated list stops covering the next file added.
+              - 'Lite/**/*.cs'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
