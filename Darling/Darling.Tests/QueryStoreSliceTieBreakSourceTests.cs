@@ -109,8 +109,10 @@ public sealed class QueryStoreSliceTieBreakSourceTests
             "Query Store dedup sites missing the #1907 execution_count tie-break:\n  " + string.Join("\n  ", untied));
 
         /* The count is asserted as a whole too: a file dropping to zero sites would otherwise be caught only
-           by its own per-file assertion, and this states the total the fix actually swept. */
-        Assert.Equal(12, total);
+           by its own per-file assertion, and this states the total the fix actually swept.
+           12 -> 18 with #2827: the plan-regression dedup states its ordering once per projected column
+           (7) where the window form stated it once, so the same logical site now contributes seven. */
+        Assert.Equal(18, total);
     }
 
     /// <summary>
