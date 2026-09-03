@@ -1837,6 +1837,27 @@ public sealed class DarlingCollectorRunner
 
         try
         {
+            /* FIRST statement in the try, ahead of the quiet-cycle return below, and that ordering is
+               the whole point. The catch further down filters out OperationCanceledException, and OCE is
+               the fault most likely here: this method's token is the per-item wall-clock budget, not host
+               shutdown, and Npgsql throws OCE when a caller-supplied token fires. So a database that simply
+               ran slow mid-probe cancels, propagates past that catch, and never reaches the restore at the
+               bottom — leaving the BORROWED connection broken for whoever runs next.
+
+               Putting the repair after the early return would have missed exactly the case that matters.
+               "Nothing referenced, nothing owed" is derived from this database's own just-read rows and is
+               completely independent of whether it has runtime stats to WRITE, so a busy-but-stable database
+               routinely returns early here while still handing the driver a non-empty batch. writeBatch then
+               runs on the still-broken connection, outside any per-item try/catch, and propagates — aborting
+               the rest of the sweep. That is precisely the whole-cycle abort this borrowing must not buy.
+
+               Classifying on connection STATE rather than exception type is the discipline
+               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
+               and the connection know, the exception type does not. Free when nothing is wrong — the helper
+               returns immediately on an Open connection — and outside the probe measurement on purpose,
+               since a reopen is recovery rather than store work. */
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+
             var hasCarryover = _planFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
             {
@@ -1879,23 +1900,6 @@ public sealed class DarlingCollectorRunner
                probeWatch now times the probe ROUND TRIP only, which is what the phase name always claimed.
                Started HERE rather than at the declaration so the quiet-cycle return above stays outside the
                measurement. */
-            /* Repair BEFORE use, not only after a fault, because the catch below filters out
-               OperationCanceledException — and that is the fault most likely to happen here. This method's
-               token is the per-item wall-clock budget, not host shutdown, and Npgsql throws OCE when a
-               caller-supplied token fires, so a database that simply ran slow mid-probe cancels, propagates
-               past that catch, and never reaches the restore at the bottom. The driver then moves to the
-               NEXT database on the same borrowed connection.
-
-               Classifying on connection STATE here rather than on exception type is the same discipline
-               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
-               and the connection know, the exception type does not. Free when nothing is wrong — the helper
-               returns immediately on an Open connection — and it means no database can be charged a
-               spurious probe failure and backoff for the previous one's timeout.
-
-               Outside the probe measurement on purpose: a reopen is recovery, not store work, and folding
-               it into probe: would re-blur exactly the phase #2819 just sharpened. */
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
-
             probeWatch.Restart();
 
             var missing = new SortedSet<long>();
@@ -2195,6 +2199,27 @@ public sealed class DarlingCollectorRunner
 
         try
         {
+            /* FIRST statement in the try, ahead of the quiet-cycle return below, and that ordering is
+               the whole point. The catch further down filters out OperationCanceledException, and OCE is
+               the fault most likely here: this method's token is the per-item wall-clock budget, not host
+               shutdown, and Npgsql throws OCE when a caller-supplied token fires. So a database that simply
+               ran slow mid-probe cancels, propagates past that catch, and never reaches the restore at the
+               bottom — leaving the BORROWED connection broken for whoever runs next.
+
+               Putting the repair after the early return would have missed exactly the case that matters.
+               "Nothing referenced, nothing owed" is derived from this database's own just-read rows and is
+               completely independent of whether it has runtime stats to WRITE, so a busy-but-stable database
+               routinely returns early here while still handing the driver a non-empty batch. writeBatch then
+               runs on the still-broken connection, outside any per-item try/catch, and propagates — aborting
+               the rest of the sweep. That is precisely the whole-cycle abort this borrowing must not buy.
+
+               Classifying on connection STATE rather than exception type is the discipline
+               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
+               and the connection know, the exception type does not. Free when nothing is wrong — the helper
+               returns immediately on an Open connection — and outside the probe measurement on purpose,
+               since a reopen is recovery rather than store work. */
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+
             var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
             {
@@ -2211,23 +2236,6 @@ public sealed class DarlingCollectorRunner
 
                probeWatch now times the probe round trip only. Started here, not at the declaration, so the
                quiet-cycle return above stays outside the measurement. */
-            /* Repair BEFORE use, not only after a fault, because the catch below filters out
-               OperationCanceledException — and that is the fault most likely to happen here. This method's
-               token is the per-item wall-clock budget, not host shutdown, and Npgsql throws OCE when a
-               caller-supplied token fires, so a database that simply ran slow mid-probe cancels, propagates
-               past that catch, and never reaches the restore at the bottom. The driver then moves to the
-               NEXT database on the same borrowed connection.
-
-               Classifying on connection STATE here rather than on exception type is the same discipline
-               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
-               and the connection know, the exception type does not. Free when nothing is wrong — the helper
-               returns immediately on an Open connection — and it means no database can be charged a
-               spurious probe failure and backoff for the previous one's timeout.
-
-               Outside the probe measurement on purpose: a reopen is recovery, not store work, and folding
-               it into probe: would re-blur exactly the phase #2819 just sharpened. */
-            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
-
             probeWatch.Restart();
 
             var missing = new SortedSet<long>();
