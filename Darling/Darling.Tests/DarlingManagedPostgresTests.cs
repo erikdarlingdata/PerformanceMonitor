@@ -428,6 +428,48 @@ public sealed class DarlingManagedPostgresTests
     /* ===================== #2845 v8 hardware re-derivation ===================== */
 
     /// <summary>
+    /// A NON-AUTHORITATIVE RAM reading must append nothing, whatever the conf says (#2845 review).
+    ///
+    /// <para>The subtlety this pins: <c>GetTotalPhysicalMemoryBytes</c> falls back to
+    /// <c>GC.GetGCMemoryInfo().TotalAvailableMemoryBytes</c> before it reaches the fixed 4 GB sentinel, and
+    /// that middle tier is a LIVE value — it varies between calls and sits below true physical RAM. So
+    /// normalising only the "&lt;= 0" case does not make the fingerprint stable: an intermittently failing
+    /// Win32 call would mint a NOVEL fingerprint on each blip, append a block every time (this check runs
+    /// on every start, unlike the marker-gated v1-v7), and derive the planner's cache estimate from the low
+    /// guess with immediate effect. Guarding on the VALUE cannot fix that; guarding on whether the reading
+    /// is trustworthy at all can. Absence of a reading is not evidence the hardware is unchanged, so the
+    /// answer is to do nothing and leave the last known-good block in force.</para>
+    /// </summary>
+    [Fact]
+    public void ShouldAppendHardwareSizing_NonAuthoritativeRamReading_AppendsNothing()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        const int hypertables = 40;
+
+        var conf = DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, hypertables);
+
+        /* A genuine 16 -> 32 GB resize DOES append, but only with an authoritative reading behind it. */
+        Assert.True(DarlingManagedPostgres.ShouldAppendHardwareSizing(
+            conf, ramReadingIsAuthoritative: true,
+            DarlingManagedPostgres.BuildHardwareFingerprint(thirtyTwoGb, hypertables)));
+
+        /* The same apparent change, from a reading we could not trust, must do nothing at all. */
+        Assert.False(DarlingManagedPostgres.ShouldAppendHardwareSizing(
+            conf, ramReadingIsAuthoritative: false,
+            DarlingManagedPostgres.BuildHardwareFingerprint(thirtyTwoGb, hypertables)));
+
+        /* And it stays inert for ANY value the GC fallback might invent, which is the append-loop case. */
+        foreach (var guessGb in new long[] { 3, 7, 12, 29 })
+        {
+            Assert.False(DarlingManagedPostgres.ShouldAppendHardwareSizing(
+                conf, ramReadingIsAuthoritative: false,
+                DarlingManagedPostgres.BuildHardwareFingerprint(guessGb * 1024 * 1024 * 1024, hypertables)));
+        }
+    }
+
+
+    /// <summary>
     /// THE PROPERTY THIS ISSUE IS ABOUT: a RAM change makes the conf stale, and staleness is what triggers
     /// re-derivation. Asserted on the decision function rather than on a code shape, so a refactor that
     /// keeps the behaviour keeps the pin green and one that loses it goes red.

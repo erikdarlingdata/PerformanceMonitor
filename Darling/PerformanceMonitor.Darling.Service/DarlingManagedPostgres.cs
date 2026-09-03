@@ -644,6 +644,21 @@ public sealed class DarlingManagedPostgres
     /// 32 GB. Comparing only the last fingerprint makes the check ask the question that matches the file's
     /// own semantics, and is what lets this converge instead of latching.</para>
     /// </summary>
+    /// <summary>
+    /// Whether the v8 block should be appended on this start (#2845) — the whole decision as one pure
+    /// function so the property can be pinned without a data directory.
+    ///
+    /// <para>Two conditions, and the FIRST is the one that is easy to get wrong: the RAM reading must be
+    /// authoritative. A non-authoritative reading is not evidence that the hardware is unchanged, it is the
+    /// absence of evidence either way — and re-deriving production sizing from a number we could not read is
+    /// worse than leaving the last good block in force. It also stops a flapping Win32 call from minting a
+    /// novel fingerprint on every blip and appending a block each time, which a value-only guard cannot do
+    /// because the fallback it would guard against is a live, varying quantity rather than a fixed
+    /// sentinel.</para>
+    /// </summary>
+    public static bool ShouldAppendHardwareSizing(string conf, bool ramReadingIsAuthoritative, string expectedFingerprint)
+        => ramReadingIsAuthoritative && !ConfHasCurrentHardwareFingerprint(conf, expectedFingerprint);
+
     public static bool ConfHasCurrentHardwareFingerprint(string conf, string expectedFingerprint)
     {
         var lastIndex = conf.LastIndexOf(ConfHardwareFingerprintPrefix, StringComparison.Ordinal);
@@ -1251,9 +1266,19 @@ public sealed class DarlingManagedPostgres
            without recording one on the first start there would be nothing for the second start to compare
            against. It converges immediately: the next start finds its own fingerprint and appends nothing. */
         var hypertableCount = TimescaleSupport.HypertableCount;
-        var v8RamBytes = GetTotalPhysicalMemoryBytes();
+        var v8Authoritative = TryGetAuthoritativePhysicalMemoryBytes(out var v8RamBytes);
         var v8Fingerprint = BuildHardwareFingerprint(v8RamBytes, hypertableCount);
-        if (!ConfHasCurrentHardwareFingerprint(conf, v8Fingerprint))
+        if (!v8Authoritative)
+        {
+            /* No authoritative RAM reading, so we cannot tell whether the hardware changed. Leave whatever
+               block is currently in force alone rather than re-deriving from the best-effort guess: the
+               guess is a live GC figure well under true RAM, and unlike the marker-gated blocks this check
+               runs on EVERY start, so acting on it would both append a block per blip and shrink the
+               planner's cache estimate on a box that is fine. */
+            _logger.LogWarning(
+                "Skipped the v8 hardware-sizing check: total physical memory could not be read authoritatively, so a hardware change cannot be distinguished from a failed reading. The existing sizing block stays in force.");
+        }
+        else if (ShouldAppendHardwareSizing(conf, v8Authoritative, v8Fingerprint))
         {
             File.AppendAllText(confPath, BuildHardwareSizingConfAppend(v8RamBytes, hypertableCount));
             var v8Settings = DeriveMemorySettings(v8RamBytes);
@@ -1272,13 +1297,38 @@ public sealed class DarlingManagedPostgres
     /// zero/garbage reading. Windows-only, like the rest of this managed-mode class.
     /// </summary>
     private long GetTotalPhysicalMemoryBytes()
+        => TryGetAuthoritativePhysicalMemoryBytes(out var authoritative)
+            ? authoritative
+            : GC.GetGCMemoryInfo().TotalAvailableMemoryBytes is var gcTotal && gcTotal > 0
+                ? gcTotal
+                : MemoryFallbackRamBytes;
+
+    /// <summary>
+    /// The AUTHORITATIVE physical-RAM read: true only when <c>GlobalMemoryStatusEx</c> actually reported
+    /// the machine's installed memory. Split out from <see cref="GetTotalPhysicalMemoryBytes"/> for #2845,
+    /// because the v8 hardware block needs to distinguish "the RAM is X" from "we could not read the RAM
+    /// and are guessing", and the guess is not a stable quantity.
+    ///
+    /// <para><b>Why the distinction is load-bearing.</b> The fallback tier below is
+    /// <c>GC.GetGCMemoryInfo().TotalAvailableMemoryBytes</c> — a LIVE snapshot of what the runtime believes
+    /// is available, not a hardware property. It varies between calls and sits well under true physical RAM.
+    /// v1-v7 are marker-gated, so a bad reading could only ever stick once and the best-effort guess was the
+    /// right trade for them. v8 re-evaluates on EVERY start for the life of the cluster, which turns the
+    /// same rare Win32 failure into unbounded chances to (a) mint a novel fingerprint and append a block on
+    /// each blip, and (b) derive effective_cache_size/maintenance_work_mem from the low guess and have them
+    /// take effect on that very start. So v8 asks for the authoritative reading and does NOTHING without
+    /// one: if we cannot read the RAM we cannot know whether it changed, and leaving the last known-good
+    /// block in force is strictly safer than re-deriving from a number we do not trust.</para>
+    /// </summary>
+    private bool TryGetAuthoritativePhysicalMemoryBytes(out long totalPhysicalMemoryBytes)
     {
         try
         {
             var status = new MemoryStatusEx();
             if (GlobalMemoryStatusEx(status) && status.ullTotalPhys > 0)
             {
-                return (long)status.ullTotalPhys;
+                totalPhysicalMemoryBytes = (long)status.ullTotalPhys;
+                return true;
             }
 
             _logger.LogWarning(
@@ -1290,8 +1340,8 @@ public sealed class DarlingManagedPostgres
             _logger.LogWarning("Could not query total physical memory ({Message}); sizing Postgres memory from a fallback.", ex.Message);
         }
 
-        var gcTotal = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-        return gcTotal > 0 ? gcTotal : MemoryFallbackRamBytes;
+        totalPhysicalMemoryBytes = 0;
+        return false;
     }
 
 #pragma warning disable CS0649 // fields are populated by the native GlobalMemoryStatusEx call, not in managed code
