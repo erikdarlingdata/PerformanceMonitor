@@ -237,6 +237,19 @@ public sealed class CollectorContext
     public long PerItemOpenMs { get; set; }
 
     /// <summary>
+    /// True once the host has measured this item's phases (#2854) — the enumerated twin of the
+    /// server-scoped <c>ServerPhasesMeasured</c> flag, and set from the same <c>finally</c> that stamps
+    /// <see cref="PerItemOpenMs"/> so a faulting open still declares itself measured.
+    ///
+    /// <para>Exists because the log site previously gated on <c>PerItemOpenMs &gt; 0</c>, which conflates
+    /// two opposite states: an open that was genuinely instant, and one that never ran. Both read as zero,
+    /// so the split line — the only per-database attribution there is — was suppressed in exactly the case
+    /// worth reading. A host that measures nothing leaves this false and prints nothing, which is the
+    /// honest answer; a host that measures an instant open prints <c>open:0ms</c>, which is a measurement.</para>
+    /// </summary>
+    public bool PerItemPhasesMeasured { get; set; }
+
+    /// <summary>
     /// Milliseconds the SERVER-SCOPED read's <c>ExecuteReaderAsync</c> took (#2851) — the twin of
     /// <see cref="PerItemOpenMs"/> for the path that collects a whole server in one query rather than
     /// enumerating databases. Separate from <see cref="PerItemOpenMs"/> rather than reusing it because the
