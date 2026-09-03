@@ -188,13 +188,19 @@ export function axisTime(date, withDate) {
 /* ─────────────────────────── value formatters ─────────────────────────── */
 
 export function fmtInt(v) {
-  return v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (v == null) return "—";
+  const n = Number(v);
+  return isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "—";
 }
 export function fmtNum(v, d = 1) {
-  return v == null ? "—" : Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+  if (v == null) return "—";
+  const n = Number(v);
+  return isFinite(n) ? n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
 }
 export function fmtPct(v) {
-  return v == null ? "—" : Math.round(Number(v)) + "%";
+  if (v == null) return "—";
+  const n = Number(v);
+  return isFinite(n) ? Math.round(n) + "%" : "—";
 }
 export function fmtMs(v) {
   if (v == null) return "—";
@@ -209,6 +215,7 @@ export function fmtMs(v) {
 export function fmtMb(v) {
   if (v == null) return "—";
   const n = Number(v);
+  if (!isFinite(n)) return "—";
   return n >= 1024 ? fmtNum(n / 1024, 1) + " GB" : fmtInt(n) + " MB";
 }
 export function fmtText(v) {
