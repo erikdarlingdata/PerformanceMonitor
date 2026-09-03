@@ -24,6 +24,9 @@ namespace PerformanceMonitorDashboard
         private TabControl? _mainPlanTabControl;
         private Grid? _planViewerContainer;
 
+        /* Re-entrancy latch for the "+"-sentinel auto-add (see HandleAddTabSelected / #2825). */
+        private bool _addTabInsertDeferred;
+
         private void OpenPlanViewer_Click(object sender, RoutedEventArgs e)
         {
             if (_planViewerTab != null && ServerTabControl.Items.Contains(_planViewerTab))
@@ -69,11 +72,8 @@ namespace PerformanceMonitorDashboard
 
             _mainPlanTabControl.SelectionChanged += (_, _) =>
             {
-                if (_mainPlanTabControl.SelectedItem is TabItem { Tag: string t } && t == PlanAddTabId)
-                {
-                    var newSub = AddNewEmptyPlanSubTab();
-                    _mainPlanTabControl.SelectedItem = newSub;
-                }
+                if (_mainPlanTabControl?.SelectedItem is TabItem { Tag: string t } && t == PlanAddTabId)
+                    HandleAddTabSelected();
             };
 
             var container = new Grid();
@@ -113,6 +113,44 @@ namespace PerformanceMonitorDashboard
             // Open the first empty sub-tab immediately
             AddNewEmptyPlanSubTab();
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => _planViewerContainer?.Focus()));
+        }
+
+        /// <summary>
+        /// The "+" sentinel became the selected tab -- add a fresh empty sub-tab and select it. Mirrors the shared
+        /// <c>StandalonePlanViewerController</c>'s #2825 re-entrancy fix: when the Plan Viewer tab is realized for the
+        /// first time, WPF re-asserts this selection for the auto-selected "+" tab from INSIDE the inner TabControl's
+        /// container generator, and <see cref="AddNewEmptyPlanSubTab"/>'s <c>ItemCollection.Insert</c> mid-generation
+        /// throws "Cannot call StartAt when content generation is in progress", which is unhandled and crashes the app.
+        /// Only the "+" tab present means we are in that first-time realization, so defer the insert off the generation
+        /// pass; the opener (<see cref="OpenPlanViewerTab"/>) adds a real sub-tab synchronously right after, so the
+        /// deferred pass finds "+" deselected and no-ops -- no duplicate tab. A real user click (steady state, more than
+        /// one item) stays synchronous exactly as before.
+        /// </summary>
+        private void HandleAddTabSelected()
+        {
+            if (_mainPlanTabControl == null) return;
+
+            // Steady state: real sub-tab(s) already present => a genuine user click on "+". Safe to mutate now.
+            if (_mainPlanTabControl.Items.Count > 1)
+            {
+                var newSub = AddNewEmptyPlanSubTab();
+                _mainPlanTabControl.SelectedItem = newSub;
+                return;
+            }
+
+            // Only the "+" sentinel exists => first-time realization, possibly mid-generation. Defer once.
+            if (_addTabInsertDeferred) return;
+            _addTabInsertDeferred = true;
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+            {
+                _addTabInsertDeferred = false;
+                if (_mainPlanTabControl != null &&
+                    _mainPlanTabControl.SelectedItem is TabItem { Tag: string t } && t == PlanAddTabId)
+                {
+                    var newSub = AddNewEmptyPlanSubTab();
+                    _mainPlanTabControl.SelectedItem = newSub;
+                }
+            }));
         }
 
         /// <summary>
