@@ -31,46 +31,43 @@ public partial class DuckDbFactCollector : IFactCollector
     /// are no longer empty either — the two collectors are a method-for-method port and a blind spot
     /// fixed on one side only would silently re-open on the other.
     ///
-    /// <para>Two arms here where Darling has three, and both differences are DuckDB facts rather than
-    /// oversights:</para>
+    /// <para><b>One arm here where Darling has three, and the asymmetry is the interesting part.</b>
+    /// Darling separates a command timeout (WARNING) from an undefined table (DEBUG) from everything
+    /// else (ERROR). Neither of the first two has a reachable counterpart in Lite:</para>
     /// <list type="bullet">
-    /// <item><description>Darling's 42P01 arm has no counterpart. DuckDB surfaces a missing relation
-    /// as a <c>DuckDBException</c> distinguishable only by MESSAGE TEXT, and this project detects
-    /// exception meaning structurally, never by message (the
-    /// <c>PgBaselineProvider.IsCommandTimeout</c> discipline). It would also be the wrong call: Lite
-    /// creates every one of these tables at startup from
-    /// <c>Schema.GetAllTableStatements()</c>, so a missing table here is a defect and not the
-    /// expected condition the old comment claimed — which is precisely the assumption that let a real
-    /// fault read as "no data" for as long as it did.</description></item>
-    /// <item><description>The non-timeout arm logs at ERROR rather than Darling's DEBUG-for-42P01,
-    /// for the same reason, and because <see cref="AppLogger.Debug"/> is compiled out of Release
-    /// builds — a level nobody can turn on is indistinguishable from the empty catch this replaces.</description></item>
+    /// <item><description><b>No timeout arm, because Lite has no timeout that can arrive here.</b>
+    /// Darling's is a real 30 s Npgsql command deadline that fires INDEPENDENTLY of the pass token,
+    /// which is what lets it survive the <c>when</c> filter. Lite's only deadline is the pass budget
+    /// itself: all thirty-one reads take <c>AcquireReadLock(context.CancellationToken)</c>, which
+    /// throws <see cref="OperationCanceledException"/> from
+    /// <c>ThrowIfCancellationRequested()</c> — never a <see cref="TimeoutException"/>, which exists
+    /// only on <c>AcquireWriteLock</c> and is never called from analysis. And that exception on that
+    /// token is precisely <c>AnalysisAbandon.IsExpected</c>, so the filter excludes it and it unwinds
+    /// to <c>AnalysisService</c>'s own abandon handling rather than reaching this method. An arm for
+    /// it would be dead code carrying a false explanation, which is the defect this issue is about
+    /// pointing the other way.</description></item>
+    /// <item><description><b>No 42P01 counterpart.</b> DuckDB surfaces a missing relation
+    /// distinguishably only by MESSAGE TEXT, and this project detects exception meaning structurally,
+    /// never by message (the <c>PgBaselineProvider.IsCommandTimeout</c> discipline). It would also be
+    /// the wrong call: Lite creates every one of these tables at startup from
+    /// <c>Schema.GetAllTableStatements()</c>, so a missing table here is a defect and not the expected
+    /// condition the old comment claimed — which is exactly the assumption that let a real fault read
+    /// as "no data" for as long as it did.</description></item>
     /// </list>
     ///
-    /// <para>The timeout arm is a <see cref="TimeoutException"/> only: Lite's deadline is
-    /// <c>DuckDbInitializer</c>'s READ-LOCK acquisition, not a server-side statement timeout, since
-    /// the store is an embedded file in this process rather than a separate postmaster. It still
-    /// means this collector produced nothing because it could not get in, which is the distinction
-    /// worth drawing.</para>
+    /// <para>So everything that actually reaches here is a fault, and ERROR is the honest level.
+    /// <see cref="AppLogger.Debug"/> would have been the wrong home for a quieter arm regardless: it
+    /// is compiled out of Release builds, and a level nobody can turn on is indistinguishable from
+    /// the empty catch this replaces.</para>
     /// </summary>
     private static void ReportCollectionFailure(
         Exception ex,
         AnalysisContext context,
         [CallerMemberName] string collectMethod = "")
     {
-        if (ex is TimeoutException || ex.InnerException is TimeoutException)
-        {
-            AppLogger.Warn("DuckDbFactCollector",
-                $"{collectMethod} timed out acquiring the store read lock for {context.ServerName} " +
-                $"(server {context.ServerId}) — that analysis input is MISSING for this pass, which is " +
-                $"not the same as the server having none: {ex.Message}");
-        }
-        else
-        {
-            AppLogger.Error("DuckDbFactCollector",
-                $"{collectMethod} failed for {context.ServerName} (server {context.ServerId}) and " +
-                $"contributes no facts this pass: {ex.Message}");
-        }
+        AppLogger.Error("DuckDbFactCollector",
+            $"{collectMethod} failed for {context.ServerName} (server {context.ServerId}) and " +
+            $"contributes no facts this pass: {ex.Message}");
     }
 
     public async Task<List<Fact>> CollectFactsAsync(AnalysisContext context)
