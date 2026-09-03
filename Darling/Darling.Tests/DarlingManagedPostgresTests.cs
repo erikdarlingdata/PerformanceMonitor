@@ -428,6 +428,50 @@ public sealed class DarlingManagedPostgresTests
     /* ===================== #2845 v8 hardware re-derivation ===================== */
 
     /// <summary>
+    /// Reporting jitter is not a hardware change (#2845 review). The fingerprint is an exact comparison and
+    /// v8 runs on EVERY start, so without quantization a host whose reported total wobbles by a few MB
+    /// between reboots would append a fresh seven-line block on every restart, forever — defeating the
+    /// "converges immediately" invariant the design rests on. <c>ullTotalPhys</c> is not guaranteed
+    /// bit-identical across reboots (balloon / Dynamic-Memory guests especially), and the fleet's own
+    /// readings are already non-round: 31.5 GB on a nominally 32 GB host.
+    ///
+    /// <para>A GB of granularity sits far above any plausible jitter and far below the smallest real resize
+    /// this class sees (4 -> 8 GB), so it cannot mask a genuine change — the last case asserts exactly
+    /// that.</para>
+    /// </summary>
+    [Fact]
+    public void HardwareFingerprint_RamJitterWithinAGb_IsNotAHardwareChange()
+    {
+        const long oneGb = 1024L * 1024 * 1024;
+        const int hypertables = 40;
+
+        /* A nominally 32 GB host, as three plausible readings of the same machine. */
+        var nominal = 32 * oneGb;
+        var short31Point5 = 31L * oneGb + 512L * 1024 * 1024;  /* what the fleet actually reports */
+        var wobble = 32 * oneGb - 7L * 1024 * 1024;            /* a few MB less on the next boot */
+
+        var conf = DarlingManagedPostgres.BuildHardwareSizingConfAppend(short31Point5, hypertables);
+
+        foreach (var reading in new[] { nominal, short31Point5, wobble })
+        {
+            Assert.True(
+                DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+                    conf, DarlingManagedPostgres.BuildHardwareFingerprint(reading, hypertables)),
+                $"reading {reading} should be the same machine, not a hardware change");
+        }
+
+        /* And the block is exactly reproducible from its own fingerprint - same quantized value both. */
+        Assert.Equal(
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(nominal, hypertables),
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(short31Point5, hypertables));
+
+        /* A REAL resize still reads as one - quantization cannot mask a genuine change. */
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(64 * oneGb, hypertables)));
+    }
+
+
+    /// <summary>
     /// A NON-AUTHORITATIVE RAM reading must append nothing, whatever the conf says (#2845 review).
     ///
     /// <para>The subtlety this pins: <c>GetTotalPhysicalMemoryBytes</c> falls back to

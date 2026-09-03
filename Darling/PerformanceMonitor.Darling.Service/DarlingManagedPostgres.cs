@@ -629,11 +629,33 @@ public sealed class DarlingManagedPostgres
     /// see. Stability comes from <see cref="ShouldAppendHardwareSizing"/> refusing to act at all without an
     /// authoritative reading.</para>
     /// </summary>
-    public static string BuildHardwareFingerprint(long totalPhysicalMemoryBytes, int hypertableCount)
+    internal static string BuildHardwareFingerprint(long totalPhysicalMemoryBytes, int hypertableCount)
+        => FormattableString.Invariant(
+            $"{ConfHardwareFingerprintPrefix}ram_mb={QuantizeRam(totalPhysicalMemoryBytes) / (1024L * 1024L)} hypertables={hypertableCount}");
+
+    /// <summary>
+    /// Rounds a raw RAM reading to the nearest GB for the v8 path (#2845 review), and is applied to BOTH
+    /// the fingerprint and the derivation so a block is exactly reproducible from the fingerprint above it.
+    ///
+    /// <para><b>Why quantize.</b> The fingerprint is an exact comparison and v8 runs on EVERY start, so any
+    /// jitter in the reported total reads as a hardware change: a fresh block appended per restart, seven
+    /// lines of postgresql.conf growth each time, forever. <c>ullTotalPhys</c> is not guaranteed
+    /// bit-identical across reboots — a balloon/Dynamic-Memory guest can report a different current total
+    /// with no operator resize — and these ARE cloud VMs. The fleet's own readings already show the total is
+    /// not a round number (31.5 GB on a nominally 32 GB host, firmware reservation), which is the same class
+    /// of wobble one size larger. Rounding also recovers the NOMINAL size the sizing formulas conceptually
+    /// want, rather than the slightly-short figure the OS reports.</para>
+    ///
+    /// <para>A GB is the right granularity because it is far above any plausible reporting jitter and far
+    /// below any real resize — the smallest step this class can be resized by is 4 -> 8 GB. It applies to the
+    /// v8 path ONLY: v3/v5/v7 keep deriving from the raw reading exactly as before, so this cannot shift a
+    /// value on a store that never reaches v8.</para>
+    /// </summary>
+    internal static long QuantizeRam(long totalPhysicalMemoryBytes)
     {
+        const long oneGb = 1024L * 1024L * 1024L;
         var ram = totalPhysicalMemoryBytes > 0 ? totalPhysicalMemoryBytes : MemoryFallbackRamBytes;
-        return FormattableString.Invariant(
-            $"{ConfHardwareFingerprintPrefix}ram_mb={ram / (1024L * 1024L)} hypertables={hypertableCount}");
+        return (ram + oneGb / 2) / oneGb * oneGb;
     }
 
     /// <summary>
@@ -647,7 +669,7 @@ public sealed class DarlingManagedPostgres
     /// 32 GB. Comparing only the last fingerprint makes the check ask the question that matches the file's
     /// own semantics, and is what lets this converge instead of latching.</para>
     /// </summary>
-    public static bool ConfHasCurrentHardwareFingerprint(string conf, string expectedFingerprint)
+    internal static bool ConfHasCurrentHardwareFingerprint(string conf, string expectedFingerprint)
     {
         var lastIndex = conf.LastIndexOf(ConfHardwareFingerprintPrefix, StringComparison.Ordinal);
         if (lastIndex < 0)
@@ -672,7 +694,7 @@ public sealed class DarlingManagedPostgres
     /// because the fallback it would guard against is a live, varying quantity rather than a fixed
     /// sentinel.</para>
     /// </summary>
-    public static bool ShouldAppendHardwareSizing(string conf, bool ramReadingIsAuthoritative, string expectedFingerprint)
+    internal static bool ShouldAppendHardwareSizing(string conf, bool ramReadingIsAuthoritative, string expectedFingerprint)
         => ramReadingIsAuthoritative && !ConfHasCurrentHardwareFingerprint(conf, expectedFingerprint);
 
     /// <summary>
@@ -722,9 +744,10 @@ public sealed class DarlingManagedPostgres
     /// <c>pg_ctl start</c> on a service-owned start, so in practice the whole block takes effect on that
     /// very start — the same story as v3 and v7.</para>
     /// </summary>
-    public static string BuildHardwareSizingConfAppend(long totalPhysicalMemoryBytes, int hypertableCount)
+    internal static string BuildHardwareSizingConfAppend(long totalPhysicalMemoryBytes, int hypertableCount)
     {
-        var settings = DeriveMemorySettings(totalPhysicalMemoryBytes);
+        /* The SAME quantized value the fingerprint records, so the block is exactly reproducible from it. */
+        var settings = DeriveMemorySettings(QuantizeRam(totalPhysicalMemoryBytes));
         var workers = DeriveWorkerSettings(hypertableCount);
         var builder = new StringBuilder();
         builder.Append('\n');
