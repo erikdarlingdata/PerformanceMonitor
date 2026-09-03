@@ -329,6 +329,14 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // fanout_item_count
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value });    // slowest_item
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // slowest_item_ms
+
+            /* And the V108 phase split, NULL for the same reason and by the same shared-statement rule: the
+               retention sweep runs against the STORE, so it has no monitored-server open or drain to report
+               and no watermark read. NULL says "no such phase here"; three zeros would claim a measured
+               instant open on a sweep that never opened a target at all. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sql_open_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sql_drain_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // watermark_ms
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

@@ -175,6 +175,57 @@ public class CollectionLogPhaseSplitStoreTests
     }
 
     /// <summary>
+    /// EVERY writer of the shared collection_log INSERT binds exactly as many parameters as the statement
+    /// declares. Added because this rung broke the OTHER one: <c>InsertCollectionLogSql</c> is deliberately
+    /// shared between the per-collector writer and the fleet-wide retention run-record, so widening the
+    /// column list without widening both binding blocks produced
+    /// <c>08P01: bind message supplies 14 parameters, but prepared statement "" requires 17</c>.
+    ///
+    /// <para>It failed SILENTLY, which is the reason this is a pin rather than a fixed typo: both writers
+    /// are failure-isolated by design - an observability write must never break the collection loop - so the
+    /// exception went to a Debug log and the run-record simply never appeared. It surfaced only because a
+    /// live-Postgres test happened to assert on that record's existence. A third writer added later would
+    /// fail exactly as quietly, so the invariant is asserted over the whole file rather than the two sites
+    /// that exist today (the [[documented-is-not-enforced]] shape: the comment beside the fanout block
+    /// already warned that the statement is shared, and a comment cannot enforce anything).</para>
+    /// </summary>
+    [Fact]
+    public void EveryWriterOfTheSharedInsert_BindsExactlyAsManyParametersAsTheStatementDeclares()
+    {
+        var source = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingObservability.cs");
+
+        var placeholders = System.Text.RegularExpressions.Regex
+            .Matches(source[source.IndexOf("INSERT INTO collection_log", StringComparison.Ordinal)..].Split(';')[0], @"\$\d+")
+            .Select(m => m.Value).Distinct().Count();
+
+        Assert.Equal(17, placeholders);
+
+        var writerStarts = System.Text.RegularExpressions.Regex
+            .Matches(source, @"new NpgsqlCommand\(InsertCollectionLogSql")
+            .Select(m => m.Index)
+            .ToList();
+
+        /* Two today. If this count changes, the new writer needs the same audit - which is the point. */
+        Assert.Equal(2, writerStarts.Count);
+
+        foreach (var start in writerStarts)
+        {
+            var end = source.IndexOf("ExecuteNonQueryAsync", start, StringComparison.Ordinal);
+            Assert.True(end > start, "Could not find the execute call closing a collection_log writer.");
+
+            var bindings = System.Text.RegularExpressions.Regex
+                .Matches(source[start..end], @"command\.Parameters\.Add")
+                .Count;
+
+            Assert.True(bindings == placeholders,
+                $"A writer of the shared collection_log INSERT binds {bindings} parameters but the statement "
+                + $"declares {placeholders}. Npgsql raises 08P01 at RUNTIME for this, and both writers swallow "
+                + "their exceptions by design, so the row silently never lands. Widen every binding block when "
+                + "you widen the column list.");
+        }
+    }
+
+    /// <summary>
     /// The connect-time gate. A COLUMN sentinel rather than a table one, because collection_log has existed
     /// since V1 and only its columns are new. Being the TOP rung, a fully-migrated store must map to exactly
     /// this version or the viewer refuses a store that is perfectly current.
