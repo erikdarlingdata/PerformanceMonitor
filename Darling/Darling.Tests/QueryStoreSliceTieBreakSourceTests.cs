@@ -52,7 +52,11 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ItemTimeline.cs"), 1),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs"), 1),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeCompiler.cs"), 1),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.QueryPerf.cs"), 1),
+        /* 7, not 1, since #2827: the plan-regression dedup is one logical site but expresses its ordering
+           once per projected column, as GROUP BY + ordered array_agg rather than a single window. Each of
+           those orderings is independently breakable — that is the whole reason the count is declared here
+           rather than globbed — so all seven are held to the tie-break, not just the first. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.QueryPerf.cs"), 7),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgDrillDownCollector.Queries.cs"), 1),
     ];
 
@@ -61,9 +65,19 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     {
         /* The ORDER BY of a window whose PARTITION BY carries the interval identity. ComposeCompiler builds
            its SQL by C# concatenation with an interpolated time column, so the time term is matched as
-           either the literal or the placeholder. */
+           either the literal or the placeholder.
+
+           #2827 added a SECOND shape. A dedup does not have to be a window function: PgFactCollector's
+           plan-regression query now expresses the same "keep the latest row per interval" as GROUP BY plus
+           ordered array_agg, because the window form forced one global sort of the server's whole Query
+           Store slice (23.4s to 9.6s in isolation on the busiest use1 server, byte-identical results). The
+           TIE-BREAK CONTRACT this guard exists to protect is unchanged and just as breakable in the new
+           form — more so, since each aggregate sorts independently and a single drifted ORDER BY would
+           blend two collections into one row. So the pattern matches the ordering wherever it appears
+           rather than only inside a PARTITION BY, and the site count below still holds each file to a
+           declared number so a dedup cannot be deleted or moved without saying so. */
         var dedupOrderBy = new Regex(
-            @"PARTITION BY[^()]*?runtime_stats_interval_id[^()]*?ORDER BY\s+(?<time>collection_time|\{timeColumn\})\s+DESC(?<tie>,\s*execution_count DESC)?",
+            @"(?:PARTITION BY[^()]*?runtime_stats_interval_id[^()]*?|array_agg\([^()]*?)ORDER BY\s+(?<time>collection_time|\{timeColumn\})\s+DESC(?<tie>,\s*execution_count DESC)?",
             RegexOptions.Singleline);
 
         var untied = new List<string>();
