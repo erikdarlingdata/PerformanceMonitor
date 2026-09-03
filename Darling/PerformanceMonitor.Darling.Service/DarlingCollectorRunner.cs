@@ -1750,6 +1750,59 @@ public sealed class DarlingCollectorRunner
     /// uncut, because inside a cut pass "absent from the result" and "excluded by the budget predicate" are
     /// indistinguishable from the client.</para>
     /// </summary>
+    /// <summary>
+    /// Puts the BORROWED store connection back into a usable state after a fetch faulted on it (#2819).
+    ///
+    /// <para><b>Why this is required rather than tidy.</b> The fetches swallow their own exceptions and
+    /// return normally, so <c>readItem</c> still hands the driver a non-null batch built from the target rows
+    /// it already read. <c>EnumeratedCollectorDriver.RunAsync</c> then calls <c>writeBatch</c> OUTSIDE its
+    /// per-item try/catch, and that path is documented to propagate — "a flush failure PROPAGATES, storage
+    /// failure is systemic". So a fetch that broke the connection would not cost one database its plan XML;
+    /// it would fail the runtime-stats write for that item and abort the REST OF THE SWEEP, every remaining
+    /// database for that collector this cycle. While the fetches held private connections that was
+    /// structurally impossible, and borrowing must not buy pool headroom at the price of a whole-cycle
+    /// abort.</para>
+    ///
+    /// <para>A transient fault — a cancelled command, a dropped socket — leaves the pooled connection
+    /// unusable but the store perfectly reachable, and that is the case this recovers: reopen, and the
+    /// caller's write proceeds as if the fetch had its own connection. If the reopen ALSO fails the store is
+    /// genuinely unreachable, which is exactly the systemic condition the driver's propagate-on-flush
+    /// behaviour exists for, so the failure is left to travel — swallowed here, surfaced there, unchanged
+    /// from before this borrowing.</para>
+    /// </summary>
+    private async Task RestoreBorrowedStoreConnectionAsync(
+        NpgsqlConnection storeConnection,
+        ServerRuntime server,
+        string databaseName,
+        CancellationToken cancellationToken)
+    {
+        if (storeConnection.State == ConnectionState.Open)
+        {
+            return;
+        }
+
+        try
+        {
+            /* Close first: Npgsql will not reopen a Broken connection in place, and Close on an already
+               closed one is a no-op rather than a fault. */
+            await storeConnection.CloseAsync();
+            await storeConnection.OpenAsync(cancellationToken);
+
+            _logger?.LogWarning(
+                "Reopened the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the fetch borrows the collector body's connection, and leaving it broken would fail this item's runtime-stats write and abort the rest of the sweep.",
+                server.Config.DisplayName, databaseName);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The store itself is unreachable. Deliberately swallowed: the write that follows will fail on
+               the same connection and PROPAGATE, which is the correct handling of a systemic store failure
+               and the behaviour that predates this borrowing. Logged so the cause is visible there. */
+            _logger?.LogWarning(ex,
+                "Could not reopen the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the store looks unreachable, so this cycle's remaining writes will fail systemically.",
+                server.Config.DisplayName, databaseName);
+        }
+    }
+
     private async Task FetchAndStorePlansAsync(
         SqlConnection sqlConnection,
         NpgsqlConnection storeConnection,
@@ -2044,6 +2097,8 @@ public sealed class DarlingCollectorRunner
                 context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
             }
 
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
+
             /* #2776: advance the backoff so the next pass attempts a narrower width. Read-modify-write
                through the dictionary rather than the local `estimate`, because Learn may already have
                written a newer record for this key and clobbering it would discard this pass's size
@@ -2292,6 +2347,8 @@ public sealed class DarlingCollectorRunner
             {
                 context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
             }
+
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName, cancellationToken);
 
             /* #2776: advance the backoff so the next pass attempts a narrower width. Saturates at the same
                halving count the plan side uses, so the counter stays meaningful rather than unbounded. */

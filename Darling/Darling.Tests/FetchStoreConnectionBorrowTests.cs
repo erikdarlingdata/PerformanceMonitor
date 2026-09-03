@@ -179,6 +179,19 @@ public sealed class FetchStoreConnectionBorrowTests
                     continue;
                 }
 
+                /* Every offset is tested and NOTHING is skipped, deliberately. This scans bytes rather than
+                   decoding real IL instruction boundaries, so a 0x28/0x6F occurring as some unrelated
+                   instruction's operand can look like a call. Advancing past a match (i += 4) would let such
+                   a coincidence swallow the four bytes that follow it and shift the scan over a genuine
+                   `call OpenConnectionAsync` — a FALSE NEGATIVE, in a test that is the sole regression guard
+                   for this fix and whose whole assertion is "zero".
+
+                   Not skipping inverts that risk. The scan may over-count, never under-count: a spurious
+                   match can only ADD a call this test then fails on, so the failure mode is a loud red that
+                   a human investigates rather than a silent green. That is the right direction for a
+                   must-be-zero assertion, and it is the same discipline as #2816's positive controls — a
+                   witness must not be able to fail in the reassuring direction. The controls below are
+                   counted the same way and are unaffected, since over-counting only helps them clear zero. */
                 for (var i = 0; i + 4 < il.Length; i++)
                 {
                     /* call (0x28) and callvirt (0x6F), each followed by a 4-byte metadata token. */
@@ -192,8 +205,6 @@ public sealed class FetchStoreConnectionBorrowTests
                     {
                         counts[name]++;
                     }
-
-                    i += 4;
                 }
             }
         }
