@@ -1034,6 +1034,20 @@ public sealed class DarlingCollectorRunner
                         context.PerItemOpenMs = 0;
                         context.PerItemPlanFetchMs = 0;
                         context.PerItemTextFetchMs = 0;
+                        /* #2811: the sub-phases clear on the SAME rule as their parents, and for the same
+                           reason — an item whose fetch faults before setting them must not print the previous
+                           database's split as its own. A stale sub-split is worse than a stale total, because
+                           it looks precise. */
+                        context.PerItemPlanProbeMs = 0;
+                        context.PerItemPlanTargetMs = 0;
+                        context.PerItemPlanWriteMs = 0;
+                        context.PerItemPlanChunks = 0;
+                        context.PerItemPlanIdsAttempted = 0;
+                        context.PerItemTextProbeMs = 0;
+                        context.PerItemTextTargetMs = 0;
+                        context.PerItemTextWriteMs = 0;
+                        context.PerItemTextChunks = 0;
+                        context.PerItemTextIdsAttempted = 0;
                         var openWatch = Stopwatch.StartNew();
                         using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
                         context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
@@ -1124,6 +1138,27 @@ public sealed class DarlingCollectorRunner
                                         server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
                                         context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
                                         context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs);
+
+                                    /* #2811: the sub-split rides its OWN line rather than nesting inside the
+                                       one above, because that line is parsed by tooling outside this repo and
+                                       "don't break the parser" outranks "one line to grep". Emitted only when
+                                       the corresponding fetch actually ran, so a text-only pass prints one
+                                       line and a fetchless collector prints none. */
+                                    if (context.PerItemPlanFetchMs > 0)
+                                    {
+                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids)",
+                                            server.Config.DisplayName, definition.Name, item, context.PerItemPlanFetchMs,
+                                            context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
+                                            context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted);
+                                    }
+
+                                    if (context.PerItemTextFetchMs > 0)
+                                    {
+                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids)",
+                                            server.Config.DisplayName, definition.Name, item, context.PerItemTextFetchMs,
+                                            context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
+                                            context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted);
+                                    }
                                 }
                                 else
                                 {
@@ -1732,6 +1767,10 @@ public sealed class DarlingCollectorRunner
                 return;
             }
 
+            /* #2811: the probe phase is the store connection open PLUS the touch/probe round trip. Timed
+               together because they are one logical "ask the store what it already has" — splitting them
+               further would name a connection pool rather than a cost. */
+            var probeWatch = Stopwatch.StartNew();
             await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             var missing = new SortedSet<long>();
@@ -1760,6 +1799,11 @@ public sealed class DarlingCollectorRunner
                     }
                 }
             }
+
+            /* Stamped BEFORE the nothing-owed return below, so a pass that is pure store round trip still
+               reports where its milliseconds went. That pass is the interesting one: it issues no target
+               query at all, so anything it costs is unambiguously the store. */
+            context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
 
             if (missing.Count == 0)
             {
@@ -1810,6 +1854,12 @@ public sealed class DarlingCollectorRunner
             var shippedBytes = 0L;
             var brokeOnBudget = false;
 
+            /* #2811: the TARGET half, and only the target half — the statement plus its read loop, summed
+               across chunks. Query building and the budget check sit outside deliberately: they are our
+               arithmetic, and folding them in here would let this number quietly absorb the thing the
+               residual is meant to expose. */
+            var targetMs = 0L;
+
             foreach (var chunk in attempt.Chunk(PlanFetchIdsPerStatement))
             {
                 if (shippedBytes >= budget)
@@ -1821,21 +1871,36 @@ public sealed class DarlingCollectorRunner
                 var query = QueryStoreCollector.Instance.BuildPlanFetchByIdsQuery(
                     databaseName, context, chunk, budget - shippedBytes);
 
-                using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                attempted.AddRange(chunk);
-                while (await reader.ReadAsync(cancellationToken))
+                var chunkWatch = Stopwatch.StartNew();
+                try
                 {
-                    var planXml = reader.IsDBNull(2) ? null : reader.GetString(2);
-                    fetched.Add(new FetchedPlan(
-                        reader.GetInt64(0),
-                        planXml,
-                        reader.IsDBNull(1) ? null : reader.GetString(1)));
-                    if (planXml is not null)
+                    using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    attempted.AddRange(chunk);
+                    while (await reader.ReadAsync(cancellationToken))
                     {
-                        /* nvarchar length * 2 is DATALENGTH exactly — no server round-trip needed. */
-                        shippedBytes += (long)planXml.Length * 2;
+                        var planXml = reader.IsDBNull(2) ? null : reader.GetString(2);
+                        fetched.Add(new FetchedPlan(
+                            reader.GetInt64(0),
+                            planXml,
+                            reader.IsDBNull(1) ? null : reader.GetString(1)));
+                        if (planXml is not null)
+                        {
+                            /* nvarchar length * 2 is DATALENGTH exactly — no server round-trip needed. */
+                            shippedBytes += (long)planXml.Length * 2;
+                        }
                     }
+                }
+                finally
+                {
+                    /* finally, not after the block: a chunk that TIMES OUT is the case this instrumentation
+                       most needs to describe, and stamping only on success would report target:0ms for it —
+                       "the target was free" is the exact misreading this change exists to end. The ids and
+                       chunk count are stamped here too so the per-id cost stays computable on a failed pass. */
+                    targetMs += chunkWatch.ElapsedMilliseconds;
+                    context.PerItemPlanTargetMs = targetMs;
+                    context.PerItemPlanChunks++;
+                    context.PerItemPlanIdsAttempted += chunk.Length;
                 }
             }
 
@@ -1855,8 +1920,23 @@ public sealed class DarlingCollectorRunner
             var returned = new HashSet<long>(fetched.Count);
             if (fetched.Count > 0)
             {
-                var landed = await QueryStorePlanWriter.WriteAsync(
-                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                /* #2811: the store WRITE, on its own stopwatch. #2777 raised this command's timeout from
+                   Npgsql's unchosen 30s default to 500s because it was being cancelled mid-write; that fixed
+                   the failure but left the duration unmeasured, so "the write is slow" stayed an assertion. */
+                var writeWatch = Stopwatch.StartNew();
+                IReadOnlyList<long> landed;
+                try
+                {
+                    landed = await QueryStorePlanWriter.WriteAsync(
+                        pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                }
+                finally
+                {
+                    /* Same finally-not-after reasoning as the target chunks: a cancelled write is precisely
+                       the event #2777 chased, and it must not report write:0ms. */
+                    context.PerItemPlanWriteMs = writeWatch.ElapsedMilliseconds;
+                }
+
                 foreach (var id in landed)
                 {
                     missing.Remove(id);
@@ -1964,6 +2044,8 @@ public sealed class DarlingCollectorRunner
                 return;
             }
 
+            /* #2811: same probe split as the plan side. */
+            var probeWatch = Stopwatch.StartNew();
             await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             var missing = new SortedSet<long>();
@@ -1991,6 +2073,8 @@ public sealed class DarlingCollectorRunner
                     }
                 }
             }
+
+            context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
 
             if (missing.Count == 0)
             {
@@ -2035,6 +2119,9 @@ public sealed class DarlingCollectorRunner
             var shippedBytes = 0L;
             var brokeOnBudget = false;
 
+            /* #2811: target half only, same contract as the plan side. */
+            var targetMs = 0L;
+
             foreach (var chunk in attempt.Chunk(TextFetchIdsPerStatement))
             {
                 if (shippedBytes >= budget)
@@ -2046,28 +2133,48 @@ public sealed class DarlingCollectorRunner
                 var query = QueryStoreCollector.Instance.BuildTextFetchByIdsQuery(
                     databaseName, context, chunk, budget - shippedBytes);
 
-                using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                attempted.AddRange(chunk);
-                while (await reader.ReadAsync(cancellationToken))
+                var chunkWatch = Stopwatch.StartNew();
+                try
                 {
-                    var text = reader.IsDBNull(2) ? null : reader.GetString(2);
-                    fetched.Add(new FetchedQueryText(
-                        reader.GetInt64(0),
-                        text,
-                        reader.IsDBNull(1) ? null : reader.GetString(1)));
-                    if (text is not null)
+                    using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    attempted.AddRange(chunk);
+                    while (await reader.ReadAsync(cancellationToken))
                     {
-                        shippedBytes += (long)text.Length * 2;
+                        var text = reader.IsDBNull(2) ? null : reader.GetString(2);
+                        fetched.Add(new FetchedQueryText(
+                            reader.GetInt64(0),
+                            text,
+                            reader.IsDBNull(1) ? null : reader.GetString(1)));
+                        if (text is not null)
+                        {
+                            shippedBytes += (long)text.Length * 2;
+                        }
                     }
+                }
+                finally
+                {
+                    targetMs += chunkWatch.ElapsedMilliseconds;
+                    context.PerItemTextTargetMs = targetMs;
+                    context.PerItemTextChunks++;
+                    context.PerItemTextIdsAttempted += chunk.Length;
                 }
             }
 
             var returned = new HashSet<long>(fetched.Count);
             if (fetched.Count > 0)
             {
-                var landed = await QueryStoreTextWriter.WriteAsync(
-                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                var writeWatch = Stopwatch.StartNew();
+                IReadOnlyList<long> landed;
+                try
+                {
+                    landed = await QueryStoreTextWriter.WriteAsync(
+                        pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                }
+                finally
+                {
+                    context.PerItemTextWriteMs = writeWatch.ElapsedMilliseconds;
+                }
                 foreach (var id in landed)
                 {
                     missing.Remove(id);
