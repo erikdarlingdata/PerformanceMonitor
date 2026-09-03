@@ -130,6 +130,22 @@ public sealed class DarlingCollectorRunner
        the runner. Lite has no equivalent and keeps the collector's compile-time constant. */
     private readonly Func<int> _textBudgetMb;
 
+    /* Feeds the V108 procedure_stats plan-capture cadence — config_service.procedure_stats_plan_cycle_interval,
+       clamped [1,60] by the worker's provider. Provider-read for the same reason as the knobs above: a store
+       reload takes effect on the NEXT cycle without rebuilding the runner. 1 (and any value below it) means
+       capture on every cycle, which is exactly the pre-V108 behaviour. Lite has no equivalent and never sets
+       CapturePlanXml at all, so it is unaffected either way. */
+    private readonly Func<int> _procedureStatsPlanCycleInterval;
+
+    /// <summary>
+    /// Per-(server, collector) cycle counter for the V108 plan-capture cadence. In-memory, and lost on a
+    /// service restart — deliberately, and harmlessly: the fleet STAGGER comes from the server id (see
+    /// <see cref="ShouldCapturePlanThisCycle"/>), not from accumulated drift, so a fleet-wide restart cannot
+    /// bunch 42 servers onto the same capture cycle. The only cost of the reset is that each server's first
+    /// post-restart capture lands within one interval of the restart rather than continuing its old phase.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Collector), long> _planCadenceCycles = new();
+
     /* Azure SQL DB logins without master access fall back to single-database mode, throttled per
        server so master isn't retried every cycle (#857 — mirrors Lite).
 
@@ -228,6 +244,66 @@ public sealed class DarlingCollectorRunner
 
     public const int CommandTimeoutSeconds = 60;
 
+    /// <summary>The one collector the V108 cadence gate applies to. Named rather than inferred from
+    /// &quot;does it capture plans&quot;, because query_stats, query_store, deadlocks and
+    /// blocked_process_report all capture plans too and are deliberately NOT gated here: this rung is a
+    /// targeted response to a measured cost on one collector, not a fleet-wide policy change.</summary>
+    internal const string PlanCadenceGatedCollector = "procedure_stats";
+
+    /// <summary>
+    /// Whether a given cycle captures plan XML under the V108 cadence. Pure - no clock, no I/O, no state -
+    /// so the policy is unit-testable without a host, per the house rule for scheduling decisions.
+    ///
+    /// <para><paramref name="interval"/> at or below 1 captures on EVERY cycle, which is byte-identical to
+    /// the pre-V108 collector; that is what makes the knob safely reversible.</para>
+    ///
+    /// <para><b>The phase is derived from the server id, and that is the whole point.</b> A bare
+    /// <c>ordinal % interval</c> would put every server in the fleet on the SAME capture cycle: 42 servers
+    /// would each skip three cycles and then all pay full plan-render cost together, converting a steady
+    /// load into a 4x spike every fourth cycle - worse for the monitored servers than collecting every time,
+    /// because peak is what causes timeouts and the 120s wall-clock abandonments this rung exists to reduce.
+    /// Offsetting by <c>serverId % interval</c> spreads the fleet evenly across the interval instead, and
+    /// does so deterministically, so it survives a restart that resets the counters.</para>
+    /// </summary>
+    internal static bool ShouldCapturePlanThisCycle(long cycleOrdinal, int serverId, int interval)
+    {
+        if (interval <= 1)
+        {
+            return true;
+        }
+
+        /* Unsigned so a negative server id (none exist today, but the column is a signed integer and this
+           must not throw or bias if one ever does) still lands in [0, interval). */
+        var phase = (long)((uint)serverId % (uint)interval);
+        return (cycleOrdinal + phase) % interval == 0;
+    }
+
+    /// <summary>
+    /// The instance side of the V108 cadence: advances this (server, collector) cycle counter and asks the
+    /// pure policy. Returns true unconditionally for every collector except
+    /// <see cref="PlanCadenceGatedCollector"/>, so no other collector's behaviour changes and no other
+    /// collector's counter is even allocated.
+    /// </summary>
+    private bool ShouldCapturePlanForCollector(string collectorName, int serverId)
+    {
+        if (!string.Equals(collectorName, PlanCadenceGatedCollector, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var interval = _procedureStatsPlanCycleInterval();
+        if (interval <= 1)
+        {
+            return true;
+        }
+
+        /* AddOrUpdate returns the STORED value, so the first cycle for a (server, collector) is ordinal 0
+           and each later cycle is one more. Concurrent sweeps of the same server do not overlap for one
+           collector, but the dictionary is concurrent because different servers are swept in parallel. */
+        var ordinal = _planCadenceCycles.AddOrUpdate((serverId, collectorName), 0L, static (_, previous) => previous + 1);
+        return ShouldCapturePlanThisCycle(ordinal, serverId, interval);
+    }
+
     /// <param name="capturePlans">
     /// Live provider for the plan-capture flag; null defaults to always-on (Darling's SKU default).
     /// The worker passes <c>() =&gt; config.CapturePlans</c> so a store reload takes effect next cycle;
@@ -238,7 +314,7 @@ public sealed class DarlingCollectorRunner
     /// behavior). The worker passes <c>() =&gt; config.CollectSchemaChangeEvents</c> so a noisy/benchmark box
     /// can suppress the default-trace Object:Created/Deleted flood; tests pass a constant lambda.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
@@ -251,6 +327,9 @@ public sealed class DarlingCollectorRunner
            false = 'none': plain text into query_plan_xml so direct-SQL consumers read it bare.
            The worker passes () => config.PlanXmlCompression == "gzip"; tests pass a constant. */
         _compressPlanContent = compressPlanContent ?? (() => true);
+        /* Null provider = 1 = capture a plan on every cycle, i.e. the pre-V108 behaviour. Every existing
+           caller and test therefore keeps the collector it already had without naming the knob. */
+        _procedureStatsPlanCycleInterval = procedureStatsPlanCycleInterval ?? (() => 1);
     }
 
     /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
@@ -501,7 +580,9 @@ public sealed class DarlingCollectorRunner
             IgnoredWaitTypes = IgnoredWaitDefaults.All,
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
-            CapturePlanXml = _capturePlans(),
+            /* V108: plan capture is additionally cadence-gated for procedure_stats — see
+               ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans(). */
+            CapturePlanXml = _capturePlans() && ShouldCapturePlanForCollector(definition.Name, server.ServerId),
             /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
                per query_id into collect.query_store_text (FetchAndStoreQueryTextAsync, below) and resolved
                back by the readers, all six of which now prefer that table and fall back to the fact row's

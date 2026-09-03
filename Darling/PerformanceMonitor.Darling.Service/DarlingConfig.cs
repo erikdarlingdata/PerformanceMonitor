@@ -86,6 +86,24 @@ public sealed class DarlingConfig
     public int PlanContentRetentionDays { get; set; } = 21;
 
     /// <summary>
+    /// How many collection cycles pass between plan captures for <c>procedure_stats</c> (V108).
+    /// 1 = capture on every cycle (the pre-V108 behaviour, byte-identical); N &gt; 1 = capture on one cycle
+    /// in N and leave <c>query_plan_xml</c> NULL on the rest. Store-backed (config_service, V108) and read
+    /// live, so a change takes effect on the NEXT cycle without a restart; clamped [1,60] on read.
+    /// <para>procedure_stats is the most expensive collector on the production use1 store, and 96% of its
+    /// cost is the read loop draining plan XML. The plan half of that drain is 73.8% RENDER and 26.0%
+    /// TRANSFER, and the render happens inside <c>sys.dm_exec_text_query_plan</c> — a SERVER-side TVF — so
+    /// it is CPU spent on the MONITORED server, not on the collector box. That is why the lever is cadence
+    /// rather than a dedup key: hashing at the source would remove the transfer and leave the render
+    /// burning on customer hardware.</para>
+    /// <para>The cost is plan-history granularity: at N the newest stored plan for a module can be up to
+    /// N cycles old. Every reader already skips NULL-plan rows and returns the latest row that HAS a plan
+    /// (the #1767 guard), so a skipped cycle is invisible to consumers rather than showing a missing plan.</para>
+    /// </summary>
+    [JsonPropertyName("procedureStatsPlanCycleInterval")]
+    public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
+
+    /// <summary>
     /// The per-session <c>statement_timeout</c> applied to the viewer and mcp roles — the hard backstop a
     /// composed query can never exceed (#2357). Seeds <c>config_service.compose_statement_timeout_seconds</c>;
     /// the store is authoritative afterwards, like every other value here.

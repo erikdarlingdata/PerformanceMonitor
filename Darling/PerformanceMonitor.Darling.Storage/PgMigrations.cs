@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -164,6 +164,7 @@ public static class PgMigrations
         new Migration(105, "collector-cost", V105Sql),
         new Migration(106, "pg-cpu-utilization", V106Sql),
         new Migration(107, "plan-force-actions", V107Sql),
+        new Migration(108, "procedure-stats-plan-cadence", V108Sql),
     };
 
     /// <summary>
@@ -2343,6 +2344,47 @@ CREATE INDEX IF NOT EXISTS idx_plan_force_actions_query
 
 ALTER TABLE config.config_monitored_servers
     ADD COLUMN IF NOT EXISTS plan_force_bot_enabled boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V108 (#2862): how many collection cycles pass between plan captures for
+    /// <c>procedure_stats</c>. 1 = capture every cycle (the behaviour before this rung, byte-identical);
+    /// N &gt; 1 = capture on one cycle in N and leave <c>query_plan_xml</c> NULL on the rest.
+    ///
+    /// <para>Why this collector needs it. <c>procedure_stats</c> is the most expensive collector on the
+    /// production use1 store — 98.1M ms/day over 17,869 runs, avg 5,490 ms, having overtaken
+    /// <c>query_store</c> at 1.57x — and 96% of that is the read loop (<c>sql:4,902ms = open:149ms +
+    /// drain:4,724ms + other:1ms</c>). A controlled decomposition (6 heaviest servers, 3 reps x 3 variants,
+    /// serial AND 6-way concurrent, 108 executions) split the drain into RENDER 73.8% / TRANSFER 26.0%,
+    /// stable under concurrency; the variant with no <c>OUTER APPLY</c> at all cost 0.2% of drain, so
+    /// essentially the entire drain is plan cost and the non-plan columns are free.</para>
+    ///
+    /// <para>The render share is the reason a dedup key cannot fix this and cadence can.
+    /// <c>sys.dm_exec_text_query_plan</c> is a SERVER-SIDE TVF, so that 73.8% is CPU burned on the
+    /// monitored production SQL Server, not on the collector box — <c>get_collector_cost.sql_ms</c> is
+    /// target-side duration. Hashing at the source would remove the 26% transfer and leave the 74% render
+    /// burning on customer hardware; skipping the cycle removes both. Because the module DMVs expose no
+    /// statement offsets the collector passes literal <c>0, -1</c> and gets the WHOLE module plan: mean
+    /// 373 KB, p50 103 KB, p95 1,206 KB, max 8.5 MB.</para>
+    ///
+    /// <para>Not a dedup key, and this is settled rather than untried: a <c>plan_handle</c>-keyed probe is
+    /// DISPROVEN — 16,745 distinct handles map to 142,955 distinct (handle, digest) pairs, 8.5 distinct plan
+    /// XMLs per handle per day, one handle producing 457 plans in 468 sightings, and adding <c>cached_time</c>
+    /// to the key changes the count by exactly zero. The module recompiles statements in place as temp-table
+    /// statistics change, so the handle is stable by design while the XML is not. The #1767 plan dimension
+    /// already covers <c>procedure_stats</c> (<c>PayloadDimensions.All</c>) but is storage-side dedup and
+    /// structurally cannot touch a wire/render cost.</para>
+    ///
+    /// <para>Clamped on READ like the V59/V75 knobs, to [1,60]. It takes a darling.json seed
+    /// (<c>procedureStatsPlanCycleInterval</c>) exactly as <c>planContentRetentionDays</c> does — for a
+    /// config_service knob the file value SEEDS the row on first insert and the store is authoritative
+    /// afterwards, which is unlike the server registry where a later file edit really is a silent no-op
+    /// (#2254). It gets no Viewer Settings field, matching <c>plan_content_retention_days</c> (V75) and
+    /// <c>compose_statement_timeout_seconds</c>: both are store-and-service only, and neither appears in
+    /// darling.sample.json either.</para>
+    /// </summary>
+    private const string V108Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS procedure_stats_plan_cycle_interval integer NOT NULL DEFAULT 4;";
 
     /// <summary>
     /// V105 — <c>collect.collector_cost</c>, the tool's own per-collector cost on the monitored servers
