@@ -52,6 +52,16 @@ function statusCell(a) {
     glyph = "✕";
     label = "Delivery failed";
     sev = "Critical";
+  } else if (a.notification_type === "tray") {
+    /* #2814: the Darling web is headless — there is no system tray — so a "tray" alert (Lite's
+       delivered-without-email taxonomy) was never delivered anywhere on this surface; it was only logged.
+       Show a single neutral "Logged" rather than a Sent/Not-sent derived from alert_sent, which the alert
+       engine sets inconsistently across paths (clears true, problems false) and which reads backwards here
+       ("notified you it cleared but not that it broke"). A real channel (email/webhook) keeps Sent/Not-sent
+       below. Extends #2781, which already dropped the meaningless "tray" channel label. */
+    glyph = "•";
+    label = "Logged";
+    sev = "Unknown";
   } else if (a.alert_sent) {
     glyph = "✓";
     label = "Sent";

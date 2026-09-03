@@ -31,6 +31,10 @@ import { suggestViz, deriveVizConfig } from "../derive.js";
 function alertStatusText(a) {
   if (a.muted) return "Muted";
   if (a.send_error) return "Delivery failed: " + a.send_error;
+  /* #2814: headless has no tray, so a "tray" alert was only logged, never delivered — a single neutral
+     "Logged", kept in lockstep with statusCell in alerts.js (see the note there). A real channel keeps
+     Sent/Not-sent below. */
+  if (a.notification_type === "tray") return "Logged";
   const channel = a.notification_type && a.notification_type !== "tray" ? " (" + a.notification_type + ")" : "";
   if (a.alert_sent) return "Sent" + channel;
   return "Not sent";

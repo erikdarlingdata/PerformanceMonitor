@@ -2104,8 +2104,11 @@ const PROPERTY_STATS = [
 
 const DAILY_STATS = [
   { key: "summary_date", label: "Date", format: "text", small: true },
+  /* One health card, not two. get_daily_summary returns overall_health as the band's LABEL
+     (DarlingHealthReader: OverallHealth => DailyHealthBandCalculator.Label(HealthBand)) — the same value
+     health_band carries — so an "overall_health" card duplicated this one AND, formatted as num1, rendered
+     the label "Critical" as NaN. #2807. A numeric health SCORE would be a new backend field, not this label. */
   { key: "health_band", label: "Band", format: "text", small: true },
-  { key: "overall_health", label: "Health", format: "num1" },
   { key: "top_wait_type", label: "Top wait", format: "text", small: true },
   { key: "total_wait_time_sec", label: "Total wait", format: "int" },
   { key: "unique_queries", label: "Unique queries", format: "int" },
