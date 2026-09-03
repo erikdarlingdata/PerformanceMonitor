@@ -1888,7 +1888,12 @@ public sealed class DarlingCollectorRunner
                    and the text sibling would double it again per item. This codebase caps repetitive
                    failure logging deliberately (MaxLoggedProbeFailures), and attempting store work already
                    known to be doomed is not diagnosis. The carryover is untouched, so nothing is forgotten
-                   and the next cycle re-selects it. */
+                   and the next cycle re-selects it.
+
+                   Stamped before returning, like every other exit from this method: the failed reconnect
+                   still took real wall clock, the caller's fetch watch still counted it, and leaving it
+                   unstamped would hand the one measurable part of an outage to the other: residual. */
+                context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
                 return;
             }
 
@@ -2274,7 +2279,12 @@ public sealed class DarlingCollectorRunner
                    and the text sibling would double it again per item. This codebase caps repetitive
                    failure logging deliberately (MaxLoggedProbeFailures), and attempting store work already
                    known to be doomed is not diagnosis. The carryover is untouched, so nothing is forgotten
-                   and the next cycle re-selects it. */
+                   and the next cycle re-selects it.
+
+                   Stamped before returning, like every other exit from this method: the failed reconnect
+                   still took real wall clock, the caller's fetch watch still counted it, and leaving it
+                   unstamped would hand the one measurable part of an outage to the other: residual. */
+                context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
                 return;
             }
 
