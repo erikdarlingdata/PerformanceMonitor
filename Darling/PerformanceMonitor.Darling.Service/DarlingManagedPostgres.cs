@@ -601,7 +601,20 @@ public sealed class DarlingManagedPostgres
                postgres.exe PROCESS on Windows, and each spawn must re-reserve the shared memory
                region (the 487 surface) — a field box showed 43 backends during a 24-server sweep.
                24 comfortably covers the 4-wide sweep + command/beacon/alert/analysis seams; Npgsql's
-               default idle pruning shrinks the pool between bursts. */
+               default idle pruning shrinks the pool between bursts.
+
+               #2819 re-derived this rather than raising it, and 24 is still right — but the arithmetic
+               above was only ever true by accident. Each swept server holds ONE store connection for its
+               whole body, so the sweep's demand is MaxConcurrentSweeps, not 24. Until #2819 the Query Store
+               plan and text fetches each opened a SECOND and THIRD connection per database on top of it, so
+               real demand was 3x the sweep width: fine at the 4-wide default (12), and over this bound at
+               the 16-wide ClampConcurrentSweeps limit (48). Borrowing the body's connection puts worst-case
+               sweep demand back at the sweep width itself, so even a 16-wide sweep now fits inside 24 with
+               the seams — which it demonstrably did not before.
+
+               Raising this number would have been the wrong fix for the same reason it is bounded at all:
+               every pooled connection is a postgres.exe PROCESS, and this store logged 8 "could not reserve
+               shared memory region" retries on 2026-09-03. Fewer acquisitions, not a bigger pool. */
             MaxPoolSize = 24,
         };
         return builder.ConnectionString;

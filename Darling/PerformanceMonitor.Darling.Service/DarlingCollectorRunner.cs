@@ -898,7 +898,14 @@ public sealed class DarlingCollectorRunner
                 var itemTimeout = definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds;
 
                 /* One pooled store connection for the whole body; the driver writes one binary COPY per
-                   database on it, flushing each before reading the next. */
+                   database on it, flushing each before reading the next.
+
+                   #2819: "for the whole body" is now literally true. The Query Store plan and text fetches
+                   used to open their own on every item — a third and a fourth connection per database, ~228
+                   acquisitions per cycle against MaxPoolSize=24, at a measured 673-893ms floor each — and
+                   they now borrow this one. Safe precisely because of the flushing order named above: the
+                   driver reads an item and then awaits its write, so this connection is idle for the whole
+                   read, which is when those fetches run. */
                 await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
                 /* #2312: open-interval stamps STAGED at decision time (perItemWatermark, below), landed
@@ -1068,7 +1075,7 @@ public sealed class DarlingCollectorRunner
                                per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
                                blended sql: could not distinguish them. */
                             var planFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStorePlansAsync(planFetchConnection,
+                            await FetchAndStorePlansAsync(planFetchConnection, pgConnection,
                                 server, item, context, itemTimeout, ExtractPlanReferences(batch), ct);
                             context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
                         }
@@ -1086,7 +1093,7 @@ public sealed class DarlingCollectorRunner
                         {
                             /* #2312 investigation: same split as the plan fetch above. */
                             var textFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStoreQueryTextAsync(textFetchConnection,
+                            await FetchAndStoreQueryTextAsync(textFetchConnection, pgConnection,
                                 server, item, context, itemTimeout, ExtractTextReferences(batch), ct);
                             context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
                         }
@@ -1745,6 +1752,7 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private async Task FetchAndStorePlansAsync(
         SqlConnection sqlConnection,
+        NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
         CollectorContext context,
@@ -1777,12 +1785,34 @@ public sealed class DarlingCollectorRunner
                 return;
             }
 
-            /* #2811: the probe phase is the store connection open PLUS the touch/probe round trip. Timed
-               together because they are one logical "ask the store what it already has" — splitting them
-               further would name a connection pool rather than a cost. Started HERE rather than at the
-               declaration so the quiet-cycle return above stays outside the measurement. */
+            /* #2811 named this phase "the store connection open PLUS the touch/probe round trip", and
+               declined to split them because doing so "would name a connection pool rather than a cost".
+               #2819 measured it and it WAS the connection pool: the probe SQL runs in 0.4ms (nothing stale)
+               to 37ms (40 stale ids), while the phase measured 673-6,663ms — and a cycle with zero ids,
+               which issues no SQL at all, still cost 673ms. That is acquisition, not work.
+
+               So this method no longer acquires. It borrows the caller's connection — the one opened once
+               per collector body at the top of RunEnumeratedAsync and described there as "one pooled store
+               connection for the whole body", a promise this method and its text sibling were quietly
+               breaking by opening a second and third. The driver is strictly sequential (read an item, then
+               await its write), so that connection is provably IDLE across exactly the window this fetch
+               occupies; there is no concurrent use to collide with.
+
+               What that buys: ~228 acquisitions per cycle (114 (server, database) pairs x two fetches)
+               against a MaxPoolSize of 24 collapse to zero, and the pool slot that used to be held across
+               the SQL Server target fetch — measured at 104,799ms on one database — is no longer held at
+               all, because it was already held by the caller regardless.
+
+               The trade: a store fault inside this method now leaves the caller's connection broken rather
+               than a private one, so the item's subsequent write fails too. That is acceptable and close to
+               honest — a broken store connection means the store is unreachable, and the write was going to
+               fail on its own connection anyway. The driver's per-item catch skips the item and the next
+               cycle re-selects it, which is the same recovery either arm takes.
+
+               probeWatch now times the probe ROUND TRIP only, which is what the phase name always claimed.
+               Started HERE rather than at the declaration so the quiet-cycle return above stays outside the
+               measurement. */
             probeWatch.Restart();
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             var missing = new SortedSet<long>();
             if (hasCarryover)
@@ -1796,7 +1826,7 @@ public sealed class DarlingCollectorRunner
             if (references.Count > 0)
             {
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
-                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
+                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
                 {
                     if (!verdict.Resolved || verdict.HashStale)
@@ -1940,7 +1970,7 @@ public sealed class DarlingCollectorRunner
                 try
                 {
                     landed = await QueryStorePlanWriter.WriteAsync(
-                        pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
                 }
                 finally
                 {
@@ -2045,6 +2075,7 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private async Task FetchAndStoreQueryTextAsync(
         SqlConnection sqlConnection,
+        NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
         CollectorContext context,
@@ -2070,10 +2101,15 @@ public sealed class DarlingCollectorRunner
                 return;
             }
 
-            /* #2811: same probe split as the plan side. Started here, not at the declaration, so the
+            /* #2819: same borrowed connection as the plan side, for the same measured reason — this method
+               was the SECOND of the two per-item acquisitions, and its zero-id probes measured 893ms, the
+               worst floor of either. See the plan side for why borrowing is safe (the driver reads an item
+               and then awaits its write, so the caller's connection is idle across this window) and what it
+               trades (a store fault here breaks the caller's connection rather than a private one).
+
+               probeWatch now times the probe round trip only. Started here, not at the declaration, so the
                quiet-cycle return above stays outside the measurement. */
             probeWatch.Restart();
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             var missing = new SortedSet<long>();
             if (hasCarryover)
@@ -2087,7 +2123,7 @@ public sealed class DarlingCollectorRunner
             if (references.Count > 0)
             {
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
-                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
+                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
                 {
                     if (!verdict.Resolved || verdict.HashStale)
@@ -2197,7 +2233,7 @@ public sealed class DarlingCollectorRunner
                 try
                 {
                     landed = await QueryStoreTextWriter.WriteAsync(
-                        pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
                 }
                 finally
                 {
