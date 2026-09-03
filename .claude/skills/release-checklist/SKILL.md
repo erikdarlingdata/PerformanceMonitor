@@ -95,8 +95,8 @@ Spin up temporary instances with the Azure CLI (`az`) and AWS CLI (`aws`):
 4. Firewall churn: DELETE the allow rule, wait 3–5 minutes, re-add it. Collection must resume on its own without restarting the service. (CAVEAT, verified v3.2.0: a bare rule-deletion often does NOT sever an actively-collecting client — connection pooling keeps the open connection alive and Azure gates only NEW connections — so treat a no-outage result as inconclusive rather than a pass; the recovery logic's authoritative validation is the unit suites.)
 5. Clean up: `az group delete --name rg-release-test --yes --no-wait`
 
-**AWS RDS:**
-1. Create an RDS SQL Server instance. **Use us-east-1** — cross-country latency to us-west-2 causes collector timeouts:
+**AWS RDS:** (same `SQL_TEST_PASSWORD` throwaway as above)
+1. Create an RDS SQL Server instance. **Use a region geographically close to the machine running the collector** -- cross-country latency causes collector timeouts. From US East that is us-east-1:
    ```
    aws rds create-db-instance --db-instance-identifier pm-release-test --db-instance-class db.t3.xlarge --engine sqlserver-ee --master-username admin --master-user-password "$SQL_TEST_PASSWORD" --allocated-storage 20 --region us-east-1
    ```
