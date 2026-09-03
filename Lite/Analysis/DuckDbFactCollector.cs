@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -20,6 +22,55 @@ public partial class DuckDbFactCollector : IFactCollector
     public DuckDbFactCollector(DuckDbInitializer duckDb)
     {
         _duckDb = duckDb;
+    }
+
+    /// <summary>
+    /// Reports a fact-collection failure that is being swallowed, so a collector that CANNOT run is
+    /// distinguishable from one that ran and found nothing (#2826). Darling's
+    /// <c>PgFactCollector.ReportCollectionFailure</c> counterpart, and the reason this file's catches
+    /// are no longer empty either — the two collectors are a method-for-method port and a blind spot
+    /// fixed on one side only would silently re-open on the other.
+    ///
+    /// <para>Two arms here where Darling has three, and both differences are DuckDB facts rather than
+    /// oversights:</para>
+    /// <list type="bullet">
+    /// <item><description>Darling's 42P01 arm has no counterpart. DuckDB surfaces a missing relation
+    /// as a <c>DuckDBException</c> distinguishable only by MESSAGE TEXT, and this project detects
+    /// exception meaning structurally, never by message (the
+    /// <c>PgBaselineProvider.IsCommandTimeout</c> discipline). It would also be the wrong call: Lite
+    /// creates every one of these tables at startup from
+    /// <c>Schema.GetAllTableStatements()</c>, so a missing table here is a defect and not the
+    /// expected condition the old comment claimed — which is precisely the assumption that let a real
+    /// fault read as "no data" for as long as it did.</description></item>
+    /// <item><description>The non-timeout arm logs at ERROR rather than Darling's DEBUG-for-42P01,
+    /// for the same reason, and because <see cref="AppLogger.Debug"/> is compiled out of Release
+    /// builds — a level nobody can turn on is indistinguishable from the empty catch this replaces.</description></item>
+    /// </list>
+    ///
+    /// <para>The timeout arm is a <see cref="TimeoutException"/> only: Lite's deadline is
+    /// <c>DuckDbInitializer</c>'s READ-LOCK acquisition, not a server-side statement timeout, since
+    /// the store is an embedded file in this process rather than a separate postmaster. It still
+    /// means this collector produced nothing because it could not get in, which is the distinction
+    /// worth drawing.</para>
+    /// </summary>
+    private static void ReportCollectionFailure(
+        Exception ex,
+        AnalysisContext context,
+        [CallerMemberName] string collectMethod = "")
+    {
+        if (ex is TimeoutException || ex.InnerException is TimeoutException)
+        {
+            AppLogger.Warn("DuckDbFactCollector",
+                $"{collectMethod} timed out acquiring the store read lock for {context.ServerName} " +
+                $"(server {context.ServerId}) — that analysis input is MISSING for this pass, which is " +
+                $"not the same as the server having none: {ex.Message}");
+        }
+        else
+        {
+            AppLogger.Error("DuckDbFactCollector",
+                $"{collectMethod} failed for {context.ServerName} (server {context.ServerId}) and " +
+                $"contributes no facts this pass: {ex.Message}");
+        }
     }
 
     public async Task<List<Fact>> CollectFactsAsync(AnalysisContext context)

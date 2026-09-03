@@ -115,7 +115,7 @@ public sealed class DarlingAnalysisService
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
         _findingStore = new PgFindingStore(postgres, logger);
-        _collector = new PgFactCollector(postgres);
+        _collector = new PgFactCollector(postgres, logger);
         _scorer = new FactScorer();
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
