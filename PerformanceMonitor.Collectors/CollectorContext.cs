@@ -262,18 +262,28 @@ public sealed class CollectorContext
     /// </summary>
     public long PerItemTextFetchMs { get; set; }
 
-    /* #2811: the fetch phases above are each a whole METHOD, not a query. FetchAndStorePlansAsync opens a
-       store connection, round-trips the store to learn what is already held, issues at most two target
-       statements, and writes the results back — three of those four steps are Postgres. A 189,562ms
-       plan_fetch on a production database was read as SQL Server query time for a full day and tuned on that
-       premise; the tuning was measured at 0.508s in isolation and moved production nothing, because nobody
-       could see which step held the time. These sub-phases exist so that question is answered by the log
-       rather than by argument. Same zero-means-unmeasured contract as their parent. */
+    /* #2811: the fetch phases above are each a whole METHOD, not a query. FetchAndStorePlansAsync
+       round-trips the store to learn what is already held, issues at most two target statements, and writes
+       the results back — two of those three steps are Postgres. A 189,562ms plan_fetch on a production
+       database was read as SQL Server query time for a full day and tuned on that premise; the tuning was
+       measured at 0.508s in isolation and moved production nothing, because nobody could see which step held
+       the time. These sub-phases exist so that question is answered by the log rather than by argument. Same
+       zero-means-unmeasured contract as their parent.
+
+       #2819 removed a fourth step this comment used to open with. The method acquired its own store
+       connection, and that acquisition — not the query — was the phase: the probe SQL measured 0.39ms while
+       the phase measured 673-6,663ms, and a zero-id cycle issuing no SQL at all still cost 673ms. Both
+       fetches now borrow the connection the collector body already holds, so no acquisition happens here and
+       probe: below is the round trip alone. Kept in the record rather than edited away, because the reason
+       these fields exist is that a phase whose documentation outlived what it measures is how the cost was
+       misread in the first place. */
 
     /// <summary>
-    /// Milliseconds of <see cref="PerItemPlanFetchMs"/> spent opening the store connection and running the
-    /// touch/probe round trip that decides which plans are still owed — the STORE half that runs before any
-    /// target query is issued.
+    /// Milliseconds of <see cref="PerItemPlanFetchMs"/> spent on the touch/probe round trip that decides
+    /// which plans are still owed — the STORE half that runs before any target query is issued.
+    /// <para>Round trip ONLY since #2819: the fetch borrows the collector body's connection rather than
+    /// opening one, so this no longer carries a connection acquisition. It used to, and that acquisition was
+    /// the overwhelming majority of it — treat any pre-#2819 reading of this field as mostly pool wait.</para>
     /// </summary>
     public long PerItemPlanProbeMs { get; set; }
 
@@ -299,7 +309,8 @@ public sealed class CollectorContext
     /// </summary>
     public int PerItemPlanIdsAttempted { get; set; }
 
-    /// <summary>Store-half of <see cref="PerItemTextFetchMs"/>. Same contract as <see cref="PerItemPlanProbeMs"/>.</summary>
+    /// <summary>Store-half of <see cref="PerItemTextFetchMs"/> — the touch/probe round trip. Same contract as
+    /// <see cref="PerItemPlanProbeMs"/>, including borrowing the body's connection rather than opening one (#2819).</summary>
     public long PerItemTextProbeMs { get; set; }
 
     /// <summary>Target-half of <see cref="PerItemTextFetchMs"/>. Same contract as <see cref="PerItemPlanTargetMs"/>.</summary>
