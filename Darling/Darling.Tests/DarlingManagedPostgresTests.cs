@@ -425,6 +425,187 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(16, settings.WorkMemMb);               /* RAM/512 = 8 MB, lifted to the 16 MB floor */
     }
 
+    /* ===================== #2845 v8 hardware re-derivation ===================== */
+
+    /// <summary>
+    /// THE PROPERTY THIS ISSUE IS ABOUT: a RAM change makes the conf stale, and staleness is what triggers
+    /// re-derivation. Asserted on the decision function rather than on a code shape, so a refactor that
+    /// keeps the behaviour keeps the pin green and one that loses it goes red.
+    ///
+    /// <para>The 16 -> 31.5 GB pair is the live case from #2845: three boxes resized under a marker-keyed
+    /// scheme kept effective_cache_size at 75% of the RAM they no longer had.</para>
+    /// </summary>
+    [Fact]
+    public void HardwareFingerprint_RamChange_TriggersRederivation()
+        {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        const int hypertables = 40;
+
+        var conf = "shared_buffers = 1024MB\n" +
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, hypertables);
+
+        /* Same host: already derived here, nothing to do. */
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(sixteenGb, hypertables)));
+
+        /* Resized: the sizing in the file was derived under RAM this host no longer has. */
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(thirtyTwoGb, hypertables)));
+
+        /* Collector added: the worker counts in the file are undersized for the new hypertable count. */
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(sixteenGb, hypertables + 1)));
+    }
+
+    /// <summary>
+    /// The LAST fingerprint decides, not any fingerprint — the case a <c>conf.Contains(fingerprint)</c>
+    /// test gets wrong and the reason the helper exists at all.
+    ///
+    /// <para>A host resized 16 -> 32 -> back to 16 GB has BOTH fingerprints in its conf. Contains would find
+    /// the original 16 GB line still present and skip the append, leaving the 32 GB block as the last
+    /// occurrence of effective_cache_size and therefore still in force — a box sized for RAM it does not
+    /// have, latched permanently. postgresql.conf resolves duplicates by last-occurrence-wins, so the
+    /// staleness test has to ask the same question the file answers.</para>
+    /// </summary>
+    [Fact]
+    public void HardwareFingerprint_ResizeBackToPreviousSize_StillRederives()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        const int hypertables = 40;
+
+        var conf =
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, hypertables) +
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(thirtyTwoGb, hypertables);
+
+        var sixteenGbFingerprint = DarlingManagedPostgres.BuildHardwareFingerprint(sixteenGb, hypertables);
+
+        /* The 16 GB fingerprint IS present — a Contains test would return true here and skip. */
+        Assert.Contains(sixteenGbFingerprint, conf, StringComparison.Ordinal);
+
+        /* But it is not the LAST one, so the box is running 32 GB sizing and must re-derive. */
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(conf, sixteenGbFingerprint));
+
+        /* And the 32 GB block, being last, correctly reports itself as current. */
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(thirtyTwoGb, hypertables)));
+    }
+
+    /// <summary>
+    /// CONSTRAINT PIN 1 (#1559 / #2845): the hardware block must never emit <c>shared_buffers</c>, at ANY
+    /// host size. The 1 GB cap is the Windows error-487 mitigation and the condition is live on the fleet
+    /// (measured 2026-09-03: 4-205 occurrences/day across three boxes, zero could-not-fork — the retry path
+    /// holding is exactly the margin a larger segment would spend).
+    ///
+    /// <para>Excluded STRUCTURALLY rather than by trusting min(25% RAM, 1 GB) to keep returning 1 GB: this
+    /// pin holds even if someone later raises the cap in <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>,
+    /// which is the point. Raising it is a formula decision that belongs in a reviewed version-keyed block,
+    /// not something a host resize propagates to production on its own.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(16)]
+    [InlineData(32)]
+    [InlineData(64)]
+    [InlineData(512)]
+    public void HardwareSizingConfAppend_NeverEmitsSharedBuffers(long ramGb)
+    {
+        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramGb * 1024 * 1024 * 1024, 40);
+
+        Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// CONSTRAINT PIN 2 (#2845): the hardware block must never emit <c>work_mem</c>, at ANY host size.
+    /// The formula would take it 31 -> 63 MB on the resized boxes, and the only measurements above 31 MB on
+    /// this store's heaviest read are worse (PlanRegressionSql: default 26,565 ms, 31 MB 25,617 ms,
+    /// 512 MB 59,323 ms). It is also the wrong KIND of setting for this block — a per-sort, per-connection
+    /// ceiling that follows from the query mix, not from the machine.
+    ///
+    /// <para>Note the theory covers 32 GB and above, where the formula clamps to the 64 MB ceiling: those
+    /// are precisely the sizes where a naive "apply the formula to the new RAM" change would have doubled
+    /// it.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(16)]
+    [InlineData(32)]
+    [InlineData(64)]
+    [InlineData(512)]
+    public void HardwareSizingConfAppend_NeverEmitsWorkMem(long ramGb)
+    {
+        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramGb * 1024 * 1024 * 1024, 40);
+
+        /* Anchored on the newline that starts every setting line. A bare "work_mem = " is a SUBSTRING of
+           "maintenance_work_mem = ", so the unanchored form fails against a correct block — caught by the
+           harness before this shipped, and the reason the positive assertion below is here as a guard. */
+        Assert.DoesNotContain("\nwork_mem = ", block, StringComparison.Ordinal);
+        Assert.Contains("\nmaintenance_work_mem = ", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The block emits what it is for, at the values the resized fleet should have had. 31.5 GB is the
+    /// m7i.2xlarge reading; 32 GB is used here for a round assertion. effective_cache_size 24576MB is the
+    /// number #2845 was filed over — the boxes were sitting at 11.86 GB, which is 75% of the 16 GB they had
+    /// before the resize.
+    /// </summary>
+    [Fact]
+    public void HardwareSizingConfAppend_EmitsHostDerivedSettings()
+    {
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(thirtyTwoGb, 40);
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV8, block, StringComparison.Ordinal);
+        Assert.Contains("effective_cache_size = 24576MB", block, StringComparison.Ordinal);  /* 75% of 32 GB (was 11.86 GB = 75% of 16 GB) */
+        Assert.Contains("maintenance_work_mem = 1638MB", block, StringComparison.Ordinal);   /* 5% of 32 GB, past the 1536 floor, under the 2 GB cap */
+        Assert.Contains("timescaledb.max_background_workers = 42", block, StringComparison.Ordinal);  /* 40 hypertables + 2 */
+        Assert.Contains("max_worker_processes = 53", block, StringComparison.Ordinal);       /* 3 + 42 + 8 */
+    }
+
+    /// <summary>
+    /// The v2 block and the v8 re-derivation share ONE worker formula (#2845), so the two writers of
+    /// max_worker_processes cannot drift apart and produce a conf whose last occurrence disagrees with the
+    /// block that established it.
+    /// </summary>
+    [Fact]
+    public void HardwareSizingConfAppend_WorkerCountsMatchV2Formula()
+    {
+        var v2 = DarlingManagedPostgres.BuildWorkerSizingConfAppend();
+        var v8 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(
+            32L * 1024 * 1024 * 1024, TimescaleSupport.HypertableCount);
+
+        foreach (var setting in new[] { "timescaledb.max_background_workers = ", "max_worker_processes = " })
+        {
+            var fromV2 = ExtractSettingLine(v2, setting);
+            var fromV8 = ExtractSettingLine(v8, setting);
+            Assert.Equal(fromV2, fromV8);
+        }
+
+        static string ExtractSettingLine(string block, string setting)
+        {
+            var start = block.IndexOf(setting, StringComparison.Ordinal);
+            Assert.True(start >= 0, $"block did not contain '{setting}'");
+            var end = block.IndexOf('\n', start);
+            return (end < 0 ? block[start..] : block[start..end]).TrimEnd('\r');
+        }
+    }
+
+    /// <summary>
+    /// A failed RAM reading fingerprints as the 4 GB fallback it actually derived under, not as "0". If it
+    /// recorded zero, the next successful reading would look like a hardware change and append a block on
+    /// every alternating start — an append loop rather than a converging heal.
+    /// </summary>
+    [Fact]
+    public void HardwareFingerprint_NonPositiveRam_MatchesTheFallbackItDerivedUnder()
+    {
+        const long fourGb = 4L * 1024 * 1024 * 1024;
+
+        Assert.Equal(
+            DarlingManagedPostgres.BuildHardwareFingerprint(fourGb, 40),
+            DarlingManagedPostgres.BuildHardwareFingerprint(0, 40));
+    }
+
     [Fact]
     public void GeneratePassword_32AlphanumericCryptoRandom()
     {

@@ -182,6 +182,35 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV7 = "# Managed by PerformanceMonitor Darling (v7 compression memory) -- do not remove this block";
 
     /// <summary>
+    /// Marker for the v8 hardware-sizing block (#2845). The EIGHTH block, and the first keyed on
+    /// something other than a version: v1-v7 each ask "is this marker absent?", a question answered once
+    /// and then never again, so every one of them re-derives only on a FORMULA change. Nothing re-derived
+    /// on a HARDWARE change, and a resized host kept its old sizing indefinitely — observed on all three
+    /// monitoring boxes after a 16 GB -> 31.5 GB resize, which left <c>effective_cache_size</c> at
+    /// 11.86 GB (75% of the RAM the box no longer had).
+    ///
+    /// <para>This block keys on <see cref="ConfHardwareFingerprintPrefix"/> — a line recording the
+    /// DERIVATION INPUTS the settings below it were written under — so the question becomes "were these
+    /// derived under the hardware we are running on NOW?". The two triggers are orthogonal and compose: a
+    /// version marker heals "we changed our mind about the formula", this heals "the machine changed
+    /// underneath it". Precedence is therefore never ambiguous even though both write the same file:
+    /// v8 re-states the SAME formulas (it calls <see cref="DeriveMemorySettings"/> and
+    /// <see cref="DeriveWorkerSettings"/>, the same helpers the version blocks use), so it can only ever
+    /// differ from them by being FRESHER, never by disagreeing.</para>
+    /// </summary>
+    public const string ConfMarkerV8 = "# Managed by PerformanceMonitor Darling (v8 hardware sizing) -- do not remove this block";
+
+    /// <summary>
+    /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
+    /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
+    /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
+    /// LAST occurrence rather than any occurrence, which is what makes a resize BACK to a previous size
+    /// re-derive: a plain Contains would find the stale earlier fingerprint and skip, leaving the larger
+    /// host's block still winning by last-occurrence-wins.
+    /// </summary>
+    public const string ConfHardwareFingerprintPrefix = "# darling-hardware-fingerprint: ";
+
+    /// <summary>
     /// Markers delimiting the Darling-managed network access block in pg_hba.conf
     /// (darling-network-endpoints, D5). <see cref="ReconcilePgHba"/> replaces exactly the lines
     /// between them and preserves every non-marked line, so the opt-in <c>hostssl</c> rule is
@@ -354,18 +383,35 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     public static string BuildWorkerSizingConfAppend()
     {
-        /* Derived from the TRUE hypertable count (never stale when a collector is added; includes
-           collection_log, the V23 hypertable outside the collector catalog): one background worker per
-           per-hypertable compression policy that can run concurrently + the scheduler + slack;
-           max_worker_processes = 3 (other bg workers) + bg workers + 8 (default max_parallel_workers). */
-        var maxBackgroundWorkers = TimescaleSupport.HypertableCount + 2;
-        var maxWorkerProcesses = 3 + maxBackgroundWorkers + 8;
+        var workers = DeriveWorkerSettings(TimescaleSupport.HypertableCount);
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV2).Append('\n');
-        builder.Append("timescaledb.max_background_workers = ").Append(maxBackgroundWorkers).Append('\n');
-        builder.Append("max_worker_processes = ").Append(maxWorkerProcesses).Append('\n');
+        builder.Append("timescaledb.max_background_workers = ").Append(workers.MaxBackgroundWorkers).Append('\n');
+        builder.Append("max_worker_processes = ").Append(workers.MaxWorkerProcesses).Append('\n');
         return builder.ToString();
+    }
+
+    /// <summary>The two worker settings derived from the live hypertable count, both restart-only.</summary>
+    internal readonly record struct WorkerSettings(int MaxBackgroundWorkers, int MaxWorkerProcesses);
+
+    /// <summary>
+    /// Derives the worker sizing from the hypertable count — extracted from
+    /// <see cref="BuildWorkerSizingConfAppend"/> (#2845) so the v2 block and the v8 hardware re-derivation
+    /// share ONE formula and cannot drift apart. One background worker per per-hypertable compression
+    /// policy that can run concurrently + the scheduler + slack; max_worker_processes = 3 (other bg
+    /// workers) + bg workers + 8 (the PostgreSQL default max_parallel_workers, which this class does not
+    /// set — see the v8 block for why raising it is deliberately NOT bundled here).
+    ///
+    /// <para>The v2 doc comment claims this "never goes stale as collectors are added". That was true of
+    /// the FORMULA and false of its application: v2 is marker-keyed, so an existing store computed these
+    /// once and kept the answer no matter how many collectors arrived afterwards. The v8 block is what
+    /// makes the claim true, by re-deriving whenever the hypertable count changes.</para>
+    /// </summary>
+    internal static WorkerSettings DeriveWorkerSettings(int hypertableCount)
+    {
+        var maxBackgroundWorkers = hypertableCount + 2;
+        return new WorkerSettings(maxBackgroundWorkers, 3 + maxBackgroundWorkers + 8);
     }
 
     /// <summary>
@@ -567,6 +613,109 @@ public sealed class DarlingManagedPostgres
         builder.Append('\n');
         builder.Append(ConfMarkerV7).Append('\n');
         builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The v8 fingerprint line for a given set of derivation inputs (#2845) — RAM and the hypertable
+    /// count, the two quantities every setting this block emits is a function of. Formatted invariantly so
+    /// the comparison is a plain ordinal string match on a machine with any locale.
+    ///
+    /// <para>RAM is normalised through the same non-positive fallback <see cref="DeriveMemorySettings"/>
+    /// applies, so a transient <c>GlobalMemoryStatusEx</c> failure fingerprints as the 4 GB fallback it
+    /// actually derived under rather than as "0" — otherwise the next successful reading would look like a
+    /// hardware change and append a block on every alternating start.</para>
+    /// </summary>
+    public static string BuildHardwareFingerprint(long totalPhysicalMemoryBytes, int hypertableCount)
+    {
+        var ram = totalPhysicalMemoryBytes > 0 ? totalPhysicalMemoryBytes : MemoryFallbackRamBytes;
+        return FormattableString.Invariant(
+            $"{ConfHardwareFingerprintPrefix}ram_mb={ram / (1024L * 1024L)} hypertables={hypertableCount}");
+    }
+
+    /// <summary>
+    /// True when the MOST RECENT fingerprint in the conf matches the current hardware — the test that
+    /// decides whether <see cref="BuildHardwareSizingConfAppend"/> needs to run (#2845).
+    ///
+    /// <para>Deliberately NOT <c>conf.Contains(fingerprint)</c>. postgresql.conf takes the LAST occurrence
+    /// of a setting, so what is in force is whatever the newest block said. A host resized 16 -> 32 -> 16 GB
+    /// would, under a Contains test, find its original 16 GB fingerprint still present and skip — leaving
+    /// the 32 GB block as the last occurrence and therefore still in force on a box that no longer has
+    /// 32 GB. Comparing only the last fingerprint makes the check ask the question that matches the file's
+    /// own semantics, and is what lets this converge instead of latching.</para>
+    /// </summary>
+    public static bool ConfHasCurrentHardwareFingerprint(string conf, string expectedFingerprint)
+    {
+        var lastIndex = conf.LastIndexOf(ConfHardwareFingerprintPrefix, StringComparison.Ordinal);
+        if (lastIndex < 0)
+        {
+            return false;
+        }
+
+        var lineEnd = conf.IndexOf('\n', lastIndex);
+        var line = lineEnd < 0 ? conf[lastIndex..] : conf[lastIndex..lineEnd];
+        return string.Equals(line.TrimEnd('\r'), expectedFingerprint, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The v8 hardware-sizing block (#2845): re-states the settings that are a pure function of the
+    /// HOST, at the host we are on now, and records the inputs it used so the next start can tell whether
+    /// they still hold.
+    ///
+    /// <para><b>What it emits, and why only these.</b> <c>effective_cache_size</c> is the setting the issue
+    /// was raised for — a planner hint with no allocation, found at 11.86 GB (75% of 16 GB) on hosts that
+    /// now have 31.5 GB, which biases the planner toward sequential scans on a store serving ~670k small
+    /// index lookups a day. <c>maintenance_work_mem</c> is a per-operation CEILING that PostgreSQL grows
+    /// into rather than reserves, so re-deriving it cannot overcommit. The two worker settings are
+    /// restart-only counts of background slots that only ever grow as collectors are added, and re-stating
+    /// them is what finally makes the v2 block's "never goes stale" claim true.</para>
+    ///
+    /// <para><b>What it deliberately does NOT emit, and why the omissions are the load-bearing part.</b></para>
+    /// <list type="bullet">
+    /// <item><b>shared_buffers</b> — EXCLUDED STRUCTURALLY, not by relying on the formula's cap. The 1 GB
+    ///   cap is the Windows error-487 mitigation (#1559, pgsql-bugs BUG #14050 / #18954): larger segments
+    ///   exacerbate <c>could not reserve shared memory region</c> when every backend re-reserves at the
+    ///   postmaster's base address, and that condition is LIVE on this fleet (measured 2026-09-03: use2
+    ///   112-205/day, use1 36-70, pgmon 4-34, with zero <c>could not fork</c> — the retry path is holding,
+    ///   which is precisely the margin a bigger segment would spend). min(25% RAM, 1 GB) is already 1 GB on
+    ///   any host above 4 GB, so a hardware change cannot move it and emitting it would buy nothing. The
+    ///   reason to leave it out is the FUTURE one: if the cap is ever raised deliberately, that is a formula
+    ///   change and belongs to a version-keyed block where it gets reviewed, not something a resize should
+    ///   silently propagate to production.</item>
+    /// <item><b>work_mem</b> — EXCLUDED. The formula would take it 31 MB -> 63 MB at 31.5 GB, and the only
+    ///   measurements above 31 MB on this store's heaviest read are WORSE: PlanRegressionSql at default
+    ///   26,565 ms, at 31 MB 25,617 ms, at 512 MB 59,323 ms (#2845). 63 MB is not 512 MB and no one has
+    ///   measured it, which is the point — the evidence that exists points the wrong way, so a resize is
+    ///   not the moment to move it. The deeper reason is that it does not belong to this block at all:
+    ///   everything here is a property of the MACHINE, while work_mem is a per-sort, per-connection ceiling
+    ///   whose right value follows from the QUERY MIX. The hardware changed; the sort behaviour did not.</item>
+    /// <item><b>max_parallel_workers</b> — not emitted because this class has never set it; it sits at the
+    ///   PostgreSQL default of 8 regardless of core count. Deriving it from cores is a plausible want on a
+    ///   16-core host, but it is a behaviour change rather than a staleness fix, and it multiplies the
+    ///   memory story above: each parallel worker gets its OWN work_mem for its share of a node, so raising
+    ///   parallelism raises peak sort memory on exactly the query that already degrades with more of it.
+    ///   It wants its own evidence and its own PR. Note this is also why the fingerprint records RAM and
+    ///   hypertables and not cores: with nothing core-derived to re-state, a core-only change has no work
+    ///   to do, and fingerprinting it would append a block of identical values on every resize.</item>
+    /// </list>
+    ///
+    /// <para><b>Reload semantics.</b> <c>effective_cache_size</c> and <c>maintenance_work_mem</c> are
+    /// SIGHUP-reloadable; the two worker settings are restart-only. The append runs before
+    /// <c>pg_ctl start</c> on a service-owned start, so in practice the whole block takes effect on that
+    /// very start — the same story as v3 and v7.</para>
+    /// </summary>
+    public static string BuildHardwareSizingConfAppend(long totalPhysicalMemoryBytes, int hypertableCount)
+    {
+        var settings = DeriveMemorySettings(totalPhysicalMemoryBytes);
+        var workers = DeriveWorkerSettings(hypertableCount);
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV8).Append('\n');
+        builder.Append(BuildHardwareFingerprint(totalPhysicalMemoryBytes, hypertableCount)).Append('\n');
+        builder.Append("effective_cache_size = ").Append(settings.EffectiveCacheSizeMb).Append("MB\n");
+        builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
+        builder.Append("timescaledb.max_background_workers = ").Append(workers.MaxBackgroundWorkers).Append('\n');
+        builder.Append("max_worker_processes = ").Append(workers.MaxWorkerProcesses).Append('\n');
         return builder.ToString();
     }
 
@@ -1088,6 +1237,30 @@ public sealed class DarlingManagedPostgres
             _logger.LogInformation(
                 "Appended v7 compression memory to postgresql.conf (maintenance_work_mem = {Maintenance}MB from min(max(5% RAM, 1536MB), 25% RAM, 2048MB); TimescaleDB compression sorts on this setting)",
                 DeriveMemorySettings(v7RamBytes).MaintenanceWorkMemMb);
+        }
+
+        /* v8 (#2845): the ONE block not keyed on a version marker. Every check above asks "is this marker
+           absent?", which is true exactly once in a cluster's life, so none of them notices that the host
+           it derived from has been replaced underneath it. This asks "was the sizing derived under the
+           hardware we are on now?" by comparing the LAST fingerprint in the file, and re-states the
+           host-derived settings when it was not.
+
+           Runs unconditionally rather than only for pre-existing clusters, including straight after a
+           fresh initdb has just written v3 with identical values. The redundant first block is the price of
+           a simple invariant — after any start, the conf carries a fingerprint for the CURRENT host — and
+           without recording one on the first start there would be nothing for the second start to compare
+           against. It converges immediately: the next start finds its own fingerprint and appends nothing. */
+        var hypertableCount = TimescaleSupport.HypertableCount;
+        var v8RamBytes = GetTotalPhysicalMemoryBytes();
+        var v8Fingerprint = BuildHardwareFingerprint(v8RamBytes, hypertableCount);
+        if (!ConfHasCurrentHardwareFingerprint(conf, v8Fingerprint))
+        {
+            File.AppendAllText(confPath, BuildHardwareSizingConfAppend(v8RamBytes, hypertableCount));
+            var v8Settings = DeriveMemorySettings(v8RamBytes);
+            var v8Workers = DeriveWorkerSettings(hypertableCount);
+            _logger.LogInformation(
+                "Appended v8 hardware sizing to postgresql.conf (host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers and work_mem deliberately NOT re-derived, see #2845)",
+                v8RamBytes / (1024L * 1024L), hypertableCount, v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses);
         }
     }
 
