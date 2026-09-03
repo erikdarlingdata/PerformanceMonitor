@@ -996,7 +996,23 @@ public sealed class DarlingCollectorRunner
                                would otherwise be silently counted as row-streaming time. Measured here so
                                DrainMsFrom can subtract it; the whole point of the split is that each number
                                names one real phase. */
+                            /* #2854: hoisted and stamped from finally, not assigned after the awaits below.
+                               A trailing assignment is SKIPPED when an await throws, and this delegate's
+                               awaits are store reads and a store write — precisely the ones #2796 found being
+                               cancelled.
+
+                               LATENT rather than live, and the distinction is worth writing down: a throwing
+                               watermark refresh propagates out of the driver's per-item try, which routes to
+                               onItemError, leaves `batch` null and `continue`s past onItemComplete
+                               (EnumeratedCollectorDriver.cs:635-702). onItemComplete is the ONLY reader of
+                               these fields, so that item prints no split line at all and the bad number never
+                               reaches a log. Stamped from finally anyway, because the field's honesty should
+                               not rest on a caller two files away continuing to discard the item, and because
+                               the pin derives its set from CollectorContext and requires every phase stamp to
+                               be handler-reachable. */
                             var watermarkWatch = Stopwatch.StartNew();
+                            try
+                            {
                             /* #2344: bound the read for the ONE collector whose value is clamped right
                                below. Name-guarded rather than applied to every enumerating definition,
                                for the reason WatermarkPolicy's remarks give: a ring-buffer source whose
@@ -1087,7 +1103,11 @@ public sealed class DarlingCollectorRunner
                                 }
                             }
 
-                            context.PerItemWatermarkMs = watermarkWatch.ElapsedMilliseconds;
+                            }
+                            finally
+                            {
+                                context.PerItemWatermarkMs = watermarkWatch.ElapsedMilliseconds;
+                            }
                         },
                     readItem: async (item, ct) =>
                     {
@@ -1122,9 +1142,29 @@ public sealed class DarlingCollectorRunner
                         context.PerItemTextChunks = 0;
                         context.PerItemTextIdsAttempted = 0;
                         context.PerItemTextProbeIds = 0;
+                        context.PerItemPhasesMeasured = false;
+                        /* #2854: stamped from finally, and the reader is hoisted out of the try only so the
+                           `using` below keeps its original disposal scope. A trailing assignment here was
+                           skipped whenever the open threw — a command timeout, a cancelled budget.
+
+                           Latent for the same reason as the watermark above: a throwing open never reaches
+                           onItemComplete, so the reading it would have produced cannot currently print. What
+                           it WOULD have produced is why the stamp is worth fixing regardless — DrainMsFrom
+                           subtracts open from the item total, so an unstamped 500s open hands its whole cost
+                           to drain: and blames row streaming for a statement that never returned a row. The
+                           flag is set in the same finally so the two can never disagree. */
                         var openWatch = Stopwatch.StartNew();
-                        using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
-                        context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
+                        DbDataReader openedReader;
+                        try
+                        {
+                            openedReader = await itemCommand.ExecuteReaderAsync(ct);
+                        }
+                        finally
+                        {
+                            context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
+                            context.PerItemPhasesMeasured = true;
+                        }
+                        using var itemReader = openedReader;
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
                         /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
                            query on purpose — it ships in plan_id order, so a budget cut truncates a SUFFIX,
@@ -1141,10 +1181,22 @@ public sealed class DarlingCollectorRunner
                             /* #2312 investigation: timed so the log split can say whether the invariant
                                per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
                                blended sql: could not distinguish them. */
+                            /* #2854: stamped from finally. This one is the PARENT of the sub-split #2816
+                               already fixed, which makes a bare stamp here worse than the defect it fixed:
+                               probe/target/write stamp from their own handlers and report real values, so a
+                               throwing fetch printed plan_fetch:0ms above non-zero children. PlanFetchOtherMs
+                               then clamps a negative residual to zero and the line reads as precise while
+                               being arithmetically impossible. */
                             var planFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStorePlansAsync(planFetchConnection, pgConnection,
-                                server, item, context, itemTimeout, ExtractPlanReferences(batch), ct);
-                            context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
+                            try
+                            {
+                                await FetchAndStorePlansAsync(planFetchConnection, pgConnection,
+                                    server, item, context, itemTimeout, ExtractPlanReferences(batch), ct);
+                            }
+                            finally
+                            {
+                                context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
+                            }
                         }
 
                         /* #2150: and this database's statement-text fetch, for the same reason and with the
@@ -1159,10 +1211,17 @@ public sealed class DarlingCollectorRunner
                         if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
                         {
                             /* #2312 investigation: same split as the plan fetch above. */
+                            /* #2854: stamped from finally, same parent/child inconsistency as the plan fetch. */
                             var textFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStoreQueryTextAsync(textFetchConnection, pgConnection,
-                                server, item, context, itemTimeout, ExtractTextReferences(batch), ct);
-                            context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
+                            try
+                            {
+                                await FetchAndStoreQueryTextAsync(textFetchConnection, pgConnection,
+                                    server, item, context, itemTimeout, ExtractTextReferences(batch), ct);
+                            }
+                            finally
+                            {
+                                context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
+                            }
                         }
 
                         return batch;
@@ -1201,8 +1260,14 @@ public sealed class DarlingCollectorRunner
                                all OPEN is bound by server-side work before the first row (for query_store,
                                the #pm_qs_slice aggregate) and no client-side budget or payload trimming will
                                touch it; a pass that is mostly drain is bound by moving rows, where the byte
-                               budget and the link are the levers. Only emitted when the host measured it. */
-                            if (context.PerItemOpenMs > 0)
+                               budget and the link are the levers. Only emitted when the host measured it.
+
+                               #2854: the gate is the FLAG, not `PerItemOpenMs > 0`. That form conflated a
+                               genuinely instant open with a path that measured nothing, and suppressed the
+                               whole split for the former — a real loss, because a fast open is exactly the
+                               item whose drain: number is worth reading. No value alone can separate those
+                               two states; a flag set beside the stamp can. */
+                            if (context.PerItemPhasesMeasured)
                             {
                                 /* #2312: the fetch phases print only when a separate fetch actually ran,
                                    so every other collector's line is byte-identical to before. */
