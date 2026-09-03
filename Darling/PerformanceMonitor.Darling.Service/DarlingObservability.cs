@@ -84,8 +84,8 @@ WHERE s.is_enabled
       (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id);";
 
     private const string InsertCollectionLogSql = @"
-INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);";
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);";
 
     /* The fleet-sentinel server_id the daily retention purge writes its run-record under. collection_log's
        server_id is NOT NULL and Collection Health reads per real server_id, but the purge is fleet-wide (per
@@ -225,6 +225,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         long storageMs,
         string? errorMessage,
         FanoutCost? fanout,
+        ServerPhaseCost? phases,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -256,6 +257,16 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = fanout.HasValue ? fanout.Value.ItemCount : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = fanout.HasValue ? fanout.Value.SlowestItem : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = fanout.HasValue ? fanout.Value.SlowestItemMs : (object)DBNull.Value });
+
+            /* V108, and all three NULL together or all three set for the same reason as the fanout triple
+               above: an open with no drain cannot be read as a split. The caller's gate is the #2851
+               MEASURED flag, not a non-zero test, so a genuinely instant open stores 0 rather than NULL -
+               "we measured it and it was fast" and "this path emits no split" must stay distinguishable.
+               other: is NOT stored; it is sql_duration_ms - sql_open_ms - sql_drain_ms and readers derive
+               it, so the terms cannot drift apart from the parent they decompose. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = phases.HasValue ? phases.Value.OpenMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = phases.HasValue ? phases.Value.DrainMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = phases.HasValue ? phases.Value.WatermarkMs : (object)DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

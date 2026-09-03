@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -92,7 +92,34 @@ public sealed record CollectorRunResult(
     /// Clamped at zero — the phases run on separate stopwatches, so tiny skew must never print negative.
     /// </summary>
     public long ServerOtherMs => Math.Max(0, SqlMs - ServerOpenMs - ServerDrainMs);
+
+    /// <summary>
+    /// The three phase figures as one value for the collection_log write (V108), or NULL when this path did
+    /// not measure them. Gated on <see cref="ServerPhasesMeasured"/> rather than on any figure being
+    /// non-zero, for the reason that flag exists: a genuinely instant open must record as 0, not vanish.
+    ///
+    /// <para>ONE value rather than three loose nullables so a caller cannot persist half a split - the
+    /// FanoutCost discipline, where a slowest item without its count is worse than no answer at all.
+    /// <see cref="ServerOtherMs"/> is deliberately absent: it is a residual defined against
+    /// <see cref="SqlMs"/>, and a stored copy could drift from the column it is supposed to complete.
+    /// Readers subtract, exactly as the property above does.</para>
+    ///
+    /// <para>Narrowing to int matches the collection_log columns, which are integer like sql_duration_ms
+    /// itself; a phase would have to exceed 24 days to overflow, and the #2673 wall-clock budget abandons
+    /// the cycle at 120 seconds.</para>
+    /// </summary>
+    public ServerPhaseCost? ServerPhases => ServerPhasesMeasured
+        ? new ServerPhaseCost((int)ServerOpenMs, (int)ServerDrainMs, (int)ServerWatermarkMs)
+        : null;
 }
+
+/// <summary>
+/// One server-scoped collector run's phase split, as persisted by V108: the open and the drain that
+/// decompose <c>sql_duration_ms</c>, and the watermark read that deliberately does NOT (it runs before that
+/// stopwatch starts - see <see cref="CollectorRunResult.ServerWatermarkMs"/>). All three or none, which is
+/// what makes the stored triple readable: a row with an open but no drain would be un-interpretable.
+/// </summary>
+public readonly record struct ServerPhaseCost(int OpenMs, int DrainMs, int WatermarkMs);
 
 /// <summary>
 /// Runs a shared collector definition against one monitored server and binary-COPYs the rows

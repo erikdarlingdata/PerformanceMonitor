@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -89,7 +89,21 @@ internal static class DarlingDataReader
         double? StoreDurationMs,
         long? RowsCollected,
         string? Status,
-        string? ErrorMessage);
+        string? ErrorMessage,
+        double? SqlOpenMs = null,
+        double? SqlDrainMs = null,
+        double? WatermarkMs = null)
+    {
+        /* The residual, derived rather than read (V108 stores no other_ms column on purpose): open + drain
+           + this SUM to SqlDurationMs by construction, so a large value here is a real finding - cost in
+           our own code between the phases, in neither database - and never a stale copy. NULL when the run
+           recorded no split, so "not measured" stays distinct from "measured zero". Clamped at zero: the
+           phases run on separate stopwatches and tiny skew must not surface as a negative. */
+        public double? SqlOtherMs =>
+            SqlDurationMs is null || SqlOpenMs is null || SqlDrainMs is null
+                ? null
+                : Math.Max(0, SqlDurationMs.Value - SqlOpenMs.Value - SqlDrainMs.Value);
+    }
 
     /// <summary>One database file's latest I/O snapshot; avg latency is computed by the tool.</summary>
     public sealed record FileIoRow(
@@ -1424,7 +1438,10 @@ internal static class DarlingDataReader
             duckdb_duration_ms,
             rows_collected,
             status,
-            error_message
+            error_message,
+            sql_open_ms,
+            sql_drain_ms,
+            watermark_ms
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -1482,7 +1499,13 @@ internal static class DarlingDataReader
                 reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
                 reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7)));
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                /* NULL on every row written before V108, and on every run whose path emits no split -
+                   both genuinely "not recorded", which is why these stay nullable rather than defaulting
+                   to zero. A zero here would claim a measured instant open. */
+                reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
+                reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
+                reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10))));
         }
 
         return rows;
