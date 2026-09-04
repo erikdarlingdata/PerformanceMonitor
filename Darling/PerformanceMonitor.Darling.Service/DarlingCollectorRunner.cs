@@ -244,21 +244,23 @@ public sealed class DarlingCollectorRunner
     /// failure counters and for the same reason: a restart forgetting the estimate costs exactly one
     /// first-contact-sized pass.
     /// </summary>
-    private readonly ConcurrentDictionary<(int ServerId, string Database), QueryStorePlanXmlState.PlanSizeEstimate> _observedPlanSize = new();
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), QueryStorePlanXmlState.PlanSizeEstimate> _observedPlanSize = new();
 
     /// <summary>
-    /// Per-database ids the activity-driven fetch (#2312 Finding 2) still owes the store: probed missing in
-    /// an earlier cycle but deferred by the candidate cap or the byte budget. Carried IN MEMORY because the
-    /// probe's input is each cycle's batch references, and a plan referenced once — its delta rows shipped,
-    /// never executed again — would otherwise never re-enter the probe and never get its XML. The honest
-    /// costs of in-memory: a restart forgets the debt, and the ids re-enter only if their plans execute
-    /// again — for the literal-churn plans that dominate deferrals, XML nobody can reach from a fact is the
-    /// cheap thing to lose. Bounded: ids are 8 bytes and a first-contact backlog is one catalog's worth.
+    /// Per-database, per-COLLECTOR ids the activity-driven fetch (#2312 Finding 2) still owes the store
+    /// — see <see cref="FetchStateKey"/> for why the collector belongs in that key (#2902). Probed
+    /// missing in an earlier cycle but deferred by the candidate cap or the byte budget. Carried IN MEMORY
+    /// because the probe's input is each cycle's batch references, and a plan referenced once — its delta
+    /// rows shipped, never executed again — would otherwise never re-enter the probe and never get its
+    /// XML. The honest costs of in-memory: a restart forgets the debt, and the ids re-enter only if their
+    /// plans execute again — for the literal-churn plans that dominate deferrals, XML nobody can reach
+    /// from a fact is the cheap thing to lose. Bounded: ids are 8 bytes and a first-contact backlog is one
+    /// catalog's worth.
     /// </summary>
-    private readonly ConcurrentDictionary<(int ServerId, string Database), long[]> _planFetchCarryover = new();
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), long[]> _planFetchCarryover = new();
 
     /// <summary>Text twin of <see cref="_planFetchCarryover"/> — same deferral contract, keyed by query_id.</summary>
-    private readonly ConcurrentDictionary<(int ServerId, string Database), long[]> _textFetchCarryover = new();
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), long[]> _textFetchCarryover = new();
 
     /// <summary>
     /// Consecutive-failure count for the TEXT fetch (#2776), the backoff input its
@@ -270,7 +272,40 @@ public sealed class DarlingCollectorRunner
     /// <see cref="QueryStorePlanXmlState.PlanSizeEstimate"/> for exactly the opposite reason: it already has
     /// a record to live in.</para>
     /// </summary>
-    private readonly ConcurrentDictionary<(int ServerId, string Database), int> _textFetchFailures = new();
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), int> _textFetchFailures = new();
+
+    /// <summary>
+    /// The key every one of the four fetch-state dictionaries above is read and written under. The COLLECTOR
+    /// is part of it, and that is the fix rather than a detail (#2902).
+    ///
+    /// <para><b>Why it was wrong without it.</b> The fetch's gate is a SKU flag —
+    /// <see cref="CollectorContext.CapturePlanXml"/> for plans and
+    /// <see cref="CollectorContext.FetchQueryTextSeparately"/> for text — not a collector identity, so
+    /// every collector that takes the enumerated path reaches it: five do off Azure, and only one of them
+    /// (query_store) can ever CREATE this state, because <see cref="ExtractPlanReferences"/> and its text
+    /// twin extract nothing from any other collector's batch. Keyed by database alone, the other four found
+    /// query_store's deferred ids waiting under the key they happened to share, drained them, and had the
+    /// fetch's wall clock recorded against their own <c>collection_log</c> row. Measured over 38 h on one
+    /// monitoring host: ~346 s of Query Store fetch time billed to plan_correction, query_store_health and
+    /// index_object_stats, with the signature that admits no other reading — <c>probed = 0</c> with
+    /// <c>ids &gt; 0</c>, a collector that fetched ids it never probed for.</para>
+    ///
+    /// <para>The key shape came from <see cref="_consecutiveQueryStoreItemFailures"/>, which is per-database
+    /// for the same reason and is safe that way only because every one of ITS call sites sits behind an
+    /// explicit <c>definition.Name == query_store</c> check. The shape was inherited; the guard was not.
+    /// Holding the collector in the key rather than re-testing the name at the fetch's call site keeps the
+    /// invariant in the data structure the state lives in, which is the one place it cannot drift from.</para>
+    ///
+    /// <para>A method rather than an inline tuple literal so the #2902 pin drives the SHIPPED construction
+    /// instead of a copy of it — an inline literal at each site is exactly how the collector went missing.
+    /// Ordinal comparison (the tuple's default for strings) matches the <c>StringComparison.Ordinal</c>
+    /// every <c>definition.Name</c> comparison in this file already uses.</para>
+    /// </summary>
+    internal static (int ServerId, string Database, string Collector) FetchStateKey(
+        int serverId,
+        string databaseName,
+        string collectorName)
+        => (serverId, databaseName, collectorName);
 
     /// <summary>
     /// Ids per IN-list statement for the plan fetch. Small on purpose: each id in the list is a plan the
@@ -1399,7 +1434,7 @@ public sealed class DarlingCollectorRunner
                             try
                             {
                                 await FetchAndStorePlansAsync(planFetchConnection, pgConnection,
-                                    server, item, context, itemTimeout, ExtractPlanReferences(batch), ct);
+                                    server, item, definition.Name, context, itemTimeout, ExtractPlanReferences(batch), ct);
                             }
                             finally
                             {
@@ -1424,7 +1459,7 @@ public sealed class DarlingCollectorRunner
                             try
                             {
                                 await FetchAndStoreQueryTextAsync(textFetchConnection, pgConnection,
-                                    server, item, context, itemTimeout, ExtractTextReferences(batch), ct);
+                                    server, item, definition.Name, context, itemTimeout, ExtractTextReferences(batch), ct);
                             }
                             finally
                             {
@@ -2158,10 +2193,14 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// The cycle's distinct referenced plans with their live hashes — the probe's whole input (#2312).
-    /// Generic because the dispatch loop is; any batch that is not query_store rows extracts nothing, and
-    /// the caller's <c>CapturePlanXml</c> gate means that never actually happens. When one plan appears in
-    /// several rows (several intervals), a non-null hash wins over a null one — the probe compares against
-    /// whatever the engine reported, and null only means the payload row predated the hash column.
+    /// Generic because the dispatch loop is; any batch that is not query_store rows extracts nothing, which
+    /// #2902 measured happening on every cycle — <c>CapturePlanXml</c> is a SKU flag, so it gates the SKU
+    /// and not the collector, and all five enumerating collectors reach this. Extracting nothing is the
+    /// right answer for them; what was wrong is that the fetch then read a carryover key they shared.
+    ///
+    /// <para>When one plan appears in several rows (several intervals), a non-null hash wins over a null
+    /// one — the probe compares against whatever the engine reported, and null only means the payload row
+    /// predated the hash column.</para>
     /// </summary>
     private static IReadOnlyList<(long PlanId, string? PlanHash)> ExtractPlanReferences<TRow>(List<TRow> batch)
     {
@@ -2238,7 +2277,7 @@ public sealed class DarlingCollectorRunner
     /// the learned average is the expensive part and it stays. Advisory, so a lost race is fine: the next
     /// idle cycle clears it again.
     /// </remarks>
-    private void ClearPlanFetchBackoff((int ServerId, string Database) carryKey)
+    private void ClearPlanFetchBackoff((int ServerId, string Database, string Collector) carryKey)
     {
         if (_observedPlanSize.TryGetValue(carryKey, out var estimate) && estimate.ConsecutiveFetchFailures > 0)
         {
@@ -2344,14 +2383,16 @@ public sealed class DarlingCollectorRunner
         NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
+        string collectorName,
         CollectorContext context,
         int itemTimeout,
         IReadOnlyList<(long PlanId, string? PlanHash)> references,
         CancellationToken cancellationToken)
     {
         /* Hoisted out of the try (#2776) so the catch can advance this database's backoff counter — the
-           handler needs the same key the body uses. */
-        var carryKey = (server.ServerId, databaseName);
+           handler needs the same key the body uses. Carries the collector since #2902 — see
+           FetchStateKey for why the database alone let four other collectors drain this one's debt. */
+        var carryKey = FetchStateKey(server.ServerId, databaseName, collectorName);
 
         /* Hoisted for the same shape of reason (#2816): the probe stamp sits at the END of the probe phase,
            so a probe that THROWS jumps clean over it and reports probe:0ms. The residual then absorbs the
@@ -2747,13 +2788,15 @@ public sealed class DarlingCollectorRunner
         NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
+        string collectorName,
         CollectorContext context,
         int itemTimeout,
         IReadOnlyList<(long QueryId, string? QueryHash)> references,
         CancellationToken cancellationToken)
     {
-        /* Hoisted out of the try (#2776), same reason as the plan side: the catch advances the backoff. */
-        var carryKey = (server.ServerId, databaseName);
+        /* Hoisted out of the try (#2776), same reason as the plan side: the catch advances the backoff.
+           Collector-scoped since #2902, same as the plan side and for the same measured reason. */
+        var carryKey = FetchStateKey(server.ServerId, databaseName, collectorName);
 
         /* #2816: hoisted for the same reason as the plan side — a probe that throws would otherwise report
            probe:0ms and hand its whole cost to the other: residual, inverting where the time was spent. */
