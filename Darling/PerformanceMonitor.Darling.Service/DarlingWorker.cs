@@ -1201,7 +1201,12 @@ public sealed class DarlingWorker : BackgroundService
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
             /* #2171: live provider like its siblings — a store reload flipping plan_xml_compression
                takes effect on the next write batch, no restart. */
-            compressPlanContent: () => !string.Equals(config.PlanXmlCompression, "none", StringComparison.OrdinalIgnoreCase));
+            compressPlanContent: () => !string.Equals(config.PlanXmlCompression, "none", StringComparison.OrdinalIgnoreCase),
+            /* #2862: the procedure_stats plan-capture cadence, clamped at the provider like the V59 budget
+               above so the runner never sees an out-of-range interval. A file-only knob today, but read
+               live like its siblings, so setting it to 1 restores every-cycle plan capture and promoting
+               it to a store column later needs no change here. */
+            procedureStatsPlanCycleInterval: () => StoreConfigProvider.ClampProcedureStatsPlanCycleInterval(config.ProcedureStatsPlanCycleInterval));
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
