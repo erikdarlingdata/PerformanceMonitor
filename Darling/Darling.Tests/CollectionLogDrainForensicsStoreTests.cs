@@ -274,6 +274,16 @@ public class CollectionLogDrainForensicsStoreTests
         /* The two callers that are not a scheduled body pass null rather than folding a previous body's
            bookkeeping into their rows. */
         Assert.Equal(2, Regex.Matches(worker, @"peerMaxAtDispatchMs: null").Count);
+
+        /* Every LogCollectionAsync inside RunOneAsync carries the body's mark, including the early-return
+           YIELDED / PERMISSIONS / ERROR / SESSION_MISSING arms (#2864 review). Those are exactly the rows
+           where "were this body's other collectors also slow" is useful - a lock-timeout yield during a
+           sweep-wide slowdown is a different finding from one on a healthy body - and the column's own
+           rationale is that a ratio needs a denominator from ordinary rows, not only from failures. */
+        Assert.DoesNotContain("sweepPeerMaxMs: null", worker, StringComparison.Ordinal);
+
+        /* drain STAYS null on those arms: nothing was drained, so there is nothing to describe. */
+        Assert.Equal(7, Regex.Matches(worker, @"drain: null").Count);
     }
 
     /// <summary>
