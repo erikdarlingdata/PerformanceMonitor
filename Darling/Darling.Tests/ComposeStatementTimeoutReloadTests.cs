@@ -151,4 +151,56 @@ public sealed class ComposeStatementTimeoutReloadTests
         /* Reload 3 — now it settles, and stops paying the catalog write. */
         Assert.False(DarlingManagedRoles.ShouldReassertComposeStatementTimeout(stored, applied, true, true));
     }
+
+    /// <summary>
+    /// <b>The first-run ordering trap.</b> Role provisioning runs BEFORE
+    /// <c>StoreConfigProvider.SeedIfEmptyAsync</c>, so on a brand-new managed store there is no
+    /// <c>config_service</c> row to read: the roles are written with the 15 s default, and only then does
+    /// the seed insert <c>darling.json</c>'s value. An operator who set the knob up front on a large store
+    /// therefore has roles at 15 s and a store saying 30.
+    ///
+    /// <para>Seeding the reload baseline from the post-seed store view records 30 as applied when the roles
+    /// never received it — and because the gate fires only on a difference, that mismatch is **permanent**
+    /// for the life of the process. So the baseline is seeded from what <c>EnsureProvisionedAsync</c>
+    /// RETURNS. Caught in review of #2921; the two cases below are the before and after.</para>
+    /// </summary>
+    [Fact]
+    public void AFreshStore_SeedsTheBaselineFromWhatTheRolesGot_NotFromThePostSeedView()
+    {
+        const int provisioningWroteToTheRoles = 15;  // no config_service row existed yet
+        const int storeAfterSeeding = 30;            // darling.json's value, inserted by the seed
+
+        /* The bug: baseline from the post-seed view. The gate sees no difference and never corrects it. */
+        Assert.False(
+            DarlingManagedRoles.ShouldReassertComposeStatementTimeout(
+                storeAfterSeeding, appliedSeconds: storeAfterSeeding, managedStore: true, isWindows: true),
+            "seeding the baseline from the store view hides a first-run mismatch permanently");
+
+        /* The fix: baseline from what provisioning actually wrote, so the first reload converges the roles. */
+        Assert.True(
+            DarlingManagedRoles.ShouldReassertComposeStatementTimeout(
+                storeAfterSeeding, appliedSeconds: provisioningWroteToTheRoles,
+                managedStore: true, isWindows: true));
+    }
+
+    /// <summary>
+    /// Provisioning reports the CLAMPED value, because that is what the batch wrote. Returning the raw read
+    /// would hand back a baseline the roles do not carry — a stored 0 provisions <c>'15s'</c> — and the very
+    /// next reload would re-assert a no-op it believed was a change.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 15)]
+    [InlineData(-5, 15)]
+    [InlineData(1, 5)]
+    [InlineData(30, 30)]
+    [InlineData(99999, 600)]
+    public void TheBaselineIsTheClampedValue_MatchingWhatTheSqlCarries(int stored, int expected)
+    {
+        /* Both sides derive from the one clamp, which is the property under test: the value a caller records
+           as applied must equal the number the shipped SQL actually contains. */
+        Assert.Equal(expected, StoreConfigProvider.ClampComposeStatementTimeoutSeconds(stored));
+        Assert.Contains(
+            $"SET statement_timeout = '{expected}s'",
+            DarlingManagedRoles.BuildComposeStatementTimeoutSql(stored), StringComparison.Ordinal);
+    }
 }

@@ -1029,7 +1029,15 @@ public sealed class DarlingWorker : BackgroundService
             try
             {
                 var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
-                await DarlingManagedRoles.EnsureProvisionedAsync(postgres, dataDirectory, _logger, stoppingToken);
+                /* #2918: record what provisioning actually WROTE onto the roles, not what the store holds
+                   afterwards. This runs BEFORE SeedIfEmptyAsync, so on a brand-new store there is no
+                   config_service row to read and the roles get the 15 s default while the seed then inserts
+                   darling.json's value — seeding the reload baseline from the post-seed view would claim a
+                   value the roles never received, and the gate only fires on a difference, so that first-run
+                   mismatch would never be corrected. Left at -1 if provisioning throws, so the first reload
+                   re-asserts rather than trusting a write that did not land. */
+                _appliedComposeStatementTimeoutSeconds =
+                    await DarlingManagedRoles.EnsureProvisionedAsync(postgres, dataDirectory, _logger, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1175,9 +1183,6 @@ public sealed class DarlingWorker : BackgroundService
             StoreConfigProvider.ApplyToConfig(config, initialView);
             _scheduleOverrides = initialView.ScheduleOverrides;
             _lastConfigVersion = initialView.ConfigVersion;
-            /* #2918: provisioning above already wrote the store's value onto the roles, so this is the
-               live ceiling -- seeding it here is what stops the first reload re-asserting a no-op. */
-            _appliedComposeStatementTimeoutSeconds = initialView.ComposeStatementTimeoutSeconds;
             /* Stage 2: honor config_service.paused from the very first sweep (a service that was paused
                before a restart comes back up paused). */
             _paused = initialView.Paused;
