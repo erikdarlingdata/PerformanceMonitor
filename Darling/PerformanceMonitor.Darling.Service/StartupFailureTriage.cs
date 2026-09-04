@@ -15,17 +15,26 @@ using Npgsql;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// Whether a failure of the collection loop's first store interaction — open the store connection, then
-/// <c>PgMigrations.MigrateAsync</c> — is worth trying again, and how long that is worth doing for (#2936).
+/// Whether a failure of one of <c>DarlingWorker</c>'s three collection-blocking startup steps is worth
+/// trying again, and how long that is worth doing for (#2936).
 ///
-/// <para><b>The problem this exists to answer.</b> That step used to sit behind one
-/// <c>catch (Exception ex) when (ex is not OperationCanceledException)</c>, one <c>LogCritical</c> and one
-/// <c>return</c>, so a store that was unreachable for two seconds ended collection for the life of the
-/// process exactly as surely as a rung that can never apply. The catch filter is too coarse to say which
-/// happened, and the process does not exit on that <c>return</c> — the worker task completes successfully,
-/// the MCP and web hosts keep serving, and the Windows service keeps reporting Running while collecting
-/// nothing. So the failure that most deserves a retry is also the one whose symptom looks least like a
-/// small problem.</para>
+/// <para><b>The three sites, which are one defect.</b> Loading <c>darling.json</c>, bootstrapping the
+/// managed Postgres, and opening the store connection to run <c>PgMigrations.MigrateAsync</c>. Each sat
+/// behind a single <c>catch (Exception)</c>, a single <c>LogCritical</c> and a single <c>return</c>, so a
+/// file another process held open for a moment, a store that was unreachable for two seconds, and a
+/// migration rung that can never apply all ended collection for the life of the process, identically. A
+/// bare <c>catch (Exception)</c> cannot say which arrived.</para>
+///
+/// <para><b>And the process does not exit on that <c>return</c>.</b> The worker task completes
+/// SUCCESSFULLY, so the host stays up, the MCP and web hosts keep serving, and the Windows service keeps
+/// reporting Running — SCM recovery never fires, because nothing crashed. So the failures that most
+/// deserve a retry are exactly the ones whose symptom looks least like a small problem.</para>
+///
+/// <para><b>Three sites, ONE classifier, deliberately.</b> The discrimination each site needs is the same
+/// question — exception type chain and, where the server answered, <c>PostgresException.SqlState</c> — and
+/// a file-sharing violation is a type-chain question just as much as a refused socket is. Forking the
+/// logic per site would give three places for the boundary to drift; the one per-site difference that
+/// does exist is named in <see cref="IsRetryable"/> as a carve-out rather than a second predicate.</para>
 ///
 /// <para><b>Default-deny, and that is the load-bearing decision.</b> <see cref="IsRetryable"/> is an
 /// ALLOWLIST. Anything it does not recognise keeps the old behaviour byte for byte: the critical line and
@@ -59,6 +68,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>NpgsqlException -> SocketException</c>; an unroutable host as
 /// <c>NpgsqlException -> TimeoutException</c>; the store dying mid-statement as
 /// <c>NpgsqlException -> IOException -> SocketException</c>.</description></item>
+/// <item><description><b>A plain <see cref="IOException"/>, which is how a file another process is
+/// holding arrives.</b> This is what the config-load site is for: <c>DarlingConfig.Load</c> is
+/// <c>File.Exists</c> then <c>File.ReadAllText</c> then deserialize, and a sharing violation on a
+/// <c>darling.json</c> that an installer, the Viewer's Settings save or a config-management tool is
+/// mid-write is as transient as a store that is not up yet. The managed bootstrap reaches the same shape
+/// unpacking <c>pg-runtime.zip</c> over a transiently locked file. <b>But NOT the not-found subtypes</b> —
+/// see the carve-out below, which is the one place the three sites genuinely differ.</description></item>
 /// <item><description><b>A bare <see cref="TimeoutException"/>, which is how the migration lock-wait
 /// budget expires.</b> A sibling instance holding the advisory lock is transient by definition — it is
 /// applying rungs and will release. Note the two spellings this arrives in: a blocking
@@ -107,17 +123,45 @@ namespace PerformanceMonitor.Darling.Service;
 /// connection string produces while Npgsql is still parsing it belongs there, and got there without
 /// being enumerated.</para>
 ///
+/// <para><b>The carve-out, without which the retry would be worse than no retry.</b> Three file-system
+/// verdicts are terminal despite reaching this as, or wrapping, an <see cref="IOException"/>.
+/// <see cref="FileNotFoundException"/> and <see cref="DirectoryNotFoundException"/> derive from it, and
+/// <c>DarlingConfig.Load</c> throws the former for a config that is not there — the single most likely
+/// reason it ever fails, on a first install.</para>
+///
+/// <para>The bootstrap reaches this carve-out only through the FRAMEWORK, which is worth stating exactly
+/// because the obvious guess is wrong: <c>DarlingManagedPostgres</c> raises none of these three itself —
+/// a missing <c>pg-runtime.zip</c>, an incomplete runtime directory and a missing credential file are all
+/// <c>InvalidOperationException</c>, which default-deny already holds terminal without any carve-out.
+/// What the carve-out covers there is its nineteen <c>File</c>/<c>Directory</c> calls under
+/// <c>%ProgramData%</c>, whose ACLs this class actively rewrites, so
+/// <see cref="UnauthorizedAccessException"/> is the member that actually bites at that site.</para>
+///
+/// <para><see cref="UnauthorizedAccessException"/> does NOT derive from <see cref="IOException"/> and
+/// still has to be named here, which is the part that is easy to get wrong: <b>on Unix .NET raises it
+/// WRAPPING an <c>IOException("Permission denied")</c></b>, so the chain walk below would have called an
+/// ACL problem transient. Measured rather than assumed — a <c>chmod 000</c> config and a directory in
+/// place of the config file both present exactly that way — and note that a test constructing this
+/// exception BARE rather than with its real inner passes for the wrong reason, which is how the gap
+/// survived its first test.</para>
+///
+/// <para>None of the three fixes itself, and all are exactly the case default-deny exists to keep loud:
+/// retried, they would spend the budget emitting warnings and then produce the one line naming the
+/// missing or unreadable path two minutes late. Classified by TYPE rather than by site, so the store path
+/// — where all three are unreachable — needs no special case and the two file-touching sites cannot
+/// drift apart.</para>
+///
 /// <para><b><see cref="OperationCanceledException"/> is not classified here at all.</b> The call site's
 /// filter excludes it ahead of this, because it means the service is stopping.</para>
 /// </summary>
-internal static class StoreStartupFailureTriage
+internal static class StartupFailureTriage
 {
     /// <summary>
     /// How many times the collection loop's first store interaction may be tried before a failure
     /// <see cref="IsRetryable"/> accepts becomes terminal anyway.
     ///
-    /// <para>Paired with <see cref="MigrateRetryBudget"/>, which is the real bound — see that constant
-    /// for why an attempt cap alone is not one. Twenty-five tries <see cref="MigrateRetryDelay"/> apart is
+    /// <para>Paired with <see cref="RetryBudget"/>, which is the real bound — see that constant
+    /// for why an attempt cap alone is not one. Twenty-five tries <see cref="RetryDelay"/> apart is
     /// 24 waits of 5 s, so the two caps expire together on a failure that returns immediately, which is
     /// the ordinary case; the attempt count exists because it is what the warning line reports and what an
     /// operator counts in.</para>
@@ -138,10 +182,10 @@ internal static class StoreStartupFailureTriage
     /// not reused across regimes. Nothing about a per-command deadline or a Windows shared-memory
     /// reservation race says how long a store takes to come back.</para>
     /// </summary>
-    internal const int MigrateAttempts = 25;
+    internal const int Attempts = 25;
 
     /// <summary>
-    /// Pause between the attempts <see cref="MigrateAttempts"/> allows.
+    /// Pause between the attempts <see cref="Attempts"/> allows.
     ///
     /// <para>A connect against a store that is not listening fails immediately — measured sub-millisecond,
     /// <see cref="SocketException"/> straight back — so this delay is the entire cost of a poll and the
@@ -149,11 +193,11 @@ internal static class StoreStartupFailureTriage
     /// store start it exists to cover, while 25 connection attempts spread over two minutes is nothing
     /// against a store that is either not listening or busy replaying WAL.</para>
     /// </summary>
-    internal static readonly TimeSpan MigrateRetryDelay = TimeSpan.FromSeconds(5);
+    internal static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// Wall clock from the first attempt after which no further attempt is made, whatever
-    /// <see cref="MigrateAttempts"/> has left.
+    /// <see cref="Attempts"/> has left.
     ///
     /// <para><b>Why an attempt cap alone is not a bound, measured rather than assumed.</b> An attempt is
     /// not instantaneous just because a refused connect is: a peer instance holding the migration advisory
@@ -163,7 +207,7 @@ internal static class StoreStartupFailureTriage
     /// never retried — correct behaviour, and exactly the shape that makes an attempt cap misleading.
     /// Twenty-five attempts each free to block for 25 minutes is over ten hours of retrying, which is not
     /// what "retry briefly, then say so" means and which would push the one definitive line most of a day
-    /// past the failure it describes. So this bounds the WALL CLOCK, <see cref="MigrateAttempts"/> bounds
+    /// past the failure it describes. So this bounds the WALL CLOCK, <see cref="Attempts"/> bounds
     /// the pauses, and whichever expires first ends the retrying.</para>
     ///
     /// <para><b>What each cap therefore covers.</b> A store that is not listening fails an attempt in
@@ -186,7 +230,7 @@ internal static class StoreStartupFailureTriage
     /// even a fully spent budget delivers the first collection cycle within the span a normal cold start
     /// occupies anyway.</para>
     /// </summary>
-    internal static readonly TimeSpan MigrateRetryBudget = TimeSpan.FromSeconds(120);
+    internal static readonly TimeSpan RetryBudget = TimeSpan.FromSeconds(120);
 
     /// <summary>
     /// <c>SqlState</c>s that mean "not yet" rather than "no" — see the class remarks for what each one was
@@ -245,6 +289,19 @@ internal static class StoreStartupFailureTriage
             if (current is PostgresException postgres)
             {
                 return postgres.SqlState is not null && s_retryableSqlStates.Contains(postgres.SqlState);
+            }
+        }
+
+        /* Three file-system verdicts that are NOT transient at any of the three sites, checked ahead of
+           the transport pass because each either IS an IOException or ARRIVES WRAPPING one, so the
+           IOException arm below would otherwise swallow all three. A config that is not there, a
+           pg-runtime.zip that is not there, and a file this account cannot read are installs to fix, not
+           moments to wait out. See the class remarks. */
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException)
+            {
+                return false;
             }
         }
 
