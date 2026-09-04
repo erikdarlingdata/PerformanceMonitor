@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -218,7 +220,9 @@ public sealed class QueryStoreServerGateTests
     /// <para>The "same dictionary" half is the one that would silently fail: two loops each holding a private
     /// registry compile, pass the gate's own unit tests, and exclude nothing. The "outside the step" half matters
     /// because an abandoned-but-wedged slice must keep the gate closed — the statement is still running on the
-    /// server, so the tick must keep yielding to it.</para>
+    /// server, so the tick must keep yielding to it. Taking it outside is necessary but was not sufficient: the
+    /// LEASE has to outlive the abandonment too, which is what
+    /// <see cref="TheBackfillHandsItsLeaseToTheStepRatherThanScopingIt"/> pins.</para>
     /// </summary>
     [Fact]
     public void Lite_BothLoopsShareOneGateRegistry()
@@ -258,6 +262,183 @@ public sealed class QueryStoreServerGateTests
         var gateIndex = worker.IndexOf("_queryStoreGates.GetOrAdd(runtime.ServerId", StringComparison.Ordinal);
         var stepIndex = worker.IndexOf("_backfillSliceSteps.GetOrAdd", StringComparison.Ordinal);
         Assert.True(gateIndex > 0 && stepIndex > 0);
+    }
+
+
+    /* ──────────── the LEASE'S LIFETIME, which "outside the step" did not buy ────────────
+
+       Found while working #2874 group D. Both SKUs took the gate outside the AbandonableStep, as the
+       tests above pin — and then scoped the lease with `using var` inside the foreach BODY, so it was
+       disposed at the end of the ITERATION. Including the iteration that ended Abandoned, which is the
+       one outcome where the slice really is still running against the monitored server: #2148's
+       in-flight guard went on quarantining that server's backfill while this gate stood wide open, so
+       the tick was free to start its own heavy extraction beside the wedged slice. The #2148 half held;
+       the #2165 half lapsed exactly where it was needed.
+
+       The lease is handed to the step now (holdUntilStepEnds), which releases it when its own guard
+       clears. Both halves of that are load-bearing and both are asserted: it must still be closed after
+       an abandonment, and it must OPEN when the wedge finally dies — a gate that never reopened would
+       stop one server's Query Store collection for the life of the process, which is a worse failure
+       than the overlap. */
+
+    /// <summary>
+    /// The end-to-end property, driven through the REAL gate and the REAL step in the shape both SKUs'
+    /// loop bodies use: after an abandonment the tick still cannot collect for that server, and the gate
+    /// opens on its own the moment the wedged slice truly ends.
+    /// </summary>
+    [Fact]
+    public async Task AnAbandonedSliceKeepsTheServersGateClosedUntilItTrulyEnds()
+    {
+        var gates = new ConcurrentDictionary<string, QueryStoreServerGate>(StringComparer.Ordinal);
+        var steps = new ConcurrentDictionary<string, AbandonableStep>(StringComparer.Ordinal);
+        var wedge = new TaskCompletionSource();
+
+        /* ── one iteration of the backfill loop body ── */
+        var gate = gates.GetOrAdd("alpha", static _ => new QueryStoreServerGate()).TryAcquire();
+        Assert.NotNull(gate);
+
+        var step = steps.GetOrAdd("alpha", static _ => new AbandonableStep());
+        var result = await step.RunAsync(
+            () => wedge.Task, TimeSpan.FromMilliseconds(200), holdUntilStepEnds: gate);
+        /* ── the iteration ends here: whatever the old `using var` covered is out of scope now ── */
+
+        Assert.Equal(AbandonableStepOutcome.Abandoned, result.Outcome);
+
+        Assert.True(gates["alpha"].IsHeld,
+            "an abandoned slice is still running on the server, so its gate must still be closed");
+        Assert.Null(gates.GetOrAdd("alpha", static _ => new QueryStoreServerGate()).TryAcquire());
+        Assert.True(steps["alpha"].IsInFlight, "the #2148 quarantine and the #2165 gate move together");
+
+        /* Not a leak in the other direction: the wedge dying opens both. */
+        wedge.SetResult();
+        for (var i = 0; i < 200 && gates["alpha"].IsHeld; i++)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.False(gates["alpha"].IsHeld, "the gate must reopen when the wedged slice truly ends");
+        Assert.False(steps["alpha"].IsInFlight);
+        using var tick = gates.GetOrAdd("alpha", static _ => new QueryStoreServerGate()).TryAcquire();
+        Assert.NotNull(tick);
+    }
+
+    /// <summary>
+    /// Neither SKU may scope the backfill's lease to its own loop iteration.
+    ///
+    /// <para>A COUNT cannot catch this. Moving a <c>using</c> — into the loop body, out of it, around the
+    /// call — leaves every occurrence count in the file invariant, which is exactly how the defect
+    /// survived the wiring pins above. So the assertion is on the SPAN between the acquire and the
+    /// handoff: the only region where a lease-scoping <c>using</c> could sit and still cover the slice.
+    /// The span is derived from offsets, so a relocation moves it.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs")]
+    [InlineData("Lite/Services/RemoteCollectorService.QueryStoreBackfill.cs")]
+    public void TheBackfillHandsItsLeaseToTheStepRatherThanScopingIt(string relativePath)
+    {
+        var source = ReadRepoFile(relativePath);
+
+        Assert.Equal(1, CountOccurrences(source, AcquireAnchor));
+        Assert.Equal(1, CountOccurrences(source, HandoffAnchor));
+        Assert.Equal(1, CountOccurrences(source, StepCallAnchor));
+
+        Assert.Null(FindLeaseScopedToTheSlice(source));
+
+        /* And the handoff is an ARGUMENT of the step call, not a statement after it — no statement
+           boundary may sit between the two. */
+        var call = source.IndexOf(StepCallAnchor, StringComparison.Ordinal);
+        var handoff = source.IndexOf(HandoffAnchor, StringComparison.Ordinal);
+        Assert.True(call < handoff, "the handoff must be inside the step call, not before it");
+        Assert.DoesNotContain(";", source[call..handoff], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The positive control for the test above, through the IDENTICAL scanner. A negative assertion that
+    /// can only ever pass is not an assertion: this feeds the scanner the pre-fix shape — the real text
+    /// from before the change — and requires it to name the offending offset.
+    /// </summary>
+    [Fact]
+    public void TheLeaseScopeScannerCatchesThePreFixShape()
+    {
+        var preFix = string.Join("\n",
+            "                var gate = _queryStoreGates.GetOrAdd(runtime.ServerId, static _ => new QueryStoreServerGate()).TryAcquire();",
+            "                if (gate is null)",
+            "                {",
+            "                    continue;",
+            "                }",
+            "",
+            "                using var backfillGate = gate;",
+            "",
+            "                var step = _backfillSliceSteps.GetOrAdd(runtime.ServerId, static _ => new AbandonableStep());",
+            "                var result = await step.RunAsync(",
+            "                    () => backfill.RunServerSliceAsync(runtime, stoppingToken),",
+            "                    BackfillSliceDeadline,",
+            "                    holdUntilStepEnds: gate,",
+            "                    cancellationToken: stoppingToken);");
+
+        var offender = FindLeaseScopedToTheSlice(preFix);
+
+        Assert.NotNull(offender);
+        Assert.Contains("using var backfillGate", offender!, StringComparison.Ordinal);
+        /* The offset is reported, and it is the one the `using` actually sits at — the property a count
+           of occurrences cannot express. */
+        Assert.Contains(
+            preFix.IndexOf("using var backfillGate", StringComparison.Ordinal).ToString(CultureInfo.InvariantCulture),
+            offender!,
+            StringComparison.Ordinal);
+
+        /* The same scanner also reports a missing anchor rather than silently passing — the other way a
+           source pin rots into a no-op. */
+        Assert.Contains("anchor", FindLeaseScopedToTheSlice("nothing relevant here")!, StringComparison.Ordinal);
+    }
+
+    private const string AcquireAnchor = "var gate = _queryStoreGates";
+    private const string HandoffAnchor = "holdUntilStepEnds: gate";
+    private const string StepCallAnchor = "step.RunAsync(";
+
+    /* `using var x = ...` and `using (...)`, the only two forms that could scope the lease. Matched as
+       code rather than as the bare word, so prose in the surrounding comments — which now discusses the
+       `using` this pin forbids — cannot trip it. */
+    private static readonly Regex LeaseScope = new(@"using\s+var|using\s*\(", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Returns a description of a <c>using</c> scope covering the backfill slice, or <c>null</c> when the
+    /// lease is handed off instead. Never returns null for a source it could not actually check.
+    /// </summary>
+    private static string? FindLeaseScopedToTheSlice(string source)
+    {
+        var acquire = source.IndexOf(AcquireAnchor, StringComparison.Ordinal);
+        if (acquire < 0)
+        {
+            return $"the acquire anchor '{AcquireAnchor}' is gone — this pin cannot see the call site";
+        }
+
+        var handoff = source.IndexOf(HandoffAnchor, StringComparison.Ordinal);
+        if (handoff < 0)
+        {
+            return $"the handoff anchor '{HandoffAnchor}' is gone — the lease is no longer given to the step";
+        }
+
+        if (handoff <= acquire)
+        {
+            return "the handoff must follow the acquire";
+        }
+
+        var match = LeaseScope.Match(source[acquire..handoff]);
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        /* The whole offending LINE, so the failure message names the declaration rather than just the
+           keyword that matched — and the offset, which is the part a count of occurrences cannot say. */
+        var at = acquire + match.Index;
+        var lineStart = source.LastIndexOf('\n', at) + 1;
+        var lineEnd = source.IndexOf('\n', at);
+        var line = (lineEnd < 0 ? source[lineStart..] : source[lineStart..lineEnd]).Trim();
+
+        return $"'{line}' scopes the lease at offset {at} — an abandoned slice would release the gate " +
+               "while it is still running on the server (#2165)";
     }
 
     private static int CountOccurrences(string haystack, string needle)
