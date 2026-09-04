@@ -109,6 +109,80 @@ public sealed partial class QueryStoreSliceRepairService
         return $"ANY_VALUE({column})";
     }
 
+    /// <summary>
+    /// Whether a column is a MEASUREMENT of the interval — something that has to be recombined when two
+    /// slices merge — as opposed to an ATTRIBUTE of it, which every slice of one interval already carries
+    /// identically.
+    ///
+    /// <para><b>Derived from <see cref="CombineExpression"/> rather than restated as a second list.</b> The
+    /// rules for what sums, what takes a weighted mean and what takes an extreme live in exactly one place,
+    /// and <c>ANY_VALUE</c> is precisely the fallback that method reaches when a column is none of those. Ask
+    /// it, and a rule added there is picked up here for free; keep a parallel list and the two drift, which on
+    /// this path would mean a measurement silently left uncombined — the original #1912 defect, reintroduced
+    /// by the fix for it.</para>
+    /// </summary>
+    internal static bool IsMeasurement(string column)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+        return !CombineExpression(column).StartsWith(AnyValuePrefix, StringComparison.Ordinal);
+    }
+
+    private const string AnyValuePrefix = "ANY_VALUE(";
+
+    /// <summary>
+    /// The NARROW staging projection (#2771): the key, a surviving row's identity, and the recombined
+    /// measurements — and deliberately not one attribute column.
+    ///
+    /// <para><b>Why the wide payload must not be here.</b> The full projection materializes every column of
+    /// every collapsed group, and <c>query_plan_text</c> holds full showplan XML. On the reporting store —
+    /// 31,426 split intervals — that aggregate does not fit in Lite's 1 GB <c>memory_limit</c>, and DuckDB
+    /// raises <c>Out of Memory Error</c> (on Windows x64 the same pressure fast-fails the process natively,
+    /// which is why the catch never ran). Attributes are identical across the slices of one interval by
+    /// definition, so they never needed to travel through the aggregate at all: leave them on the row that
+    /// survives and only the numbers move.</para>
+    ///
+    /// <para><paramref name="rowIdentity"/> is the expression that names the surviving row —
+    /// <c>MIN(rowid)</c> against a table. Which row survives is arbitrary and must be, exactly as
+    /// <c>ANY_VALUE</c> was arbitrary; what matters is that it is ONE row and that the delete and the update
+    /// agree on it.</para>
+    /// </summary>
+    internal static string BuildMeasurementProjection(
+        IReadOnlyList<string> columns, IReadOnlyList<string> key, string rowIdentity, string keepAlias)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentException.ThrowIfNullOrWhiteSpace(rowIdentity);
+        ArgumentException.ThrowIfNullOrWhiteSpace(keepAlias);
+
+        var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
+        var parts = new List<string>(key.Count + 1);
+        parts.AddRange(columns.Where(keySet.Contains));
+        parts.Add($"{rowIdentity} AS {keepAlias}");
+        parts.AddRange(
+            columns.Where(c => !keySet.Contains(c) && IsMeasurement(c))
+                   .Select(c => $"{CombineExpression(c)} AS {c}"));
+        return string.Join(", ", parts);
+    }
+
+    /// <summary>
+    /// The <c>SET</c> list that copies the staged measurements back onto the surviving row. Mirrors
+    /// <see cref="BuildMeasurementProjection"/>'s column set exactly, so a column that is staged is a column
+    /// that is written back and vice versa.
+    /// </summary>
+    internal static string BuildMeasurementAssignments(
+        IReadOnlyList<string> columns, IReadOnlyList<string> key, string stagingAlias)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stagingAlias);
+
+        var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
+        return string.Join(
+            ", ",
+            columns.Where(c => !keySet.Contains(c) && IsMeasurement(c))
+                   .Select(c => $"{c} = {stagingAlias}.{c}"));
+    }
+
     /// <summary>The full projection: key columns as-is, everything else combined, in the source's own order.</summary>
     private static string BuildProjection(IReadOnlyList<string> columns, IReadOnlyList<string> key)
     {
