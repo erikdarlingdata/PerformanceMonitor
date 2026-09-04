@@ -62,7 +62,7 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore
             await using var connection = await _postgres.OpenConnectionAsync();
             using var command = new NpgsqlCommand(@"
 INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
 
             command.Parameters.AddWithValue(NaiveUtcNow());
             command.Parameters.AddWithValue(serverId);
@@ -135,7 +135,7 @@ AND   metric_name = $2" + extraFilter
                    special characters escaped) by AlertContextSerializer.BuildDedupKeyLikePattern
                    rather than hand-concatenated here — see its doc comment for why. NULL context_json
                    rows fail the match either way. */
-                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'"), connection);
+                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'"), connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(sid);
             command.Parameters.AddWithValue(metricName);
             if (dedupKey is not null)

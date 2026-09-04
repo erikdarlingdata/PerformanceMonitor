@@ -181,6 +181,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
     {
         var rows = new List<PostgresPoisonWaitAlertInfo>();
         await using var command = _postgres.CreateCommand(PoisonWaitSql);
+        command.CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
         command.Parameters.AddWithValue(serverId);
         /* The evaluator's window, not this adapter's 2-hour Freshness: the window IS the denominator the
            threshold normalizes against, so read and evaluation must agree on it or the "average backends
@@ -206,6 +207,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
     {
         var rows = new List<PostgresWraparoundAlertInfo>();
         await using var command = _postgres.CreateCommand(WraparoundSql);
+        command.CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(NaiveUtcNow() - Freshness);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -236,6 +238,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
         int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _postgres.CreateCommand(XminSql);
+        command.CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(NaiveUtcNow() - Freshness);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -258,6 +261,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
     {
         var rows = new List<PostgresSlotAlertInfo>();
         await using var command = _postgres.CreateCommand(SlotSql);
+        command.CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(NaiveUtcNow() - Freshness);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
