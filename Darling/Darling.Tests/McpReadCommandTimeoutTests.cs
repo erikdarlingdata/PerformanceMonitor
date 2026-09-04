@@ -378,9 +378,10 @@ public sealed class McpReadCommandTimeoutTests
         /* Resolved in the shared runner, so BOTH callers get the same value from the same place. A resolve
            inside RunComposedQueryAsync would be per-QUERY (one store read per annotation source); a resolve
            in the web endpoint only would leave the MCP tool on whatever the other arm passed. */
-        var runner = code.IndexOf("RunComposedPanelAsync(\r\n", StringComparison.Ordinal) >= 0
-            ? code.IndexOf("RunComposedPanelAsync(\r\n", StringComparison.Ordinal)
-            : code.IndexOf("RunComposedPanelAsync(\n", StringComparison.Ordinal);
+        /* Anchored on the RETURN TYPE rather than on what follows the open paren: the declaration wraps its
+           parameter list, so a line-ending-sensitive anchor here would be CRLF-fragile in exactly the way a
+           source-scanning pin must not be — the blobs are LF and the working copies are CRLF. */
+        var runner = code.IndexOf("Task<ComposeRunOutcome> RunComposedPanelAsync(", StringComparison.Ordinal);
         Assert.True(runner >= 0, "RunComposedPanelAsync's declaration was not found — the shared runner has moved");
 
         var resolve = code.IndexOf("ResolveComposedQuerySecondsAsync(postgres", StringComparison.Ordinal);
