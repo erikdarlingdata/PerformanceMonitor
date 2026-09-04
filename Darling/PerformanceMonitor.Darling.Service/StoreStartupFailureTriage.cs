@@ -64,9 +64,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// applying rungs and will release. Note the two spellings this arrives in: a blocking
 /// <c>pg_advisory_lock</c> hitting its <c>CommandTimeout</c> surfaces as
 /// <c>NpgsqlException -> TimeoutException</c>, which is the transport bullet above and is byte-identical
-/// to a RUNG overrunning its own command timeout; #2935's polling waiter throws a plain
-/// <see cref="TimeoutException"/> carrying both schema versions. Both are retried, so this classification
-/// is correct whether or not that change has landed.</description></item>
+/// to a RUNG overrunning its own command timeout; the polling waiter that replaced it (#2935) throws a
+/// plain <see cref="TimeoutException"/> carrying both schema versions, and only against a store BELOW
+/// this build's version — a peer holding the lock on an already-current store now returns zero applied
+/// rather than throwing at all. Both spellings are retried, so this classification does not depend on
+/// which one the applier is using.</description></item>
 /// <item><description><b><c>57P01</c>, <c>57P02</c>, <c>57P03</c> — the server going down, or coming
 /// up.</b> Observed directly: SIGKILL the store and the in-flight session gets <c>57P01</c>; connect
 /// during the crash recovery that follows and every attempt gets <c>57P03</c> until recovery finishes.
