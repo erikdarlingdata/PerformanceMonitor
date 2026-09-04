@@ -220,7 +220,7 @@ GROUP BY server_id";
     /// — a collector that has gone dark entirely (its AppliesTo gate flipped off, say) must not read as
     /// FAILING just because its last SUCCESS is old; a collector still being invoked and erroring every cycle
     /// has a recent last_run_time and correctly stays FAILING.</summary>
-    public const string FleetCollectionHealthSql = @"
+    public const string FleetCollectionHealthSql = $@"
 SELECT
     server_id,
     collector_name,
@@ -230,7 +230,7 @@ SELECT
     -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
     -- the shared predicate is for: NULL under this NOT would have dropped it.
     SUM(CASE WHEN status = 'SUCCESS'
-              AND NOT (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned')
+              AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
              THEN 1 ELSE 0 END) AS success_count,
     SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
     MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
@@ -251,7 +251,7 @@ SELECT
     -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
     -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
     -- for query_store), so equality against one rendered sentence matches one collector.
-    SUM(CASE WHEN (status = 'ABANDONED' OR (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned'))
+    SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
              THEN 1 ELSE 0 END) AS abandoned_count
 FROM v_collection_log
 WHERE collection_time >= $1

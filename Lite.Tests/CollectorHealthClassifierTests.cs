@@ -146,7 +146,8 @@ public sealed class CollectorHealthClassifierTests
     ///
     /// <para>By REFERENCE to the constant, not by grepping the file: this repo's SQL carries discursive
     /// <c>--</c> commentary that quotes column names and predicates, and a source scan cannot tell the
-    /// query from the prose beside it.</para>
+    /// query from the prose beside it. The read interpolates the shared predicate, so its TEXT cannot
+    /// drift; what this asserts is that the read still uses it and still selects the count.</para>
     /// </summary>
     [Fact]
     public void TheCollectionHealthRead_CountsAbandonmentByTheRow_NotByTheStatusAlone()

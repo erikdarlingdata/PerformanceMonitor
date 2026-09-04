@@ -46,7 +46,7 @@ public sealed partial class ViewerDataService
     /// the last-success MAX and the PERMISSIONS bucket split out for the NO_PERMISSIONS banding. $1
     /// server_id, $2 window start (naive UTC).
     /// </summary>
-    public const string CollectionHealthSql = """
+    public const string CollectionHealthSql = $"""
         SELECT
             collector_name,
             COUNT(*) AS total_runs,
@@ -55,7 +55,7 @@ public sealed partial class ViewerDataService
             -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
             -- the shared predicate is for: NULL under this NOT would have dropped it.
             SUM(CASE WHEN status = 'SUCCESS'
-                      AND NOT (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned')
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
                      THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
@@ -126,7 +126,7 @@ public sealed partial class ViewerDataService
             -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
             -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
             -- for query_store), so equality against one rendered sentence matches one collector.
-            SUM(CASE WHEN (status = 'ABANDONED' OR (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned'))
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
                      THEN 1 ELSE 0 END) AS abandoned_count
         FROM
         (
@@ -231,7 +231,7 @@ public sealed partial class ViewerDataService
     /// — precisely the cost #1855 measured and declined. The column exists to hold the ordinal.
     /// </para>
     /// </summary>
-    public const string FleetCollectionHealthSql = """
+    public const string FleetCollectionHealthSql = $"""
         SELECT
             collector_name,
             COUNT(*) AS total_runs,
@@ -240,7 +240,7 @@ public sealed partial class ViewerDataService
             -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
             -- the shared predicate is for: NULL under this NOT would have dropped it.
             SUM(CASE WHEN status = 'SUCCESS'
-                      AND NOT (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned')
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
                      THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
@@ -264,7 +264,7 @@ public sealed partial class ViewerDataService
             -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
             -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
             -- for query_store), so equality against one rendered sentence matches one collector.
-            SUM(CASE WHEN (status = 'ABANDONED' OR (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned'))
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
                      THEN 1 ELSE 0 END) AS abandoned_count
         FROM v_collection_log
         WHERE collection_time >= $1

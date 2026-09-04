@@ -186,9 +186,10 @@ public sealed class CollectorHealthClassifierTests
         /* #2926, and why the status alone is not the key: collection_log is append-only, so a window can
            still hold cycles abandoned BEFORE #2803 gave abandonment its own status - SUCCESS on disk,
            nothing stored, the budget note. Counted by status alone this read 0 for them AND counted them
-           as successes, so the collector banded HEALTHY while losing cycles. Asserted over all four reads
-           by name for the same reason the count itself is: a surface left behind reports the window clean
-           while its siblings report WARNING, and it does so while compiling. */
+           as successes, so the collector banded HEALTHY while losing cycles. The five reads INTERPOLATE
+           the shared constant, so a retyped copy cannot drift - but nothing in the compiler says a read
+           has to USE it, and a surface left behind reports the window clean while its siblings report
+           WARNING. Asserted over all four Darling reads by name; Lite.Tests holds the fifth. */
         Assert.Contains(EnumeratedCollectorDriver.AbandonedRunPredicateSql, sql, StringComparison.Ordinal);
         Assert.Contains("AND NOT " + EnumeratedCollectorDriver.AbandonedByNotePredicateSql, sql, StringComparison.Ordinal);
 

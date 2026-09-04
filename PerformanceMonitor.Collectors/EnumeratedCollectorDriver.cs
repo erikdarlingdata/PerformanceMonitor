@@ -335,8 +335,11 @@ public static class EnumeratedCollectorDriver
     /// <see cref="AbandonedByNotePredicateSql"/> for the rows that predate it.
     ///
     /// <para>SQL text rather than a shared query, because the five reads are <c>const</c> strings in three
-    /// projects against two engines. Each embeds this sentence verbatim and a pin asserts it is still there,
-    /// so a sixth read cannot quietly go back to status-only.</para>
+    /// projects against two engines. Each INTERPOLATES this constant - they are constant interpolated
+    /// strings, so the substitution is still compile-time and they are still <c>const</c> - which makes a
+    /// drifted copy a build error rather than something a pin has to notice. What the pins still carry is
+    /// the part no compiler can state: that every banding read selects the count at all, and that none of
+    /// them has hand-rolled a status-only bucket beside the shared one.</para>
     /// </summary>
     public const string AbandonedRunPredicateSql =
         "(status = '" + AbandonedStatus + "' OR " + AbandonedByNotePredicateSql + ")";

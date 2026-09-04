@@ -1198,7 +1198,7 @@ internal static class DarlingDataReader
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
     /// the SAME ordinals, which is the parity that matters here — both MCP surfaces read positionally.</para>
     /// </summary>
-    public const string CollectionHealthSql = """
+    public const string CollectionHealthSql = $"""
         SELECT
             collector_name,
             COUNT(*) AS total_runs,
@@ -1207,7 +1207,7 @@ internal static class DarlingDataReader
             -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
             -- the shared predicate is for: NULL under this NOT would have dropped it.
             SUM(CASE WHEN status = 'SUCCESS'
-                      AND NOT (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned')
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
                      THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
@@ -1305,7 +1305,7 @@ internal static class DarlingDataReader
             -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
             -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
             -- for query_store), so equality against one rendered sentence matches one collector.
-            SUM(CASE WHEN (status = 'ABANDONED' OR (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned'))
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
                      THEN 1 ELSE 0 END) AS abandoned_count
         FROM
         (
