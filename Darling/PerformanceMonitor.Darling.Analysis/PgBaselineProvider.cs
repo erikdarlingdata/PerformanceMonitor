@@ -165,7 +165,7 @@ public class PgBaselineProvider
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            using var cmd = new NpgsqlCommand(query, connection);
+            using var cmd = new NpgsqlCommand(query, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
             /* Window bounds arrive as bound naive-UTC parameters (Kind-Unspecified so Npgsql
                maps them to `timestamp`, matching the naive-UTC columns) — never bare now(). */
