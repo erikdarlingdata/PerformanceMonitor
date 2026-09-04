@@ -177,4 +177,62 @@ public static class ServiceCommandDeadlines
     /// rather than a query's.</para>
     /// </summary>
     public const int BootstrapConnectProbeSeconds = 10;
+
+    /// <summary>
+    /// The store commands awaited INLINE on the serial collection-loop thread, ahead of every per-server
+    /// launch: the control-plane reload body — <c>StoreConfigProvider.LoadViewAsync</c>'s five config
+    /// reads, <c>DarlingObservability.SyncServerEnabledStatesAsync</c>'s two registry statements and the
+    /// managed-role <c>statement_timeout</c> re-assert — plus the store-size read behind the disk-pressure
+    /// check.
+    ///
+    /// <para><b>The regime, by the token test.</b> Every one of these is awaited directly inside
+    /// <c>DarlingWorker</c>'s <c>while (!stoppingToken.IsCancellationRequested)</c> body, on the plain
+    /// stopping token, BEFORE the per-server launches fan out. So unlike the sweep body — which holds one
+    /// of <c>max_concurrent_sweeps</c> permits while the rest of the fleet proceeds — a stall here delays
+    /// the whole fleet's cycle, and unlike the bootstrap path it happens repeatedly for as long as the
+    /// service runs. That combination is what makes it a regime of its own rather than an extension of
+    /// either neighbour.</para>
+    ///
+    /// <para><b>Seven of the nine ALSO run once on the bootstrap path</b> (<c>LoadViewAsync</c> at
+    /// <c>DarlingWorker.cs:1179</c>, <c>SyncServerEnabledStatesAsync</c> at <c>:1192</c>), which is
+    /// precisely why they take this constant and not <see cref="BootstrapSeconds"/>: a deadline is a
+    /// property of the command, so a dual-caller site has to take the TIGHTER of its two bounds, and this
+    /// is it.</para>
+    ///
+    /// <para><b>ABOVE the measured cold worst case.</b> Measured against a 4.05 GB store built by the
+    /// product's own <c>MigrateAsync</c> and seeded through <c>SeedIfEmptyAsync</c>, shared buffers
+    /// dropped before the first run: <c>LoadViewAsync</c>'s five commands together took <b>16.1 ms</b>
+    /// cold (3.4-4.8 ms warm), <c>SyncServerEnabledStatesAsync</c>'s two <b>3.8 ms</b>, and
+    /// <c>pg_database_size</c> <b>6.2 ms</b> — so the worst SINGLE command on this thread is a
+    /// single-digit-millisecond read and 5 s is roughly three orders of magnitude above it. The
+    /// <c>ALTER ROLE</c> re-assert is one statement out of the 63-statement provisioning batch that
+    /// measured 79 ms in total, so it is in the same class.</para>
+    ///
+    /// <para><b>BELOW the point where a stalled chain reports as a hang.</b> The nine run SEQUENTIALLY on
+    /// one thread, so the bound that matters is the chain's, not one command's: 9 x 5 s = 45 s stays
+    /// inside <c>DarlingWorker.SweepWatchdogSeconds</c> (60 s), while 9 x the inherited 30 s default is
+    /// 270 s and would put a merely-slow reload four and a half minutes past it. That is the same
+    /// chain-length reasoning #2928 applied to the sweep body, on a different chain.</para>
+    ///
+    /// <para><b>Why it is LOOSER than the reload beacon's own bound and must stay so.</b>
+    /// <c>ReadConfigVersionAsync</c> runs on EVERY 15 s tick and is a single-row lookup, so it is the
+    /// tightest thing on this thread and is bounded separately. The nine here run only when the beacon
+    /// has already seen a version change, or on the 5-minute disk-check cadence — rare, and each one a
+    /// heavier read than the beacon.</para>
+    ///
+    /// <para><b>The failure asymmetry points the same way as the bootstrap's, for a different reason, and
+    /// it is the binding one.</b> The beacon advances <c>_lastConfigVersion</c> BEFORE calling the reload
+    /// body, so a read that dies mid-reload does not merely fail open to the live config — it fails open
+    /// having already consumed the version bump that would have retried it, and the operator's change is
+    /// silently lost until something bumps the version again. An over-eager deadline therefore swallows a
+    /// setting change without a word, while a late one delays one tick of an already-rare event. The
+    /// disk-check read's own failure is milder (null store size at Debug, retried in five minutes), so it
+    /// rides the reload body's number rather than setting it.</para>
+    ///
+    /// <para><b>Not derived from store connection acquisition.</b> #2819's 673-893 ms has been folded
+    /// into floors elsewhere in this sweep; #2940 measured that the connect phase tracks Npgsql's
+    /// <c>Timeout</c> rather than <c>CommandTimeout</c>, so a <c>CommandTimeout</c> floor must not carry
+    /// it. None of the four numbers in this file's group C entries includes it.</para>
+    /// </summary>
+    public const int SerialLoopSeconds = 5;
 }

@@ -3966,7 +3966,7 @@ LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassComman
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand("SELECT pg_database_size(current_database())", connection);
+            using var command = new NpgsqlCommand("SELECT pg_database_size(current_database())", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             var result = await command.ExecuteScalarAsync(cancellationToken);
             return result is null || result == DBNull.Value ? null : Convert.ToInt64(result, CultureInfo.InvariantCulture);
         }

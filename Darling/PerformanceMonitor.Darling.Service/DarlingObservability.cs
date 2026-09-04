@@ -179,7 +179,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using (var command = new NpgsqlCommand(SyncEnabledStatesSql, connection))
+            using (var command = new NpgsqlCommand(SyncEnabledStatesSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
             {
                 var changed = await command.ExecuteNonQueryAsync(cancellationToken);
                 if (changed > 0)
@@ -188,7 +188,7 @@ ON CONFLICT (server_id) DO UPDATE SET
                 }
             }
 
-            using (var command = new NpgsqlCommand(DisableOrphanedServersSql, connection))
+            using (var command = new NpgsqlCommand(DisableOrphanedServersSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
             {
                 var orphaned = await command.ExecuteNonQueryAsync(cancellationToken);
                 if (orphaned > 0)

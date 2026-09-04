@@ -316,7 +316,7 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(
-                BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds), connection);
+                BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds), connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             logger.LogInformation(

@@ -21,7 +21,15 @@ namespace Darling.Tests;
 /// Every store command on the once-per-process STARTUP / BOOTSTRAP path must carry an explicit command
 /// deadline (#2874) — the managed-Postgres bootstrap and network reconcile, the in-place major-upgrade
 /// path, least-privilege role provisioning, the delta-baseline re-seed, and the config store's first-run
-/// seed.
+/// seed — and so must the commands the collection loop's own SERIAL thread runs ahead of every launch,
+/// which share seven of their call sites with that path and cannot share its number.
+///
+/// <para><b>Three constants, because the failure modes differ rather than the magnitudes.</b>
+/// <see cref="ServiceCommandDeadlines.BootstrapSeconds"/> covers the twenty-six un-retried bootstrap
+/// sites; <see cref="ServiceCommandDeadlines.BootstrapConnectProbeSeconds"/> the two inside the
+/// bootstrap's six-attempt first-connection retry, where the deadline MULTIPLIES; and
+/// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> the nine on the collection loop's serial
+/// thread, where nine sequential commands have to fit inside one watchdog window.</para>
 ///
 /// <para><b>This is the regime whose value goes UP, and the pin has to defend that as much as the
 /// number.</b> Two of the four failure handlers on this path are <c>LogCritical</c> followed by
@@ -95,34 +103,49 @@ public sealed class StartupCommandTimeoutTests
     /// <c>DarlingCommandExecutor</c> are the command plane, with a 5-minute claim lease and no
     /// heartbeat.</para>
     /// </summary>
-    private static readonly (string File, string Member, int Bootstrap, int ConnectProbe, int Other)[] s_startupMembers =
+    private static readonly (string File, string Member, int Bootstrap, int ConnectProbe, int SerialLoop, int Other)[] s_startupMembers =
     {
-        ("DarlingManagedPostgres.cs", "EnsureDatabaseOnceAsync", 0, 2, 0),
-        ("DarlingManagedPostgres.cs", "VerifyPgHbaAsync", 3, 0, 0),
-        ("DarlingManagedPostgres.cs", "GuardAdoptedListenAsync", 1, 0, 0),
-        ("DarlingStoreUpgrade.cs", "ReadClusterIdentityAsync", 1, 0, 0),
-        ("DarlingStoreUpgrade.cs", "BridgeTimescaleAsync", 3, 0, 1),
-        ("DarlingStoreUpgrade.cs", "CompleteAfterStartAsync", 3, 0, 1),
-        ("DarlingStoreUpgrade.cs", "VerifySentinelReadAsync", 2, 0, 0),
-        ("DarlingManagedRoles.cs", "EnsureProvisionedAsync", 1, 0, 0),
-        ("DarlingManagedRoles.cs", "ReadComposeStatementTimeoutAsync", 1, 0, 0),
-        ("DarlingDeltaCalculator.cs", "SeedWaitStatsAsync", 1, 0, 0),
-        ("DarlingDeltaCalculator.cs", "SeedFileIoStatsAsync", 1, 0, 0),
-        ("DarlingDeltaCalculator.cs", "SeedPerfmonStatsAsync", 1, 0, 0),
-        ("DarlingDeltaCalculator.cs", "SeedMemoryGrantStatsAsync", 1, 0, 0),
-        ("StoreConfigProvider.cs", "WarnAboutFileOnlyServersAsync", 1, 0, 0),
-        ("StoreConfigProvider.cs", "ReadRegisteredServersForComparisonAsync", 1, 0, 0),
-        ("StoreConfigProvider.cs", "CountAsync", 1, 0, 0),
-        ("StoreConfigProvider.cs", "SeedServiceRowAsync", 1, 0, 0),
-        ("StoreConfigProvider.cs", "SeedAlertSettingsAsync", 1, 0, 0),
-        ("StoreConfigProvider.cs", "SeedNotificationAsync", 1, 0, 0),
-        ("StoreConfigProvider.cs", "SeedMonitoredServersAsync", 1, 0, 0),
+        ("DarlingManagedPostgres.cs", "EnsureDatabaseOnceAsync", 0, 2, 0, 0),
+        ("DarlingManagedPostgres.cs", "VerifyPgHbaAsync", 3, 0, 0, 0),
+        ("DarlingManagedPostgres.cs", "GuardAdoptedListenAsync", 1, 0, 0, 0),
+        ("DarlingStoreUpgrade.cs", "ReadClusterIdentityAsync", 1, 0, 0, 0),
+        ("DarlingStoreUpgrade.cs", "BridgeTimescaleAsync", 3, 0, 0, 1),
+        ("DarlingStoreUpgrade.cs", "CompleteAfterStartAsync", 3, 0, 0, 1),
+        ("DarlingStoreUpgrade.cs", "VerifySentinelReadAsync", 2, 0, 0, 0),
+        ("DarlingManagedRoles.cs", "EnsureProvisionedAsync", 1, 0, 0, 0),
+        ("DarlingManagedRoles.cs", "ReadComposeStatementTimeoutAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedWaitStatsAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedFileIoStatsAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedPerfmonStatsAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedMemoryGrantStatsAsync", 1, 0, 0, 0),
+        ("StoreConfigProvider.cs", "WarnAboutFileOnlyServersAsync", 1, 0, 0, 0),
+        ("StoreConfigProvider.cs", "ReadRegisteredServersForComparisonAsync", 1, 0, 0, 0),
+        ("StoreConfigProvider.cs", "CountAsync", 1, 0, 0, 0),
+        ("StoreConfigProvider.cs", "SeedServiceRowAsync", 1, 0, 0, 0),
+        ("StoreConfigProvider.cs", "SeedAlertSettingsAsync", 1, 0, 0, 0),
+        ("StoreConfigProvider.cs", "SeedNotificationAsync", 1, 0, 0, 0),
+        ("StoreConfigProvider.cs", "SeedMonitoredServersAsync", 1, 0, 0, 0),
+
+        /* The serial collection-loop thread: the control-plane reload body plus the disk-check store-size
+           read. Seven of these nine ALSO run once on the bootstrap path above, and take this constant
+           rather than BootstrapSeconds because a dual-caller site has to take the tighter of its two
+           bounds. */
+        ("StoreConfigProvider.cs", "ReadServiceRowAsync", 0, 0, 1, 0),
+        ("StoreConfigProvider.cs", "ReadAlertSettingsAsync", 0, 0, 1, 0),
+        ("StoreConfigProvider.cs", "ReadNotificationAsync", 0, 0, 1, 0),
+        ("StoreConfigProvider.cs", "ReadMonitoredServersAsync", 0, 0, 1, 0),
+        ("StoreConfigProvider.cs", "ReadScheduleOverridesAsync", 0, 0, 1, 0),
+        ("DarlingObservability.cs", "SyncServerEnabledStatesAsync", 0, 0, 2, 0),
+        ("DarlingManagedRoles.cs", "ReassertComposeStatementTimeoutAsync", 0, 0, 1, 0),
+        ("DarlingWorker.cs", "ReadStoreSizeBytesAsync", 0, 0, 1, 0),
     };
 
     /// <summary>The group's own totals, so a member that stops creating commands fails loudly.</summary>
     private const int ExpectedBootstrapSites = 26;
 
     private const int ExpectedConnectProbeSites = 2;
+
+    private const int ExpectedSerialLoopSites = 9;
 
     /// <summary>
     /// Members whose command sites must NOT carry either bootstrap deadline — the exclusions above,
@@ -133,16 +156,10 @@ public sealed class StartupCommandTimeoutTests
     private static readonly (string File, string Member)[] s_excludedMembers =
     {
         ("StoreConfigProvider.cs", "ReadConfigVersionAsync"),
-        ("StoreConfigProvider.cs", "ReadServiceRowAsync"),
-        ("StoreConfigProvider.cs", "ReadAlertSettingsAsync"),
-        ("StoreConfigProvider.cs", "ReadNotificationAsync"),
-        ("StoreConfigProvider.cs", "ReadMonitoredServersAsync"),
-        ("StoreConfigProvider.cs", "ReadScheduleOverridesAsync"),
-        ("DarlingManagedRoles.cs", "ReassertComposeStatementTimeoutAsync"),
-        ("DarlingObservability.cs", "SyncServerEnabledStatesAsync"),
         ("DarlingObservability.cs", "LogRetentionRunAsync"),
-        ("DarlingWorker.cs", "ReadStoreSizeBytesAsync"),
         ("DarlingWorker.cs", "ReadLatestCpuAsync"),
+        ("DarlingWorker.cs", "RunTestHypotheticalIndexAsync"),
+        ("DarlingWorker.cs", "RunExecuteActualPlanAsync"),
     };
 
     /// <summary>
@@ -163,6 +180,10 @@ public sealed class StartupCommandTimeoutTests
         @"CommandTimeout\s*=\s*ServiceCommandDeadlines\.BootstrapConnectProbeSeconds\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    private static readonly Regex s_serialLoopDeadline = new(
+        @"CommandTimeout\s*=\s*ServiceCommandDeadlines\.SerialLoopSeconds\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     /// <summary>The pre-existing 1 h bridge bound, matched so it counts as timed-but-not-ours.</summary>
     private static readonly Regex s_bridgeDeadline = new(
         @"CommandTimeout\s*=\s*\(int\)s_bridgeTimeout\.TotalSeconds",
@@ -173,19 +194,19 @@ public sealed class StartupCommandTimeoutTests
     {
         var offenders = new List<string>();
         var wrongConstant = new List<string>();
-        int bootstrap = 0, probe = 0, other = 0;
+        int bootstrap = 0, probe = 0, loop = 0, other = 0;
 
-        foreach (var (file, member, wantBootstrap, wantProbe, wantOther) in s_startupMembers)
+        foreach (var (file, member, wantBootstrap, wantProbe, wantLoop, wantOther) in s_startupMembers)
         {
             var path = SourcePath(file);
             var text = File.ReadAllText(path);
             var body = MemberBody(text, member, path);
             var bodyCode = CSharpSourceWalker.StripCommentsAndStrings(body);
-            int gotBootstrap = 0, gotProbe = 0, gotOther = 0;
+            int gotBootstrap = 0, gotProbe = 0, gotLoop = 0, gotOther = 0;
 
             foreach (Match ctor in s_commandCtor.Matches(bodyCode))
             {
-                var span = ConstructionSpan(body, bodyCode, ctor.Index);
+                var span = ConstructionSpan(bodyCode, ctor.Index);
 
                 if (s_bootstrapDeadline.IsMatch(span))
                 {
@@ -194,6 +215,10 @@ public sealed class StartupCommandTimeoutTests
                 else if (s_connectProbeDeadline.IsMatch(span))
                 {
                     gotProbe++;
+                }
+                else if (s_serialLoopDeadline.IsMatch(span))
+                {
+                    gotLoop++;
                 }
                 else if (s_bridgeDeadline.IsMatch(span))
                 {
@@ -205,15 +230,18 @@ public sealed class StartupCommandTimeoutTests
                 }
             }
 
-            if (gotBootstrap != wantBootstrap || gotProbe != wantProbe || gotOther != wantOther)
+            if (gotBootstrap != wantBootstrap || gotProbe != wantProbe
+                || gotLoop != wantLoop || gotOther != wantOther)
             {
                 wrongConstant.Add(
                     $"{file} {member}: bootstrap {gotBootstrap}/{wantBootstrap}, "
-                    + $"connect-probe {gotProbe}/{wantProbe}, other {gotOther}/{wantOther}");
+                    + $"connect-probe {gotProbe}/{wantProbe}, serial-loop {gotLoop}/{wantLoop}, "
+                    + $"other {gotOther}/{wantOther}");
             }
 
             bootstrap += gotBootstrap;
             probe += gotProbe;
+            loop += gotLoop;
             other += gotOther;
         }
 
@@ -223,7 +251,8 @@ public sealed class StartupCommandTimeoutTests
             offenders.Count == 0,
             $"{offenders.Count} startup command(s) inherit Npgsql's undocumented 30s default instead of "
             + $"setting {nameof(ServiceCommandDeadlines)}.{nameof(ServiceCommandDeadlines.BootstrapSeconds)} "
-            + $"or {nameof(ServiceCommandDeadlines.BootstrapConnectProbeSeconds)}: "
+            + $"{nameof(ServiceCommandDeadlines.BootstrapConnectProbeSeconds)} or "
+            + $"{nameof(ServiceCommandDeadlines.SerialLoopSeconds)}: "
             + string.Join(", ", offenders));
 
         /* The retried pair and the un-retried remainder are DIFFERENT budgets — 6 x deadline against
@@ -236,6 +265,7 @@ public sealed class StartupCommandTimeoutTests
 
         Assert.Equal(ExpectedBootstrapSites, bootstrap);
         Assert.Equal(ExpectedConnectProbeSites, probe);
+        Assert.Equal(ExpectedSerialLoopSites, loop);
     }
 
     /// <summary>
@@ -261,9 +291,11 @@ public sealed class StartupCommandTimeoutTests
             foreach (Match ctor in s_commandCtor.Matches(bodyCode))
             {
                 scanned++;
-                var span = ConstructionSpan(body, bodyCode, ctor.Index);
+                var span = ConstructionSpan(bodyCode, ctor.Index);
 
-                if (s_bootstrapDeadline.IsMatch(span) || s_connectProbeDeadline.IsMatch(span))
+                if (s_bootstrapDeadline.IsMatch(span)
+                    || s_connectProbeDeadline.IsMatch(span)
+                    || s_serialLoopDeadline.IsMatch(span))
                 {
                     offenders.Add($"{file} {member} +{LineOf(body, ctor.Index)}");
                 }
@@ -300,7 +332,7 @@ public sealed class StartupCommandTimeoutTests
         var ctor = s_commandCtor.Match(code);
         Assert.True(ctor.Success, "the control fixture did not contain a command construction");
 
-        var span = ConstructionSpan(Fixture, code, ctor.Index);
+        var span = ConstructionSpan(code, ctor.Index);
         Assert.True(
             s_bootstrapDeadline.IsMatch(span),
             "the exclusion scan cannot see a bootstrap stamp it is supposed to reject, so its negative "
@@ -377,10 +409,52 @@ public sealed class StartupCommandTimeoutTests
     }
 
     /// <summary>
-    /// <see cref="ConstructionSpan"/> is what twenty-eight sites' correctness is asserted through, so its
+    /// The serial-loop bound — see <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/>. The
+    /// interesting assertion is the CHAIN one: these nine run sequentially on one thread, so what has to
+    /// stay bounded is their sum, not any single deadline. Pinned RELATIONALLY against
+    /// <c>DarlingWorker.SweepWatchdogSeconds</c> and against the site count, so adding a tenth site to
+    /// this regime forces the value to be re-derived rather than silently stretching the chain.
+    /// </summary>
+    [Fact]
+    public void TheSerialLoopDeadline_KeepsItsWholeChainInsideTheWatchdog()
+    {
+        var seconds = ServiceCommandDeadlines.SerialLoopSeconds;
+
+        Assert.True(
+            seconds >= 2,
+            $"serial-loop deadline {seconds}s leaves too little over the measured cold worst case — "
+            + "LoadViewAsync's five commands at 16.1 ms together, SyncServerEnabledStatesAsync's two at "
+            + "3.8 ms, pg_database_size at 6.2 ms — on a thread whose reload body silently LOSES an "
+            + "operator's config change if it fires, because the beacon advances _lastConfigVersion "
+            + "before the reload runs");
+
+        Assert.True(
+            seconds < 30,
+            $"serial-loop deadline {seconds}s is at or above Npgsql's inherited 30s default, so it buys "
+            + "nothing on a thread that blocks the whole fleet's cycle while it runs");
+
+        Assert.True(
+            ExpectedSerialLoopSites * seconds < DarlingWorker.SweepWatchdogSeconds,
+            $"{ExpectedSerialLoopSites} sequential commands at {seconds}s is "
+            + $"{ExpectedSerialLoopSites * seconds}s, which reaches the "
+            + $"{DarlingWorker.SweepWatchdogSeconds}s watchdog — a merely-slow control-plane reload would "
+            + "then report as a hang, the #1581/#2170 warning herd #2928 also had to avoid");
+
+        Assert.True(
+            seconds < ServiceCommandDeadlines.BootstrapSeconds,
+            $"serial-loop deadline {seconds}s is not tighter than the bootstrap's "
+            + $"{ServiceCommandDeadlines.BootstrapSeconds}s. Seven of these nine sites ALSO run once on "
+            + "the bootstrap path, and a dual-caller site must take the tighter of its two bounds — if "
+            + "this is not the tighter one, those seven are on the wrong constant");
+    }
+
+    /// <summary>
+    /// <see cref="ConstructionSpan"/> is what thirty-seven sites' correctness is asserted through, so its
     /// own edges are pinned. The fixtures are shapes that OCCUR in the members above, and the fourth is
     /// the one that matters: the <c>using (...) { ...; }</c> block whose neighbour a two-statement window
-    /// would borrow, which is the real shape of <c>BridgeTimescaleAsync</c>.
+    /// would borrow, which is the real shape of <c>BridgeTimescaleAsync</c>. The last fixture covers the
+    /// other direction — a deadline written in a COMMENT inside the initializer, which every landed pin
+    /// in this sweep counts as set because it matches its value pattern over raw source (#2940).
     /// </summary>
     [Theory]
     [InlineData(
@@ -410,13 +484,20 @@ public sealed class StartupCommandTimeoutTests
         "/* CommandTimeout = D.BootstrapSeconds is what this one is MISSING. */\n"
         + "using var command = new NpgsqlCommand(Sql, connection);\n",
         false)]
+    [InlineData(
+        "using var command = new NpgsqlCommand(Sql, connection)\n"
+        + "{\n"
+        + "    /* CommandTimeout = D.BootstrapSeconds -- a deadline described, not set. */\n"
+        + "    Parameters = { p },\n"
+        + "};\n",
+        false)]
     public void TheConstructionScanner_ReadsOnlyItsOwnCommandsDeadline(string source, bool expectedStamped)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
         var ctor = s_commandCtor.Match(code);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = ConstructionSpan(source, code, ctor.Index);
+        var span = ConstructionSpan(code, ctor.Index);
         var stamped = new Regex(@"CommandTimeout\s*=\s*D\.BootstrapSeconds\b").IsMatch(span);
 
         Assert.Equal(expectedStamped, stamped);
@@ -478,7 +559,7 @@ public sealed class StartupCommandTimeoutTests
 
         var offenders = new List<string>();
 
-        foreach (var (file, member, _, _, _) in s_startupMembers)
+        foreach (var (file, member, _, _, _, _) in s_startupMembers)
         {
             var path = SourcePath(file);
             var text = File.ReadAllText(path);
@@ -506,21 +587,27 @@ public sealed class StartupCommandTimeoutTests
     /// From a construction's match index through the end of its argument list AND its optional trailing
     /// object initializer — this command's OWN text and nothing after it.
     ///
-    /// <para>Walked over <see cref="CSharpSourceWalker.StripCommentsAndStrings"/>'s output while the span
-    /// is cut from the ORIGINAL text, the same split the shared walker uses: these members embed verbatim
-    /// and raw-string SQL carrying braces, parentheses and quote characters, so a brace in a literal is
-    /// exactly what would unbalance the walk. The stripper is load-bearing rather than defensive here for
-    /// the same reason it is in #2905 — and the pin strips before EVERY scan in this file, including the
-    /// construction scan, which the landed pins do not: a <c>.CreateCommand(</c> in running prose would
-    /// otherwise be reported as an offender at a line no edit could fix.</para>
+    /// <para>Both walked over and RETURNED FROM <see cref="CSharpSourceWalker.StripCommentsAndStrings"/>'s
+    /// output, which is the third of this sweep's pin defects and the reason the value regexes below cannot
+    /// be fooled: every landed pin matches its value pattern over the RAW span, so a <c>CommandTimeout</c>
+    /// written in a comment inside the construction makes an untimed site read clean (#2940 measured that
+    /// gap and it survives #2938's span fix). Returning the stripped slice closes it, and it is safe
+    /// because the stripper is character-ALIGNED with its input — newlines and offsets survive, so the
+    /// offender line numbers computed against the raw body still match.</para>
+    ///
+    /// <para>Walking the stripped text is separately load-bearing rather than defensive: these members
+    /// embed verbatim and raw-string SQL carrying braces, parentheses and quote characters, so a brace in
+    /// a literal is exactly what would unbalance the walk. The pin strips before EVERY scan in this file,
+    /// including the construction scan, which the landed pins do not: a <c>.CreateCommand(</c> in running
+    /// prose would otherwise be reported as an offender at a line no edit could fix.</para>
     /// </summary>
-    private static string ConstructionSpan(string text, string code, int start)
+    private static string ConstructionSpan(string code, int start)
     {
         var open = code.IndexOf('(', start);
 
         if (open < 0)
         {
-            return text[start..];
+            return code[start..];
         }
 
         var depth = 0;
@@ -551,7 +638,7 @@ public sealed class StartupCommandTimeoutTests
            unrelocatable and the span unborrowable. */
         if (next >= code.Length || code[next] != '{')
         {
-            return text[start..Math.Min(close + 1, text.Length)];
+            return code[start..Math.Min(close + 1, code.Length)];
         }
 
         depth = 0;
@@ -564,11 +651,11 @@ public sealed class StartupCommandTimeoutTests
             }
             else if (code[i] == '}' && --depth == 0)
             {
-                return text[start..(i + 1)];
+                return code[start..(i + 1)];
             }
         }
 
-        return text[start..];
+        return code[start..];
     }
 
     /// <summary>
