@@ -134,6 +134,31 @@ public sealed class DarlingConfig
     public bool CollectSchemaChangeEvents { get; set; } = true;
 
     /// <summary>
+    /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is
+    /// every cycle (the pre-#2862 collector, byte-identical), 4 is one cycle in four. Clamped to [1,60] on
+    /// read. Only <c>procedure_stats</c> is gated; every other plan-capturing collector is untouched.
+    ///
+    /// <para><b>Why the knob exists.</b> procedure_stats is the most expensive collector on the production
+    /// us-east-1 store, and a controlled decomposition attributed 73.8% of its read loop to RENDERING plan
+    /// XML and a further 26.0% to shipping it, against 0.2% for the same query with no plan apply at all.
+    /// The render happens inside <c>sys.dm_exec_text_query_plan</c>, a server-side TVF, so it is CPU burned
+    /// on the MONITORED server — which is why the lever is cadence and not a dedup key: hashing at the
+    /// source would remove the transfer and leave the render on customer hardware.</para>
+    ///
+    /// <para>The cost paid is plan-data granularity: a captured plan is up to this many cycles old. 4 keeps
+    /// the worst-case plan age inside the collector's own ten-minute <c>last_execution_time</c> candidate
+    /// window, so a module busy enough to reach the TOP (150) cut is still busy when its plan is next
+    /// rendered. Runtime statistics are unaffected — they are collected at full resolution every cycle.</para>
+    ///
+    /// <para>A file-only knob (not seeded into the control-plane store), exactly like
+    /// <see cref="CollectSchemaChangeEvents"/> above, so an edit takes effect on the next restart and this
+    /// needs no schema rung. It is read through a live provider, so promoting it to a store column later is
+    /// a change to the source only and not to the collector seam.</para>
+    /// </summary>
+    [JsonPropertyName("procedureStatsPlanCycleInterval")]
+    public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
+
+    /// <summary>
     /// The shared alert engine's enabled flags and thresholds (Phase-5 slice D). Every default
     /// mirrors Lite's <c>App.*</c> alert defaults exactly, so an empty section alerts like a
     /// fresh Lite install. Optional — omit it entirely for the defaults.
