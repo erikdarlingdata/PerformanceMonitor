@@ -127,8 +127,15 @@ namespace PerformanceMonitor.Darling.Service;
 /// verdicts are terminal despite reaching this as, or wrapping, an <see cref="IOException"/>.
 /// <see cref="FileNotFoundException"/> and <see cref="DirectoryNotFoundException"/> derive from it, and
 /// <c>DarlingConfig.Load</c> throws the former for a config that is not there — the single most likely
-/// reason it ever fails, on a first install — while the managed bootstrap throws it for a missing
-/// <c>pg-runtime.zip</c>, a broken package.</para>
+/// reason it ever fails, on a first install.</para>
+///
+/// <para>The bootstrap reaches this carve-out only through the FRAMEWORK, which is worth stating exactly
+/// because the obvious guess is wrong: <c>DarlingManagedPostgres</c> raises none of these three itself —
+/// a missing <c>pg-runtime.zip</c>, an incomplete runtime directory and a missing credential file are all
+/// <c>InvalidOperationException</c>, which default-deny already holds terminal without any carve-out.
+/// What the carve-out covers there is its nineteen <c>File</c>/<c>Directory</c> calls under
+/// <c>%ProgramData%</c>, whose ACLs this class actively rewrites, so
+/// <see cref="UnauthorizedAccessException"/> is the member that actually bites at that site.</para>
 ///
 /// <para><see cref="UnauthorizedAccessException"/> does NOT derive from <see cref="IOException"/> and
 /// still has to be named here, which is the part that is easy to get wrong: <b>on Unix .NET raises it
