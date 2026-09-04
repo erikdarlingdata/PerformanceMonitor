@@ -448,8 +448,11 @@ public sealed class CollectionSweepCommandTimeoutTests
         Assert.True(
             seconds >= 5,
             $"collection-sweep deadline {seconds}s leaves no headroom over the measured worst case — a "
-            + "1.53s store write on the busiest server, projected to ~3.1s at max_concurrent_sweeps=8, "
-            + "plus 673-893ms of store connection acquisition (#2819)");
+            + "1.53s store write on the busiest server, projected to ~3.1s at max_concurrent_sweeps=8. "
+            + "Store connection acquisition is deliberately NOT in this floor: CommandTimeout starts when "
+            + "the command executes on an already-open connection, and the connect phase is tracked by the "
+            + "connection string's Timeout instead — measured, with Timeout=2 a connect failure lands at "
+            + "2.0s whether CommandTimeout is 1 or 60");
 
         Assert.True(
             seconds < 30,
