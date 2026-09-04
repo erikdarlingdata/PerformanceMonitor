@@ -1507,6 +1507,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Installer: optional custom data/log file locations** ([#768]) â€” two optional CLI flags, `--data-path` and `--log-path` (both `--flag VALUE` and `--flag=VALUE` forms accepted), place the `PerformanceMonitor` database's `.mdf`/`.ldf` on specific server-side volumes at install time; an omitted flag falls back to the instance default path as before. The paths apply only on first creation (the create block is guarded by `IF DB_ID(N'PerformanceMonitor') IS NULL`), and Azure SQL Managed Instance ignores them. The path is validated and escaped (control characters and the dangerous filename characters are rejected; single quotes are doubled in both the C# injection layer and the dynamic `CREATE DATABASE`) because a data-file `FILENAME` literal cannot be parameterized
 
 [#2862]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2862
+[#2849]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2849
 [#2843]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2843
 [#2818]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2818
 [#1564]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1564
