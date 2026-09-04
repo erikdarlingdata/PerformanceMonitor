@@ -46,11 +46,17 @@ public sealed partial class ViewerDataService
     /// the last-success MAX and the PERMISSIONS bucket split out for the NO_PERMISSIONS banding. $1
     /// server_id, $2 window start (naive UTC).
     /// </summary>
-    public const string CollectionHealthSql = """
+    public const string CollectionHealthSql = $"""
         SELECT
             collector_name,
             COUNT(*) AS total_runs,
-            SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+            -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+            -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+            -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+            -- the shared predicate is for: NULL under this NOT would have dropped it.
+            SUM(CASE WHEN status = 'SUCCESS'
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                     THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
             -- SKIPPED counts as a healthy run (dedup / version-gated collectors no-op without being stale)
@@ -111,7 +117,17 @@ public sealed partial class ViewerDataService
             END AS has_user_databases,
             -- #2804: runs the #2673 wall-clock budget abandoned. Appended last — this result set is
             -- read positionally by one shared mapper serving BOTH the per-server and fleet reads.
-            SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
+            --
+            -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+            -- window can still hold cycles written before #2803 gave abandonment its own status:
+            -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+            -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+            -- filter correct against current writes and silently wrong against older ones, failing in
+            -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+            -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+            -- for query_store), so equality against one rendered sentence matches one collector.
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                     THEN 1 ELSE 0 END) AS abandoned_count
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -129,6 +145,10 @@ public sealed partial class ViewerDataService
                 duration_ms,
                 status,
                 error_message,
+                -- #2926: the abandonment predicate above reads it. Projected here for the same reason
+                -- #2472's three columns are: this subquery ENUMERATES its columns, so an aggregate
+                -- outside naming one it does not carry fails at the STORE and nowhere earlier.
+                rows_collected,
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY collector_name
@@ -211,11 +231,17 @@ public sealed partial class ViewerDataService
     /// — precisely the cost #1855 measured and declined. The column exists to hold the ordinal.
     /// </para>
     /// </summary>
-    public const string FleetCollectionHealthSql = """
+    public const string FleetCollectionHealthSql = $"""
         SELECT
             collector_name,
             COUNT(*) AS total_runs,
-            SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+            -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+            -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+            -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+            -- the shared predicate is for: NULL under this NOT would have dropped it.
+            SUM(CASE WHEN status = 'SUCCESS'
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                     THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
             MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
@@ -229,7 +255,17 @@ public sealed partial class ViewerDataService
             CAST(NULL AS integer) AS has_user_databases,
             -- #2804: runs the #2673 wall-clock budget abandoned. Appended last — this result set is
             -- read positionally by one shared mapper serving BOTH the per-server and fleet reads.
-            SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
+            --
+            -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+            -- window can still hold cycles written before #2803 gave abandonment its own status:
+            -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+            -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+            -- filter correct against current writes and silently wrong against older ones, failing in
+            -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+            -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+            -- for query_store), so equality against one rendered sentence matches one collector.
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                     THEN 1 ELSE 0 END) AS abandoned_count
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)

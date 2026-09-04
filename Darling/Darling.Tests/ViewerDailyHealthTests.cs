@@ -151,8 +151,13 @@ public sealed class ViewerCollectionHealthSqlTests
         Assert.Contains("GROUP BY collector_name", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collector_name", sql, StringComparison.Ordinal);
 
-        /* Success / error / permission buckets feed the row's HealthStatus banding. */
-        Assert.Contains("SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
+        /* Success / error / permission buckets feed the row's HealthStatus banding. The success bucket
+           is NARROWED (#2926): an abandonment written before #2803 gave abandonment its own status is
+           SUCCESS on disk, and counting it here as well as in abandoned_count would let the Success and
+           Abandoned columns - adjacent in this grid - both claim the same run. */
+        Assert.Contains("SUM(CASE WHEN status = 'SUCCESS'", sql, StringComparison.Ordinal);
+        Assert.Contains("AND NOT " + EnumeratedCollectorDriver.AbandonedByNotePredicateSql, sql, StringComparison.Ordinal);
+        Assert.Contains("AS success_count", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
 

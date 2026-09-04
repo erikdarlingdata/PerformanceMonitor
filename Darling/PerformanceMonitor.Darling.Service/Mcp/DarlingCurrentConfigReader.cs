@@ -52,6 +52,7 @@ internal static class DarlingCurrentConfigReader
     {
         var rows = new List<ServerConfigReadRow>();
         await using var command = postgres.CreateCommand(ServerConfigSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -100,6 +101,7 @@ internal static class DarlingCurrentConfigReader
     {
         var rows = new List<DatabaseConfigReadRow>();
         await using var command = postgres.CreateCommand(DatabaseConfigSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -160,6 +162,7 @@ internal static class DarlingCurrentConfigReader
     {
         var rows = new List<TraceFlagReadRow>();
         await using var command = postgres.CreateCommand(TraceFlagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

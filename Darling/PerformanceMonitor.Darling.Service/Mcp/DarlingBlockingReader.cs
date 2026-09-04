@@ -191,6 +191,7 @@ internal static class DarlingBlockingReader
 
         await using (var command = new NpgsqlCommand(BlockedProcessReportsSql, connection))
         {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -238,6 +239,7 @@ internal static class DarlingBlockingReader
 
         await using (var command = new NpgsqlCommand(DmvBlockingSnapshotsSql, connection))
         {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -304,6 +306,7 @@ internal static class DarlingBlockingReader
     {
         var rows = new List<DeadlockReadRow>();
         await using var command = postgres.CreateCommand(RecentDeadlocksSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
