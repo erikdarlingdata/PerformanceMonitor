@@ -5742,7 +5742,7 @@ LIMIT 1";
 
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, status, result.Rows, result.SqlMs, result.StorageMs, result.Note,
-                result.Fanout, result.ServerPhases, result.Drain, peerMaxAtDispatchMs, _logger, cancellationToken);
+                result.Fanout, result.ServerPhases, result.Drain, result.FetchPhases, peerMaxAtDispatchMs, _logger, cancellationToken);
 
             /* #2864 item 3: fold THIS run into the body's peer high-water mark, AFTER its own row is
                written so a collector is never its own peer. The mark answers the question that took
@@ -5797,7 +5797,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName, ex.Message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (RdsLogUnavailableException ex) when (ex.IsAuthorizationFailure)
@@ -5821,7 +5821,7 @@ LIMIT 1";
                 + "the RDS API, so the role needs rds:DescribeDBLogFiles and rds:DownloadDBLogFilePortion "
                 + "on the target instance. Nothing was read this cycle — this is NOT 'no plans were "
                 + "captured'.",
-                fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (PiMetricsUnavailableException ex) when (ex.IsAuthorizationFailure)
@@ -5839,7 +5839,7 @@ LIMIT 1";
                 + "so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters and "
                 + "pi:GetResourceMetrics on the target instance. Nothing was read this cycle — this is NOT "
                 + "'CPU is idle'.",
-                fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
@@ -5860,7 +5860,7 @@ LIMIT 1";
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, "YIELDED", 0, 0, 0,
                 $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
-                fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (SqlException ex) when (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
@@ -5883,7 +5883,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName, ex.Number, message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (PostgresException ex) when (
@@ -5918,7 +5918,7 @@ LIMIT 1";
             }
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (Exception ex)
@@ -5956,7 +5956,7 @@ LIMIT 1";
             try
             {
                 await DarlingObservability.LogCollectionAsync(
-                    _postgres!, runtime, collectorName, "ERROR", 0, 0, 0, ex.Message, fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                    _postgres!, runtime, collectorName, "ERROR", 0, 0, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             }
             catch
             {

@@ -1128,7 +1128,7 @@ public sealed class DarlingMcpDataTools
         _ => $"SQL Server v{sqlMajorVersion}",
     };
 
-    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window.")]
+    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. Also carries the phase decomposition where the run recorded one, and a row has at most ONE of the two families: server-scoped collectors report sql_open_ms / sql_drain_ms / sql_other_ms (derived) / watermark_ms plus the drain forensics (drain_rows_read, drain_bytes_read, drain_last_read_ms, target_session_id, sweep_peer_max_ms), while per-database collectors that perform a deferred plan or statement-text fetch report that fetch summed across their databases as plan_fetch_* / text_fetch_* (probe / target / write milliseconds plus ids_attempted and probe_ids). NULL in either family means the run recorded no such phase, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost.")]
     public static async Task<string> GetCollectionLog(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1202,6 +1202,58 @@ public sealed class DarlingMcpDataTools
                 rows_collected = r.RowsCollected,
                 status = r.Status,
                 error_message = r.ErrorMessage,
+                /*
+                    The phase decomposition, and it is emitted here rather than only SELECTed because
+                    persisting a column nothing reports is half a feature. V108 and V109 both widened
+                    CollectionLogSql and CollectionLogEntry and then stopped: the eight columns below were
+                    read off the row into the record and dropped on the floor by this projection, so the
+                    only way to them was psql on the monitoring box — which is the exact reachability
+                    problem V108 was filed to fix. Found while adding V110's ten (#2860) and fixed in the
+                    same pass, because a projection carrying the fetch split but not the open/drain one
+                    would read as "the server-scoped split is not stored".
+
+                    The two families never populate the same row and that is not a coincidence: the
+                    open/drain figures come from the SERVER-scoped path, and the fetch figures from the
+                    ENUMERATED one, which never sets V108's measured flag and is the only path that
+                    performs a deferred fetch. So a row carries at most one of these blocks, and NULL
+                    throughout is the ordinary case rather than a fault.
+                */
+                sql_open_ms = r.SqlOpenMs is null ? (double?)null : Math.Round(r.SqlOpenMs.Value, 0),
+                sql_drain_ms = r.SqlDrainMs is null ? (double?)null : Math.Round(r.SqlDrainMs.Value, 0),
+                /* Derived, not stored — V108 keeps no other_ms column so the terms cannot drift from the
+                   parent they decompose. Reported because a large residual is itself the finding: it means
+                   the cost sits in our own code between the phases, in neither database. */
+                sql_other_ms = r.SqlOtherMs is null ? (double?)null : Math.Round(r.SqlOtherMs.Value, 0),
+                watermark_ms = r.WatermarkMs is null ? (double?)null : Math.Round(r.WatermarkMs.Value, 0),
+                /* V109: what the drain DELIVERED, as against what the run STORED. rows_collected above is
+                   0 for every abandoned cycle by definition, so it can never separate a target that sent
+                   nothing from one that sent rows and went silent. */
+                drain_rows_read = r.DrainRowsRead,
+                drain_bytes_read = r.DrainBytesRead,
+                drain_last_read_ms = r.DrainLastReadMs is null ? (double?)null : Math.Round(r.DrainLastReadMs.Value, 0),
+                target_session_id = r.TargetSessionId,
+                sweep_peer_max_ms = r.SweepPeerMaxMs is null ? (double?)null : Math.Round(r.SweepPeerMaxMs.Value, 0),
+                /*
+                    V110 (#2860): the deferred plan/text fetch split, SUMMED across the run's fan-out. The
+                    store probe is the largest single term on this fleet — 55.4% of plan_fetch and 80.6% of
+                    text_fetch measured over 38 h — which inverts the shape the sub-split was originally
+                    written against, so getting it in front of a reader is the whole point.
+
+                    Emitted raw rather than pre-divided into ms-per-id. The rates are what the counts are
+                    for, but there are three useful ones over these five figures (ms per attempted id, ms
+                    per probed reference, and attempted ÷ probed, which is the #2902 backlog signal), and
+                    blessing one in the projection would hide the other two.
+                */
+                plan_fetch_probe_ms = r.PlanFetchProbeMs is null ? (double?)null : Math.Round(r.PlanFetchProbeMs.Value, 0),
+                plan_fetch_target_ms = r.PlanFetchTargetMs is null ? (double?)null : Math.Round(r.PlanFetchTargetMs.Value, 0),
+                plan_fetch_write_ms = r.PlanFetchWriteMs is null ? (double?)null : Math.Round(r.PlanFetchWriteMs.Value, 0),
+                plan_fetch_ids_attempted = r.PlanFetchIdsAttempted,
+                plan_fetch_probe_ids = r.PlanFetchProbeIds,
+                text_fetch_probe_ms = r.TextFetchProbeMs is null ? (double?)null : Math.Round(r.TextFetchProbeMs.Value, 0),
+                text_fetch_target_ms = r.TextFetchTargetMs is null ? (double?)null : Math.Round(r.TextFetchTargetMs.Value, 0),
+                text_fetch_write_ms = r.TextFetchWriteMs is null ? (double?)null : Math.Round(r.TextFetchWriteMs.Value, 0),
+                text_fetch_ids_attempted = r.TextFetchIdsAttempted,
+                text_fetch_probe_ids = r.TextFetchProbeIds,
             });
 
             return JsonSerializer.Serialize(new

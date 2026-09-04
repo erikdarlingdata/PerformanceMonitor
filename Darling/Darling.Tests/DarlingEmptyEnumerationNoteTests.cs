@@ -89,10 +89,11 @@ public sealed class DarlingEmptyEnumerationNoteTests
 
         Assert.Contains("collectionNote = enumeration.Note;", source);
 
-        /* The success return gained the fan-out rollup at #2472 and the server-scoped phase split at #2851,
-           and this pin moved with each of them rather than being loosened to a substring. Naming the whole
-           argument list is the point: it is what makes an argument DROPPED from this call — the note
-           included — fail here instead of silently reaching the store as a null.
+        /* The success return gained the fan-out rollup at #2472, the server-scoped phase split at #2851 and
+           the summed per-database fetch split at #2860, and this pin moved with each of them rather than
+           being loosened to a substring. Naming the whole argument list is the point: it is what makes an
+           argument DROPPED from this call — the note included — fail here instead of silently reaching the
+           store as a null.
 
            #2851 wrapped the call across lines, which broke the single-line literal this used to be. Collapsing
            runs of whitespace before matching makes the pin survive REFORMATTING while still failing on a
@@ -105,7 +106,8 @@ public sealed class DarlingEmptyEnumerationNoteTests
             "ServerPhasesMeasured: serverPhasesMeasured, ServerOpenMs: context.ServerScopeOpenMs, " +
             "ServerDrainMs: context.ServerScopeDrainMs, ServerWatermarkMs: serverWatermarkMs, " +
             "ServerRowsRead: context.ServerScopeRowsRead, ServerBytesRead: context.ServerScopeBytesRead, " +
-            "ServerLastReadMs: context.ServerScopeLastReadMs, TargetSessionId: context.TargetSessionId);",
+            "ServerLastReadMs: context.ServerScopeLastReadMs, TargetSessionId: context.TargetSessionId, " +
+            "FetchPhases: fetchPhases.Result);",
             collapsed);
     }
 
