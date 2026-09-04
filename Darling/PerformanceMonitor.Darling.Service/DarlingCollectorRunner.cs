@@ -1600,17 +1600,21 @@ public sealed class DarlingCollectorRunner
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
+        /* #2864: the drain forensics are recorded on the SUCCESS path too, not only on abandon. The
+           abandoned row is the one being explained, but a ratio needs a denominator - "149 rows, last read
+           at 500 ms" only reads as pathological against what this collector on this server normally
+           delivers, and that baseline has to come from the same column on ordinary rows. Storing it only on
+           failures would reproduce exactly the cross-referencing this change exists to remove.
+
+           Kept ABOVE the return rather than inside the argument list: DarlingEmptyEnumerationNoteTests pins
+           this call's arguments as one whitespace-collapsed run, so a comment between them breaks a pin
+           whose actual job is to catch a DROPPED argument. */
         return new CollectorRunResult(
             rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result,
             ServerPhasesMeasured: serverPhasesMeasured,
             ServerOpenMs: context.ServerScopeOpenMs,
             ServerDrainMs: context.ServerScopeDrainMs,
             ServerWatermarkMs: serverWatermarkMs,
-            /* #2864: recorded on the SUCCESS path too, not only on abandon. The abandoned row is the one
-               being explained, but a ratio needs a denominator — "149 rows, last read at 500 ms" only reads
-               as pathological against what this collector on this server normally delivers, and that
-               baseline has to come from the same column on ordinary rows. Storing it only on failures would
-               reproduce exactly the cross-referencing this change exists to remove. */
             ServerRowsRead: context.ServerScopeRowsRead,
             ServerBytesRead: context.ServerScopeBytesRead,
             ServerLastReadMs: context.ServerScopeLastReadMs,
