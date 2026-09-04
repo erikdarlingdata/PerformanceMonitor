@@ -331,14 +331,14 @@ public partial class ViewerServerTab
     {
         if (sender is not MenuItem menuItem) return;
         if (FindParentDataGrid(menuItem)?.CurrentItem is not ViewerBlockedProcessRow row || !row.HasBlockedQueryPlan) return;
-        OpenPlanTab(row.BlockedQueryPlanXml!, $"Blocked Plan - SPID {row.BlockedSpid}", row.BlockedSqlText);
+        _ = OpenPlanTab(row.BlockedQueryPlanXml!, $"Blocked Plan - SPID {row.BlockedSpid}", row.BlockedSqlText);
     }
 
     private void ViewBlockingQueryPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem menuItem) return;
         if (FindParentDataGrid(menuItem)?.CurrentItem is not ViewerBlockedProcessRow row || !row.HasBlockingQueryPlan) return;
-        OpenPlanTab(row.BlockingQueryPlanXml!, $"Blocking Plan - SPID {row.BlockingSpid}", row.BlockingSqlText);
+        _ = OpenPlanTab(row.BlockingQueryPlanXml!, $"Blocking Plan - SPID {row.BlockingSpid}", row.BlockingSqlText);
     }
 
     private void RenderLockWaitTrendChart(List<LockWaitTrendPoint> data)
