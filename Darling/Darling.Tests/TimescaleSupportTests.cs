@@ -1234,10 +1234,14 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
             Assert.True(applied == RetentionPolicyCount,
                 $"expected all {RetentionPolicyCount} retention policies to apply, got {applied} — a swallowed error means the policy SQL is invalid on this TimescaleDB; {retentionLog.Joined}");
 
-            /* Idempotent: the second pass hits if_not_exists (job_id -1) and must not throw on alter_job(-1). */
-            var reapplied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct);
+            /* Idempotent: the second pass hits if_not_exists (job_id -1) and must not throw on alter_job(-1).
+               Fresh logger — CapturingTestLogger has no reset, and EnsureRetentionPoliciesAsync always logs an
+               Information summary even on success, so reusing retentionLog would bury this pass's own evidence
+               under the first pass's already-explained noise (review finding on #2887). */
+            var reapplyLog = new CapturingTestLogger();
+            var reapplied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, reapplyLog, ct);
             Assert.True(reapplied == RetentionPolicyCount,
-                $"the idempotent second pass should count all {RetentionPolicyCount} policies, got {reapplied}; {retentionLog.Joined}");
+                $"the idempotent second pass should count all {RetentionPolicyCount} policies, got {reapplied}; {reapplyLog.Joined}");
 
             using var job = new NpgsqlCommand(@"
 SELECT COUNT(*)
@@ -1350,12 +1354,16 @@ VALUES (1, $1, 9137, 'converge-1937', 'TestDb', decode(md5('converge'), 'hex'), 
 
             /* #2818: the nightly's one "expected 17, got 0" on this exact line was untriageable because every
                per-relation warning went to a null logger. Capture instead, and carry the evidence in the
-               assertion message — see the EndToEnd test above for the full reasoning. */
-            var retentionLog = new CapturingTestLogger();
-            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, retentionLog, ct);
-            var created17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct);
+               assertion message — see the EndToEnd test above for the full reasoning. A FRESH logger per pass
+               below: this fixture keeps query_stats HELD for the whole test (see the comment above), so every
+               pass logs a benign "... HELD PAUSED ..." warning for it plus EnsureRetentionPoliciesAsync's own
+               Information summary — sharing one CapturingTestLogger (which has no reset) would bury whichever
+               pass actually fails under the earlier passes' expected noise (review finding on #2887). */
+            var createLog = new CapturingTestLogger();
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct);
+            var created17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, createLog, ct);
             Assert.True(created17 == RetentionPolicyCount,
-                $"the creation pass should apply all {RetentionPolicyCount} retention policies, got {created17}; {retentionLog.Joined}");
+                $"the creation pass should apply all {RetentionPolicyCount} retention policies, got {created17}; {createLog.Joined}");
 
             /* The gate's own verdicts, asserted as preconditions: short coverage holds, empty coverage arms. */
             var created = new
@@ -1389,10 +1397,12 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             Assert.Equal(("21 days", false), (before.Held.DropAfter, before.Held.Scheduled));
             Assert.Equal(("21 days", true), (before.Armed.DropAfter, before.Armed.Scheduled));
 
-            /* THE measured claim: the sweep converges both onto the constant, preserving everything else. */
-            var converged = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct);
+            /* THE measured claim: the sweep converges both onto the constant, preserving everything else.
+               Fresh logger — see the fixture-level #2818 comment above. */
+            var convergeLog = new CapturingTestLogger();
+            var converged = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, convergeLog, ct);
             Assert.True(converged == RetentionPolicyCount,
-                $"the convergence pass should count all {RetentionPolicyCount} policies, got {converged}; {retentionLog.Joined}");
+                $"the convergence pass should count all {RetentionPolicyCount} policies, got {converged}; {convergeLog.Joined}");
 
             var after = new
             {
@@ -1407,10 +1417,12 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             Assert.True(after.Armed.Scheduled, "an ARMED policy must stay armed across a horizon convergence");
             Assert.Equal(before.Armed.NextStart, after.Armed.NextStart);
 
-            /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing. */
-            var settled17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct);
+            /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing.
+               Fresh logger — see the fixture-level #2818 comment above. */
+            var settledLog = new CapturingTestLogger();
+            var settled17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, settledLog, ct);
             Assert.True(settled17 == RetentionPolicyCount,
-                $"the idempotent third sweep should count all {RetentionPolicyCount} policies, got {settled17}; {retentionLog.Joined}");
+                $"the idempotent third sweep should count all {RetentionPolicyCount} policies, got {settled17}; {settledLog.Joined}");
             var settled = await PolicyStateAsync(connection, ArmedRelation, ct);
             Assert.Equal(("90 days", true, after.Armed.NextStart), (settled.DropAfter, settled.Scheduled, settled.NextStart));
             Assert.Equal("4 days", (await PolicyStateAsync(connection, HeldRelation, ct)).DropAfter);
