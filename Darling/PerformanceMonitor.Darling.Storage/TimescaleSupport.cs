@@ -3045,7 +3045,6 @@ LEFT JOIN LATERAL (
 WHERE j.proc_name = 'policy_retention'
   AND j.hypertable_schema = 'collect'";
 
-
     /// <summary>
     /// Every retention policy's ARMED state against the consequence of it being held (#2813) — the readings
     /// the Retention Held self-alert judges, and the live block <c>get_store_metrics</c> reports.
@@ -3083,8 +3082,6 @@ WHERE j.proc_name = 'policy_retention'
         {
             throw new ArgumentNullException(nameof(connection));
         }
-
-
 
         var readings = new List<RetentionHoldReading>();
         try
