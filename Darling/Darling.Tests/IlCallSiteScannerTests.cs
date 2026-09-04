@@ -105,6 +105,66 @@ public sealed class IlCallSiteScannerTests
     }
 
     /// <summary>
+    /// <para>A two-byte opcode carrying its own operand, decoded ahead of a genuine call. This pins the one
+    /// piece of the decoder that looks redundant and is not: <c>OpCodes</c> contains a ONE-byte entry at
+    /// <c>0xFE</c> (<c>Prefix1</c>, <c>FlowControl.Meta</c>, <c>InlineNone</c>) representing the second-page
+    /// prefix rather than an instruction, so the scanner must test that byte before consulting the table.</para>
+    ///
+    /// <para>Collapse it into a single lookup and <c>ldftn</c> below reads as a zero-operand <c>Prefix1</c>;
+    /// the decode then resumes inside <c>ldftn</c>'s operand, reads the <c>0x20</c> there as a <c>ldc.i4</c>
+    /// whose own four bytes swallow the real <c>call</c>, and the call site disappears. That is the same
+    /// class of miss as the <c>i += 4</c> skip, arrived at from the other direction.</para>
+    /// </summary>
+    [Fact]
+    public void ATwoByteOpcodeIsDecodedAsTwoBytes_NotAsTheOneByteInlineNonePrefixEntry()
+    {
+        /* ldftn <4-byte operand>  |  call 0x28030201  |  ret
+           offset 0 .. 5              offset 6 .. 10      offset 11
+
+           The operand's first byte is 0x20 (ldc.i4) on purpose: if the prefix is mis-decoded as one byte, the
+           decode lands there and ldc.i4's four operand bytes consume the genuine call's opcode at offset 6. */
+        byte[] il =
+        [
+            0xFE, 0x06,                      // ldftn (two-byte opcode, InlineMethod)
+            0x20, 0x00, 0x00, 0x00,          // its operand — first byte doubles as a ldc.i4 opcode
+            0x28, 0x01, 0x02, 0x03, 0x28,    // call 0x28030201  <- the genuine call site, at offset 6
+            0x2A,                             // ret
+        ];
+
+        var decoded = IlCallSiteScanner.DecodeCallSites(il, nameof(ATwoByteOpcodeIsDecodedAsTwoBytes_NotAsTheOneByteInlineNonePrefixEntry));
+
+        /* ldftn is InlineMethod but is neither call nor callvirt, so it is correctly not a call site. */
+        Assert.Equal(1, decoded.Count);
+        Assert.Equal(6, decoded[0].Offset);
+        Assert.Equal(ContrivedToken, decoded[0].Token);
+    }
+
+    /// <summary>
+    /// A body whose last operand runs off the end must throw rather than return the call sites it managed to
+    /// read. A partial answer from this scanner is indistinguishable from a complete one at the call site, and
+    /// every pin that depends on it asserts on a count.
+    /// </summary>
+    [Fact]
+    public void ATruncatedBodyThrows_RatherThanReturningTheCallSitesItManagedToRead()
+    {
+        /* call <token>, then a ldc.i4 with only two of its four operand bytes present. */
+        byte[] truncated =
+        [
+            0x28, 0x01, 0x02, 0x03, 0x28,   // call 0x28030201
+            0x20, 0x00, 0x00,                // ldc.i4 — operand cut short
+        ];
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => IlCallSiteScanner.DecodeCallSites(truncated, "cut-short-body"));
+
+        /* Asserted on the diagnostic's own content, not on the body name this test passed in: the point is
+           that it names WHERE the decode ran out, so a real failure is actionable from the message alone. */
+        Assert.Contains("cut-short-body", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("IL offset 5", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("only 8 bytes", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The decoder against the shipped artifact rather than a hand-built body: every method body in the
     /// service assembly must decode to exactly its own length with no unknown opcode. A mis-stepped decode
     /// walks off an instruction boundary and then reports garbage offsets, and there is no way to notice

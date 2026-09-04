@@ -69,9 +69,14 @@ internal static class IlCallSiteScanner
     private const byte Call = 0x28;
     private const byte Callvirt = 0x6F;
 
-    /* 0xFE is the reserved prefix for the second opcode page and is not itself a single-byte opcode, so a
-       leading 0xFE always means a two-byte opcode. OpCode.Value for those is the packed 0xFExx as a signed
-       short, which is what the key computation below reproduces. */
+    /* 0xFE introduces the second opcode page, so a leading 0xFE always means a two-byte opcode. OpCode.Value
+       for those is the packed 0xFExx as a SIGNED short (Ceq is -511, not 65025), which is what the key
+       computation below reproduces; single-byte values stay 0..255, so the two ranges cannot collide.
+
+       The table does contain a one-byte entry at 0xFE — OpCodes.Prefix1, FlowControl.Meta, InlineNone — which
+       represents the prefix rather than an instruction. Testing this byte BEFORE consulting the table is what
+       shadows it. Collapsing that into a single lookup would read every two-byte opcode as a zero-operand
+       Prefix1 and mis-step the rest of the body, which is the failure this class exists to prevent. */
     private const byte TwoBytePrefix = 0xFE;
 
     private static readonly Dictionary<short, OperandType> OperandTypes = BuildOperandTable();
