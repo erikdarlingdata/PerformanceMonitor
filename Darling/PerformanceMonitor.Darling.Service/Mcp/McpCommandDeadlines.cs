@@ -6,6 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -88,9 +92,21 @@ namespace PerformanceMonitor.Darling.Service;
 internal static class McpCommandDeadlines
 {
     /// <summary>
-    /// The read deadline for the 124 shipped-shape commands: everything under <c>Mcp/</c> plus
+    /// The deadline for the 124 shipped-shape commands: everything under <c>Mcp/</c> plus
     /// <see cref="CustomViewStore"/>. Bounded on both sides, and each side comes from a different
     /// constraint rather than one argument restated.
+    ///
+    /// <para><b>"Read" names the SURFACE, not the verb, and six of the 124 are writes</b> — the
+    /// custom-view insert/update/delete in <see cref="CustomViewStore"/>, the
+    /// <c>config_alert_settings</c> update behind the alert-tuning tool, and the server-registry insert and
+    /// delete behind <c>add_servers</c>/<c>remove_server</c>. They share this bound rather than getting
+    /// their own because they share the REGIME exactly, which is what this sweep groups by: the same
+    /// least-privilege pool, the same absent <c>CancellationToken</c>, the same role
+    /// <c>statement_timeout</c>, and no enclosing budget. They are also strictly cheaper than the reads the
+    /// bound was floored on — every one is a single-row statement on a <c>config</c> table keyed by primary
+    /// key — so a ceiling derived from the heaviest read is comfortable for all of them. The name follows
+    /// <see cref="StorageCommandDeadlines.McpReadSeconds"/> and the viewer's
+    /// <c>InteractiveReadSeconds</c>, both of which cover their surface's writes for the same reason.</para>
     ///
     /// <para>ABOVE the managed store's shipped server-side ceiling, deliberately. The <c>mcp</c> role's
     /// default <c>statement_timeout</c> is 15 s and it fires on this surface in production TODAY: on
@@ -114,29 +130,77 @@ internal static class McpCommandDeadlines
     internal const int ReadSeconds = 20;
 
     /// <summary>
-    /// The deadline for the composed-query runner —
-    /// <see cref="!:DarlingWebEndpoints.RunComposedQueryAsync"/>, reached from both the web
-    /// <c>/api/compose/run</c> endpoint and the MCP <c>run_custom_view_panel</c> tool through the one shared
-    /// <see cref="DarlingWebEndpoints.RunComposedPanelAsync"/>.
+    /// The composed-query deadline when the operator's configured value cannot be read — 15 s, which is the
+    /// shipped default in three other places (<see cref="DarlingConfig.ComposeStatementTimeoutSeconds"/>,
+    /// <c>ComposeSpec.StatementTimeout</c>, and the <c>value &lt;= 0</c> arm of
+    /// <see cref="StoreConfigProvider.ClampComposeStatementTimeoutSeconds"/>), so a store that cannot answer
+    /// lands on the same number a store that has never been tuned would.
+    ///
+    /// <para><b>Defensive on purpose, mirroring <c>DarlingManagedRoles</c>' own read of this column.</b> The
+    /// row may not be seeded yet, the store may predate the V78 column, and the read runs on a
+    /// least-privilege pool — none of which should turn a tuning knob into a failed panel. Failing OPEN to a
+    /// larger value would be the wrong direction: it would grant more time precisely when the store is least
+    /// able to answer for itself.</para>
+    /// </summary>
+    internal const int ComposedQueryFallbackSeconds = 15;
+
+    /// <summary>
+    /// <para>The deadline for the composed-query runner — <c>RunComposedQueryAsync</c>, reached from both the
+    /// web <c>/api/compose/run</c> endpoint and the MCP <c>run_custom_view_panel</c> tool through the one
+    /// shared <see cref="DarlingWebEndpoints.RunComposedPanelAsync"/>.</para>
     ///
     /// <para><b>Why this one cannot take <see cref="ReadSeconds"/>.</b> Every other command on this surface
     /// is a shipped query of fixed shape. This one runs OPERATOR-AUTHORED SQL compiled from a stored panel
-    /// spec, and <c>compose_statement_timeout_seconds</c> exists precisely to bound it — that column is the
-    /// operator's declaration of how long this query class may run. A fixed 20 s here would cut off the
-    /// panel an operator raised the knob to 120 s for, which is a regression dressed as a fix.</para>
+    /// spec, and <c>config.config_service.compose_statement_timeout_seconds</c> exists precisely to bound it
+    /// — that column is the operator's declaration of how long this query class may run. A fixed 20 s here
+    /// would cut off the panel an operator raised the knob to 120 s for, which is a regression dressed as a
+    /// fix.</para>
     ///
-    /// <para>So the value is the operator's own declared MAXIMUM,
-    /// <see cref="StoreConfigProvider.MaxComposeStatementTimeoutSeconds"/>, taken by reference rather than
-    /// copied. Because the clamp guarantees no configured value can exceed it, this deadline can never be
-    /// the binding bound on a managed store — the role GUC always fires first, whatever it is set to — while
-    /// on a BYO store, where no role GUC exists, it replaces "whatever Npgsql defaults to" with the
-    /// product's own stated ceiling for this query class.</para>
+    /// <para><b>Why it is READ rather than declared, and read HERE rather than plumbed from the host.</b>
+    /// The store is authoritative for this knob and #2918 made it hot-swappable — a control-plane reload
+    /// re-asserts it onto the roles without a restart. So a value captured at host start is simply wrong
+    /// after the first change, and the value a host COULD plumb is the file-loaded
+    /// <see cref="DarlingConfig.ComposeStatementTimeoutSeconds"/>, which is only the seed: the store wins
+    /// afterwards. Reading the store per panel run has no cache to go stale, and it is also what lets the two
+    /// callers stay identical — <see cref="DarlingWebEndpoints.MapAll"/> has the host's config in scope and
+    /// the MCP tool has only the data source, so plumbing would have given one surface the file value and the
+    /// other a store read, which is exactly the divergence the single shared runner exists to prevent.</para>
     ///
-    /// <para><b>It narrows rather than closes.</b> Ten minutes is a long time to hold one of 24 permits, and
-    /// the honest fix is to thread the LIVE configured value down to the runner so the client deadline
-    /// tracks the operator's actual setting instead of its upper clamp. That needs
-    /// <see cref="DarlingWebEndpoints.MapAll"/>'s signature and the MCP tool's call to carry it, which is a
-    /// wider change than removing an inherited default; it is filed rather than smuggled in here.</para>
+    /// <para><b>The near miss worth naming</b> is three lines away in the same method:
+    /// <c>ComposeStoreAvailability.GetRollupsAsync</c> is deliberately <i>cached per data source</i>, because
+    /// which rollups a store HAS changes only when someone migrates it. Caching this the same way would
+    /// compile, pass any pin that only checks the value's band, and silently pin the deadline to whatever the
+    /// knob said the first time a panel ran. It is resolved once per RUN — not per query, so a panel with
+    /// annotation overlays pays one read rather than one per source, and not once per process.</para>
+    ///
+    /// <para>Clamped through the store's own
+    /// <see cref="StoreConfigProvider.ClampComposeStatementTimeoutSeconds"/> rather than trusted, so a
+    /// hand-edited row cannot widen this deadline any more than it can widen the role GUC; the clamp also
+    /// maps a null or non-positive value onto <see cref="ComposedQueryFallbackSeconds"/>' 15.</para>
     /// </summary>
-    internal const int ComposedQuerySeconds = StoreConfigProvider.MaxComposeStatementTimeoutSeconds;
+    internal static async Task<int> ResolveComposedQuerySecondsAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(ComposeDeadlineSql);
+            command.CommandTimeout = ReadSeconds;
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+
+            return StoreConfigProvider.ClampComposeStatementTimeoutSeconds(value is int seconds ? seconds : 0);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return ComposedQueryFallbackSeconds;
+        }
+    }
+
+    /// <summary>
+    /// Schema-QUALIFIED, like <c>DarlingManagedRoles</c>' read of the same column and unlike most reads on
+    /// this surface: the least-privilege pools carry a <c>collect,config</c> search path, but this one read
+    /// also runs on paths where that cannot be assumed, and <c>config_service</c> is not a name worth
+    /// resolving by luck.
+    /// </summary>
+    private const string ComposeDeadlineSql =
+        "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1";
 }

@@ -41,7 +41,7 @@ namespace Darling.Tests;
 /// constant, and <c>Targets/HypotheticalIndexExperiment</c> builds transaction-scoped commands against a
 /// monitored PostgreSQL target under its own <c>SET LOCAL statement_timeout</c>. Both are other groups'
 /// territory, and both would be flagged as offenders by a directory-scoped sweep that could not tell a store
-/// command from a target one. Every site in THIS scope was classified by hand and all 125 are store
+/// command from a target one. Every site in THIS scope was classified by hand and all 126 are store
 /// commands, which is what makes one store-derived constant correct for them; the receiver allowlist in
 /// <see cref="EveryCommandInScope_IsBuiltAgainstTheStore_NotAMonitoredTarget"/> is that classification
 /// written down, so a future target command here fails rather than silently inheriting a store bound.</para>
@@ -55,7 +55,8 @@ public sealed class McpReadCommandTimeoutTests
     /// <summary>
     /// Both ways a command is constructed in this codebase — <c>new NpgsqlCommand(</c> and
     /// <c>.CreateCommand(</c>. The second is the shape #2874's original census missed entirely, and here it
-    /// is 121 of the 125 sites.
+    /// is 122 of the 126 sites — 125 that inherited the default plus the deadline resolver's own read,
+    /// which this change adds and which is a shipped-shape read like any other.
     ///
     /// <para><b>The type name may be QUALIFIED, which every regex in this sweep so far could not see.</b>
     /// Found by a red-first variant of this pin whose planted offender came back GREEN: a scan for
@@ -135,7 +136,8 @@ public sealed class McpReadCommandTimeoutTests
             }
         }
 
-        /* 125 sites at the time this pin landed; the floor guards against the sweep silently reading an
+        /* 126 sites at the time this pin landed — the 125 that inherited Npgsql's default plus the
+           deadline resolver's own read. The floor guards against the sweep silently reading an
            empty or wrong directory, not against refactors that change the count. */
         Assert.True(total >= 100, $"the read-surface scan matched only {total} command constructions — the sweep is not reading the project");
 
@@ -211,7 +213,7 @@ public sealed class McpReadCommandTimeoutTests
     /// word rather than a delimiter; the near miss is the point. This repo's comments quote code constantly,
     /// so EVERY scan in this file reads the STRIPPED text — including the construction scan, which the
     /// landed pins run over raw text and where a prose mention of <c>.CreateCommand(</c> would be counted as
-    /// an untimed site that no edit could ever fix. That divergence changes no count today (125 either way)
+    /// an untimed site that no edit could ever fix. That divergence changes no count today (126 either way)
     /// and closes a false-positive direction, which is the one that fails a green build on correct code.
     /// <see cref="TheHandoffScan_ReadsCodeNotProse"/> and the commented-construction case in
     /// <see cref="TheScanner_JudgesTheSiteItself_NotItsNeighbours"/> are the positive controls, so these
@@ -318,27 +320,92 @@ public sealed class McpReadCommandTimeoutTests
     }
 
     /// <summary>
-    /// The composed-query deadline, pinned RELATIONALLY against the operator's own knob rather than by
-    /// value — full derivation on <see cref="McpCommandDeadlines.ComposedQuerySeconds"/>.
+    /// The composed-query deadline is READ from the store per panel run, not declared — full derivation on
+    /// <see cref="McpCommandDeadlines.ResolveComposedQuerySecondsAsync"/>. This fact pins the FALLBACK the
+    /// resolver lands on when the store cannot answer.
     ///
-    /// <para>This site is the one place on the surface that runs OPERATOR-AUTHORED SQL, and
-    /// <c>config_service.compose_statement_timeout_seconds</c> is the operator's declaration of how long
-    /// that query class may run. A fixed constant under it would cut off the panel the knob was raised for,
-    /// so the deadline is the knob's own clamped MAXIMUM: never the binding bound on a managed store, and
-    /// the product's stated ceiling rather than a library default on a BYO one.</para>
+    /// <para>Bounded on both sides by the same clamp the role GUC is written through, so the fallback can
+    /// never be a value an operator could not have configured, and equal to the shipped default so a store
+    /// that cannot answer behaves like a store nobody has tuned. Failing open to something larger would
+    /// grant more time precisely when the store is least able to answer for itself, which is the wrong
+    /// direction for a deadline whose whole job on a BYO store is to be the only bound there is.</para>
     /// </summary>
     [Fact]
-    public void TheComposedQueryDeadline_TracksTheOperatorsDeclaredMaximum()
+    public void TheComposedQueryFallback_IsAValueAnOperatorCouldHaveConfigured()
     {
-        var seconds = McpCommandDeadlines.ComposedQuerySeconds;
+        var seconds = McpCommandDeadlines.ComposedQueryFallbackSeconds;
 
-        Assert.Equal(StoreConfigProvider.MaxComposeStatementTimeoutSeconds, seconds);
+        Assert.InRange(
+            seconds,
+            StoreConfigProvider.MinComposeStatementTimeoutSeconds,
+            StoreConfigProvider.MaxComposeStatementTimeoutSeconds);
 
+        Assert.Equal(seconds, StoreConfigProvider.ClampComposeStatementTimeoutSeconds(seconds));
+
+        /* The shipped default in three other places; a fallback that disagreed with them would make an
+           unreadable store behave unlike a never-tuned one for no stated reason. */
+        Assert.Equal(new DarlingConfig().ComposeStatementTimeoutSeconds, seconds);
+
+        /* And the clamp's own null/non-positive arm has to land on it, because that is the arm the resolver
+           relies on for a missing row or a pre-V78 store rather than branching itself. */
+        Assert.Equal(seconds, StoreConfigProvider.ClampComposeStatementTimeoutSeconds(0));
+    }
+
+    /// <summary>
+    /// The composed-query runner must resolve its deadline PER RUN and must not carry a compile-time one.
+    ///
+    /// <para><b>This is the staleness guard, and it is structural because the value's correctness is not a
+    /// property of any number.</b> <c>compose_statement_timeout_seconds</c> is hot-swappable — #2918 has a
+    /// control-plane reload re-assert it onto the roles without a restart — so a deadline captured at host
+    /// start, or memoised per data source the way <c>ComposeStoreAvailability.GetRollupsAsync</c> three lines
+    /// away deliberately is, compiles and passes every band assertion while being simply wrong after the
+    /// first config change. The behavioural half lives in
+    /// <c>McpComposedQueryDeadlineLivePostgresTests</c>, which changes the column and requires the resolver
+    /// to see it; this half is what fails on a machine with no store.</para>
+    /// </summary>
+    [Fact]
+    public void TheComposedQueryRunner_ResolvesItsDeadlinePerRun()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            File.ReadAllText(Path.Combine(
+                RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs")));
+
+        Assert.Contains("McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres", code, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("CommandTimeout = McpCommandDeadlines.ComposedQuery", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("MaxComposeStatementTimeoutSeconds", code, StringComparison.Ordinal);
+
+        /* Resolved in the shared runner, so BOTH callers get the same value from the same place. A resolve
+           inside RunComposedQueryAsync would be per-QUERY (one store read per annotation source); a resolve
+           in the web endpoint only would leave the MCP tool on whatever the other arm passed. */
+        var runner = code.IndexOf("RunComposedPanelAsync(\r\n", StringComparison.Ordinal) >= 0
+            ? code.IndexOf("RunComposedPanelAsync(\r\n", StringComparison.Ordinal)
+            : code.IndexOf("RunComposedPanelAsync(\n", StringComparison.Ordinal);
+        Assert.True(runner >= 0, "RunComposedPanelAsync's declaration was not found — the shared runner has moved");
+
+        var resolve = code.IndexOf("ResolveComposedQuerySecondsAsync(postgres", StringComparison.Ordinal);
+        var query = code.IndexOf("private static async Task<JsonArray> RunComposedQueryAsync", StringComparison.Ordinal);
         Assert.True(
-            seconds > McpCommandDeadlines.ReadSeconds,
-            $"the composed-query deadline {seconds}s is not above the shipped-read deadline "
-            + $"{McpCommandDeadlines.ReadSeconds}s — a user-authored panel is the one query class on this surface "
-            + "the operator is allowed to grant more time than a fixed-shape read");
+            resolve > runner && resolve < query,
+            "the resolve does not sit inside the shared RunComposedPanelAsync body — it must happen once per "
+            + "run there, not per query inside RunComposedQueryAsync and not in one caller only");
+    }
+
+    /// <summary>
+    /// A user-authored panel is the one query class on this surface an operator may grant more time than a
+    /// fixed-shape read, so the clamp's ceiling has to leave room above the shipped-read deadline. Pinned
+    /// against the CLAMP rather than against any resolved value, because the resolved value is whatever the
+    /// operator chose and may legitimately be lower.
+    /// </summary>
+    [Fact]
+    public void TheComposedQueryClamp_LeavesRoomAboveTheShippedReadDeadline()
+    {
+        Assert.True(
+            StoreConfigProvider.MaxComposeStatementTimeoutSeconds > McpCommandDeadlines.ReadSeconds,
+            $"the compose clamp ceiling {StoreConfigProvider.MaxComposeStatementTimeoutSeconds}s is not above the "
+            + $"shipped-read deadline {McpCommandDeadlines.ReadSeconds}s — an operator could then never grant a "
+            + "user-authored panel more time than a fixed-shape read, which is the whole reason this regime is "
+            + "separate");
     }
 
     /// <summary>
