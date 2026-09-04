@@ -78,8 +78,8 @@ public sealed class StragglerCommandTimeoutTests
             nameof(ServiceCommandDeadlines.PostAnalysisForcePlanSeconds),
             Assigns(@"ServiceCommandDeadlines\.PostAnalysisForcePlanSeconds")),
         ("DarlingCliCommands.cs", Hop.Store, 3,
-            nameof(ServiceCommandDeadlines.CliStoreReadSeconds),
-            Assigns(@"ServiceCommandDeadlines\.CliStoreReadSeconds")),
+            "ServiceCommandDeadlines.Cli{StoreRead,BudgetBackstop}Seconds",
+            Assigns(@"ServiceCommandDeadlines\.Cli(?:StoreRead|BudgetBackstop)Seconds")),
     };
 
     /// <summary>
@@ -121,6 +121,7 @@ public sealed class StragglerCommandTimeoutTests
         var (file, _, expected, constant, assignment) = s_regimes[regime];
         var path = SourcePath(file);
         var text = File.ReadAllText(path);
+        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
         var offenders = new List<string>();
         var total = 0;
 
@@ -128,11 +129,16 @@ public sealed class StragglerCommandTimeoutTests
            contain `postgres.CreateCommand` in running prose, and a raw scan reports a phantom offender at a
            line no edit can fix. It happens not to match the regexes above — what follows the name there is a
            space — so the stripper is belt-and-braces on today's tree and load-bearing on tomorrow's. */
-        foreach (Match ctor in s_commandCtor.Matches(CSharpSourceWalker.StripCommentsAndStrings(text)))
+        foreach (Match ctor in s_commandCtor.Matches(code))
         {
             total++;
 
-            var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
+            /* The span is cut from the STRIPPED text, not the raw source, and that is a correctness
+               requirement rather than tidiness. `StripCommentsAndStrings` is length-preserving, so the two
+               are character-aligned and the offsets are interchangeable — but a `CommandTimeout = …` written
+               inside a COMMENT in the window satisfies a raw match and makes an untimed site read clean.
+               Every pin landed in this sweep before #2940 matches its value regex over the raw span. */
+            var span = CSharpSourceWalker.StatementSpanFrom(code, ctor.Index, statements: 2);
 
             if (!assignment.IsMatch(span))
             {
@@ -235,19 +241,62 @@ public sealed class StragglerCommandTimeoutTests
     public void NoDeadlineInScope_IsBorrowedFromANeighbouringConstruction(int regime)
     {
         var (file, _, expected, _, assignment) = s_regimes[regime];
-        var path = SourcePath(file);
-        var text = File.ReadAllText(path);
+        var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(SourcePath(file)));
         var timed = 0;
 
-        foreach (Match ctor in s_commandCtor.Matches(CSharpSourceWalker.StripCommentsAndStrings(text)))
+        foreach (Match ctor in s_commandCtor.Matches(code))
         {
-            if (assignment.IsMatch(CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 1)))
+            if (assignment.IsMatch(CSharpSourceWalker.StatementSpanFrom(code, ctor.Index, statements: 1)))
             {
                 timed++;
             }
         }
 
         Assert.Equal(expected, timed);
+    }
+
+    /// <summary>
+    /// A <c>CommandTimeout</c> written in a COMMENT must not satisfy the guard.
+    ///
+    /// <para>This is the gap #2940 found across the landed pins: they match the value regex over
+    /// <see cref="CSharpSourceWalker.StatementSpanFrom"/>'s span cut from the RAW source, so a commented-out
+    /// or merely-discussed deadline in the two-statement window reads as a real one. The fix is to cut the
+    /// span from the stripped text — which is length-preserving, so the offsets are interchangeable — and
+    /// this fixture is what stops it being un-fixed. Both halves are asserted: the commented deadline is
+    /// rejected AND the real one beside it is accepted, so the test cannot pass by rejecting everything.</para>
+    /// </summary>
+    [Fact]
+    public void ACommentedOutDeadline_DoesNotSatisfyTheGuard()
+    {
+        var assignment = Assigns(@"(?:Forward|Reset)CommandTimeoutSeconds");
+
+        const string Commented =
+            "await using var reset = new NpgsqlCommand(Sql, connection);\n"
+            + "/* was: CommandTimeout = ResetCommandTimeoutSeconds, and it should come back */\n"
+            + "await reset.ExecuteNonQueryAsync(CancellationToken.None);\n";
+
+        const string Real =
+            "await using var reset = new NpgsqlCommand(Sql, connection)\n"
+            + "{\n    CommandTimeout = ResetCommandTimeoutSeconds,\n};\n"
+            + "await reset.ExecuteNonQueryAsync(CancellationToken.None);\n";
+
+        foreach (var (source, expected) in new[] { (Commented, false), (Real, true) })
+        {
+            var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+            var ctor = s_commandCtor.Match(code);
+            Assert.True(ctor.Success, "the fixture did not contain a command construction");
+
+            Assert.Equal(
+                expected,
+                assignment.IsMatch(CSharpSourceWalker.StatementSpanFrom(code, ctor.Index, statements: 2)));
+
+            /* And the same fixture over the RAW span is what the landed pins do — the commented one passes
+               there, which is the defect being guarded rather than a claim about this file. */
+            Assert.True(
+                assignment.IsMatch(CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2)),
+                "the raw-span form no longer accepts a commented deadline, so this fixture has stopped "
+                + "demonstrating the gap it exists to demonstrate");
+        }
     }
 
     /// <summary>
@@ -322,11 +371,14 @@ public sealed class StragglerCommandTimeoutTests
             + "hook runs after that pass inside the same sweep body, holding a max_concurrent_sweeps permit "
             + "while the server's collection cannot relaunch, so it must not outlast the pass it rides on");
 
+        /* The floor is NOT connection acquisition: #2940 measured the connect phase tracking the connection
+           string's Timeout rather than CommandTimeout, so #2819's 673-893ms sits outside what this bounds.
+           It is the one COLD store read this sweep has measured in PRODUCTION - #2882's 1,744.9ms forced-plan
+           read - because the 3.59ms this group measured is from a local container. */
         Assert.True(
             seconds >= 2,
-            $"{seconds}s leaves no headroom over store connection acquisition alone (673-893ms, #2819), "
-            + "which dominates these commands: the history read measured 3.59ms cold at 5.0M journal rows "
-            + "and the journal INSERT 0.346ms");
+            $"{seconds}s leaves no headroom over a cold production store read (#2882 measured 1,744.9ms), "
+            + "and this group's own 3.59ms figure is from a local container rather than a production store");
 
         Assert.True(
             seconds < 30,
@@ -362,6 +414,60 @@ public sealed class StragglerCommandTimeoutTests
             ServiceCommandDeadlines.CliStoreReadSeconds < 30,
             $"{ServiceCommandDeadlines.CliStoreReadSeconds}s is at or above the inherited default, so the "
             + "command could still outlive the budget whose expiry the operator is told about");
+    }
+
+    /// <summary>
+    /// At the one CLI site that already has a budget, the command's deadline sits strictly ABOVE it, so the
+    /// budget wins and the operator gets the message that names a number.
+    ///
+    /// <para>Review caught the tie. Equal bounds make which one fires a race, and the two arms report
+    /// differently: the CTS surfaces as <c>OperationCanceledException</c> and takes the arm that says "did not
+    /// answer within N seconds", while an Npgsql <c>CommandTimeout</c> expiry falls through to the general arm
+    /// and renders <c>Exception while reading from stream</c> — the #2826 costume, handed to an installer by
+    /// the site whose purpose is to explain the failure. Same ordering rule as
+    /// <see cref="HypotheticalIndexExperiment.ForwardCommandTimeoutSeconds"/> against the server-side GUC: the
+    /// bound with the better message must be the one that fires.</para>
+    ///
+    /// <para>Pinned as an ordering plus a placement, because the ordering alone would be satisfied by a site
+    /// that took the backstop where no budget encloses it — which would silently loosen the other two verbs.</para>
+    /// </summary>
+    [Fact]
+    public void TheBudgetedCliSite_KeepsItsCommandDeadlineAboveTheBudget()
+    {
+        Assert.True(
+            ServiceCommandDeadlines.CliBudgetBackstopSeconds > ServiceCommandDeadlines.CliStoreReadSeconds,
+            $"the backstop {ServiceCommandDeadlines.CliBudgetBackstopSeconds}s does not sit above the "
+            + $"{ServiceCommandDeadlines.CliStoreReadSeconds}s budget, so which bound fires is a race and "
+            + "half the timing window reports the store as a network fault");
+
+        Assert.True(
+            ServiceCommandDeadlines.CliBudgetBackstopSeconds < 30,
+            $"the backstop {ServiceCommandDeadlines.CliBudgetBackstopSeconds}s is at or above Npgsql's "
+            + "inherited default, so it stops being a backstop and becomes the absence of one");
+
+        var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(SourcePath("DarlingCliCommands.cs")));
+
+        /* The backstop appears exactly where a budget encloses the command, and nowhere else. */
+        Assert.Equal(1, CountOf(code, "ServiceCommandDeadlines.CliBudgetBackstopSeconds"));
+
+        var budgeted = new Regex(
+            @"CancelAfter\(TimeSpan\.FromSeconds\(ServiceCommandDeadlines\.CliStoreReadSeconds\)\)"
+            + @".*?CommandTimeout = ServiceCommandDeadlines\.CliBudgetBackstopSeconds",
+            RegexOptions.Singleline | RegexOptions.CultureInvariant);
+
+        Assert.Matches(budgeted, code);
+    }
+
+    private static int CountOf(string text, string needle)
+    {
+        var n = 0;
+        for (var i = text.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+             i = text.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            n++;
+        }
+
+        return n;
     }
 
     /// <summary>
@@ -437,7 +543,7 @@ public sealed class StragglerCommandTimeoutTests
 
         foreach (Match ctor in s_commandCtor.Matches(code))
         {
-            var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
+            var span = CSharpSourceWalker.StatementSpanFrom(code, ctor.Index, statements: 2);
 
             if (s_setsTimeout.IsMatch(span))
             {

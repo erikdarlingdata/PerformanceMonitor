@@ -3883,7 +3883,12 @@ public static class DarlingCliCommands
         {
             await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(budget.Token);
-            await using var command = new NpgsqlCommand(ReadEndpointTogglesSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+            await using var command = new NpgsqlCommand(ReadEndpointTogglesSql, connection)
+            {
+                /* ABOVE the CTS on purpose: the budget must win the race so the failure reports as
+                   "did not answer within N seconds" rather than as Npgsql's stream message. */
+                CommandTimeout = ServiceCommandDeadlines.CliBudgetBackstopSeconds,
+            };
             await using var reader = await command.ExecuteReaderAsync(budget.Token);
             if (!await reader.ReadAsync(budget.Token))
             {

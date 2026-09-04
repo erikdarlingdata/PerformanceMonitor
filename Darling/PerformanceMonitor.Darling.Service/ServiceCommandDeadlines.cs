@@ -102,17 +102,25 @@ public static class ServiceCommandDeadlines
     /// 120 s. At Npgsql's inherited 30 s default it is 600 s — <b>five times the budget of the pass it rides
     /// on</b>, for a hook that is not part of it.</para>
     ///
-    /// <para><b>ABOVE the measured worst case, which is dominated by connection acquisition rather than by
-    /// the query.</b> Measured on PostgreSQL 17 against a <c>collect.plan_force_actions</c> seeded to 5.0 M
+    /// <para><b>ABOVE the worst case, and the floor is NOT connection acquisition.</b> #2940 measured that
+    /// the connect phase tracks the connection string's <c>Timeout</c> and not <c>CommandTimeout</c> — at
+    /// <c>Timeout=2</c> it fails at 2.0 s with <c>CommandTimeout</c> set to either 1 or 60 — so the 673-893 ms
+    /// acquisition of #2819 is outside what this constant bounds and is deliberately NOT in the arithmetic
+    /// below. What is left is the statement itself. Measured on PostgreSQL 17 against a
+    /// <c>collect.plan_force_actions</c> seeded to 5.0 M
     /// rows / 1,382 MB — 43 servers x 8 databases x 1,000 distinct queries over a 1,095-day horizon, because
     /// this table has NO retention path and grows for the life of the deployment — <c>GetQueryHistoryAsync</c>
     /// runs in <b>3.59 ms cold</b> and 0.84-1.01 ms warm, and the journal <c>INSERT ... RETURNING</c> in
     /// <b>0.346 ms</b>. It is flat in table size: both indexes V107 creates are used, and the only subquery
     /// that scales with volume is the trailing-24 h server count, which stayed at 0.47 ms with a
     /// deliberately pathological 2,925-row window (the volume a per-query cooldown of zero would produce).
-    /// So the per-command floor is <b>~0.9 s of store connection acquisition</b> (673-893 ms, #2819) plus
-    /// single-digit milliseconds of work, and 5 s carries ~5.6x over it — the same ratio #2901 took on
-    /// <c>.Viewer</c>'s interactive reads.</para>
+    /// Those figures are from a local container, so the floor is anchored on the one COLD store read this
+    /// sweep has measured in production instead: #2882's forced-plan read at <b>1,744.9 ms</b> over ~6.0 GB.
+    /// A value under ~2 s could fire on a cold read; 5 s carries ~2.9x over it.</para>
+    ///
+    /// <para><b>So the CEILING is what fixes this number, not the floor.</b> The pass budget puts it at
+    /// 6 s or less and the floor only rules out the bottom two, which is worth saying plainly rather than
+    /// presenting a two-sided squeeze that is really one-sided.</para>
     ///
     /// <para><b>The two reads with no caller yet.</b> <c>GetPendingReviewsAsync</c> and
     /// <c>GetRecentActionsAsync</c> are specced ahead of #2731 and have no production caller in this build,
@@ -143,8 +151,16 @@ public static class ServiceCommandDeadlines
     /// 30 s does exactly that: the CTS fires at 10 s while the command believes it has 20 s left, so the two
     /// bounds disagree about the same wait. Making the command agree with the budget is what stops the
     /// message from being a lie. The floor is a single-row read or a single-row primary-key update of a
-    /// one-row <c>config_service</c> table — sub-millisecond work — plus the same ~0.9 s of store connection
-    /// acquisition, so ten seconds is over 10x the worst thing that can legitimately happen.</para>
+    /// one-row <c>config_service</c> table — sub-millisecond work — against #2882's 1,744.9 ms production
+    /// cold-read anchor, so ten seconds is ~5.7x the worst thing that can legitimately happen.</para>
+    ///
+    /// <para><b>The CTS and the <c>CommandTimeout</c> bound different spans, and that is why both exist.</b>
+    /// #2940 measured that the connect phase tracks <c>Timeout</c>, not <c>CommandTimeout</c>. So
+    /// <c>TryReadEndpointTogglesAsync</c>'s linked <c>CancellationTokenSource</c> is the only one of the two
+    /// that covers <c>OpenAsync</c> — which is the half an installer actually hangs on — while this constant
+    /// bounds the statement. Both are set to the same number because the operator is told one number; they
+    /// are not redundant, and the store-connection acquisition cost belongs to the CTS's span rather than to
+    /// this constant's.</para>
     ///
     /// <para>It lands on the same ten seconds as <see cref="CollectionSweepSeconds"/> and #2882's alert pass.
     /// That is a third derivation meeting them rather than a number reused: nothing above mentions a 30 s
@@ -152,4 +168,33 @@ public static class ServiceCommandDeadlines
     /// printed to an operator.</para>
     /// </summary>
     public const int CliStoreReadSeconds = 10;
+
+    /// <summary>
+    /// The command deadline at the ONE CLI site that already has a budget of its own —
+    /// <c>TryReadEndpointTogglesAsync</c>'s linked <c>CancellationTokenSource</c> — set deliberately ABOVE
+    /// <see cref="CliStoreReadSeconds"/> so the budget wins the race rather than tying it.
+    ///
+    /// <para><b>Review caught this, and it undercut the justification for the constant above.</b> Setting the
+    /// command to the same duration as the CTS makes which one fires first a race, and the two arms report
+    /// differently: the CTS surfaces as <c>OperationCanceledException</c> and is caught by the arm that says
+    /// "the store did not answer within N seconds", while an Npgsql <c>CommandTimeout</c> expiry is an
+    /// <c>NpgsqlException</c> wrapping a <c>TimeoutException</c>, falls through to the general arm, and
+    /// renders <c>ex.Message</c> — which is <c>Exception while reading from stream</c>, the network-fault
+    /// costume #2826 exists to stop this product wearing. So a tie does not merely reword the failure; under
+    /// half the timing window it hands an installer the exact misdiagnosis, from the site whose whole purpose
+    /// is to say plainly why the store did not answer.</para>
+    ///
+    /// <para><b>It is the same rule as the HypoPG forward path, and that is why the margin is the same 5 s.</b>
+    /// <c>HypotheticalIndexExperiment.ForwardCommandTimeoutSeconds</c> sits above the server-side
+    /// <c>SET LOCAL statement_timeout</c> for exactly this reason — a client-side deadline BELOW the
+    /// authoritative one converts a diagnosable error into an undiagnosable one. Here the authoritative bound
+    /// is a client-side CTS rather than a server GUC, but the ordering requirement is identical: whichever
+    /// bound produces the better message must be the one that fires, so the other is a backstop strictly
+    /// above it. The backstop still matters — it is what bounds the statement if the token is never observed —
+    /// and it stays far below Npgsql's inherited 30 s.</para>
+    ///
+    /// <para>The other two CLI sites have no budget around them, so for them
+    /// <see cref="CliStoreReadSeconds"/> IS the bound and there is nothing to order it against.</para>
+    /// </summary>
+    public const int CliBudgetBackstopSeconds = CliStoreReadSeconds + 5;
 }
