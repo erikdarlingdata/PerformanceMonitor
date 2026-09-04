@@ -88,6 +88,7 @@ public static class DarlingPgPredicateStatsReader
 
         var rows = new List<PgPredicateStatRow>();
         await using var command = postgres.CreateCommand(PgPredicateStatsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified) at the BIND, the convention every PostgreSQL read here follows. */
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));

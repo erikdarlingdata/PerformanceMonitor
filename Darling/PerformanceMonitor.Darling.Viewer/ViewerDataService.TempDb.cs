@@ -104,6 +104,7 @@ public sealed partial class ViewerDataService
         var samples = new List<TempDbSample>();
 
         await using var command = _dataSource.CreateCommand(TempDbTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -137,6 +138,7 @@ public sealed partial class ViewerDataService
         var samples = new List<TempDbFileIoSample>();
 
         await using var command = _dataSource.CreateCommand(TempDbFileIoTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {

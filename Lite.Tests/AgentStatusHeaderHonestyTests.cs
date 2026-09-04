@@ -33,10 +33,15 @@ public sealed class AgentStatusHeaderHonestyTests
         CollectionTime = DateTime.UtcNow.AddMinutes(-minutesOld),
     };
 
+    /* The two fixture ages every case in this class is built from, named so the straddle pin below reads the
+       SAME values the fixtures use rather than a retyped copy that could drift away from them. */
+    private const int CurrentFixtureMinutes = 1;
+    private const int StaleFixtureMinutes = 45;
+
     [Fact]
     public void NeverSeenRunning_ReadsNotPresent_AndIsNotAProblem()
     {
-        var row = Row(running: false, everSeenRunning: false, minutesOld: 1);
+        var row = Row(running: false, everSeenRunning: false, minutesOld: CurrentFixtureMinutes);
 
         Assert.Equal("not present", row.StatusDisplay);
         Assert.False(row.IsAgentProblem);
@@ -45,7 +50,7 @@ public sealed class AgentStatusHeaderHonestyTests
     [Fact]
     public void StoppedOnAServerThatRunsAgent_ReadsStopped_AndIsAProblem()
     {
-        var row = Row(running: false, everSeenRunning: true, minutesOld: 1);
+        var row = Row(running: false, everSeenRunning: true, minutesOld: CurrentFixtureMinutes);
 
         Assert.Equal("Stopped", row.StatusDisplay);
         Assert.True(row.IsAgentProblem);
@@ -54,7 +59,7 @@ public sealed class AgentStatusHeaderHonestyTests
     [Fact]
     public void Running_ReadsRunning_AndIsNotAProblem()
     {
-        var row = Row(running: true, everSeenRunning: true, minutesOld: 1);
+        var row = Row(running: true, everSeenRunning: true, minutesOld: CurrentFixtureMinutes);
 
         Assert.Equal("Running", row.StatusDisplay);
         Assert.False(row.IsAgentProblem);
@@ -65,8 +70,10 @@ public sealed class AgentStatusHeaderHonestyTests
     [InlineData(false)]
     public void StaleReading_ReadsUnknown_AndIsNeverAProblem_WhateverItLastSaid(bool everSeenRunning)
     {
-        /* Older than the 30-minute window the headless service uses for the same refusal. */
-        var row = Row(running: false, everSeenRunning: everSeenRunning, minutesOld: 45);
+        /* Older than the window, which is the headless service's window via the shared constant (#2794);
+           the straddle that makes this age meaningful is pinned by
+           TheStalenessFixtures_StraddleTheWindowTheyAreMeantToTest. */
+        var row = Row(running: false, everSeenRunning: everSeenRunning, minutesOld: StaleFixtureMinutes);
 
         Assert.True(row.IsStale);
         Assert.Equal("unknown (stale)", row.StatusDisplay);
@@ -85,19 +92,47 @@ public sealed class AgentStatusHeaderHonestyTests
         Assert.False(row.IsAgentProblem);
     }
 
+    /// <summary>
+    /// The cases in this class only test what they claim while the fixture ages STRADDLE the window: the
+    /// current-reading cases have to sit inside it, the stale-reading case outside it. Widen
+    /// <c>ServerHealthThresholds.CollectionStoppedMinutesDefault</c> past <c>StaleFixtureMinutes</c> and
+    /// <c>StaleReading_ReadsUnknown_AndIsNeverAProblem_WhateverItLastSaid</c> quietly stops exercising
+    /// staleness at all — it would build a row the header considers CURRENT and then assert it is stale,
+    /// failing on an out-of-date fixture constant while reporting itself as a behavior break. This pins the
+    /// straddle, so the reason arrives with the failure.
+    ///
+    /// <para>Note what this deliberately does NOT assert. Not that the window is 30 minutes: it is now
+    /// DERIVED from the shared constant (#2794), so restating the number here proves nothing about the two
+    /// surfaces agreeing, and asserting it against the constant it derives from would be a tautology that can
+    /// never fail. Not that it equals the headless service's window either —
+    /// <c>DarlingSelfAlertEvaluator.StaleWindow</c> is <c>internal</c> to the service, which this assembly
+    /// neither references nor is granted access to, and coupling Lite's tests to the service to reach one
+    /// value would cost more than the pin is worth. That agreement is already held from both ends against the
+    /// shared constant, the only place the two SKUs meet: <c>CollectionStoppedThresholdAgreementTests</c> here
+    /// pins <c>AgentStatusRow.StaleWindow</c> to it, and its twin in <c>Darling.Tests</c> pins
+    /// <c>DarlingSelfAlertEvaluator.StaleWindow</c> to it.</para>
+    /// </summary>
     [Fact]
-    public void StaleWindow_MatchesTheHeadlessServicesRefusalWindow()
+    public void TheStalenessFixtures_StraddleTheWindowTheyAreMeantToTest()
     {
-        /* Both surfaces must refuse to judge on the same age of data; drifting them apart would let the header
-           call a server down while the alert path stays silent about it (or the reverse). */
-        Assert.Equal(TimeSpan.FromMinutes(30), AgentStatusRow.StaleWindow);
+        Assert.True(
+            TimeSpan.FromMinutes(CurrentFixtureMinutes) < AgentStatusRow.StaleWindow,
+            $"The current-reading fixture ({CurrentFixtureMinutes}m) must sit INSIDE StaleWindow "
+                + $"({AgentStatusRow.StaleWindow}), or the not-present/Stopped/Running cases are asserting "
+                + "against a row the header already considers stale.");
+
+        Assert.True(
+            TimeSpan.FromMinutes(StaleFixtureMinutes) >= AgentStatusRow.StaleWindow,
+            $"The stale-reading fixture ({StaleFixtureMinutes}m) must sit OUTSIDE StaleWindow "
+                + $"({AgentStatusRow.StaleWindow}), or the staleness cases are asserting against a row the "
+                + "header still considers current.");
     }
 
     [Fact]
     public void RunningAlwaysWins_EvenIfEverSeenRunningSomehowLags()
     {
         /* A currently-running Agent is its own proof; the never-seen gate must not suppress the good news. */
-        var row = Row(running: true, everSeenRunning: false, minutesOld: 1);
+        var row = Row(running: true, everSeenRunning: false, minutesOld: CurrentFixtureMinutes);
 
         Assert.Equal("Running", row.StatusDisplay);
         Assert.False(row.IsAgentProblem);

@@ -137,6 +137,7 @@ HAVING COUNT(*) >= 24";
     public async Task<EditionFacts?> GetEditionFactsAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(RecommendationsEditionFactsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -543,6 +544,7 @@ HAVING COUNT(*) >= 24";
         try
         {
             await using var command = _dataSource.CreateCommand(RecommendationsMaintenanceWindowSql);
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = memoryCutoff });
 
@@ -586,6 +588,7 @@ HAVING COUNT(*) >= 24";
                 try
                 {
                     await using var cpuCommand = _dataSource.CreateCommand(RecommendationsCpuP95Sql);
+                    cpuCommand.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
                     cpuCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
                     cpuCommand.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = memoryCutoff });
 
@@ -668,6 +671,7 @@ HAVING COUNT(*) >= 24";
 
             await using (var command = _dataSource.CreateCommand(RecommendationsStorageTierSql))
             {
+                command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
                 command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = memoryCutoff });
 
@@ -715,6 +719,7 @@ HAVING COUNT(*) >= 24";
         try
         {
             await using var command = _dataSource.CreateCommand(RecommendationsReservedCapacitySql);
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = memoryCutoff });
 
@@ -755,6 +760,7 @@ HAVING COUNT(*) >= 24";
     private async Task<(int P95Mb, long SampleCount)> ReadMemoryP95Async(int serverId, DateTime cutoff, CancellationToken cancellationToken)
     {
         await using var command = _dataSource.CreateCommand(RecommendationsMemoryP95Sql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
 

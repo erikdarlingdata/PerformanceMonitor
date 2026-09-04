@@ -162,6 +162,7 @@ public sealed partial class ViewerDataService
         var rawCells = new List<HeatmapCell>();
 
         await using var command = _dataSource.CreateCommand(BuildQueryHeatmapSql(metric));
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

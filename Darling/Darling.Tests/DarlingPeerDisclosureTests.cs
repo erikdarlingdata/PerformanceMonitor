@@ -382,7 +382,7 @@ public sealed class DarlingPeerDisclosureTests
     {
         var rows = new List<DarlingDataReader.ServerListRow>
         {
-            new(1, "prod-sql-use1-beta-01", "ayr", 16, new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc)),
+            new(1, "prod-sql-use1-beta-01", "omega", 16, new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc)),
         };
 
         return JsonDocument
@@ -410,7 +410,7 @@ public sealed class DarlingPeerDisclosureTests
         /* The existing payload is untouched — the disclosure is additive here too. */
         var server = Assert.Single(root.GetProperty("servers").EnumerateArray());
         Assert.Equal("prod-sql-use1-beta-01", server.GetProperty("server_name").GetString());
-        Assert.Equal("ayr", server.GetProperty("display_name").GetString());
+        Assert.Equal("omega", server.GetProperty("display_name").GetString());
     }
 
     [Fact]

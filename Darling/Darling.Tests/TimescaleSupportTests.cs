@@ -1220,15 +1220,28 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
         {
             /* Retention targets the hourly CAGGs as well as the raw tables, so the aggregates must exist first —
                the same ordering EnsureRetentionPoliciesAsync documents. */
-            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            /* #2818: capture, don't discard. Every failure inside EnsureRetentionPoliciesAsync lands in a
+               per-relation catch that logs a warning and moves on — the right behaviour for the service, but
+               with a null logger the only surviving evidence is the count, and "expected 17, got 0" cannot be
+               triaged (that exact failure was written off as a flake once already). Same repair as #1564's
+               purge E2Es: pass the capturing logger and fold Joined into every count assertion, so the next
+               failure names the actual Postgres error in the CI log. */
+            var retentionLog = new CapturingTestLogger();
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, retentionLog, ct);
 
             /* THE assertion: every policy applied. A 42883 would be caught per-policy and counted as 0. */
-            var applied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+            var applied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct);
             Assert.True(applied == RetentionPolicyCount,
-                $"expected all {RetentionPolicyCount} retention policies to apply, got {applied} — a swallowed error means the policy SQL is invalid on this TimescaleDB");
+                $"expected all {RetentionPolicyCount} retention policies to apply, got {applied} — a swallowed error means the policy SQL is invalid on this TimescaleDB; {retentionLog.Joined}");
 
-            /* Idempotent: the second pass hits if_not_exists (job_id -1) and must not throw on alter_job(-1). */
-            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+            /* Idempotent: the second pass hits if_not_exists (job_id -1) and must not throw on alter_job(-1).
+               Fresh logger — CapturingTestLogger has no reset, and EnsureRetentionPoliciesAsync always logs an
+               Information summary even on success, so reusing retentionLog would bury this pass's own evidence
+               under the first pass's already-explained noise (review finding on #2887). */
+            var reapplyLog = new CapturingTestLogger();
+            var reapplied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, reapplyLog, ct);
+            Assert.True(reapplied == RetentionPolicyCount,
+                $"the idempotent second pass should count all {RetentionPolicyCount} policies, got {reapplied}; {reapplyLog.Joined}");
 
             using var job = new NpgsqlCommand(@"
 SELECT COUNT(*)
@@ -1339,8 +1352,18 @@ VALUES (1, $1, 9137, 'converge-1937', 'TestDb', decode(md5('converge'), 'hex'), 
                 await seed.ExecuteNonQueryAsync(ct);
             }
 
-            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+            /* #2818: the nightly's one "expected 17, got 0" on this exact line was untriageable because every
+               per-relation warning went to a null logger. Capture instead, and carry the evidence in the
+               assertion message — see the EndToEnd test above for the full reasoning. A FRESH logger per pass
+               below: this fixture keeps query_stats HELD for the whole test (see the comment above), so every
+               pass logs a benign "... HELD PAUSED ..." warning for it plus EnsureRetentionPoliciesAsync's own
+               Information summary — sharing one CapturingTestLogger (which has no reset) would bury whichever
+               pass actually fails under the earlier passes' expected noise (review finding on #2887). */
+            var createLog = new CapturingTestLogger();
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct);
+            var created17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, createLog, ct);
+            Assert.True(created17 == RetentionPolicyCount,
+                $"the creation pass should apply all {RetentionPolicyCount} retention policies, got {created17}; {createLog.Joined}");
 
             /* The gate's own verdicts, asserted as preconditions: short coverage holds, empty coverage arms. */
             var created = new
@@ -1374,8 +1397,12 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             Assert.Equal(("21 days", false), (before.Held.DropAfter, before.Held.Scheduled));
             Assert.Equal(("21 days", true), (before.Armed.DropAfter, before.Armed.Scheduled));
 
-            /* THE measured claim: the sweep converges both onto the constant, preserving everything else. */
-            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+            /* THE measured claim: the sweep converges both onto the constant, preserving everything else.
+               Fresh logger — see the fixture-level #2818 comment above. */
+            var convergeLog = new CapturingTestLogger();
+            var converged = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, convergeLog, ct);
+            Assert.True(converged == RetentionPolicyCount,
+                $"the convergence pass should count all {RetentionPolicyCount} policies, got {converged}; {convergeLog.Joined}");
 
             var after = new
             {
@@ -1390,8 +1417,12 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             Assert.True(after.Armed.Scheduled, "an ARMED policy must stay armed across a horizon convergence");
             Assert.Equal(before.Armed.NextStart, after.Armed.NextStart);
 
-            /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing. */
-            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+            /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing.
+               Fresh logger — see the fixture-level #2818 comment above. */
+            var settledLog = new CapturingTestLogger();
+            var settled17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, settledLog, ct);
+            Assert.True(settled17 == RetentionPolicyCount,
+                $"the idempotent third sweep should count all {RetentionPolicyCount} policies, got {settled17}; {settledLog.Joined}");
             var settled = await PolicyStateAsync(connection, ArmedRelation, ct);
             Assert.Equal(("90 days", true, after.Armed.NextStart), (settled.DropAfter, settled.Scheduled, settled.NextStart));
             Assert.Equal("4 days", (await PolicyStateAsync(connection, HeldRelation, ct)).DropAfter);

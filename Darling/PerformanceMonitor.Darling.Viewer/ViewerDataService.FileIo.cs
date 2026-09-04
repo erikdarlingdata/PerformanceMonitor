@@ -151,6 +151,7 @@ public sealed partial class ViewerDataService
         var items = new List<FileIoLatencyPoint>();
 
         await using var command = _dataSource.CreateCommand(FileIoLatencyTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -186,6 +187,7 @@ public sealed partial class ViewerDataService
         var items = new List<FileIoThroughputPoint>();
 
         await using var command = _dataSource.CreateCommand(FileIoThroughputTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {

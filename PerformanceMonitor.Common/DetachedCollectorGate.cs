@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Common;
 ///
 /// <para><b>#2701 was the first instance.</b> <c>query_store</c> (5-minute cadence) could spike from its
 /// normal 5-35s to 100-230+ seconds on a server accumulating an abnormally large distinct-plan population
-/// (the leaflogix-class decimal-parameter-instability signature). Awaited inline in the sequential body,
+/// (the workload-class decimal-parameter-instability signature). Awaited inline in the sequential body,
 /// that spike blocked every OTHER due collector for the same server and could push the whole server's
 /// sweep past its 60-second budget (BODY_OVERRUN). The fix was to detach it: fire the collector without
 /// awaiting it in the sequential foreach, single-flighted per server so a still-running previous tick

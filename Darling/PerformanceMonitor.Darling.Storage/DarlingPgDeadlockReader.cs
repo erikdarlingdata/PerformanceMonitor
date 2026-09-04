@@ -107,6 +107,7 @@ public static class DarlingPgDeadlockReader
     {
         var rows = new List<PgDeadlockRow>();
         await using var command = postgres.CreateCommand(DeadlocksSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then converts these naive columns at the store session's
@@ -137,6 +138,7 @@ public static class DarlingPgDeadlockReader
     {
         var rows = new List<PgDeadlockDetailRow>();
         await using var command = postgres.CreateCommand(DeadlockDetailSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(
             string.IsNullOrWhiteSpace(deadlockHash) ? (object)DBNull.Value : deadlockHash.Trim());

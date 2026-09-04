@@ -319,7 +319,7 @@ public static class QueryStoreSliceRepair
            purge's fallback DELETE already does — deliberate bulk decompression is this verb's job.
            On a store without the extension the qualified name is a placeholder GUC, safe everywhere. */
         await using (var lift = new NpgsqlCommand(
-            "SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0", connection, transaction))
+            "SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0", connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
             await lift.ExecuteNonQueryAsync(cancellationToken);
         }

@@ -30,7 +30,7 @@ internal sealed class CapturingTestLogger : ILogger
         {
             lock (_lines)
             {
-                return _lines.Count == 0 ? "(no purge log lines)" : string.Join(" | ", _lines);
+                return _lines.Count == 0 ? "(no log lines captured)" : string.Join(" | ", _lines);
             }
         }
     }

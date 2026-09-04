@@ -63,6 +63,7 @@ public sealed partial class ViewerDataService
         }
 
         await using var command = _dataSource.CreateCommand(QueryStatsPlanXmlSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
@@ -94,6 +95,7 @@ public sealed partial class ViewerDataService
         int serverId, string databaseName, long queryId, long planId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(QueryStorePlanTextSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
@@ -146,6 +148,7 @@ public sealed partial class ViewerDataService
         }
 
         await using var command = _dataSource.CreateCommand(ProcedureStatsPlanXmlSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName ?? "" });

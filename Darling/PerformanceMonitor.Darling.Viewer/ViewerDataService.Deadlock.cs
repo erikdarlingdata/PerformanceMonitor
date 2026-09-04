@@ -117,6 +117,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerDeadlockRow>();
 
         await using var command = _dataSource.CreateCommand(RecentDeadlocksSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

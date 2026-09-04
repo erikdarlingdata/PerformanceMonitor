@@ -12,9 +12,6 @@ using System.IO;
 using System.Linq;
 using System.Data;
 using System.Reflection;
-using System.Reflection.Metadata;
-using System.Reflection.Metadata.Ecma335;
-using System.Reflection.PortableExecutable;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -176,107 +173,22 @@ public sealed class FetchStoreConnectionBorrowTests
     }
 
     /// <summary>
-    /// Returns, per fetch state machine, a count of calls to each name of interest. Walks the compiler
-    /// -generated state machine types rather than the source methods, because that is where an async
-    /// method's body actually lives after compilation.
+    /// Counts calls by callee name inside the compiler-generated state machine types for the two fetches:
+    /// an async method's body lives in its state machine after compilation, not in the source method. The
+    /// IL walk itself lives in <see cref="IlCallSiteScanner"/> as of #2898 — this pin carried its own copy,
+    /// which tested every byte offset rather than decoding instructions. That form was a deliberate superset
+    /// and safe for the must-APPEAR controls, but it could not see a call to a GENERIC callee at all, which
+    /// is unsafe for the must-NOT-appear assertion this pin actually makes: a generic acquisition would have
+    /// read as zero.
     /// </summary>
     private static Dictionary<string, Dictionary<string, int>> ScanFetchStateMachines()
     {
         var assemblyPath = typeof(DarlingCollectorRunner).Assembly.Location;
         Assert.True(File.Exists(assemblyPath), $"Service assembly not found at '{assemblyPath}'.");
 
-        var wanted = new HashSet<string>(Controls, StringComparer.Ordinal) { Acquire };
-        var results = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
-
-        using var stream = File.OpenRead(assemblyPath);
-        using var peReader = new PEReader(stream);
-        var metadata = peReader.GetMetadataReader();
-
-        /* A callee is reachable through a MemberReference (defined in another assembly, which both the
-           acquisition and the controls are) or a MethodDefinition (defined here). Collect both so the scan
-           does not depend on where the callee happens to live. */
-        var tokenToName = new Dictionary<int, string>();
-
-        foreach (var handle in metadata.MemberReferences)
-        {
-            var name = metadata.GetString(metadata.GetMemberReference(handle).Name);
-            if (wanted.Contains(name))
-            {
-                tokenToName[MetadataTokens.GetToken(handle)] = name;
-            }
-        }
-
-        foreach (var handle in metadata.MethodDefinitions)
-        {
-            var name = metadata.GetString(metadata.GetMethodDefinition(handle).Name);
-            if (wanted.Contains(name))
-            {
-                tokenToName[MetadataTokens.GetToken(handle)] = name;
-            }
-        }
-
-        foreach (var typeHandle in metadata.TypeDefinitions)
-        {
-            var type = metadata.GetTypeDefinition(typeHandle);
-            var typeName = metadata.GetString(type.Name);
-
-            var machine = FetchStateMachines.FirstOrDefault(
-                m => typeName.StartsWith(m, StringComparison.Ordinal));
-            if (machine is null)
-            {
-                continue;
-            }
-
-            if (!results.TryGetValue(machine, out var counts))
-            {
-                counts = wanted.ToDictionary(n => n, _ => 0, StringComparer.Ordinal);
-                results[machine] = counts;
-            }
-
-            foreach (var methodHandle in type.GetMethods())
-            {
-                var method = metadata.GetMethodDefinition(methodHandle);
-                if (method.RelativeVirtualAddress == 0)
-                {
-                    continue;
-                }
-
-                var il = peReader.GetMethodBody(method.RelativeVirtualAddress).GetILBytes();
-                if (il is null)
-                {
-                    continue;
-                }
-
-                /* Every offset is tested and NOTHING is skipped, deliberately. This scans bytes rather than
-                   decoding real IL instruction boundaries, so a 0x28/0x6F occurring as some unrelated
-                   instruction's operand can look like a call. Advancing past a match (i += 4) would let such
-                   a coincidence swallow the four bytes that follow it and shift the scan over a genuine
-                   `call OpenConnectionAsync` — a FALSE NEGATIVE, in a test that is the sole regression guard
-                   for this fix and whose whole assertion is "zero".
-
-                   Not skipping inverts that risk. The scan may over-count, never under-count: a spurious
-                   match can only ADD a call this test then fails on, so the failure mode is a loud red that
-                   a human investigates rather than a silent green. That is the right direction for a
-                   must-be-zero assertion, and it is the same discipline as #2816's positive controls — a
-                   witness must not be able to fail in the reassuring direction. The controls below are
-                   counted the same way and are unaffected, since over-counting only helps them clear zero. */
-                for (var i = 0; i + 4 < il.Length; i++)
-                {
-                    /* call (0x28) and callvirt (0x6F), each followed by a 4-byte metadata token. */
-                    if (il[i] != 0x28 && il[i] != 0x6F)
-                    {
-                        continue;
-                    }
-
-                    var token = BitConverter.ToInt32(il, i + 1);
-                    if (tokenToName.TryGetValue(token, out var name))
-                    {
-                        counts[name]++;
-                    }
-                }
-            }
-        }
-
-        return results;
+        return IlCallSiteScanner.CountCallsByStateMachine(
+            assemblyPath,
+            FetchStateMachines,
+            Controls.Append(Acquire));
     }
 }
