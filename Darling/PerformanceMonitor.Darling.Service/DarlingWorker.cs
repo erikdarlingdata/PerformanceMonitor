@@ -3959,6 +3959,16 @@ LIMIT 1", connection);
             var cadenceReadings = await TimescaleSupport.ReadJobCadenceReadingsAsync(
                 connection, _logger, cancellationToken);
             await _selfAlerts!.EvaluateStoreJobCadenceAsync(cadenceReadings, cancellationToken);
+
+            /* #2813: the Retention Held check rides the same connection and hourly cadence. A retention
+               policy the #1680/#1877 coverage gate has paused reports total_failures = 0 and a plausible
+               last run — it is not failing, it is stopped — so it is invisible to every stored metric and
+               went unnoticed on the production store for 16 days while that tier grew to 4.5x its horizon.
+               Judged on the CONSEQUENCE (held AND the tier past its own horizon), never on the paused flag
+               alone, which is the normal state of every freshly created policy. Same isolation posture. */
+            var retentionHolds = await TimescaleSupport.ReadRetentionHoldReadingsAsync(
+                connection, _logger, cancellationToken);
+            await _selfAlerts!.EvaluateRetentionHoldsAsync(retentionHolds, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

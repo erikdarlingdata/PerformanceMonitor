@@ -2358,6 +2358,151 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Contains(warnings, x => x.Message.Contains("[muted]", StringComparison.Ordinal));
     }
 
+    /* ---------------- #2813 Retention Held ---------------- */
+
+    /* The production shape this comes from: query_store_stats held 18 days under a 4-day policy across 19
+       chunks — 4.52x its horizon, held for 16 days, and invisible in every stored metric because a paused
+       job is not a failing one. Defaults reproduce that reading; each test varies the one axis it names. */
+    private static RetentionHoldReading HeldPolicy(
+        long id = 1072, bool armed = false, long spanSeconds = 1_561_449, long? horizonSeconds = 345_600,
+        long chunks = 19, string hypertable = "query_store_stats", string dropAfter = "4 days") =>
+        new(id, hypertable, armed, dropAfter, chunks, spanSeconds, horizonSeconds);
+
+    [Fact]
+    public async Task RetentionHeld_HeldPastTheWarnRatio_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.RetentionHoldMetric, fired.MetricName);
+        Assert.Equal("retentionhold:1072", fired.ServerKey);  /* prefixed so it never parses as a server_id */
+        Assert.Contains("held at 4.5x", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_TheProductionIncident_ReadsCritical()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 4.52x — the real reading. It must land CRITICAL, not Warning: at four times its intended depth the
+           tier is the dominant and still-compounding contributor to store size. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        Assert.Equal(AlertSeverityLevel.Critical, Assert.Single(h.Deliverer.Outcomes).Severity);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_ArmedPolicy_StaysSilentEvenWhenTheTierIsDeep()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The SAME 4.52x depth, but armed. Over-horizon alone is not the signal — retention drops whole
+           chunks and a tier can legitimately sit past its horizon while purging normally. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(armed: true) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_FreshlyCreatedPausedPolicy_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* EnsureRetentionPoliciesAsync creates EVERY policy paused — there is no window in which TimescaleDB
+           would not run a new policy's first check immediately. So held-alone must never fire, or every fresh
+           store alerts on every start. One hour of history under a 4-day horizon is 0.01x. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(spanSeconds: 3_600) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_WholeChunkGranularity_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Retention drops whole CHUNKS, so a 4-day policy with 1-day chunks legitimately holds ~5 days
+           (1.25x) while working perfectly. The warn ratio sits clear of that floor with margin. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(spanSeconds: 5 * 86_400) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_WithNoMeasurableRatio_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* No chunks yet, and no readable horizon. Unmeasured is not innocent, but it is not evidence either
+           — the agent-status discipline: no signal, no alert, and no touching the standing state. */
+        await e.ApplyRetentionHoldsAsync(
+            new[] { HeldPolicy(id: 1, spanSeconds: 0, chunks: 0), HeldPolicy(id: 2, horizonSeconds: null) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_WhenThePolicyArms_RecordsOneResolution()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The backfill landed and the gate released it. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(armed: true) }, Ct);
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal("Retention Hold Cleared", resolution.MetricName);
+        Assert.Contains("armed again", resolution.DetailText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_QuietStore_WritesNoResolutionRows()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Nothing was ever standing, so clearing must be a no-op. Otherwise every hourly sweep on a healthy
+           store writes a resolution row for every armed policy. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(armed: true), HeldPolicy(id: 1073, armed: true) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public void RetentionHeld_TheWarnRatioClearsChunkGranularityAndCatchesTheIncident()
+    {
+        /* Both bounds asserted, not just described. Below: whole-chunk granularity on the shipped raw tier
+           (4-day horizon, 1-day chunks) tops out at 1.25x, which must stay under the warn ratio. Above: the
+           motivating incident sat at 4.52x and must reach CRITICAL. */
+        Assert.True(DarlingSelfAlertEvaluator.RetentionHoldWarnRatio > 1.25);
+        Assert.True(DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio > DarlingSelfAlertEvaluator.RetentionHoldWarnRatio);
+        Assert.True(4.52 >= DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio);
+    }
+
+    [Fact]
+    public void RetentionHoldReading_RatioIsNullRatherThanZeroWhenUnmeasurable()
+    {
+        /* A ratio over an unmeasurable denominator is not a number. Returning 0 would read as "perfectly
+           retained", which is the false-reassurance shape this whole issue is about. */
+        Assert.Null(new RetentionHoldReading(1, "t", false, "4 days", 0, null, 345_600).OverHorizonRatio);
+        Assert.Null(new RetentionHoldReading(1, "t", false, "", 19, 1_561_449, null).OverHorizonRatio);
+        Assert.Null(new RetentionHoldReading(1, "t", false, "0", 19, 1_561_449, 0).OverHorizonRatio);
+        Assert.Equal(4.52, new RetentionHoldReading(1, "t", false, "4 days", 19, 1_561_449, 345_600).OverHorizonRatio!.Value, 2);
+    }
+
     /* ---------------- #2136 Store Job Over Cadence ---------------- */
 
     private static StoreJobCadenceReading CadenceJob(

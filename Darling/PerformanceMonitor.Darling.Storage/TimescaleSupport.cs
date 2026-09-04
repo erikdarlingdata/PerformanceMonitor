@@ -2995,6 +2995,92 @@ WHERE js.last_run_status = 'Success'";
         return readings;
     }
 
+    /// <summary>
+    /// Every retention policy's ARMED state against the consequence of it being held (#2813) — the readings
+    /// the Retention Held self-alert judges, and the live block <c>get_store_metrics</c> reports.
+    ///
+    /// <para><b>Why this is read live rather than taken from the V56 job telemetry.</b>
+    /// <see cref="StoreSelfMetrics.BackgroundJobInsertSql"/> records <c>total_runs</c> and
+    /// <c>total_failures</c> but NOT <c>j.scheduled</c>, so a policy the #1680/#1877 coverage gate has held
+    /// reports <c>total_failures = 0</c> and a plausible last-run duration — byte-for-byte the shape of a
+    /// healthy job, because it is not failing, it is paused. On the production store five
+    /// <c>query_store_stats</c> policies sat held for 16 days and every stored metric read clean; the only
+    /// signal was one WARNING per service start (#2809). Persisting <c>scheduled</c> into the series is the
+    /// better long-term answer and needs a migration rung; this read makes the CURRENT state answerable
+    /// without one, which is the half that would have caught the incident.</para>
+    ///
+    /// <para><b>Held is judged by its CONSEQUENCE, not by a timer.</b> Nothing records when a policy was
+    /// paused, so hold duration is not directly knowable. The data span past the policy's own horizon is
+    /// the same signal measured at the other end, and it is strictly better: it is what an operator checks
+    /// by hand, it is the number that makes the cost legible (4 days configured against 18 days actual),
+    /// and it self-scales — a policy paused an hour ago on a young store sits at ~1x its horizon and says
+    /// nothing, while one held long enough to matter climbs without bound. That is why a freshly created
+    /// policy, which <see cref="EnsureRetentionPoliciesAsync"/> deliberately creates PAUSED, raises nothing.</para>
+    ///
+    /// <para>The span comes from <c>timescaledb_information.chunks</c>, never from the hypertable — the
+    /// oldest chunk's <c>range_start</c> is catalog metadata, so this stays a catalog round trip on a
+    /// multi-hundred-GB table instead of a scan. <c>range_start</c> is declared <c>timestamptz</c> even for
+    /// the naive-<c>timestamp</c> partitioning column every collector table uses, so it is normalized with
+    /// <c>AT TIME ZONE 'UTC'</c>: verified byte-identical under UTC, UTC+14 and UTC-7 sessions rather than
+    /// assumed. Tolerant like <see cref="ReadJobCadenceReadingsAsync"/> — a plain-PG store or a hiccup
+    /// yields no readings, never an exception.</para>
+    /// </summary>
+    public static async Task<IReadOnlyList<RetentionHoldReading>> ReadRetentionHoldReadingsAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        const string sql = @"
+SELECT
+    j.job_id,
+    coalesce(j.hypertable_name, ''),
+    j.scheduled,
+    coalesce(j.config->>'drop_after', ''),
+    c.chunk_count,
+    EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - (c.oldest_range_start AT TIME ZONE 'UTC')))::bigint,
+    CASE
+        WHEN (j.config->>'drop_after') IS NULL THEN NULL
+        ELSE EXTRACT(EPOCH FROM (j.config->>'drop_after')::interval)::bigint
+    END
+FROM timescaledb_information.jobs AS j
+LEFT JOIN LATERAL (
+    SELECT
+        min(ch.range_start) AS oldest_range_start,
+        count(*)::bigint AS chunk_count
+    FROM timescaledb_information.chunks AS ch
+    WHERE ch.hypertable_schema = j.hypertable_schema
+      AND ch.hypertable_name   = j.hypertable_name
+) AS c ON true
+WHERE j.proc_name = 'policy_retention'";
+
+        var readings = new List<RetentionHoldReading>();
+        try
+        {
+            using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                readings.Add(new RetentionHoldReading(
+                    Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    !reader.IsDBNull(2) && reader.GetBoolean(2),
+                    reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(6) ? null : Convert.ToInt64(reader.GetValue(6), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Retention-hold check: could not read retention policy state: {Message}", ex.Message);
+        }
+
+        return readings;
+    }
+
     /* ---------------- compression-run observability (#1778) ---------------- */
 
     /// <summary>
@@ -3181,6 +3267,40 @@ public sealed record StuckCompressionJob(long JobId, string? HypertableName, str
 /// <c>[job_id]</c> suffix (the id rides separately as the alert key).
 /// </summary>
 public sealed record StoreJobCadenceReading(long JobId, string JobName, long? LastRunDurationMs, long ScheduleIntervalMs);
+
+/// <summary>
+/// One retention policy's armed state and the consequence of it being held (#2813), from
+/// <see cref="TimescaleSupport.ReadRetentionHoldReadingsAsync"/>.
+///
+/// <para><see cref="Armed"/> is <c>timescaledb_information.jobs.scheduled</c> — false means the #1680/#1877
+/// coverage gate is holding this policy so it cannot drop history a consumer has never materialized.
+/// <see cref="SpanSeconds"/> is now minus the OLDEST chunk's start (null when the hypertable has no chunks
+/// yet) and <see cref="HorizonSeconds"/> is the policy's own <c>drop_after</c>, so
+/// <see cref="OverHorizonRatio"/> is how many times its intended depth the tier is actually holding. That
+/// ratio is the honest measure of a hold that has begun to cost something, and it is deliberately NOT a
+/// hold duration: nothing records when a policy was paused, and a policy created paused moments ago on a
+/// young store must read as unremarkable rather than as a 0-second-old incident.</para>
+/// </summary>
+public sealed record RetentionHoldReading(
+    long JobId,
+    string HypertableName,
+    bool Armed,
+    string DropAfter,
+    long ChunkCount,
+    long? SpanSeconds,
+    long? HorizonSeconds)
+{
+    /// <summary>
+    /// How many times its configured horizon this tier is actually holding — 4.5 on the production store
+    /// that held 18 days under a 4-day policy. Null when either side is unknown or the horizon is
+    /// non-positive: a ratio over an unmeasurable denominator is not a number, and reporting one would be
+    /// the false-precision this whole issue is about.
+    /// </summary>
+    public double? OverHorizonRatio =>
+        SpanSeconds is > 0 && HorizonSeconds is > 0
+            ? SpanSeconds.Value / (double)HorizonSeconds.Value
+            : null;
+}
 
 /// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how
