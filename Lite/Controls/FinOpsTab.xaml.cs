@@ -58,6 +58,16 @@ public partial class FinOpsTab : UserControl
     private DataGridFilterManager<MemoryGrantEfficiencyRow>? _memoryGrantFilterMgr;
     private DataGridFilterManager<IndexLockingRow>? _indexLockingFilterMgr;
 
+    /* #2933: this tab has no load guard, and every grid above is shared across servers — one
+       server switch during the fourteen-way fan-out in LoadPerServerDataAsync, or a per-grid Refresh
+       during it, leaves two differently-scoped reads in flight for one grid and the LATER-STARTING
+       one can land first. Each loader claims a generation for its own grid and drops its paint when a
+       newer load for that grid has begun; keyed per grid, because a single-grid Refresh must not
+       discard the other thirteen paints of a whole-tab load. Lite's own answer to this shape at three
+       sites already (ServerTab.Pickers.cs' _waitStatsPickerGen / _memoryClerksPickerGen /
+       _perfmonPickerGen); this is that idiom with the key spelled once. */
+    private readonly ScopedLoadGenerations _loads = new();
+
     public FinOpsTab()
     {
         InitializeComponent();
@@ -251,6 +261,8 @@ public partial class FinOpsTab : UserControl
     {
         if (_dataService == null || _credentialResolver == null) return;
 
+        var gen = _loads.Claim(nameof(LoadRecommendationsAsync));
+
         try
         {
             var selectedServer = ServerSelector.SelectedItem as Models.ServerConnection;
@@ -259,6 +271,7 @@ public partial class FinOpsTab : UserControl
 
             var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
             var data = await Task.Run(() => _dataService.GetRecommendationsAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
+            if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
             RecommendationsDataGrid.ItemsSource = data;
             RecommendationsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             RecommendationsCountIndicator.Text = data.Count > 0 ? $"{data.Count} recommendation(s)" : "";
@@ -272,10 +285,12 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadUtilizationAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadUtilizationAsync));
 
         try
         {
             var data = await Task.Run(() => _dataService.GetUtilizationEfficiencyAsync(serverId));
+            if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
             if (data != null)
             {
@@ -283,6 +298,7 @@ public partial class FinOpsTab : UserControl
 
                 // Compute free space % for health score from database sizes
                 var dbSizes = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
+                if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
                 var totalStorageMb = dbSizes.Sum(d => d.TotalSizeMb);
                 var totalFreeMb = dbSizes.Sum(d => (d.FreeSpaceMb ?? 0m));
                 data.FreeSpacePct = totalStorageMb > 0 ? totalFreeMb / totalStorageMb * 100m : 100m;
@@ -298,6 +314,7 @@ public partial class FinOpsTab : UserControl
                 TopAvgGrid.ItemsSource = await Task.Run(() => _dataService.GetTopResourceConsumersByAvgAsync(serverId));
                 DbSizeChart.ItemsSource = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId));
                 ProvisioningTrendGrid.ItemsSource = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId));
+                if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
             }
             else
             {
@@ -457,11 +474,13 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadDatabaseResourcesAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadDatabaseResourcesAsync));
 
         try
         {
             var hoursBack = HoursBackFromIndex(ResourceUsageTimeRangeCombo);
             var data = await Task.Run(() => _dataService.GetDatabaseResourceUsageAsync(serverId, hoursBack));
+            if (_loads.Superseded(nameof(LoadDatabaseResourcesAsync), gen)) return;
             _dbResourcesFilterMgr!.UpdateData(data);
             NoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             DbResourcesCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
@@ -475,10 +494,12 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadApplicationConnectionsAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadApplicationConnectionsAsync));
 
         try
         {
             var data = await Task.Run(() => _dataService.GetApplicationConnectionsAsync(serverId));
+            if (_loads.Superseded(nameof(LoadApplicationConnectionsAsync), gen)) return;
             _appConnectionsFilterMgr!.UpdateData(data);
             NoAppConnectionsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             AppConnectionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} application(s)" : "";
@@ -492,10 +513,12 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadDatabaseSizesAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadDatabaseSizesAsync));
 
         try
         {
             var data = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
+            if (_loads.Superseded(nameof(LoadDatabaseSizesAsync), gen)) return;
 
             // Compute proportional cost shares
             if (_currentServerMonthlyCost > 0 && data.Count > 0)
@@ -528,6 +551,7 @@ public partial class FinOpsTab : UserControl
             if (data.Count > 0 && _dataService != null)
             {
                 var properties = await _dataService.GetLatestServerPropertiesAsync(serverId);
+                if (_loads.Superseded(nameof(LoadDatabaseSizesAsync), gen)) return;
 
                 if (properties?.EngineEdition == 5)
                 {
@@ -553,10 +577,12 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadPvsStatsAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadPvsStatsAsync));
 
         try
         {
             var data = await Task.Run(() => _dataService.GetPvsStatsLatestAsync(serverId));
+            if (_loads.Superseded(nameof(LoadPvsStatsAsync), gen)) return;
 
             _pvsStatsFilterMgr!.UpdateData(data);
 
@@ -566,6 +592,7 @@ public partial class FinOpsTab : UserControl
             /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same
                time axis family as Storage Growth. Top-5 databases by current PVS size, 7 days. */
             var trend = await Task.Run(() => _dataService.GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7)));
+            if (_loads.Superseded(nameof(LoadPvsStatsAsync), gen)) return;
             RenderPvsTrendChart(trend);
         }
         catch (Exception ex)
@@ -620,6 +647,8 @@ public partial class FinOpsTab : UserControl
         using var _profiler = Helpers.MethodProfiler.StartTiming("FinOps-ServerInventory");
         if (_dataService == null || _serverManager == null || _credentialResolver == null) return;
 
+        var gen = _loads.Claim(nameof(LoadServerInventoryAsync));
+
         // Use cache if available and less than 5 minutes old
         if (!forceRefresh && _serverInventoryCache != null
             && (DateTime.Now - _serverInventoryCacheTime).TotalMinutes < 5)
@@ -670,6 +699,7 @@ public partial class FinOpsTab : UserControl
             });
 
             var results = await System.Threading.Tasks.Task.WhenAll(tasks);
+            if (_loads.Superseded(nameof(LoadServerInventoryAsync), gen)) return;
             var data = results.Where(r => r != null).Cast<ServerPropertyRow>().ToList();
 
             // Compute health scores for each server
@@ -697,10 +727,12 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadStorageGrowthAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadStorageGrowthAsync));
 
         try
         {
             var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId));
+            if (_loads.Superseded(nameof(LoadStorageGrowthAsync), gen)) return;
             _storageGrowthFilterMgr!.UpdateData(data);
             NoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
@@ -729,10 +761,12 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadIdleDatabasesAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadIdleDatabasesAsync));
 
         try
         {
             var data = await Task.Run(() => _dataService.GetIdleDatabasesAsync(serverId));
+            if (_loads.Superseded(nameof(LoadIdleDatabasesAsync), gen)) return;
             _idleDbsFilterMgr!.UpdateData(data);
             IdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
@@ -746,10 +780,12 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadTempdbSummaryAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadTempdbSummaryAsync));
 
         try
         {
             var data = await Task.Run(() => _dataService.GetTempdbSummaryAsync(serverId));
+            if (_loads.Superseded(nameof(LoadTempdbSummaryAsync), gen)) return;
             _tempdbFilterMgr!.UpdateData(data);
             TempdbPressureNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -762,11 +798,13 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadHighImpactQueriesAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadHighImpactQueriesAsync));
 
         try
         {
             var hoursBack = HoursBackFromIndex(HighImpactTimeRangeCombo);
             var data = await Task.Run(() => _dataService.GetHighImpactQueriesAsync(serverId, hoursBack));
+            if (_loads.Superseded(nameof(LoadHighImpactQueriesAsync), gen)) return;
             _highImpactFilterMgr!.UpdateData(data);
             HighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             HighImpactCountIndicator.Text = data.Count > 0 ? $"{data.Count} high-impact query(s)" : "";
@@ -780,11 +818,13 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadWaitCategorySummaryAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadWaitCategorySummaryAsync));
 
         try
         {
             var hoursBack = HoursBackFromIndex(WaitStatsTimeRangeCombo);
             var data = await Task.Run(() => _dataService.GetWaitCategorySummaryAsync(serverId, hoursBack));
+            if (_loads.Superseded(nameof(LoadWaitCategorySummaryAsync), gen)) return;
 
             // Compute proportional cost shares — scaled to time window
             if (_currentServerMonthlyCost > 0 && data.Count > 0)
@@ -810,11 +850,13 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadExpensiveQueriesAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadExpensiveQueriesAsync));
 
         try
         {
             var hoursBack = HoursBackFromIndex(ExpensiveQueriesTimeRangeCombo);
             var data = await Task.Run(() => _dataService.GetExpensiveQueriesAsync(serverId, hoursBack));
+            if (_loads.Superseded(nameof(LoadExpensiveQueriesAsync), gen)) return;
 
             // Compute proportional cost shares — scaled to time window
             if (_currentServerMonthlyCost > 0 && data.Count > 0)
@@ -841,10 +883,12 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadMemoryGrantEfficiencyAsync(int serverId)
     {
         if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(LoadMemoryGrantEfficiencyAsync));
 
         try
         {
             var data = await Task.Run(() => _dataService.GetMemoryGrantEfficiencyAsync(serverId));
+            if (_loads.Superseded(nameof(LoadMemoryGrantEfficiencyAsync), gen)) return;
             _memoryGrantFilterMgr!.UpdateData(data);
             MemoryGrantEfficiencyNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -989,6 +1033,8 @@ public partial class FinOpsTab : UserControl
         var server = ServerSelector.SelectedItem as ServerConnection;
         if (server == null) return;
 
+        var gen = _loads.Claim(nameof(RunIndexAnalysis_Click));
+
         try
         {
             var databaseNameEarly = IndexAnalysisDatabaseInput.Text?.Trim();
@@ -1007,6 +1053,7 @@ public partial class FinOpsTab : UserControl
             var properties = _dataService == null
                 ? null
                 : await _dataService.GetLatestServerPropertiesAsync(GetSelectedServerId());
+            if (_loads.Superseded(nameof(RunIndexAnalysis_Click), gen)) return;
             var isAzureSqlDb = properties?.EngineEdition == 5;
 
             if (isAzureSqlDb && allDatabasesEarly)
@@ -1025,6 +1072,7 @@ public partial class FinOpsTab : UserControl
                 : _credentialResolver.GetUtilityConnectionString(server);
 
             var exists = await LocalDataService.CheckSpIndexCleanupExistsAsync(utilityConnectionString);
+            if (_loads.Superseded(nameof(RunIndexAnalysis_Click), gen)) return;
             if (!exists)
             {
                 /* On Azure the proc must live in the target database, so name it — "not installed" against a
@@ -1055,6 +1103,7 @@ public partial class FinOpsTab : UserControl
                 utilityConnectionString,
                 string.IsNullOrWhiteSpace(databaseName) ? null : databaseName,
                 getAllDatabases);
+            if (_loads.Superseded(nameof(RunIndexAnalysis_Click), gen)) return;
 
             _indexSummaryFilterMgr!.UpdateData(summaries);
             _indexDetailFilterMgr!.UpdateData(details);
@@ -1067,6 +1116,7 @@ public partial class FinOpsTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to run index analysis: {ex.Message}");
+            if (_loads.Superseded(nameof(RunIndexAnalysis_Click), gen)) return;
             IndexAnalysisStatusText.Text = $"Error: {ex.Message}";
         }
         finally
