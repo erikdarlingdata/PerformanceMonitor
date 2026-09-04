@@ -480,7 +480,38 @@ public class StartupFailureTriageTests
     {
         Assert.False(StartupFailureTriage.IsRetryable(new System.Text.Json.JsonException("bad token at line 4")));
         Assert.False(StartupFailureTriage.IsRetryable(new InvalidDataException("Configuration file parsed to null.")));
+    }
+
+    /// <summary>
+    /// A config this account cannot read is terminal, asserted in the shape the runtime ACTUALLY raises.
+    ///
+    /// <para><b>This is the fixture that hid a real bug.</b> The first version of this test constructed a
+    /// bare <see cref="UnauthorizedAccessException"/>, which is terminal for a trivial reason — it matches
+    /// no arm — and so it passed while the classifier was wrong. On Unix .NET raises that exception
+    /// WRAPPING an <c>IOException("Permission denied")</c>, measured against a <c>chmod 000</c> file and
+    /// against a directory in place of the config, and the transport pass therefore called an ACL problem
+    /// transient. Both shapes are asserted now, and the wrapped one is the one that matters.</para>
+    /// </summary>
+    [Fact]
+    public void AnUnreadableConfig_IsTerminal_InTheShapeTheRuntimeActuallyRaises()
+    {
+        /* The bare shape: terminal, but for a reason that proves nothing on its own. */
         Assert.False(StartupFailureTriage.IsRetryable(new UnauthorizedAccessException("Access to the path is denied.")));
+
+        /* The REAL shape, measured: chmod 000 and a directory-as-config both produce this. */
+        Assert.False(
+            StartupFailureTriage.IsRetryable(new UnauthorizedAccessException(
+                "Access to the path '/etc/darling.json' is denied.",
+                new IOException("Permission denied"))),
+            "an ACL problem wrapping an IOException must not be read as a transient file lock");
+
+        /* Positive control through the identical wrapping: swap only the OUTER type for one that is not
+           carved out, and the same inner IOException must make it retryable. Without this, the assertion
+           above could be passing because any nested IOException is rejected. */
+        Assert.True(
+            StartupFailureTriage.IsRetryable(new InvalidOperationException(
+                "reading darling.json", new IOException("Resource temporarily unavailable"))),
+            "control: the same inner IOException under a non-carved-out outer type is retryable");
     }
 
     /// <summary>

@@ -123,16 +123,26 @@ namespace PerformanceMonitor.Darling.Service;
 /// connection string produces while Npgsql is still parsing it belongs there, and got there without
 /// being enumerated.</para>
 ///
-/// <para><b>The carve-out: <see cref="FileNotFoundException"/> and
-/// <see cref="DirectoryNotFoundException"/> are terminal even though both derive from
-/// <see cref="IOException"/>.</b> This is the one asymmetry between the three sites, and without it the
-/// retry would be worse than no retry. <c>DarlingConfig.Load</c> throws <see cref="FileNotFoundException"/>
-/// for a config that is not there — the single most likely reason it ever fails, on a first install — and
-/// the managed bootstrap throws it for a missing <c>pg-runtime.zip</c>, a broken package. Neither fixes
-/// itself, and both are exactly the case default-deny exists to keep loud: retried, they would spend the
-/// budget emitting warnings and then produce the one line that names the missing path two minutes late.
-/// Classified by TYPE rather than by site, so the store path — where these are unreachable — needs no
-/// special case and the two file-touching sites cannot drift apart.</para>
+/// <para><b>The carve-out, without which the retry would be worse than no retry.</b> Three file-system
+/// verdicts are terminal despite reaching this as, or wrapping, an <see cref="IOException"/>.
+/// <see cref="FileNotFoundException"/> and <see cref="DirectoryNotFoundException"/> derive from it, and
+/// <c>DarlingConfig.Load</c> throws the former for a config that is not there — the single most likely
+/// reason it ever fails, on a first install — while the managed bootstrap throws it for a missing
+/// <c>pg-runtime.zip</c>, a broken package.</para>
+///
+/// <para><see cref="UnauthorizedAccessException"/> does NOT derive from <see cref="IOException"/> and
+/// still has to be named here, which is the part that is easy to get wrong: <b>on Unix .NET raises it
+/// WRAPPING an <c>IOException("Permission denied")</c></b>, so the chain walk below would have called an
+/// ACL problem transient. Measured rather than assumed — a <c>chmod 000</c> config and a directory in
+/// place of the config file both present exactly that way — and note that a test constructing this
+/// exception BARE rather than with its real inner passes for the wrong reason, which is how the gap
+/// survived its first test.</para>
+///
+/// <para>None of the three fixes itself, and all are exactly the case default-deny exists to keep loud:
+/// retried, they would spend the budget emitting warnings and then produce the one line naming the
+/// missing or unreadable path two minutes late. Classified by TYPE rather than by site, so the store path
+/// — where all three are unreachable — needs no special case and the two file-touching sites cannot
+/// drift apart.</para>
 ///
 /// <para><b><see cref="OperationCanceledException"/> is not classified here at all.</b> The call site's
 /// filter excludes it ahead of this, because it means the service is stopping.</para>
@@ -275,14 +285,14 @@ internal static class StartupFailureTriage
             }
         }
 
-        /* The not-found subtypes are IOExceptions and are NOT transient at any of the three sites: a
-           config that is not there, or a pg-runtime.zip that is not there, is an install to fix, not a
-           moment to wait out. Checked ahead of the transport pass so the IOException arm below cannot
-           swallow them. See the class remarks for why this is a typed carve-out rather than a per-site
-           predicate. */
+        /* Three file-system verdicts that are NOT transient at any of the three sites, checked ahead of
+           the transport pass because each either IS an IOException or ARRIVES WRAPPING one, so the
+           IOException arm below would otherwise swallow all three. A config that is not there, a
+           pg-runtime.zip that is not there, and a file this account cannot read are installs to fix, not
+           moments to wait out. See the class remarks. */
         for (var current = exception; current is not null; current = current.InnerException)
         {
-            if (current is FileNotFoundException or DirectoryNotFoundException)
+            if (current is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException)
             {
                 return false;
             }
