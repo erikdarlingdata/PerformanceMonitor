@@ -465,11 +465,19 @@ public static class DarlingWebEndpoints
 
         try
         {
-            var rows = await RunComposedQueryAsync(postgres, compiled!, cancellationToken);
+            /* Resolved once per RUN, from the store, and deliberately not cached: see
+               McpCommandDeadlines.ResolveComposedQuerySecondsAsync for why a value captured at host start or
+               memoised per data source would be wrong for this particular knob. Threaded rather than
+               re-read per query so a panel with annotation overlays pays one read, not one per source —
+               which also means every query in ONE run shares one ceiling, matching the role
+               statement_timeout they all run under. */
+            var composedQuerySeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
+
+            var rows = await RunComposedQueryAsync(postgres, compiled!, composedQuerySeconds, cancellationToken);
             /* Event-annotation overlays (design D5): one bounded, catalog-only event query per requested
                source, on the SAME window + server scope, under the same statement_timeout. Additive —
                {sql, rows} are unchanged; a panel that requests no annotations returns an empty array. */
-            var annotations = await RunAnnotationsAsync(postgres, plan!, runContext, cancellationToken);
+            var annotations = await RunAnnotationsAsync(postgres, plan!, runContext, composedQuerySeconds, cancellationToken);
             var payload = new JsonObject { ["sql"] = compiled!.Sql, ["rows"] = rows, ["annotations"] = annotations };
             /* Partial window, and says so (#1665): when the route landed on a tier whose retention cannot
                reach the window's start on a retention-active store, tell the caller instead of quietly
@@ -569,9 +577,11 @@ public static class DarlingWebEndpoints
 
     /// <summary>Runs a compiled composed query on the viewer pool and serializes its rows to a JSON array of
     /// <c>{column: value}</c> objects — generic over the SELECT shape (bucket / group dims / value).</summary>
-    private static async Task<JsonArray> RunComposedQueryAsync(NpgsqlDataSource postgres, ComposeCompiled compiled, System.Threading.CancellationToken cancellationToken)
+    private static async Task<JsonArray> RunComposedQueryAsync(
+        NpgsqlDataSource postgres, ComposeCompiled compiled, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(compiled.Sql);
+        command.CommandTimeout = composedQuerySeconds;
         foreach (var parameter in compiled.Parameters)
         {
             command.Parameters.Add(parameter);
@@ -601,12 +611,12 @@ public static class DarlingWebEndpoints
     /// caller's try/catch exactly like the measure query's (a runaway overlay fails the run with a clear 400,
     /// rather than silently dropping markers the caller can't tell are missing).</summary>
     private static async Task<JsonArray> RunAnnotationsAsync(
-        NpgsqlDataSource postgres, PanelPlan plan, ComposeRunContext runContext, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, PanelPlan plan, ComposeRunContext runContext, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
     {
         var annotations = new JsonArray();
         foreach (var (source, compiled) in ComposeCompiler.CompileAnnotations(plan, runContext))
         {
-            var events = await RunComposedQueryAsync(postgres, compiled, cancellationToken);
+            var events = await RunComposedQueryAsync(postgres, compiled, composedQuerySeconds, cancellationToken);
             annotations.Add(new JsonObject { ["source"] = source, ["events"] = events });
         }
 

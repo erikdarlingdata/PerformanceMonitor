@@ -182,6 +182,7 @@ public sealed class DarlingMcpPgPlanTools
         try
         {
             await using var command = postgres.CreateCommand(sql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.AddWithValue(serverId);
 
             await using var reader = await command.ExecuteReaderAsync();
