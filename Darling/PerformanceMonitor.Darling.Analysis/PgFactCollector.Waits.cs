@@ -39,7 +39,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var command = new NpgsqlCommand(WaitStatsSql, connection);
+        using var command = new NpgsqlCommand(WaitStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -97,7 +97,7 @@ AND   collection_time <= $3";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var command = new NpgsqlCommand(BlockingSql, connection);
+        using var command = new NpgsqlCommand(BlockingSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -151,7 +151,7 @@ AND   collection_time <= $3";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var command = new NpgsqlCommand(DeadlocksSql, connection);
+        using var command = new NpgsqlCommand(DeadlocksSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -213,7 +213,7 @@ LIMIT 5000";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var command = new NpgsqlCommand(BlockingChainSql, connection);
+            using var command = new NpgsqlCommand(BlockingChainSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             command.Parameters.AddWithValue(context.ServerId);
             command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
