@@ -198,6 +198,23 @@ public partial class MainWindow
     }
 
     /// <summary>
+    /// The collector-health SCOPE the active tab defines: a per-server tab's server id, or null for the
+    /// fleet-cumulative total on an aggregate tab.
+    ///
+    /// <para>Extracted so <see cref="UpdateCollectorHealthTextAsync"/>'s capture and its post-read verify
+    /// are the SAME expression. Two spellings of "which scope is on screen" would compare two things and
+    /// mean neither, and the verify is only worth having if it cannot drift from what it verifies.</para>
+    ///
+    /// <para>The scope is the SERVER ID, not the tab: Overview / Alert History / FinOps / Recommendations
+    /// all read the same fleet aggregate, so moving between them is not a scope change and must not
+    /// invalidate a read that is already in flight for it.</para>
+    /// </summary>
+    private int? SelectedTabCollectorScope() =>
+        MainTabs.SelectedItem is System.Windows.Controls.TabItem { Content: ViewerServerTab serverTab }
+            ? serverTab.ServerId
+            : null;
+
+    /// <summary>
     /// Sets the status bar's collector-health field from the ACTIVE TAB's scope, mirroring Lite's
     /// <c>UpdateCollectorHealth</c>: a per-server tab shows THAT server's collectors; an aggregate tab
     /// (Overview / Alert History / FinOps / Recommendations) shows the FLEET-CUMULATIVE total across all
@@ -210,6 +227,24 @@ public partial class MainWindow
     /// SKIPPED-as-healthy (e.g. running_jobs on Azure SQL DB) surface in the Collection Health tab, not here,
     /// exactly like Lite. The server COUNT is a separate field (ServerCountText); this one is collectors,
     /// which is why the pre-fix "Collectors: {online-servers} OK" read wrong.
+    ///
+    /// <para><b>The scope is captured before the read and verified after it</b> (#2924). One field carries
+    /// every scope's answer, so an answer read for a scope that has since left the screen must be dropped
+    /// rather than painted: the operator can change tab during the read, which is one store read bounded at
+    /// <see cref="ViewerCommandDeadlines.InteractiveReadSeconds"/> by #2901.</para>
+    ///
+    /// <para><b>A drop is right here, where <see cref="RefreshServerStatusAsync"/> needs a replay</b>, and
+    /// the difference is whether anything else is going to ask. The event that invalidates the scope IS a
+    /// re-read: <c>MainTabs_SelectionChanged</c> calls this method for the newly selected tab, so a
+    /// mismatching answer is stale by definition and its replacement is already in flight. Replaying here
+    /// would issue a third read for a scope two calls are already answering; dropping leaves the newest
+    /// call — the only one whose scope can still match when it lands — to paint.</para>
+    ///
+    /// <para>The verify is what makes the ORDER of two overlapping calls stop mattering.
+    /// <see cref="RefreshServerStatusAsync"/>'s guard serializes the timer path against itself, but the
+    /// tab-change caller reaches this method directly and so can overlap it; without the verify, the read
+    /// that STARTED later can land first and then be overwritten by the earlier one's stale scope, which
+    /// stands until the next fleet tick.</para>
     /// </summary>
     private async Task UpdateCollectorHealthTextAsync()
     {
@@ -222,9 +257,7 @@ public partial class MainWindow
 
         /* Per-server tab -> that server's collectors; an aggregate tab -> the fleet-cumulative total across all
            enabled servers (mirrors Lite's cumulative count on a non-server view). */
-        int? serverId = MainTabs.SelectedItem is System.Windows.Controls.TabItem { Content: ViewerServerTab serverTab }
-            ? serverTab.ServerId
-            : null;
+        int? serverId = SelectedTabCollectorScope();
 
         List<CollectorHealthRow> health;
         try
@@ -236,6 +269,14 @@ public partial class MainWindow
         catch (Exception ex)
         {
             ViewerLogger.Warn("ServerStatus", $"collector health read failed: {ex.Message}");
+            return;
+        }
+
+        /* The tab moved while the read was in flight, so this answer describes a scope that is no longer on
+           screen. Drop it ahead of EVERY paint below, the empty-result clear included — painting "" for a
+           departed scope is the same wrong answer as painting its count. */
+        if (SelectedTabCollectorScope() != serverId)
+        {
             return;
         }
 
