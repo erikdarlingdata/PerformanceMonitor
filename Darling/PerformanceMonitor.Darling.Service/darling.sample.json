@@ -151,6 +151,22 @@
   // Dashboard's @include_object_events. A file-only knob (not stored in the control plane): edit + restart.
   "collectSchemaChangeEvents": true,
 
+  // How many collection cycles pass between execution-plan captures for procedure_stats. 1 = every cycle
+  // (identical to releases before this knob existed); 4 = one cycle in four. Clamped to [1,60].
+  //
+  // procedure_stats is normally the most expensive collector against a monitored server, and nearly all of
+  // that cost is rendering plan XML: a controlled decomposition put 73.8% of its read loop in the render
+  // and 26.0% in shipping the result, against 0.2% for the same query with no plan capture at all. The
+  // render happens inside sys.dm_exec_text_query_plan, a server-side function, so it is CPU on the
+  // MONITORED server rather than on this one. Capturing every fourth cycle removes about three quarters of
+  // it, and shortens the whole collection cycle with it.
+  //
+  // Runtime statistics (execution counts, CPU, duration, reads) are unaffected - those are still collected
+  // every cycle. What you trade is plan freshness: a stored plan can be up to this many cycles old. The
+  // capture cycle is offset per server, so a fleet spreads across the interval instead of every server
+  // rendering on the same cycle. A file-only knob (not stored in the control plane): edit + restart.
+  "procedureStatsPlanCycleInterval": 4,
+
   // The alert engine (optional section). Every default mirrors Performance Monitor Lite's:
   // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, long-running query
   // 30 min, tempdb 80%, low disk 10% / 5 GB, job multiplier 3x, failed-job lookback 60 min,

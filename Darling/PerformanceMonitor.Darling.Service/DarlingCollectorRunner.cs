@@ -379,12 +379,6 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// The instance side of the #2862 cadence: advances this (server, collector) cycle counter and asks the
-    /// pure policy. Returns true unconditionally for every collector except
-    /// <see cref="PlanCadenceGatedCollector"/>, so no other collector's behaviour changes and no other
-    /// collector's counter is even allocated.
-    /// </summary>
-    /// <summary>
     /// The complete plan-capture decision for one collector on one server on this cycle: the SKU flag
     /// AND the #2862 cadence gate. This is what <see cref="CollectorContext.CapturePlanXml"/> is set from,
     /// and it exists as ONE named seam rather than as a <c>&amp;&amp;</c> inside the context initializer so the
@@ -394,6 +388,12 @@ public sealed class DarlingCollectorRunner
     internal bool ShouldCapturePlanXmlFor(string collectorName, int serverId) =>
         _capturePlans() && ShouldCapturePlanForCollector(collectorName, serverId);
 
+    /// <summary>
+    /// The instance side of the #2862 cadence: advances this (server, collector) cycle counter and asks the
+    /// pure policy. Returns true unconditionally for every collector except
+    /// <see cref="PlanCadenceGatedCollector"/>, so no other collector's behaviour changes and no other
+    /// collector's counter is even allocated.
+    /// </summary>
     private bool ShouldCapturePlanForCollector(string collectorName, int serverId)
     {
         if (!string.Equals(collectorName, PlanCadenceGatedCollector, StringComparison.Ordinal))
