@@ -1,0 +1,236 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net.Sockets;
+using Npgsql;
+
+namespace PerformanceMonitor.Darling.Service;
+
+/// <summary>
+/// Whether a failure of the collection loop's first store interaction — open the store connection, then
+/// <c>PgMigrations.MigrateAsync</c> — is worth trying again, and how long that is worth doing for (#2936).
+///
+/// <para><b>The problem this exists to answer.</b> That step used to sit behind one
+/// <c>catch (Exception ex) when (ex is not OperationCanceledException)</c>, one <c>LogCritical</c> and one
+/// <c>return</c>, so a store that was unreachable for two seconds ended collection for the life of the
+/// process exactly as surely as a rung that can never apply. The catch filter is too coarse to say which
+/// happened, and the process does not exit on that <c>return</c> — the worker task completes successfully,
+/// the MCP and web hosts keep serving, and the Windows service keeps reporting Running while collecting
+/// nothing. So the failure that most deserves a retry is also the one whose symptom looks least like a
+/// small problem.</para>
+///
+/// <para><b>Default-deny, and that is the load-bearing decision.</b> <see cref="IsRetryable"/> is an
+/// ALLOWLIST. Anything it does not recognise keeps the old behaviour byte for byte: the critical line and
+/// the stand-down. That direction is chosen because the two errors are not symmetric. Refusing to retry
+/// something transient costs an operator a restart, and they get a loud, literal, searchable line telling
+/// them to perform it. Retrying something permanent costs them the line — a rung that can never apply
+/// would be re-attempted on a cadence, logging warnings, and the one message that says what is actually
+/// wrong would never be emitted. A retry policy that retries everything is indistinguishable from a
+/// working one right up to the point where it matters, so the unclassifiable case is terminal.</para>
+///
+/// <para><b>Why the existing classifier could not be reused.</b> <c>DarlingManagedPostgres</c> already has
+/// <c>IsTransientConnectionFault</c>, driving a 6-attempt / 2-second retry around the bundled store's
+/// first post-start interaction, and its rule is "a <see cref="PostgresException"/> means the server
+/// replied, so it is never transient". That rule is right for its own site — the server there was started
+/// by this process moments earlier with a credential this process derived, so a reply really is a verdict —
+/// and it is wrong here. Measured against PostgreSQL 17.11, TWO of the three transient cases #2936 names
+/// arrive as a <see cref="PostgresException"/>: an unclean store restart answers <c>57P01</c>
+/// ("terminating connection due to unexpected postmaster exit") and a store still in crash recovery
+/// answers <c>57P03</c> ("the database system is not yet accepting connections") for as long as recovery
+/// takes. Both are the server replying, and both mean "not yet" rather than "no". That class is also
+/// <c>DarlingManagedPostgres</c>-shaped in a second way: the type is
+/// <c>[SupportedOSPlatform("windows")]</c>, and this path runs on Linux containers too.</para>
+///
+/// <para><b>Retryable, with what each one actually looks like.</b> Every shape below was observed against
+/// PostgreSQL 17.11 / TimescaleDB 2.29.2 rather than reasoned about:</para>
+/// <list type="bullet">
+/// <item><description><b>Transport — the server never delivered a verdict.</b> No
+/// <see cref="PostgresException"/> anywhere in the chain, and a <see cref="SocketException"/>,
+/// <see cref="IOException"/> or <see cref="TimeoutException"/> in it (or the exception is an
+/// <see cref="NpgsqlException"/> itself). Nothing listening presents as
+/// <c>NpgsqlException -> SocketException</c>; an unroutable host as
+/// <c>NpgsqlException -> TimeoutException</c>; the store dying mid-statement as
+/// <c>NpgsqlException -> IOException -> SocketException</c>.</description></item>
+/// <item><description><b>A bare <see cref="TimeoutException"/>, which is how the migration lock-wait
+/// budget expires.</b> A sibling instance holding the advisory lock is transient by definition — it is
+/// applying rungs and will release. Note the two spellings this arrives in: a blocking
+/// <c>pg_advisory_lock</c> hitting its <c>CommandTimeout</c> surfaces as
+/// <c>NpgsqlException -> TimeoutException</c>, which is the transport bullet above and is byte-identical
+/// to a RUNG overrunning its own command timeout; #2935's polling waiter throws a plain
+/// <see cref="TimeoutException"/> carrying both schema versions. Both are retried, so this classification
+/// is correct whether or not that change has landed.</description></item>
+/// <item><description><b><c>57P01</c>, <c>57P02</c>, <c>57P03</c> — the server going down, or coming
+/// up.</b> Observed directly: SIGKILL the store and the in-flight session gets <c>57P01</c>; connect
+/// during the crash recovery that follows and every attempt gets <c>57P03</c> until recovery finishes.
+/// These are the issue's "a restart, a failover, the store still coming up alongside the service", and
+/// they are the whole reason this class exists rather than a call to the classifier next
+/// door.</description></item>
+/// <item><description><b>Class <c>08</c> — <c>08000</c>, <c>08001</c>, <c>08003</c>, <c>08004</c>,
+/// <c>08006</c>.</b> The connection itself failed. Not the whole class: <c>08P01</c> is a protocol
+/// violation, which is a defect that will recur identically, and <c>08007</c> leaves the transaction's
+/// outcome unknown, which is a thing to say out loud rather than paper over.</description></item>
+/// <item><description><b><c>40001</c> and <c>40P01</c> — serialization failure and deadlock.</b> Safe for
+/// a reason specific to this applier rather than a general one: each rung's DDL and its
+/// <c>darling_schema_version</c> stamp commit in ONE transaction, so a rung that loses a deadlock rolls
+/// back with nothing applied and nothing stamped, and re-entering re-attempts that same rung from
+/// scratch.</description></item>
+/// <item><description><b><c>55P03</c> and <c>55006</c> — lock not available, object in use.</b> A rung's
+/// <c>ALTER TABLE</c> losing a race with live traffic, reachable on any store carrying a role- or
+/// database-level <c>lock_timeout</c>. The blocker is by definition a session that finishes, and the
+/// rung's transaction rolled back whole.</description></item>
+/// </list>
+///
+/// <para><b>Terminal, including the ones that are close calls.</b> Class <c>42</c> is a rung that cannot
+/// apply against this store — wrong syntax, missing object, insufficient privilege — and is the case the
+/// old code was right about. Class <c>23</c> is a rung whose constraint is violated by data already in
+/// the store, which is V62's exact shape, and no amount of waiting changes the rows. <c>28P01</c> /
+/// <c>28000</c> is a credential, <c>3D000</c> a database that does not exist, <c>55000</c> a database
+/// somebody set <c>datallowconn = false</c> on. Class <c>53</c> — disk full, out of memory, too many
+/// connections — is a capacity finding an operator has to see now, and two minutes does not clear any of
+/// them; class <c>58</c> is the filesystem underneath the store. Two deserve naming because a
+/// class-level rule would have swept them in with their neighbours: <c>57014</c> is somebody else's
+/// <c>statement_timeout</c> cancelling a rung, which will cancel the identical rung identically on every
+/// attempt, and <c>57P04</c> is the database having been dropped — both sit in the same class <c>57</c>
+/// as the three retryable states above, which is why this classifies on individual states and not on
+/// the two-character class. And an exception that is neither <see cref="NpgsqlException"/> nor carrying a
+/// transport fault is terminal by the default-deny rule: the <c>ArgumentException</c> a malformed
+/// connection string produces while Npgsql is still parsing it belongs there, and got there without
+/// being enumerated.</para>
+///
+/// <para><b><see cref="OperationCanceledException"/> is not classified here at all.</b> The call site's
+/// filter excludes it ahead of this, because it means the service is stopping.</para>
+/// </summary>
+internal static class StoreStartupFailureTriage
+{
+    /// <summary>
+    /// Total wall clock the collection loop's first store interaction may spend retrying a failure
+    /// <see cref="IsRetryable"/> accepts, expressed as <see cref="MigrateAttempts"/> tries
+    /// <see cref="MigrateRetryDelay"/> apart: 24 waits of 5 s, so two minutes.
+    ///
+    /// <para><b>BELOW — it has to outlast the store restarting.</b> This codebase's own statement of how
+    /// long a PostgreSQL start may take is <c>DarlingManagedPostgres.PgCtlWaitSeconds</c> = 60, what
+    /// <c>pg_ctl -w</c> is allowed for the bundled store; two minutes is twice that. The measured case is
+    /// far smaller — SIGKILL of a 1.7 GB store carrying 701 MB of unreplayed WAL refused connections for
+    /// 2.0 s end to end on local NVMe (26 transport failures, then 74 <c>57P03</c>s, then service) — so
+    /// the ordinary blip is gone inside the FIRST wait and the rest of the budget exists for the cold,
+    /// large, contended restart and for a sibling instance holding the migration lock while it applies
+    /// rungs.</para>
+    ///
+    /// <para><b>ABOVE — it has to stay finite, and short of looking like a hang.</b> The terminal line is
+    /// the only diagnosis this failure ever produces, and the process does not exit when it lands, so an
+    /// unbounded retry would convert the single most common permanent case — a wrong port or host in
+    /// <c>darling.json</c>, which presents as a retryable <see cref="SocketException"/> forever — from one
+    /// loud, literal, documented line into a service that reports Running and says nothing conclusive
+    /// ever. Two minutes also sits inside <c>DarlingWorker.ColdStartSpreadSeconds</c> = 150, the window
+    /// the fleet's first sweep is already deliberately staggered across, so even a fully spent budget
+    /// delivers the first collection cycle inside the span a normal cold start occupies
+    /// anyway.</para>
+    ///
+    /// <para><b>Bounded rather than a supervisor loop, deliberately.</b> The repo holds both shapes.
+    /// <c>DarlingManagedPostgres.EnsureDatabaseAsync</c> is bounded — 6 attempts, 2 s apart, classified,
+    /// then it gives up — and it is the structural match: straight-line startup code around a store
+    /// interaction that must succeed before the caller can continue. <c>DarlingMcpHostService</c> and
+    /// <c>DarlingWebHostService</c> retry a failed config load forever on a 30 s
+    /// <c>FailedStartBackoff</c> (#2038), which is right THERE because those hosts are supervisor loops
+    /// that already existed and had nothing else to do with the tick. Making this one unbounded means
+    /// giving the collection loop's whole start a supervisor of its own, which is a different change than
+    /// classifying its failures; this bounded form leaves the long-outage case behaving exactly as it does
+    /// today rather than half-solving it.</para>
+    ///
+    /// <para>Attempts and delay are separate from every other budget in
+    /// <c>ServiceCommandDeadlines</c> and from the 6 / 2 s above per that file's rule that a constant is
+    /// not reused across regimes. Nothing about a per-command deadline or a Windows shared-memory
+    /// reservation race says how long a store takes to come back.</para>
+    /// </summary>
+    internal const int MigrateAttempts = 25;
+
+    /// <summary>
+    /// Pause between the attempts <see cref="MigrateAttempts"/> allows.
+    ///
+    /// <para>A connect against a store that is not listening fails immediately — measured sub-millisecond,
+    /// <see cref="SocketException"/> straight back — so this delay is the entire cost of a poll and the
+    /// entire notice latency too. Five seconds keeps that latency an order below the tens of seconds of
+    /// store start it exists to cover, while 25 connection attempts spread over two minutes is nothing
+    /// against a store that is either not listening or busy replaying WAL.</para>
+    /// </summary>
+    internal static readonly TimeSpan MigrateRetryDelay = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// <c>SqlState</c>s that mean "not yet" rather than "no" — see the class remarks for what each one was
+    /// observed doing. An allowlist: a state absent from it is terminal, which is what keeps a rung that
+    /// can never apply from being retried into silence.
+    /// </summary>
+    private static readonly HashSet<string> s_retryableSqlStates = new(StringComparer.Ordinal)
+    {
+        /* The server is going down, or is not up yet. */
+        PostgresErrorCodes.AdminShutdown,
+        PostgresErrorCodes.CrashShutdown,
+        PostgresErrorCodes.CannotConnectNow,
+
+        /* The connection itself failed. 08P01 (protocol violation) and 08007 (transaction resolution
+           unknown) are deliberately absent — see the class remarks. */
+        PostgresErrorCodes.ConnectionException,
+        PostgresErrorCodes.SqlClientUnableToEstablishSqlConnection,
+        PostgresErrorCodes.ConnectionDoesNotExist,
+        PostgresErrorCodes.SqlServerRejectedEstablishmentOfSqlConnection,
+        PostgresErrorCodes.ConnectionFailure,
+
+        /* The rung's transaction lost a concurrency race and rolled back whole, stamp included. */
+        PostgresErrorCodes.SerializationFailure,
+        PostgresErrorCodes.DeadlockDetected,
+        PostgresErrorCodes.LockNotAvailable,
+        PostgresErrorCodes.ObjectInUse,
+    };
+
+    /// <summary>
+    /// Whether the collection loop's first store interaction should be tried again after this failure.
+    /// FALSE for anything not positively recognised, including every <see cref="PostgresException"/> whose
+    /// <c>SqlState</c> is not in <see cref="s_retryableSqlStates"/> — see the class remarks for why the
+    /// unclassifiable case is terminal rather than retried.
+    /// </summary>
+    /// <param name="exception">The failure. <see cref="OperationCanceledException"/> is the caller's to
+    /// filter out first; it means shutdown, not a store problem.</param>
+    internal static bool IsRetryable(Exception? exception)
+    {
+        if (exception is null)
+        {
+            return false;
+        }
+
+        /* Walk the chain rather than testing the outermost type: Npgsql reports a refused connect as
+           NpgsqlException wrapping SocketException, and a mid-statement death as NpgsqlException wrapping
+           IOException wrapping SocketException, so the outermost type alone cannot tell a transport
+           failure from anything else Npgsql raises.
+
+           TWO passes, not one, and the order is the point. A PostgresException anywhere in the chain is
+           the server's own verdict on the thing that failed, and nothing wrapping it adds to that — so it
+           decides regardless of how deeply it sits, rather than losing to whichever transport type a
+           single pass happened to reach first. Only a chain carrying no verdict at all is read as a
+           transport failure. */
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException postgres)
+            {
+                return postgres.SqlState is not null && s_retryableSqlStates.Contains(postgres.SqlState);
+            }
+        }
+
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is SocketException or IOException or TimeoutException)
+            {
+                return true;
+            }
+        }
+
+        return exception is NpgsqlException;
+    }
+}
