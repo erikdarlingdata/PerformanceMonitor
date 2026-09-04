@@ -12,7 +12,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// The explicit command deadline for the store readers that serve the MCP surface (#2874) — the
 /// <c>DarlingPg*Reader</c> family, <c>DarlingPgTrendReader</c> and <c>QueryStoreTrendRouting</c>.
 ///
-/// <para>Before this, all forty-nine of those commands set no <c>CommandTimeout</c> and so inherited
+/// <para>Before this, all forty-eight of those commands set no <c>CommandTimeout</c> and so inherited
 /// Npgsql's undocumented 30 s default — a value nobody chose, and the defect class behind three
 /// production failures (#2810, #2871, #2796): exceeding the ceiling fails in a way that looks like a
 /// legitimate result.</para>
