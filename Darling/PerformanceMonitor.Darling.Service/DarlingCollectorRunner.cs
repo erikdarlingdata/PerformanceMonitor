@@ -1282,10 +1282,27 @@ public sealed class DarlingCollectorRunner
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
-                    /* Read ONCE. The stopwatch is still running, so a second read a few statements later
-                       returns a larger number, and the per-item total would then exceed the blended total
-                       it is a ratio against — a dominance a hair above the truth, on every Azure run
-                       (#2472). Small, and wrong in the direction that matters. */
+                    /* Read ONCE. A second read a few statements later returns a larger number, and the
+                       per-item total would then exceed the blended total it is a ratio against — a dominance
+                       a hair above the truth, on every Azure run (#2472). Small, and wrong in the direction
+                       that matters.
+
+                       #2896 review catch: STOPPED rather than merely read once, and stopped BEFORE the read
+                       so the read is the frozen value. "Read once" was a convention the success path kept by
+                       having only one read; the fault arms below now hold the same stopwatch, and everything
+                       between here and them — the flush above all — kept accumulating into it. A store write
+                       that throws (WriteBatchAsync deliberately runs on cancellationToken, so it CAN throw
+                       into these arms) would have printed a sql: larger than the dbSqlMs already folded into
+                       sqlMs and fanout.Observe for this same database, with the whole difference landing in
+                       other: — storage latency reported as unattributed SQL-side residual, which is the
+                       exact mis-attribution this instrumentation exists to prevent.
+
+                       Stopping makes the two paths print the same parent by construction rather than by
+                       both happening to read at the same moment. It does NOT widen dbSqlMs: the interval
+                       still ends here, a hair earlier than the old read if anything. A fault BEFORE this
+                       point still finds the stopwatch running and reports how far it got, which is what the
+                       fault line is for. */
+                    sqlSlice.Stop();
                     var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     sqlMs += dbSqlMs;
 

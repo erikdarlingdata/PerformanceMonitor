@@ -215,6 +215,58 @@ public sealed class PerDatabaseFaultPathSplitTests
         Assert.Equal(0, Group(match, "other"));
     }
 
+    [Fact]
+    public void AStoppedSliceFreezesTheParent_SoAFlushTimeFaultPrintsWhatTheMetricAlreadyRecorded()
+    {
+        /* The #2896 REVIEW catch, and the one case the tests above could not see. The runner captures
+           dbSqlMs and folds it into sqlMs and fanout.Observe, and THEN flushes — and the flush runs on
+           cancellationToken rather than the per-database budget, so a store write that throws lands in a
+           fault arm holding the same stopwatch. While that stopwatch was still running, the arm re-read it
+           and printed a parent LARGER than the one already persisted for this database, with the whole
+           difference falling into other:, because connect/open/drain are fixed by their own finally blocks.
+           Storage latency reported as unattributed SQL-side residual is the precise mis-attribution this
+           instrumentation exists to prevent.
+
+           Stopping the slice at the capture point is what makes the two paths agree by construction. The
+           assertion is that a STOPPED slice still prints, and prints the frozen figure — measured across a
+           real delay after the stop, because the defect was that time kept accruing. */
+        var logger = new Recorder();
+        var context = PerDatabaseContext();
+        context.PerDatabasePhasesMeasured = true;
+        context.PerDatabaseConnectMs = 2;
+        context.PerDatabaseOpenMs = 1;
+        context.PerDatabaseDrainMs = 1;
+
+        var slice = RunningSlice(minimumElapsedMs: 25);
+        slice.Stop();
+        var frozen = slice.ElapsedMilliseconds;
+
+        /* Stand in for the flush: real elapsed time between the capture and the fault arm's read. */
+        Thread.Sleep(60);
+
+        DarlingCollectorRunner.LogPerDatabaseFaultSplit(
+            logger, LogLevel.Debug, context, slice, "alpha", "query_store", "beta", "failed");
+
+        var match = SplitShape.Match(Assert.Single(logger.Records).Message);
+        Assert.True(match.Success, "The emitted line did not carry a parseable split.");
+
+        Assert.Equal(frozen, Group(match, "sql"));
+        Assert.Equal(
+            frozen,
+            Group(match, "connect") + Group(match, "open") + Group(match, "drain") + Group(match, "other"));
+
+        /* The control the assertion needs: the delay really was long enough that a RUNNING slice would have
+           reported a different, larger parent. Without this the equality above could hold simply because no
+           measurable time passed, and the pin would guard nothing. */
+        var stillRunning = RunningSlice(minimumElapsedMs: 25);
+        var firstRead = stillRunning.ElapsedMilliseconds;
+        Thread.Sleep(60);
+        Assert.True(
+            stillRunning.ElapsedMilliseconds > firstRead,
+            "A running stopwatch did not advance across the same delay, so this test cannot distinguish a " +
+            "frozen slice from a live one and proves nothing.");
+    }
+
     /* ── the shape pins: what the runner must keep true for the behaviour above to be reachable ── */
 
     [Fact]
@@ -309,6 +361,26 @@ public sealed class PerDatabaseFaultPathSplitTests
            a well-meaning simplification would put the slice back out of the catch's reach while leaving
            every other assertion in this test green. */
         Assert.Equal(0, Occurrences(branch, "var sqlSlice = Stopwatch.StartNew();"));
+
+        /* And it is STOPPED before the parent is captured (the review catch). The ORDER is the whole
+           assertion: stopping AFTER the read leaves the read live, and stopping at all is what keeps a
+           flush-time fault from printing a parent larger than the one already folded into sqlMs. */
+        var stop = branch.IndexOf("sqlSlice.Stop();", StringComparison.Ordinal);
+        var capture = branch.IndexOf("var dbSqlMs = sqlSlice.ElapsedMilliseconds;", StringComparison.Ordinal);
+        var accumulate = branch.IndexOf("sqlMs += dbSqlMs;", StringComparison.Ordinal);
+
+        Assert.True(stop >= 0, "The slice is never stopped, so it keeps accruing into the fault arms' read.");
+        Assert.True(capture >= 0 && accumulate >= 0, "The dbSqlMs capture or its accumulator moved.");
+        Assert.True(
+            stop > start,
+            "The slice is stopped before it is started.");
+        Assert.True(
+            stop < capture,
+            "The slice is stopped AFTER dbSqlMs is captured, so the captured value is a live read and a " +
+            "fault during the flush still prints a larger parent than sqlMs recorded.");
+        Assert.True(
+            capture < accumulate,
+            "dbSqlMs is accumulated before it is captured.");
 
         /* Positive control for that zero: the identical counter, in the identical string, against the form
            that IS there. A zero from a needle that could never have matched anything proves nothing. */
