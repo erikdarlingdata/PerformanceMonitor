@@ -692,7 +692,7 @@
         "dependencies": {
           "AWSSDK.PI": "[4.0.100.11, )",
           "AWSSDK.RDS": "[4.0.104.4, )",
-          "BlackwellSystems.Gcf": "[0.2.0, )",
+          "BlackwellSystems.Gcf": "[0.2.1, )",
           "Microsoft.Data.SqlClient": "[7.0.2, )",
           "Microsoft.Extensions.Hosting": "[10.0.11, )",
           "Microsoft.Extensions.Hosting.WindowsServices": "[10.0.11, )",
@@ -775,9 +775,9 @@
       },
       "BlackwellSystems.Gcf": {
         "type": "CentralTransitive",
-        "requested": "[0.2.0, )",
-        "resolved": "0.2.0",
-        "contentHash": "HnL0i5xnmNDxv0j4kqGTgUxZ+uTEuRtM4S31NYS/XdL1kaQ77TfknqpW0yUALyt4KJRmzVKXgI2CmqdhvMQ9cA=="
+        "requested": "[0.2.1, )",
+        "resolved": "0.2.1",
+        "contentHash": "reYZPIgRpPctAOEVOhaZguOT4eSxv4hKCiFjiTJOdZuZViPEaWghz3DyW3MGSbxuzBFSwnLjxkiSB2X9S+93VA=="
       },
       "CredentialManagement": {
         "type": "CentralTransitive",
