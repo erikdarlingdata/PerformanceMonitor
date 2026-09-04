@@ -64,6 +64,35 @@ public sealed partial class PgFactCollector : IFactCollector
     private readonly ILogger? _logger;
 
     /// <summary>
+    /// The per-command deadline for every fact read in this collector (#2810), set explicitly so the
+    /// value is a deliberate choice rather than Npgsql's undocumented 30 s default — the #2795 lesson.
+    ///
+    /// <para><b>Why 30 s was wrong.</b> Nobody ever chose it; it was inherited. Measured on the
+    /// production store AFTER retention was restored (#2809) and after #2827's dedup rewrite, the
+    /// heaviest servers still cross it on a COLD run — 34.7 s and 32.4 s on the two largest, against
+    /// 10.6-21.2 s for the same servers warm. That few-second overshoot is the whole defect: the read
+    /// fails only on the cold/large combination, which is why it looked intermittent rather than
+    /// broken, and why the two changes before it did not fix it. #2827 made the query 2.4x faster and
+    /// #2826 made the failure visible; neither touched the ceiling it was failing against.</para>
+    ///
+    /// <para><b>Why not simply raise it further.</b> The whole analysis pass gets 120 s
+    /// (<c>DarlingWorker.s_analysisTimeout</c>) and THIRTY collect methods share it. A per-command
+    /// timeout at or near that figure would let one stalled read consume the entire pass and cost the
+    /// server its other twenty-nine facts — strictly worse than today's failure, which loses one. At
+    /// 60 s a timing-out read still leaves half the pass for everything else, while clearing the
+    /// measured cold worst case by 1.7x. That headroom is the growth margin: when a store outgrows it
+    /// the read starts warning (#2826) instead of failing silently, which is the signal to look at the
+    /// scanned window rather than at the ceiling.</para>
+    ///
+    /// <para>Applied to EVERY command in this collector, not just the plan-regression read that
+    /// exposed it. All thirty-one share the same pass budget and had the same missing value, and
+    /// pinning one site while leaving thirty identical ones is the enumerated-list mistake this repo
+    /// has already paid for twice (#2344, <c>PgStatementText</c>). A generous ceiling is inert on a
+    /// query that returns in milliseconds, so uniformity costs nothing and removes the trap.</para>
+    /// </summary>
+    internal const int FactCommandTimeoutSeconds = 60;
+
+    /// <summary>
     /// The logger is OPTIONAL and defaulted, matching <see cref="PgBaselineProvider"/>,
     /// <see cref="PgAnomalyDetector"/> and <see cref="PgPlanFetcher"/> in this project — so #2826
     /// cost no call-site churn, and a test constructing a collector without one still compiles.
