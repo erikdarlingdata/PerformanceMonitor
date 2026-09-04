@@ -181,7 +181,7 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 14-column per-collector
+    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 15-column per-collector
     /// aggregate but across ALL enabled monitored servers (GROUP BY server_id, collector_name — one row per
     /// server/collector pair), for the status bar's aggregate-view total (mirrors Lite's cumulative
     /// GetHealthSummary(null)). Scoped to enabled servers so a removed server's aged-out rows don't read as
@@ -337,7 +337,9 @@ public sealed partial class ViewerDataService
         return items;
     }
 
-    /// <summary>Maps one row of the shared 14-column health projection (per-server or fleet) to a <see cref="CollectorHealthRow"/>.</summary>
+    /// <summary>Maps one row of the shared 15-column health projection (per-server or fleet, ordinals 0-14) to a
+/// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY through
+/// this one mapper, so it must match them exactly (15 since #2804 appended abandoned_count at ordinal 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
