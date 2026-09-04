@@ -17,6 +17,12 @@ namespace PerformanceMonitor.Ui;
 
 public partial class PlanViewerControl
 {
+    /* Re-entrancy latch for the Ctrl+V paste handler (#2870). #2837's async clipboard retry keeps the UI pump
+       responsive but yields the thread for the ~175 ms can't-open retry window, so a HELD Ctrl+V (OS key-repeat)
+       could put several reads in flight at once and each success would LoadPlan a fresh "Pasted Plan". While a
+       paste is running, a further Ctrl+V is dropped (its key is still claimed via e.Handled). */
+    private bool _pasteInProgress;
+
     #region Node Selection & Context Menu
 
     private void Node_Click(object sender, MouseButtonEventArgs e)
@@ -167,32 +173,41 @@ public partial class PlanViewerControl
             // Claim the paste gesture during event routing, before the async read yields on the retry path
             // (#2837): setting e.Handled after the await would let the key event finish routing unsuppressed.
             e.Handled = true;
-            var (ok, text) = await ClipboardText.TryReadAsync();
-            if (ok && !string.IsNullOrWhiteSpace(text))
+            // Re-entrancy guard (#2870): drop a repeat paste while one is already running (a held Ctrl+V could
+            // otherwise put several async reads in flight at once, each loading its own tab). The key stays
+            // claimed above, so a dropped repeat cannot fall through to another handler.
+            if (_pasteInProgress) return;
+            _pasteInProgress = true;
+            try
             {
-                try
+                var (ok, text) = await ClipboardText.TryReadAsync();
+                if (ok && !string.IsNullOrWhiteSpace(text))
                 {
-                    /* LoadPlan parses+analyzes off the UI thread and throws XmlException for
-                       malformed XML, replacing the redundant up-front XDocument.Parse. */
-                    await LoadPlan(text, "Pasted Plan");
-                }
-                catch (System.Xml.XmlException ex)
-                {
-                    MessageBox.Show(
-                        $"The plan XML is not valid:\n\n{ex.Message}",
-                        "Invalid Plan XML",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(
-                        $"Failed to load the execution plan:\n\n{ex.Message}",
-                        "Plan Load Error",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
+                    try
+                    {
+                        /* LoadPlan parses+analyzes off the UI thread and throws XmlException for
+                           malformed XML, replacing the redundant up-front XDocument.Parse. */
+                        await LoadPlan(text, "Pasted Plan");
+                    }
+                    catch (System.Xml.XmlException ex)
+                    {
+                        MessageBox.Show(
+                            $"The plan XML is not valid:\n\n{ex.Message}",
+                            "Invalid Plan XML",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Warning);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(
+                            $"Failed to load the execution plan:\n\n{ex.Message}",
+                            "Plan Load Error",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Warning);
+                    }
                 }
             }
+            finally { _pasteInProgress = false; }
         }
     }
 

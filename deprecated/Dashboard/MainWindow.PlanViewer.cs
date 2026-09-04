@@ -27,6 +27,14 @@ namespace PerformanceMonitorDashboard
         /* Re-entrancy latch for the "+"-sentinel auto-add (see HandleAddTabSelected / #2825). */
         private bool _addTabInsertDeferred;
 
+        /* Re-entrancy latch shared by the Plan Viewer's two paste entry points -- the "Paste XML" button and the
+           Ctrl+V MainWindowPlanViewer_KeyDown (#2870). #2837's async clipboard retry keeps the UI pump responsive
+           but yields the thread for the ~175 ms can't-open retry window; the old Thread.Sleep had incidentally
+           serialized input, so a HELD Ctrl+V (OS key-repeat) could put several reads in flight at once and each
+           would LoadPlan another "Pasted Plan" tab. While a paste is running, a further paste trigger is dropped
+           (its key is still claimed via e.Handled). */
+        private bool _pasteInProgress;
+
         private void OpenPlanViewer_Click(object sender, RoutedEventArgs e)
         {
             if (_planViewerTab != null && ServerTabControl.Items.Contains(_planViewerTab))
@@ -283,20 +291,28 @@ namespace PerformanceMonitorDashboard
 
             pasteBtn.Click += async (_, _) =>
             {
-                var (ok, xml) = await ClipboardText.TryReadAsync();
-                if (!ok)
+                // Re-entrancy guard (#2870): share the paste latch with the Ctrl+V handler so a rapid
+                // double-invoke of the button cannot double-load (a paste is a paste, whichever entry fires).
+                if (_pasteInProgress) return;
+                _pasteInProgress = true;
+                try
                 {
-                    MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
-                        "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
+                    var (ok, xml) = await ClipboardText.TryReadAsync();
+                    if (!ok)
+                    {
+                        MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
+                            "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                    if (!string.IsNullOrWhiteSpace(xml))
+                    {
+                        LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
+                        return;
+                    }
+                    MessageBox.Show("The clipboard does not contain any text.", "Paste Plan XML",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
                 }
-                if (!string.IsNullOrWhiteSpace(xml))
-                {
-                    LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
-                    return;
-                }
-                MessageBox.Show("The clipboard does not contain any text.", "Paste Plan XML",
-                    MessageBoxButton.OK, MessageBoxImage.Information);
+                finally { _pasteInProgress = false; }
             };
 
             // Insert before the "+" tab
@@ -450,11 +466,20 @@ namespace PerformanceMonitorDashboard
                 // Claim the paste gesture during event routing, before the async read yields on the retry
                 // path (#2837): setting e.Handled after the await would leave the key event unsuppressed.
                 e.Handled = true;
-                var (ok, xml) = await ClipboardText.TryReadAsync();
-                if (ok && !string.IsNullOrWhiteSpace(xml))
+                // Re-entrancy guard (#2870): the async retry window yields the UI thread, so a HELD Ctrl+V
+                // (OS key-repeat) could otherwise put several reads in flight at once and open several tabs.
+                // Drop repeats while a paste runs; the key stays claimed above so it can't fall through.
+                if (_pasteInProgress) return;
+                _pasteInProgress = true;
+                try
                 {
-                    LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
+                    var (ok, xml) = await ClipboardText.TryReadAsync();
+                    if (ok && !string.IsNullOrWhiteSpace(xml))
+                    {
+                        LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
+                    }
                 }
+                finally { _pasteInProgress = false; }
             }
         }
 

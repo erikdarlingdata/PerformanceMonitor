@@ -109,6 +109,25 @@ public sealed class ServerTabCapabilityPinTests
         }
     }
 
+    /// <summary>
+    /// #2870 regression pin: the ServerTab Ctrl+V plan-paste handler must keep its <c>_pasteInProgress</c>
+    /// re-entrancy guard. #2837 moved the clipboard can't-open retry off a synchronous <c>Thread.Sleep</c> onto
+    /// an awaited <c>Task.Delay</c>, which yields the UI thread for the retry window; the old sleep had
+    /// incidentally serialized input, so without a guard a HELD Ctrl+V (OS key-repeat) can put several reads in
+    /// flight at once and open several "Pasted Plan" tabs from one keypress. The flag is set before the awaited
+    /// read and cleared in a <c>finally</c>. Scans the COMBINED ServerTab source (the guard lives in
+    /// <c>ServerTab_KeyDown</c> in ServerTab.xaml.cs, one of the partial files), so drop the guard and this fails.
+    /// </summary>
+    [Fact]
+    public void ServerTabPastePath_HasReentrancyGuard()
+    {
+        var combined = string.Join("\n", ServerTabCsFiles().Select(File.ReadAllText));
+        Assert.True(combined.Contains("_pasteInProgress", StringComparison.Ordinal),
+            "the ServerTab paste re-entrancy guard '_pasteInProgress' is gone -- a HELD Ctrl+V during a busy " +
+            "clipboard can again spawn concurrent paste handlers and open several 'Pasted Plan' tabs from one " +
+            "keypress (#2870). Restore the guard around the awaited clipboard read in ServerTab_KeyDown.");
+    }
+
     /* ---------------- scans ---------------- */
 
     private static ISet<string> ScanTabs()

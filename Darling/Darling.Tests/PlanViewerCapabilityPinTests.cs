@@ -100,6 +100,33 @@ public sealed class PlanViewerCapabilityPinTests
     }
 
     /// <summary>
+    /// #2870 regression pin: the shared standalone Plan Viewer paste handlers must keep their per-surface
+    /// re-entrancy guard. #2837 moved the clipboard can't-open retry off a synchronous <c>Thread.Sleep</c> onto
+    /// an awaited <c>Task.Delay</c>, which keeps the UI pump responsive but yields the thread for the retry
+    /// window; the old sleep had incidentally serialized input, so without a guard a HELD Ctrl+V (OS key-repeat)
+    /// can put several reads in flight at once and each success calls <c>LoadPlan</c> -- several "Pasted Plan"
+    /// tabs from one keypress. The guard is a <c>_pasteInProgress</c> flag set synchronously before the awaited
+    /// read and cleared in a <c>finally</c>, so a repeat paste during the retry window is dropped. Guards the
+    /// SHARED paste surface used by all three front ends: the controller's Paste XML button + Ctrl+V
+    /// <c>HandleKeyDown</c>, and <c>PlanViewerControl.Interaction.cs</c>'s Ctrl+V handler. (The app-side
+    /// MainWindow.PlanViewer.cs only FORWARDS to the controller, so it carries no guard of its own.) Drop the
+    /// guard from either shared file and this fails.
+    /// </summary>
+    [Fact]
+    public void PlanViewerPastePaths_HaveReentrancyGuard()
+    {
+        foreach (var file in ReentrancyGuardedPasteCsFiles())
+        {
+            Assert.True(File.Exists(file), $"paste-path source not found: {file} (scan is broken -- fix the path).");
+            var source = File.ReadAllText(file);
+            Assert.True(source.Contains("_pasteInProgress", StringComparison.Ordinal),
+                $"the paste re-entrancy guard '_pasteInProgress' is gone from {Path.GetFileName(file)} -- a HELD " +
+                "Ctrl+V during a busy clipboard can again spawn concurrent paste handlers and load several " +
+                "'Pasted Plan' tabs from one keypress (#2870). Restore the guard around the awaited clipboard read.");
+        }
+    }
+
+    /// <summary>
     /// #2828 regression pin: the inner plan <c>TabControl</c>'s <c>SelectionChanged</c> subscription must be
     /// wired in the controller CONSTRUCTOR (exactly once for the controller's lifetime), NEVER inside
     /// <c>EnsureInitialized</c>. <c>Reset()</c> (Plan Viewer close) clears the <c>_initialized</c> guard, so a
@@ -217,6 +244,15 @@ public sealed class PlanViewerCapabilityPinTests
     private static IEnumerable<string> PastePathCsFiles()
     {
         yield return AppPlanViewerCs();
+        yield return ControllerCs();
+        yield return InteractionCs();
+    }
+
+    // The .cs paste-path sources whose async paste handlers #2870 guards with the _pasteInProgress re-entrancy
+    // flag. The app-side MainWindow.PlanViewer.cs only FORWARDS to the controller (no inline paste), so the
+    // guarded handlers live entirely in the shared controller + PlanViewerControl.Interaction.cs.
+    private static IEnumerable<string> ReentrancyGuardedPasteCsFiles()
+    {
         yield return ControllerCs();
         yield return InteractionCs();
     }
