@@ -8,6 +8,7 @@
 
 using System;
 using System.Reflection;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 using PerformanceMonitor.Ui;
@@ -122,6 +123,7 @@ public partial class App : Application
         /* Surface otherwise-invisible crashes into the log now that we have one. */
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
         base.OnStartup(e);
 
@@ -192,6 +194,15 @@ public partial class App : Application
         }
 
         ViewerLogger.Error("App", "Unhandled domain exception", exception);
+    }
+
+    private static void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+    {
+        /* Fire-and-forget Tasks (e.g. the discarded `_ = OpenPlanTab(...)` View-Plan loaders, #2870) that
+           fault would otherwise vanish here -- Lite and the deprecated Dashboard already observe this, so
+           Darling matching restores parity and keeps a failed plan load from failing silently. */
+        ViewerLogger.Error("App", "Unobserved task exception", e.Exception);
+        e.SetObserved(); /* Prevent process termination */
     }
 
     /// <summary>
