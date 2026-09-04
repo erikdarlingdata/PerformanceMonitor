@@ -123,6 +123,7 @@ ORDER BY database_name";
     {
         var rows = new List<PlanCorrectionRow>();
         await using var command = postgres.CreateCommand(PlanCorrectionsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
@@ -165,6 +166,7 @@ ORDER BY database_name";
     {
         var rows = new List<AutomaticTuningRow>();
         await using var command = postgres.CreateCommand(AutomaticTuningSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

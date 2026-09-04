@@ -80,6 +80,7 @@ ORDER BY day";
     {
         var rows = new List<CollectorCostSummaryRow>();
         await using var command = postgres.CreateCommand(TopSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(sinceUtc);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -103,6 +104,7 @@ ORDER BY day";
     {
         var rows = new List<CollectorCostDailyPoint>();
         await using var command = postgres.CreateCommand(TrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(collectorName);
         command.Parameters.AddWithValue(sinceUtc);
 
@@ -221,6 +223,7 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
     {
         var rows = new List<CostRegression>();
         await using var command = postgres.CreateCommand(RegressionSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(baselineSinceUtc);
         command.Parameters.AddWithValue(baselineFloorMs);
         command.Parameters.AddWithValue(factor);
