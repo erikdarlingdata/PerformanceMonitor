@@ -36,7 +36,11 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
     @ms_ticks bigint,
-    @now datetime2(7) = SYSDATETIME();
+    /* SYSUTCDATETIME(), not SYSDATETIME() -- see CpuUtilizationCollector's identical fix for the full
+       explanation: @now is the base for a STORED sample_time, and every naive timestamp in the store is
+       UTC, so the local-time version sat one UTC offset behind the collection_time written by the same
+       run. Same defect, same ring-buffer arithmetic, same fix. */
+    @now datetime2(7) = SYSUTCDATETIME();
 
 SELECT @ms_ticks = dosi.ms_ticks FROM sys.dm_os_sys_info AS dosi;
 
