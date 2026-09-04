@@ -79,9 +79,20 @@ public sealed class AnalysisPassCommandTimeoutTests
     /// A <c>CreateCommand</c> handed over as a METHOD GROUP rather than called - invisible to
     /// <see cref="s_commandCtor"/> because no <c>(</c> follows it, and the shape both remaining
     /// #2874 sites in this assembly were built on.
+    ///
+    /// <para><c>;</c> is in the class alongside <c>,</c> and <c>)</c>, which the viewer's otherwise
+    /// identical regex does not have. Those two catch a hand-off INLINED as an argument, which is the
+    /// only form present in the repo today; a hand-off through a local
+    /// (<c>Func&lt;NpgsqlCommand&gt; factory = connection.CreateCommand;</c>) ends in a semicolon and
+    /// would slip past the argument forms AND past <see cref="s_commandCtor"/>, since a method group
+    /// has no <c>(</c> either way. Adding it is one character and measured to introduce no false
+    /// positive in either project (the called form <c>CreateCommand()</c> is excluded by the <c>(</c>),
+    /// and declining to close a KNOWN missed shape in the very regex that exists because a census
+    /// missed a shape would be this issue's own mistake in miniature. Pinned by
+    /// <see cref="TheFactoryHandoffScan_ReadsCodeNotProse"/> so it cannot be narrowed back silently.</para>
     /// </summary>
     private static readonly Regex s_commandFactoryHandoff = new(
-        @"\.CreateCommand\s*[,)]",
+        @"\.CreateCommand\s*[,);]",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     [Fact]
@@ -239,6 +250,9 @@ public sealed class AnalysisPassCommandTimeoutTests
     [Theory]
     [InlineData("        Append(connection.CreateCommand, rows);\n", true)]
     [InlineData("        Append(connection.CreateCommand);\n", true)]
+    /* The hand-off through a LOCAL rather than inlined as an argument - ends in a semicolon, so the
+       argument forms above miss it and so does the ctor regex. No such site exists today. */
+    [InlineData("        Func<NpgsqlCommand> factory = connection.CreateCommand;\n", true)]
     [InlineData("        /* not the bare connection.CreateCommand, but a factory. */\n", false)]
     [InlineData("        // pass connection.CreateCommand) here? no.\n", false)]
     [InlineData("        /// <c>connection.CreateCommand</c> method group, which inherits the default\n", false)]
