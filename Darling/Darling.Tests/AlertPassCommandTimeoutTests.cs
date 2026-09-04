@@ -151,10 +151,50 @@ public sealed class AlertPassCommandTimeoutTests
     }
 
     /// <summary>
+    /// The scanner above is what forty-five sites' correctness is asserted through, so its own blind
+    /// spots are worth pinning: a false positive here fails a green build on correct code.
+    ///
+    /// <para>Both cases are shapes that actually occur. The first is the <c>CreateCommand</c> site
+    /// with an interposed explanatory comment containing a semicolon — the exact gap where this
+    /// codebase's style puts one. The second is the verbatim-SQL construction, where the deadline sits
+    /// twenty-odd lines below the opening and past any fixed line window.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(
+        "var command = _postgres.CreateCommand(Sql);\n"
+        + "/* set separately here; a method result cannot take an initializer. */\n"
+        + "command.CommandTimeout = 10;\n",
+        true)]
+    [InlineData(
+        "var command = new NpgsqlCommand(@\"\nSELECT 1;\nSELECT 2;\n\", connection) { CommandTimeout = 10 };\n",
+        true)]
+    [InlineData(
+        "var command = _postgres.CreateCommand(Sql);\n"
+        + "await command.ExecuteNonQueryAsync();\n",
+        false)]
+    public void TheScanner_SeesADeadlineThroughCommentsAndVerbatimSql(string source, bool expectedTimed)
+    {
+        var ctor = s_commandCtor.Match(source);
+        Assert.True(ctor.Success, "the fixture did not contain a command construction");
+
+        var span = StatementSpanFrom(source, ctor.Index, statements: 2);
+
+        Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
+    }
+
+    /// <summary>
     /// The text from <paramref name="start"/> through the end of the Nth following statement,
-    /// counting only semicolons that sit outside string literals and outside any nesting. Verbatim
-    /// SQL in this family contains both semicolons and quote characters, so a naive scan for ';'
-    /// stops in the middle of a query and reports every multi-line construction as untimed.
+    /// counting only semicolons that sit outside string literals, outside comments, and outside any
+    /// nesting. Verbatim SQL in this family contains both semicolons and quote characters, so a naive
+    /// scan for ';' stops in the middle of a query and reports every multi-line construction as
+    /// untimed.
+    ///
+    /// <para>Comments are skipped for the same reason and it is not hypothetical: the two-statement
+    /// window exists for the <c>CreateCommand</c> shape, whose deadline is the statement AFTER the
+    /// construction, and this codebase's style actively encourages an explanatory comment in exactly
+    /// that gap. A semicolon inside one would end the span early and report a correctly-timed site as
+    /// an offender — a false positive in the guard, which is worse than a miss because it fails a
+    /// green build and trains people to distrust the pin.</para>
     /// </summary>
     private static string StatementSpanFrom(string text, int start, int statements)
     {
@@ -175,6 +215,20 @@ public sealed class AlertPassCommandTimeoutTests
             if (c == '"')
             {
                 i = SkipRegularString(text, i + 1);
+                continue;
+            }
+
+            if (c == '/' && i + 1 < text.Length && text[i + 1] == '/')
+            {
+                var nl = text.IndexOf('\n', i);
+                i = nl < 0 ? text.Length : nl + 1;
+                continue;
+            }
+
+            if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
+            {
+                var end = text.IndexOf("*/", i + 2, System.StringComparison.Ordinal);
+                i = end < 0 ? text.Length : end + 2;
                 continue;
             }
 
