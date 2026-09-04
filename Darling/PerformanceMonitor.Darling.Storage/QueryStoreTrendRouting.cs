@@ -117,6 +117,7 @@ public static class QueryStoreTrendRouting
 
         await using (var probe = dataSource.CreateCommand(RollupProbeSql))
         {
+            probe.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
             if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
             {
                 return QueryStoreTrendRoute.RawOnly;
@@ -124,6 +125,7 @@ public static class QueryStoreTrendRouting
         }
 
         await using var bounds = dataSource.CreateCommand(RollupBoundsSql);
+        bounds.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         await using var reader = await bounds.ExecuteReaderAsync(cancellationToken);
         DateTime? oldest = null;
         DateTime? newest = null;
