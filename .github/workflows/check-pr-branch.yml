@@ -9,6 +9,11 @@ on:
 jobs:
   check-branches:
     runs-on: ubuntu-latest
+    # Read-only: the branch check is pure event metadata and the identity check below only
+    # reads the pull request's commit list. Nothing in this job writes anything.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Check branches
         env:
@@ -19,3 +24,30 @@ jobs:
             echo "::error::Pull requests to main are only allowed from dev. Please target the dev branch instead."
             exit 1
           fi
+
+      # pull_request_target starts with an EMPTY workspace, so the check script has to be
+      # checked out before it can run. ref is pinned to the base branch explicitly rather than
+      # left to the default: that is the entire security property of this trigger, and an
+      # explicit pin cannot quietly start resolving to pull request head. Never point this at
+      # github.event.pull_request.head.* -- this job holds a token and must not execute, or even
+      # fetch, code proposed by the pull request. The identity check reads commits from the API
+      # for the same reason.
+      - name: Check out the base ref (for the check script only)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.base_ref }}
+          fetch-depth: 1
+          # The script authenticates with GH_TOKEN below; leaving a credential behind in
+          # .git/config would only widen what a later step could reach.
+          persist-credentials: false
+
+      # #2891: nothing else in CI looks at WHO authored a commit. Commit metadata cannot be
+      # corrected after merge without a history rewrite that invalidates every clone and every
+      # open pull request's merge base, so this runs before the merge, not after.
+      - name: Check commit identity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref }}
+        run: .github/scripts/check-commit-identity.sh
