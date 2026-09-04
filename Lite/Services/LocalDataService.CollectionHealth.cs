@@ -140,7 +140,11 @@ SELECT
     MAX(CASE WHEN slowest_rank = 1 THEN fanout_item_count END) AS fanout_items,
     MAX(CASE WHEN slowest_rank = 1 THEN slowest_item END) AS slowest_item,
     MAX(CASE WHEN slowest_rank = 1 THEN slowest_item_ms END) AS slowest_item_ms,
-    MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms
+    MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms,
+    -- #2804: runs the #2673 wall-clock budget abandoned. APPENDED, never inserted — this result set
+    -- is read positionally and Darling's CollectionHealthSql mirrors these ordinals, so a mid-list
+    -- insert would silently re-map every later column in whichever surface was not edited with it.
+    SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
 FROM
 (
     -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
@@ -223,7 +227,9 @@ ORDER BY collector_name";
                 FanoutItems = reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16)),
                 SlowestItem = reader.IsDBNull(17) ? null : reader.GetString(17),
                 SlowestItemMs = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18)),
-                SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19))
+                SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19)),
+                /* Appended (#2804), for the same reason the four above were. */
+                AbandonedCount = reader.IsDBNull(20) ? 0 : ToInt64(reader.GetValue(20))
             });
         }
 
@@ -424,6 +430,11 @@ public class CollectorHealthRow
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
+    /// <summary>Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from
+    /// errors for the same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike
+    /// a yield it is data LOSS: the cycle stored nothing and advanced no watermark.</summary>
+    public long AbandonedCount { get; set; }
+
     /// <summary>
     /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
     /// enumeration probe failed. Null for the ordinary run, which is why the column reads blank for a
@@ -471,6 +482,11 @@ public class CollectorHealthRow
             : null;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
+
+    /// <summary>Share of runs the #2673 budget abandoned (#2804) — its own rate, not folded into
+    /// <see cref="FailureRatePercent"/>, because the two carry very different thresholds and merging
+    /// them would report a 2%-abandoning collector as a 2%-erroring one.</summary>
+    public double AbandonRatePercent => TotalRuns > 0 ? (double)AbandonedCount / TotalRuns * 100 : 0;
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
         : 999;
@@ -495,7 +511,7 @@ public class CollectorHealthRow
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount,
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, AbandonedCount,
         HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
 
     public string AvgDurationFormatted => AvgDurationMs < 1000

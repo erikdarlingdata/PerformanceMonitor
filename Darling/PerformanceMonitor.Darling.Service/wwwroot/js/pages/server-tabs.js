@@ -2853,6 +2853,10 @@ const COLLECTOR_COLUMNS = [
   { key: "total_runs", label: "Runs", format: "int" },
   { key: "errors", label: "Errors", format: "int" },
   { key: "yields", label: "Yields", format: "int" },
+  /* #2804: cycles the wall-clock budget gave up on. Beside Yields because both are guards firing rather
+     than faults, but this one is data LOSS — the cycle stored nothing and advanced no watermark — and it
+     is why a WARNING in the Status column may have nothing to do with the Errors beside it. */
+  { key: "abandoned", label: "Abandoned", format: "int" },
   { key: "failure_rate_pct", label: "Failure %", format: "num1" },
   { key: "avg_duration_ms", label: "Avg Dur", format: "ms" },
   { key: "p95_duration_ms", label: "p95 Dur", format: "ms" },

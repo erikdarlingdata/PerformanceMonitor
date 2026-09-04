@@ -108,7 +108,10 @@ public sealed partial class ViewerDataService
                      )
                 THEN 1
                 ELSE 0
-            END AS has_user_databases
+            END AS has_user_databases,
+            -- #2804: runs the #2673 wall-clock budget abandoned. Appended last — this result set is
+            -- read positionally by one shared mapper serving BOTH the per-server and fleet reads.
+            SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -178,7 +181,7 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 14-column per-collector
+    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 15-column per-collector
     /// aggregate but across ALL enabled monitored servers (GROUP BY server_id, collector_name — one row per
     /// server/collector pair), for the status bar's aggregate-view total (mirrors Lite's cumulative
     /// GetHealthSummary(null)). Scoped to enabled servers so a removed server's aged-out rows don't read as
@@ -222,7 +225,10 @@ public sealed partial class ViewerDataService
             SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
             CAST(NULL AS text) AS last_note,
             COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
-            CAST(NULL AS integer) AS has_user_databases
+            CAST(NULL AS integer) AS has_user_databases,
+            -- #2804: runs the #2673 wall-clock budget abandoned. Appended last — this result set is
+            -- read positionally by one shared mapper serving BOTH the per-server and fleet reads.
+            SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
@@ -331,7 +337,10 @@ public sealed partial class ViewerDataService
         return items;
     }
 
-    /// <summary>Maps one row of the shared 14-column health projection (per-server or fleet) to a <see cref="CollectorHealthRow"/>.</summary>
+    /// <summary>Maps one row of the shared 15-column health projection (per-server or fleet, ordinals 0-14) to a
+    /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY
+    /// through this one mapper, so it must match them exactly (15 since #2804 appended abandoned_count at
+    /// ordinal 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
@@ -350,6 +359,9 @@ public sealed partial class ViewerDataService
         /* #1852: NULL on the fleet read (see FleetCollectionHealthSql) reads as "no inventory to go on",
            which is the same silence an install with no size stats gets. */
         TargetHasUserDatabases = !reader.IsDBNull(13) && Convert.ToInt64(reader.GetValue(13)) != 0,
+        /* Appended (#2804). Both reads above compute it, so unlike has_user_databases it is never a
+           NULL placeholder on the fleet side — an abandoned cycle is data loss on either surface. */
+        AbandonedCount = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
     };
 
     /// <summary>
@@ -482,6 +494,11 @@ public class CollectorHealthRow
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
+    /// <summary>Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from
+    /// errors for the same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike
+    /// a yield it is data LOSS: the cycle stored nothing and advanced no watermark.</summary>
+    public long AbandonedCount { get; set; }
+
     /// <summary>
     /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
     /// enumeration probe failed. Null for the ordinary run, which is why the column reads blank for a
@@ -502,6 +519,11 @@ public class CollectorHealthRow
     public bool TargetHasUserDatabases { get; set; }
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
+
+    /// <summary>Share of runs the #2673 budget abandoned (#2804) — its own rate, not folded into
+    /// <see cref="FailureRatePercent"/>, because the two carry very different thresholds and merging
+    /// them would report a 2%-abandoning collector as a 2%-erroring one.</summary>
+    public double AbandonRatePercent => TotalRuns > 0 ? (double)AbandonedCount / TotalRuns * 100 : 0;
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
         : 999;
@@ -525,7 +547,7 @@ public class CollectorHealthRow
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount,
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, AbandonedCount,
         HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
