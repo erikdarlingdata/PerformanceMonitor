@@ -106,9 +106,17 @@ public sealed class McpReadCommandTimeoutTests
     /// <para>A monitored-TARGET command matches none of these: the provider form carries a plan, a
     /// <c>DbConnection</c> and a threaded timeout, and the HypoPG form carries a transaction. That is the
     /// distinction this group's pin has to encode and the earlier ones did not.</para>
+    ///
+    /// <para><b>Each receiver is word-boundaried, and the boundary guards the direction that matters.</b>
+    /// Without it, <c>targetPostgres.CreateCommand(</c> matches <c>postgres\.CreateCommand</c> as a
+    /// substring, so a monitored-target command on any variable whose name ENDS in the receiver's name
+    /// would be waved through as a store command — a false ACCEPT in exactly the guard that exists to stop
+    /// one. The mirror case is safe by construction: an unrecognised receiver like <c>oldConnection</c>
+    /// fails asking for a decision, which is the direction a guard should err in.</para>
     /// </summary>
     private static readonly Regex s_storeReceiver = new(
-        @"(?:postgres|_dataSource)\.CreateCommand\s*\(|new (?:Npgsql\.)?NpgsqlCommand\s*\([A-Za-z_][A-Za-z0-9_.]*\s*,\s*connection\s*\)",
+        @"(?<![A-Za-z0-9_])(?:postgres|_dataSource)\.CreateCommand\s*\("
+        + @"|new (?:Npgsql\.)?NpgsqlCommand\s*\([A-Za-z_][A-Za-z0-9_.]*\s*,\s*(?<![A-Za-z0-9_])connection\s*\)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     [Fact]
@@ -498,6 +506,13 @@ public sealed class McpReadCommandTimeoutTests
     /* ...and the qualified STORE form is accepted, so widening the ctor regex cannot turn a legitimate
        qualified store construction into an unclassified-receiver false positive. */
     [InlineData("await using var command = new Npgsql.NpgsqlCommand(Sql, connection);", true)]
+    /* A receiver whose name merely ENDS in a store receiver's name is NOT one — the false-accept the
+       word-boundary closes, and the shape a monitored-target field would plausibly have. */
+    [InlineData("await using var command = targetPostgres.CreateCommand(Sql);", false)]
+    [InlineData("await using var command = notpostgres.CreateCommand(Sql);", false)]
+    [InlineData("await using var command = new NpgsqlCommand(Sql, targetConnection);", false)]
+    /* ...while a legitimately qualified store receiver still reads as one: `.` is not a name character. */
+    [InlineData("await using var command = this._dataSource.CreateCommand(Sql);", true)]
     public void TheReceiverAllowlist_AcceptsStoreShapesAndRejectsTargetShapes(string source, bool expectedStore)
     {
         Assert.Equal(expectedStore, s_storeReceiver.IsMatch(source));

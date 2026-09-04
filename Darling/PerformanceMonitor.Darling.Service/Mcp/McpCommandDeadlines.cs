@@ -141,6 +141,14 @@ internal static class McpCommandDeadlines
     /// least-privilege pool — none of which should turn a tuning knob into a failed panel. Failing OPEN to a
     /// larger value would be the wrong direction: it would grant more time precisely when the store is least
     /// able to answer for itself.</para>
+    ///
+    /// <para><b>The catch is deliberately ANY failure, not only the two schema-shaped ones.</b> A missing
+    /// row and a pre-V78 store are the cases with tests, but a transient connect error or a permission
+    /// change reaches it too, and the fallback is right for those as well: the composed query is about to
+    /// run on the same pool and will surface the same underlying failure with its own error, so swallowing
+    /// it HERE loses nothing and turning a deadline lookup into the thing that fails the panel would be
+    /// strictly worse. The one exception is cancellation, which is re-thrown — a caller that gave up must
+    /// not be told the store is untunable.</para>
     /// </summary>
     internal const int ComposedQueryFallbackSeconds = 15;
 
