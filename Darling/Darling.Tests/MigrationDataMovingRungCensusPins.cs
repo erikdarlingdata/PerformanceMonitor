@@ -303,6 +303,8 @@ public sealed class MigrationDataMovingRungCensusPins
     [InlineData("VACUUM bare", "VACUUM;")]
     [InlineData("CLUSTER", "CLUSTER collect.old USING ix;")]
     [InlineData("REINDEX", "REINDEX TABLE CONCURRENTLY collect.old;")]
+    [InlineData("CREATE INDEX with no index name", "CREATE INDEX ON collect.old (a);")]
+    [InlineData("ALTER TABLE ONLY", "ALTER TABLE ONLY collect.old ADD PRIMARY KEY (a);")]
     public void EveryDataMovingShape_FiresOnASyntheticRung(string label, string sql)
     {
         var findings = Classify(
@@ -315,6 +317,47 @@ public sealed class MigrationDataMovingRungCensusPins
             findings.Any(f => f.Version == 2),
             $"the {label} shape is not detected — a rung using it would land silently and "
             + $"MigrationLockWaitTimeoutSeconds' census would not notice. SQL:\n{sql}");
+    }
+
+    /// <summary>
+    /// Optional syntax must not shift what the scan thinks the TARGET is — the two ways #2920's review
+    /// found it doing so. An unnamed <c>CREATE INDEX</c> matched nothing at all, which is a silent miss;
+    /// an <c>ALTER TABLE ONLY t</c> matched but reported <c>ONLY</c> as the table, which is a precise
+    /// failure message that names the wrong object. The same-rung exemption has to survive both, or the
+    /// fix trades a miss for false positives.
+    /// </summary>
+    [Fact]
+    public void OptionalSyntaxDoesNotBecomeTheReportedTarget()
+    {
+        var unnamed = Assert.Single(Classify(
+        [
+            new PgMigrations.Migration(1, "creates", "CREATE TABLE collect.old (a int);"),
+            new PgMigrations.Migration(2, "unnamed-index", "CREATE INDEX ON collect.old (a);"),
+        ]));
+
+        Assert.Equal("CREATE INDEX", unnamed.Shape);
+        Assert.Equal("collect.old", unnamed.Table);
+        Assert.Equal("V1", unnamed.CreatedBy);
+
+        var only = Assert.Single(Classify(
+        [
+            new PgMigrations.Migration(1, "creates", "CREATE TABLE collect.old (a int);"),
+            new PgMigrations.Migration(2, "alter-only", "ALTER TABLE ONLY collect.old ADD PRIMARY KEY (a);"),
+        ]));
+
+        Assert.Equal("collect.old", only.Table);
+        Assert.Equal("V1", only.CreatedBy);
+
+        /* Both forms still resolve to the rung's OWN table, so neither fix invents a finding. */
+        Assert.Empty(Classify(
+        [
+            new PgMigrations.Migration(
+                1,
+                "creates-then-uses-both-forms",
+                "CREATE TABLE collect.own (a int);\n"
+                + "CREATE INDEX ON collect.own (a);\n"
+                + "ALTER TABLE ONLY collect.own ADD PRIMARY KEY (a);"),
+        ]));
     }
 
     /// <summary>
@@ -391,9 +434,17 @@ public sealed class MigrationDataMovingRungCensusPins
         @"CREATE\s+(?:UNLOGGED\s+|TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?<t>" + Ident + ")",
         Opts);
 
+    /// <summary>
+    /// The index NAME is optional — <c>CREATE INDEX ON collect.t (a)</c> is valid and PostgreSQL
+    /// auto-names it — so the name group is optional too. It has to be, and this is not cosmetic: with
+    /// the name mandatory, the engine consumes the literal <c>ON</c> as the name, then finds no second
+    /// <c>ON</c>, and the whole statement produces NO finding. That is a silent miss of exactly the kind
+    /// this file exists to prevent (#2920 review). Every rung today names its indexes, because they all
+    /// want <c>IF NOT EXISTS</c>, which cannot be spelled without a name.
+    /// </summary>
     private static readonly Regex s_createIndex = new(
-        @"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?" + Ident
-        + @"\s+ON\s+(?:ONLY\s+)?(?<t>" + Ident + ")",
+        @"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:(?:IF\s+NOT\s+EXISTS\s+)?" + Ident
+        + @"\s+)?ON\s+(?:ONLY\s+)?(?<t>" + Ident + ")",
         Opts);
 
     private static readonly Regex s_dynamicSql = new(
@@ -408,16 +459,16 @@ public sealed class MigrationDataMovingRungCensusPins
     [
         ("CREATE INDEX", s_createIndex),
         ("ALTER ... TYPE", new Regex(
-            @"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?<t>" + Ident + @")[^;]*?\bALTER\s+(?:COLUMN\s+)?"
+            @"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?<t>" + Ident + @")[^;]*?\bALTER\s+(?:COLUMN\s+)?"
             + Ident + @"\s+(?:SET\s+DATA\s+)?TYPE\b", Opts)),
         ("ALTER ... SET NOT NULL", new Regex(
-            @"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?<t>" + Ident + @")[^;]*?\bSET\s+NOT\s+NULL\b", Opts)),
+            @"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?<t>" + Ident + @")[^;]*?\bSET\s+NOT\s+NULL\b", Opts)),
         ("ALTER ... ADD CONSTRAINT", new Regex(
-            @"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?<t>" + Ident
+            @"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?<t>" + Ident
             + @")[^;]*?\bADD\s+(?:CONSTRAINT\b|PRIMARY\s+KEY\b|UNIQUE\b|FOREIGN\s+KEY\b|CHECK\b|EXCLUDE\b)",
             Opts)),
         ("ADD COLUMN with a volatile DEFAULT", new Regex(
-            @"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?<t>" + Ident + @")[^;]*?\bADD\s+COLUMN\b[^;]*?\bDEFAULT\s+"
+            @"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?<t>" + Ident + @")[^;]*?\bADD\s+COLUMN\b[^;]*?\bDEFAULT\s+"
             + Ident + @"\s*\(", Opts)),
         ("INSERT INTO ... SELECT", new Regex(
             @"INSERT\s+INTO\s+(?<t>" + Ident + @")[^;]*?\bSELECT\b", Opts)),
