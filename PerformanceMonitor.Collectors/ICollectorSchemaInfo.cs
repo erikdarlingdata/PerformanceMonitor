@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 
 namespace PerformanceMonitor.Collectors;
@@ -84,6 +85,37 @@ public interface ICollectorSchemaInfo
     /// other collector had to come from somewhere unexpected and stays an ERROR.
     /// </summary>
     bool YieldsOnLockTimeout { get; }
+
+    /// <summary>
+    /// WALL-CLOCK ceiling for one unit of work - the watermark refresh, the command, and the whole drain
+    /// (#2150). Null (the common case) = unbounded.
+    ///
+    /// <para><b>Why the command timeout is not this.</b> <c>CommandTimeout</c> bounds the wait for a network
+    /// read, and SqlClient RESETS it on every read that arrives - so a result set that trickles rows
+    /// continuously never trips it, however long it takes in total. A 100-minute read under a 30-second
+    /// timeout is the documented behaviour, not a bug, which is why the field report in #2150 shows six
+    /// per-database passes of up to 99.8 minutes against a 30-second timeout.</para>
+    ///
+    /// <para><b>What exceeding it means.</b> The item is abandoned and reported as a per-item FAILURE, and
+    /// the cycle continues to the next database - the same treatment an offline database gets. Nothing is
+    /// silently dropped: a collector with a watermark did not advance it, so the abandoned range is simply
+    /// re-read next cycle. For <c>query_store</c> that failure also feeds the #2111 consecutive-failure
+    /// count, so the window NARROWS on the next pass instead of retrying the same impossible width - a
+    /// bound that converges rather than one that just repeats.</para>
+    ///
+    /// <para>Host-enforced rather than definition-enforced, unlike the byte budget: only the host owns the
+    /// cancellation token and the loop, and the point is to bound the definition's own read.</para>
+    ///
+    /// <para><b>On the BASE interface rather than <c>ICollectorDefinition&lt;TRow&gt;</c></b> (#2864),
+    /// alongside <see cref="AppliesTo"/> and <see cref="YieldsOnLockTimeout"/> and for the same reason those
+    /// are: the catalog is keyed by NAME and holds this interface, so a host that knows only which collector
+    /// ran could not otherwise ask whether that collector is one of the budgeted heavy ones. Carrying a
+    /// budget at all is what distinguishes the few collectors capable of occupying a target for minutes from
+    /// the ordinary body of a sweep - a question the worker asks per run, and one it must not answer from a
+    /// hardcoded name list, since the list that needs editing when a fifth collector earns a budget is the
+    /// list that silently stops being right.</para>
+    /// </summary>
+    TimeSpan? PerItemWallClockBudget { get; }
 
     /// <summary>
     /// Named pieces of per-server collector state the host loads from its own store before the query is

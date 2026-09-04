@@ -172,4 +172,20 @@ public static class CollectorCatalog
     /// </summary>
     public static bool YieldsOnLockTimeout(string collectorName) =>
         s_byName.TryGetValue(collectorName, out var definition) && definition.YieldsOnLockTimeout;
+
+    /// <summary>
+    /// Whether this collector carries a #2673 per-item wall-clock budget — i.e. whether it is one of the
+    /// few heavy enough to need bounding, as opposed to the ordinary body of a sweep (#2864).
+    ///
+    /// <para>Asked by name because the worker classifies a run it has only the NAME of, and derived from
+    /// the definition rather than from a list of collector names kept beside it. A hardcoded list would be
+    /// correct today and wrong the moment a fifth collector earns a budget, with nothing to say so — the
+    /// failure this codebase keeps re-learning, and the reason
+    /// <see cref="ICollectorSchemaInfo.PerItemWallClockBudget"/> was moved to the base interface.</para>
+    ///
+    /// <para>An unknown name returns <c>false</c>: a collector this catalog does not know is not one of
+    /// the four budgeted heavies, and treating it as light is the reading that degrades gracefully.</para>
+    /// </summary>
+    public static bool HasWallClockBudget(string collectorName) =>
+        s_byName.TryGetValue(collectorName, out var definition) && definition.PerItemWallClockBudget is not null;
 }

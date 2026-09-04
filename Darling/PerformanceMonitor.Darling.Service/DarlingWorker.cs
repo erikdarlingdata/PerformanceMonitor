@@ -583,6 +583,17 @@ public sealed class DarlingWorker : BackgroundService
         /* MinValue = the first loop pass after connect evaluates alerts immediately. */
         public DateTime NextAlertSweep { get; set; } = DateTime.MinValue;
 
+        /// <summary>
+        /// The slowest NON-budgeted collector seen so far in the current sweep body (#2864), or -1 before
+        /// any has run. Reset per body, so it describes one sweep rather than the server's history.
+        ///
+        /// <para>Recorded on every row, not only abandoned ones: a ratio needs a denominator, and the
+        /// baseline for 'were this body's ordinary collectors slow' has to come from the same column on
+        /// ordinary bodies. Storing it only on failures would rebuild the cross-referencing this exists
+        /// to remove.</para>
+        /// </summary>
+        public int SweepPeerMaxMs { get; set; } = -1;
+
         /* MinValue = the first loop pass evaluates the Stage 4 service self-alerts (collection-stopped,
            capture-down) immediately. Separate from NextAlertSweep because the self-alert sweep runs for
            a DISCONNECTED server too (collection-stopped is exactly the unreachable-server case), above
@@ -4710,7 +4721,10 @@ LIMIT 1", connection);
 
                 if (effective.FrequencyMinutes == 0)
                 {
-                    await RunOneAsync(server, runner, name, cancellationToken);
+                    /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
+                       never resets it, so folding it in would mix a previous body's bookkeeping
+                       into these rows - the cross-body contamination the reset exists to prevent. */
+                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
                 }
                 else
                 {
@@ -4792,6 +4806,11 @@ LIMIT 1", connection);
         try
         {
             var now = DateTime.UtcNow;
+
+            /* #2864: the peer high-water mark describes ONE body. Reset here rather than decayed, because
+               the comparison it feeds is 'were this sweep's other collectors slow', and a mark carried
+               across bodies would answer a different question with the same number. */
+            server.SweepPeerMaxMs = -1;
             foreach (var name in CollectorScheduleDefaults.All.Keys)
             {
                 if (cancellationToken.IsCancellationRequested)
@@ -4882,13 +4901,17 @@ LIMIT 1", connection);
                    sys.dm_db_tuning_recommendations is re-read whole on every successful pass regardless —
                    a skipped tick simply re-reads the same (or since-refreshed) live set next time, the
                    same "defers, does not drop" property #1960 gives query_store's watermark. */
+                /* #2864 review: snapshot the peer mark HERE, at dispatch, and hand it to the run. Reading it
+                   at completion is correct only for the sequential arm; a detached run finishes 100-230s
+                   later, by which time the 15s sweep has reset and rebuilt the mark from unrelated ticks. */
+                var peerMaxAtDispatchMs = PeerMaxOrNull(server);
                 if (IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name))
                 {
-                    _ = RunDetachedAsync(server, runner, name, cancellationToken);
+                    _ = RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
                 }
                 else
                 {
-                    await RunOneAsync(server, runner, name, cancellationToken);
+                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
                 }
             }
         }
@@ -4964,7 +4987,8 @@ LIMIT 1", connection);
                     continue;
                 }
 
-                totalRows += await RunOneAsync(server, runner, name, cancellationToken);
+                /* null for the same reason as the on-load loop: an operator snapshot is not a body. */
+                totalRows += await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
                 collectorsRun++;
             }
 
@@ -5589,11 +5613,31 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// This body's peer high-water mark for the collection_log write (#2864), or null before any
+    /// non-budgeted collector has run in it.
+    ///
+    /// <para>NULL rather than the -1 the field carries, because the column means 'no peer had run yet when
+    /// this row was written' - true for the first collector of every body - and a stored -1 would be a
+    /// magic number every reader had to know to filter. The sentinel is right in memory, where it must not
+    /// collide with a real 0 ms peer; NULL is right in the store, where absence has its own value.</para>
+    /// </summary>
+    private static int? PeerMaxOrNull(ServerLoopState server) =>
+        server.SweepPeerMaxMs >= 0 ? server.SweepPeerMaxMs : null;
+
+    /// <summary>
     /// Runs one collector for a server and logs its outcome to collection_log. Returns the rows written
     /// (0 on skip/permissions/error) so an on-demand snapshot can tally them; the scheduled/on-load callers
     /// simply discard the count.
     /// </summary>
-    private async Task<int> RunOneAsync(ServerLoopState server, DarlingCollectorRunner runner, string collectorName, CancellationToken cancellationToken)
+    /// <param name="peerMaxAtDispatchMs">
+    /// The sweep body's peer high-water mark AS AT DISPATCH (#2864 review), or null when this call is not
+    /// part of a scheduled body. Passed in rather than re-read from <c>server.SweepPeerMaxMs</c> at
+    /// completion because <c>query_store</c> and <c>plan_correction</c> are dispatched FIRE-AND-FORGET:
+    /// their runs outlive the body by 100-230s while the 15s sweep resets and rebuilds the mark several
+    /// times over, so a value read at completion describes some unrelated later tick. Those two are among
+    /// the heavies this diagnostic exists to explain, so reading it late is wrong exactly where it matters.
+    /// </param>
+    private async Task<int> RunOneAsync(ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken)
     {
         var runtime = server.Runtime;
         if (runtime is null || !s_dispatch.TryGetValue(collectorName, out var run))
@@ -5686,7 +5730,27 @@ LIMIT 1";
 
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, status, result.Rows, result.SqlMs, result.StorageMs, result.Note,
-                result.Fanout, result.ServerPhases, _logger, cancellationToken);
+                result.Fanout, result.ServerPhases, result.Drain, peerMaxAtDispatchMs, _logger, cancellationToken);
+
+            /* #2864 item 3: fold THIS run into the body's peer high-water mark, AFTER its own row is
+               written so a collector is never its own peer. The mark answers the question that took
+               manual cross-referencing of neighbouring rows to answer before: when a heavy collector
+               blows its budget, were the ORDINARY collectors in that same body slow too?
+
+               Population A - one genuinely large query - runs beside peers at or below their baseline;
+               a measured sweep had wait_stats at 1ms and latch_stats at 1ms while query_store took
+               71,977ms for 12,557 rows. Population B is sweep-wide degradation, where the same light
+               collectors ran 34-47x their baseline BEFORE the heavy ones burned their budget. Same
+               stored shape, opposite causes, and only the peers tell them apart.
+
+               Budgeted collectors are excluded because they are the heavy ones being explained - a
+               mark that included procedure_stats would be dominated by exactly the run in question.
+               Asked of the catalog rather than a name list here: the list would be right until a fifth
+               collector earned a budget and silently wrong after. */
+            if (!CollectorCatalog.HasWallClockBudget(collectorName))
+            {
+                server.SweepPeerMaxMs = (int)Math.Min(int.MaxValue, Math.Max(server.SweepPeerMaxMs, result.SqlMs));
+            }
 
             /* #2674: record this run's cost for the hourly collector_cost aggregate — the same numbers that
                go to collection_log, kept as a compact per-(server, collector) series for the cost panel. */
@@ -5721,7 +5785,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName, ex.Message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, fanout: null, phases: null, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (RdsLogUnavailableException ex) when (ex.IsAuthorizationFailure)
@@ -5745,7 +5809,7 @@ LIMIT 1";
                 + "the RDS API, so the role needs rds:DescribeDBLogFiles and rds:DownloadDBLogFilePortion "
                 + "on the target instance. Nothing was read this cycle — this is NOT 'no plans were "
                 + "captured'.",
-                fanout: null, phases: null, _logger, cancellationToken);
+                fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (PiMetricsUnavailableException ex) when (ex.IsAuthorizationFailure)
@@ -5763,7 +5827,7 @@ LIMIT 1";
                 + "so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters and "
                 + "pi:GetResourceMetrics on the target instance. Nothing was read this cycle — this is NOT "
                 + "'CPU is idle'.",
-                fanout: null, phases: null, _logger, cancellationToken);
+                fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
@@ -5784,7 +5848,7 @@ LIMIT 1";
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, "YIELDED", 0, 0, 0,
                 $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
-                fanout: null, phases: null, _logger, cancellationToken);
+                fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (SqlException ex) when (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
@@ -5807,7 +5871,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName, ex.Number, message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, fanout: null, phases: null, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (PostgresException ex) when (
@@ -5842,7 +5906,7 @@ LIMIT 1";
             }
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, fanout: null, phases: null, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (Exception ex)
@@ -5880,7 +5944,7 @@ LIMIT 1";
             try
             {
                 await DarlingObservability.LogCollectionAsync(
-                    _postgres!, runtime, collectorName, "ERROR", 0, 0, 0, ex.Message, fanout: null, phases: null, _logger, cancellationToken);
+                    _postgres!, runtime, collectorName, "ERROR", 0, 0, 0, ex.Message, fanout: null, phases: null, drain: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             }
             catch
             {
@@ -5900,11 +5964,11 @@ LIMIT 1";
     /// containment every other fire-and-track body in this file gets.
     /// </summary>
     private async Task RunDetachedAsync(
-        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, CancellationToken cancellationToken)
+        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken)
     {
         try
         {
-            await RunOneAsync(server, runner, collectorName, cancellationToken);
+            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken);
         }
         catch (OperationCanceledException)
         {

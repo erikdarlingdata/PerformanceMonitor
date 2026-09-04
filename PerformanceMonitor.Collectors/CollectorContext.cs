@@ -274,6 +274,49 @@ public sealed class CollectorContext
     public long ServerScopeDrainMs { get; set; }
 
     /// <summary>
+    /// Rows the server-scoped drain actually delivered (#2864), counted by
+    /// <see cref="DrainCountingDataReader"/> rather than by the collector's own loop.
+    ///
+    /// <para>Distinct from the run's stored row count, and that distinction is the point: an abandoned cycle
+    /// ships nothing, so <c>rows_collected</c> is 0 whether the target sent no rows at all or sent 149 and
+    /// then went quiet. Those two are a stalled target and a stalled stream, and they want different fixes.
+    /// -1 means the host did not wrap the reader — a value no real count can take, so "not measured" cannot
+    /// be misread as "delivered nothing".</para>
+    /// </summary>
+    public long ServerScopeRowsRead { get; set; } = -1;
+
+    /// <summary>
+    /// UTF-16 payload bytes the server-scoped drain delivered (#2864) — the string and binary getters only,
+    /// NOT the wire size, which no <c>DbDataReader</c> exposes. Honest scope and the useful one: the
+    /// collectors this exists for are dominated by a single large text column, so string bytes are the
+    /// payload to within a rounding error. -1 when unmeasured, for the reason above.
+    /// </summary>
+    public long ServerScopeBytesRead { get; set; } = -1;
+
+    /// <summary>
+    /// The drain stopwatch's reading at the LAST successful read (#2864). Subtract it from
+    /// <see cref="ServerScopeDrainMs"/> and you have how long the reader sat with nothing arriving, which is
+    /// the figure that separates a slow stream from a stalled one — both of which otherwise end at the
+    /// wall-clock budget with a positive row count. -1 when no row ever arrived OR when unmeasured; the row
+    /// count above disambiguates those two, and 0 is left free because "row 1 arrived instantly" is a real
+    /// answer that must not collide with a sentinel.
+    /// </summary>
+    public long ServerScopeLastReadMs { get; set; } = -1;
+
+    /// <summary>
+    /// The monitored target's own session identifier for this run (#2864) — SQL Server's SPID, PostgreSQL's
+    /// backend pid. Null when the provider does not expose one.
+    ///
+    /// <para>Read from the open connection as a property, NOT by issuing <c>SELECT @@SPID</c>: a round trip
+    /// per collector per server per cycle is ~25,000 extra queries an hour against the fleet to record a
+    /// number the client already has. The value is what makes a stalled run joinable to everything else the
+    /// tool collects — <c>waiting_tasks</c>, <c>dmv_blocking_snapshot</c> and <c>query_snapshots</c> all
+    /// carry a session id, so without it a retrospective "what was OUR session waiting on" cannot be asked
+    /// even where the snapshot that would answer it was captured.</para>
+    /// </summary>
+    public int? TargetSessionId { get; set; }
+
+    /// <summary>
     /// Milliseconds the item's watermark refresh took (#2164), set by the host when it runs one. This is NOT
     /// server think-time or streaming — for query_store it is a STORE read (and on the catch-up/adaptive
     /// path a store write too), yet the driver's <c>sql:</c> stopwatch starts before it. Measured so it can
