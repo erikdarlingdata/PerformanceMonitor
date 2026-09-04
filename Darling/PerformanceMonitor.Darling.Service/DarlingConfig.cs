@@ -89,15 +89,28 @@ public sealed class DarlingConfig
     /// <summary>
     /// The per-session <c>statement_timeout</c> applied to the viewer and mcp roles — the hard backstop a
     /// composed query can never exceed (#2357). Seeds <c>config_service.compose_statement_timeout_seconds</c>;
-    /// the store is authoritative for this property afterwards, but NOT on the same terms as its siblings.
+    /// the store is authoritative afterwards, and since #2918 a reload delivers a change like every other
+    /// knob here — on a managed store. The mechanism is still unlike the others, and the difference shows
+    /// at the edges.
     ///
-    /// <para><b>Its delivery is restart-scoped, unlike the other store-backed knobs.</b> The timeout lives
-    /// on the roles, not in a query: startup provisioning reads the store column directly and emits
-    /// <c>ALTER ROLE viewer/mcp SET statement_timeout</c>, which is re-asserted on every managed start, so
-    /// an operator's change takes effect on the next service start rather than on the reload that observes
-    /// it. A control-plane reload does keep THIS property in sync with the store, so reading it tells you
-    /// the store's desired value — it does NOT tell you what the live roles are currently enforcing, which
-    /// is whatever the store said at the last start.</para>
+    /// <para><b>It lives on the roles, not in a query.</b> The ceiling is
+    /// <c>ALTER ROLE viewer/mcp SET statement_timeout</c>, written by startup provisioning and — since
+    /// #2918 — re-asserted by a control-plane reload when the value changed
+    /// (<see cref="!:DarlingManagedRoles.ReassertComposeStatementTimeoutAsync"/>). Three consequences a
+    /// reader of this property should not have to rediscover:</para>
+    ///
+    /// <para>1. <b>Re-assertion is managed-mode + Windows only</b>, mirroring the gate on provisioning,
+    /// which is where these roles get CREATED. A BYO store provisions them out-of-band through
+    /// <c>tools/provision-roles.sql</c> and names them itself, so there the old restart-scoped caveat still
+    /// holds — and an operator has to re-run that script by hand.</para>
+    ///
+    /// <para>2. <b>A role <c>SET</c> only takes on that role's NEXT session.</b> Lowering the ceiling bounds
+    /// the next runaway, not the one already running; an already-connected viewer keeps the old value until
+    /// it reconnects. This is not a kill switch.</para>
+    ///
+    /// <para>3. Reading this property tells you the store's <i>desired</i> value. It is kept in sync with
+    /// what was last successfully written to the roles on the paths above, but a failed re-assertion leaves
+    /// the roles behind until the next reload or start converges them.</para>
     ///
     /// <para>15 preserves the constant it replaces. It is a judgement about store size and disk speed, which
     /// this product cannot make for someone else's deployment — a fleet-wide aggregate over a wide window on a
