@@ -442,18 +442,49 @@ public sealed class DarlingCollectorRunner
         var serverReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
             ? WatermarkPolicy.ReadFloor(collectionTime)
             : null;
+
+        var excludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>();
+
+        /* #2797: on the two FAN-OUT paths the answer to this read is thrown away — both of them overwrite
+           context.Watermark with a per-database value before any query is built — so skip the round trip
+           there, and only there. ServerWatermarkIsDiscarded holds the predicate and the argument for why it
+           is a DISPATCH-PATH question rather than a watermark-column one.
+
+           Note what this does to the read floor just above: query_store is the only collector that guard
+           names, and the gate is true for query_store on EVERY target (it runs per database on Azure and
+           enumerates everywhere else), so the floor it computes is now unused. Kept rather than deleted
+           because it is the BOUND on this read, and removing it would make #2796's correctness depend on
+           #2797's gate continuing to fire — two unrelated conditions that must not become one.
+
+           The probe context exists because the real one cannot be built yet: hasCollectedBefore below is
+           computed FROM this read, and CollectorContext.HasCollectedBefore/NumericWatermark/State are all
+           init-only, so constructing the cycle's context ahead of the read would mean widening three
+           deliberately-immutable members on a type both SKUs and every definition share. It carries the
+           real Target and the real ExcludedDatabases — everything the five BuildEnumerationQuery
+           implementations actually read — and nothing this read produces. */
+        var dispatchProbe = new CollectorContext
+        {
+            ServerId = server.ServerId,
+            ServerName = server.StorageName,
+            CollectionTime = collectionTime,
+            Deltas = _deltas,
+            Target = server.Target,
+            ExcludedDatabases = excludedDatabases,
+        };
+        var serverWatermarkDiscarded = ServerWatermarkIsDiscarded(definition, dispatchProbe);
+
         /* #2851: timed because this is a STORE round trip that the server-scoped path's sql: stopwatch does
            not cover — it runs before that stopwatch starts. #2796 measured a sibling store read at 50s cold
            on a bounded-only-by-luck predicate, so "the watermark read is free" is an assumption worth
            holding a number against rather than believing. finally, not a trailing assignment (#2816): a
            throwing read must still report how long it ran. Zero when the definition declares no watermark
-           column, which is honest — no read happened. */
+           column, or when #2797's gate skipped the read, which is honest either way — no read happened. */
         var serverWatermarkWatch = Stopwatch.StartNew();
         long serverWatermarkMs;
         DateTime? watermark;
         try
         {
-            watermark = definition.WatermarkColumn is null
+            watermark = definition.WatermarkColumn is null || serverWatermarkDiscarded
                 ? null
                 : await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
         }
@@ -472,8 +503,16 @@ public sealed class DarlingCollectorRunner
 
         /* Only when the watermark came back null: tell a TRUE first run from a store merely emptied by
            retention, so default_trace_events uses a bounded window instead of re-scanning all .trc history
-           (CollectorContext.HasCollectedBefore). Skipped in the common (non-null watermark) path. */
+           (CollectorContext.HasCollectedBefore). Skipped in the common (non-null watermark) path.
+
+           #2797 gates this on the SAME flag, and it is not incidental: this branch keys off `watermark is
+           null`, so skipping the read above would otherwise READ AS A FIRST RUN and fire this store query
+           on precisely the cycles the gate exists to make cheaper — trading one round trip for another and
+           netting nothing. The two consumers of HasCollectedBefore (default_trace_events, job_history)
+           declare no PerDatabaseWatermarkColumn, so the flag is false for both on every target and neither
+           loses the signal. */
         bool hasCollectedBefore = definition.WatermarkColumn is not null
+            && !serverWatermarkDiscarded
             && watermark is null
             && await HasPriorCollectorSuccessAsync(server.ServerId, definition.Name, cancellationToken);
 
@@ -559,7 +598,10 @@ public sealed class DarlingCollectorRunner
             HasCollectedBefore = hasCollectedBefore,
             State = collectorState ?? CollectorContext.NoState,
             IgnoredWaitTypes = IgnoredWaitDefaults.All,
-            ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
+            /* The same array the #2797 dispatch probe above was built with, deliberately shared rather than
+               re-derived: the probe's answer is only sound if it saw the exclusions this cycle will actually
+               use, and two independent reads of server.Config could disagree. */
+            ExcludedDatabases = excludedDatabases,
             PerfmonCounterOverride = null,
             CapturePlanXml = _capturePlans(),
             /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
@@ -1862,6 +1904,48 @@ public sealed class DarlingCollectorRunner
         bounded
             ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
             : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+
+    /// <summary>
+    /// True when this cycle will OVERWRITE the server-scoped watermark before any query is built, so
+    /// <see cref="GetLastCollectedTimeAsync"/>'s answer would be read by nothing and the round trip can be
+    /// skipped (#2797).
+    ///
+    /// <para><b>This is a DISPATCH-PATH question, not a watermark-column one, and that is the whole issue.</b>
+    /// #2797 proposed gating on <c>PerDatabaseWatermarkColumn is not null</c> alone — the signal the per-item
+    /// paths already key on. That reads plausibly and would ship a data-correctness bug. Four collectors
+    /// declare BOTH watermark columns (query_store, deadlocks, blocked_process_report,
+    /// long_query_completions) and all four declare <c>RunsPerDatabase =&gt; target.IsAzureSqlDb</c>, but only
+    /// query_store overrides <see cref="ICollectorDefinition{TRow}.BuildEnumerationQuery"/>; the other three
+    /// inherit <c>CollectorDefinitionBase</c>'s <c>=&gt; null</c>. So OFF Azure — which is the entire on-prem
+    /// and RDS fleet — three of the four fall through to the plain server-scoped path and genuinely CONSUME
+    /// this value. Gating on the column alone would hand them a null watermark on every cycle and make them
+    /// re-collect their whole first-run window forever: #2795's defect, arrived at from the other side.</para>
+    ///
+    /// <para><b>The three paths.</b> <see cref="RunAsync"/> dispatches down exactly one of them.
+    /// <see cref="ICollectorDefinition{TRow}.RunsPerDatabase"/> opens a connection per database and assigns
+    /// <c>context.Watermark</c> from <see cref="GetLastCollectedTimeForDatabaseAsync"/> inside the loop; a
+    /// non-null <see cref="ICollectorDefinition{TRow}.BuildEnumerationQuery"/> drives the enumerated loop,
+    /// which assigns <c>context.Watermark</c> inside its <c>perItemWatermark</c> delegate; anything else
+    /// reads the server-scoped value this method guards. Both fan-out paths wire their per-item refresh only
+    /// when BOTH watermark columns are declared, which is why that conjunct belongs here too: a collector
+    /// that enumerates with no <c>PerDatabaseWatermarkColumn</c> keeps the server-wide value and still
+    /// consumes it.</para>
+    ///
+    /// <para><b>Derived, not declared, so it cannot drift.</b> The enumeration half asks the definition's own
+    /// <c>BuildEnumerationQuery</c> rather than a second flag mirroring it — a hand-maintained "enumerates"
+    /// signal would just relocate the bug the moment the two disagreed. The price is that the question is
+    /// asked against a probe context rather than the cycle's own (which cannot exist yet — see the call
+    /// site), and that is sound only while null-ness is a function of
+    /// <see cref="CollectorContext.Target"/> alone. That is not assumed: <c>ServerWatermarkDispatchGateTests</c>
+    /// varies Watermark, NumericWatermark, HasCollectedBefore, State and ExcludedDatabases across every
+    /// definition in <see cref="CollectorCatalog.All"/> and fails if any of them moves the answer.</para>
+    /// </summary>
+    internal static bool ServerWatermarkIsDiscarded<TRow>(
+        ICollectorDefinition<TRow> definition, CollectorContext dispatchProbe) =>
+        definition.WatermarkColumn is not null
+        && definition.PerDatabaseWatermarkColumn is not null
+        && (definition.RunsPerDatabase(dispatchProbe.Target)
+            || definition.BuildEnumerationQuery(dispatchProbe) is not null);
 
     /// <summary>
     /// Gets the most recent value of a timestamp column from Postgres for incremental collection.
