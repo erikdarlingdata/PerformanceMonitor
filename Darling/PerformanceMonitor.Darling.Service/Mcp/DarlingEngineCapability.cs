@@ -97,6 +97,7 @@ WHERE server_id = $1";
         CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(ServerEngineSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
@@ -138,6 +139,7 @@ WHERE server_id = $1";
         try
         {
             await using var command = postgres.CreateCommand(PostgresMajorVersionSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
