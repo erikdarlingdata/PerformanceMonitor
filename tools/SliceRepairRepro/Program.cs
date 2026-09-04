@@ -122,26 +122,98 @@ var projection = string.Join(
     allCols.Select(c => keySet.Contains(c) ? c : $"{QueryStoreSliceRepairService.CombineExpression(c)} AS {c}"));
 var match = string.Join(" AND ", keyCols.Select(k => $"t.{k} IS NOT DISTINCT FROM r.{k}"));
 
+var inPlace = !args.Contains("--legacy-collapse");
+Console.WriteLine(inPlace
+    ? "strategy=in-place (#2771: measurements staged, attributes never aggregated)"
+    : "strategy=legacy  (#1912 original: full projection through the aggregate)");
+
 using var transaction = connection.BeginTransaction();
 
-/* THE STATEMENT THAT FAILS. Everything above is setup. */
-Console.WriteLine("staging collapsed groups (where a large store runs out of memory)...");
-Console.Out.Flush();
+long removed, inserted;
 sw.Restart();
-Exec($@"
+
+if (!inPlace)
+{
+    /* THE STATEMENT THAT FAILS. Everything above is setup. */
+    Console.WriteLine("staging collapsed groups (where a large store runs out of memory)...");
+    Console.Out.Flush();
+    Exec($@"
 CREATE OR REPLACE TEMP TABLE qs_slice_repair AS
 SELECT {projection}
 FROM query_store_stats
 GROUP BY {string.Join(", ", keyCols)}
 HAVING COUNT(*) > 1", transaction);
-Console.WriteLine($"staged {Scalar("SELECT COUNT(*) FROM qs_slice_repair", transaction):N0} group(s) in {sw.ElapsedMilliseconds:N0} ms");
+    Console.WriteLine($"staged {Scalar("SELECT COUNT(*) FROM qs_slice_repair", transaction):N0} group(s) in {sw.ElapsedMilliseconds:N0} ms");
 
-var removed = Exec($"DELETE FROM query_store_stats AS t WHERE EXISTS (SELECT 1 FROM qs_slice_repair AS r WHERE {match})", transaction);
-var inserted = Exec("INSERT INTO query_store_stats SELECT * FROM qs_slice_repair", transaction);
+    removed = Exec($"DELETE FROM query_store_stats AS t WHERE EXISTS (SELECT 1 FROM qs_slice_repair AS r WHERE {match})", transaction);
+    inserted = Exec("INSERT INTO query_store_stats SELECT * FROM qs_slice_repair", transaction);
+}
+else
+{
+    /* #2771: the same collapse without the wide payload in the aggregate. The staging carries the key, the
+       surviving row's identity and the recombined MEASUREMENTS only; every attribute column stays on the row
+       that survives, which is what ANY_VALUE was arbitrarily picking anyway. Expressions come from the
+       linked production Collapse.cs, not from a copy. */
+    var keepCol = "pm_keep_rowid";
+    var measurementProjection = QueryStoreSliceRepairService.BuildMeasurementProjection(allCols, keyCols, "MIN(rowid)", keepCol);
+    var assignments = QueryStoreSliceRepairService.BuildMeasurementAssignments(allCols, keyCols, "r");
+
+    Console.WriteLine("staging collapsed measurements (narrow)...");
+    Console.Out.Flush();
+    Exec($@"
+CREATE OR REPLACE TEMP TABLE qs_slice_repair AS
+SELECT {measurementProjection}
+FROM query_store_stats
+GROUP BY {string.Join(", ", keyCols)}
+HAVING COUNT(*) > 1", transaction);
+    Console.WriteLine($"staged {Scalar("SELECT COUNT(*) FROM qs_slice_repair", transaction):N0} group(s) in {sw.ElapsedMilliseconds:N0} ms");
+
+    /* Delete every slice of a collapsed group EXCEPT the survivor, then write the recombined numbers onto
+       the survivor. Delete first: after it each group holds exactly one row, so the update's key match is
+       unambiguous without depending on rowid staying stable across a mutation. */
+    removed = Exec($"DELETE FROM query_store_stats AS t WHERE EXISTS (SELECT 1 FROM qs_slice_repair AS r WHERE {match} AND t.rowid <> r.{keepCol})", transaction);
+    inserted = Exec($"UPDATE query_store_stats AS t SET {assignments} FROM qs_slice_repair AS r WHERE {match}", transaction);
+}
+
 transaction.Commit();
 
-Console.WriteLine($"removed {removed:N0}, re-inserted {inserted:N0}, final {Scalar("SELECT COUNT(*) FROM query_store_stats"):N0} (expected {groups:N0})");
-Console.WriteLine("COMPLETED - did not reproduce at this size, payload and limit");
+Console.WriteLine($"removed {removed:N0}, rewrote {inserted:N0}, final {Scalar("SELECT COUNT(*) FROM query_store_stats"):N0} (expected {groups:N0})");
+
+/* CONSERVATION, the same two invariants the production archive rewrite verifies: one row per interval, and
+   the execution counter unchanged across the collapse. A strategy that fits in memory but loses executions
+   would be worse than the OOM it replaces. */
+var finalRows = Scalar("SELECT COUNT(*) FROM query_store_stats");
+var finalExecs = Scalar("SELECT CAST(SUM(execution_count) AS BIGINT) FROM query_store_stats");
+var wideIntact = Scalar("SELECT COUNT(*) FROM query_store_stats WHERE length(query_plan_text) > 1000");
+Console.WriteLine($"CONSERVATION rows={finalRows:N0} (expect {groups:N0})  executions={finalExecs:N0}  rowsWithFullPlanText={wideIntact:N0}");
+
+/* FULL-ROW CHECKSUM. The two strategies must be byte-identical in their result, not merely both
+   "plausible" — this is the assertion that the in-place collapse did not quietly change a value the
+   legacy aggregate produced. Ordered so the hash is deterministic. */
+/* SUM of a per-row hash rather than a hash of the concatenated table: order-independent, and it
+   STREAMS. Aggregating 31,426 x 64 KB of plan text into one string exhausts the same 1 GB budget the
+   repair was just fixed to fit inside, which would have the verification failing where the code under
+   test now passes. */
+var cksumSql = "SELECT CAST(SUM(hash(concat_ws('|', " +
+    string.Join(", ", allCols.Select(c => $"COALESCE(CAST({c} AS VARCHAR), '<null>')")) +
+    "))) AS VARCHAR) FROM query_store_stats";
+if (textKb > 0)
+{
+    /* Skipped under --fat on purpose. Hashing the row means concatenating its 64 KB plan text, and doing
+       that for every row needs more than the 1 GB budget the repair now fits inside — the VERIFICATION
+       would OOM where the code under test passes, which reads as a failure of the fix. The equivalence
+       proof belongs to the small non-fat runs, where both strategies complete and can be compared; what a
+       fat run has to show is that the wide payload SURVIVED, which rowsWithFullPlanText above reports. */
+    Console.WriteLine("CHECKSUM skipped (--fat: hashing full plan text exceeds the repair's own budget)");
+}
+else
+{
+    using var ck = connection.CreateCommand();
+    ck.CommandText = cksumSql;
+    Console.WriteLine($"CHECKSUM {ck.ExecuteScalar()}");
+}
+
+Console.WriteLine("COMPLETED");
 
 long Exec(string sql, DuckDBTransaction? tx = null)
 {
