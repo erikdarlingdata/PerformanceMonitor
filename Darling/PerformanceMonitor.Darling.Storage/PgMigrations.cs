@@ -3902,6 +3902,52 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     private const int MigrationCommandTimeoutSeconds = 300;
 
     /// <summary>
+    /// Lock-wait budget (seconds) for the <c>pg_advisory_lock</c> ACQUIRE. A different quantity from
+    /// <see cref="MigrationCommandTimeoutSeconds"/> above, which bounds ONE statement: the lock is taken once
+    /// and held while <see cref="MigrateLockedAsync"/> applies EVERY pending rung in the same session, so what
+    /// a sibling waits for here is a whole multi-rung session. Set to the statement bound (as this site first
+    /// was) a several-rung upgrade can outlast the waiter while every individual statement stayed inside its
+    /// own limit, so the two budgets are named separately and move independently.
+    ///
+    /// <para><b>Lower bound — the total the lock can legitimately be held for.</b> Of the 108 rungs in
+    /// <see cref="Scripts"/>, exactly FOUR touch pre-existing data: V22 (index built over every existing chunk
+    /// of the populated <c>index_object_stats</c> hypertable), V23 (<c>create_hypertable</c> with
+    /// <c>migrate_data =&gt; true</c>, rewriting <c>collection_log</c>'s rows into chunks), V39 (two partial
+    /// indexes over the populated <c>query_stats</c> and <c>procedure_stats</c> hypertables) and V104 (index
+    /// over the populated <c>pg_deadlocks</c>). Every other rung creates the table it then indexes, or is a
+    /// metadata-only <c>ADD COLUMN</c> / <c>ALTER TABLE ... SET SCHEMA</c> / <c>DROP NOT NULL</c> / view
+    /// refresh — the whole 108-rung ladder measured 0.301 s end to end on a fresh PostgreSQL 17.11 /
+    /// TimescaleDB 2.29.2 store, advisory lock and version stamps included. Each of the four is ONE command,
+    /// so <see cref="MigrationCommandTimeoutSeconds"/> already caps the data-moving part of a full
+    /// V21-to-current upgrade at four times that bound; the fifth multiple here is margin, sized at one
+    /// statement bound because that is the granularity this ladder grows by — one new data-moving rung.
+    /// Seeded reference points on that same local store, warm and on local NVMe (a cold busy store being why
+    /// the statement bound is 300 s rather than 30): V22 1.29 s over 907 MB / 90 chunks, V23 9.37 s over a
+    /// 608 MB heap, V39 1.44 s over 1.26 GB. The live 42-server store holds 2.72 GB, 0.69 GB and 24.5 GB in
+    /// those same tables, so the real figures are larger and colder — which is the point of taking the floor
+    /// from the per-statement bound rather than from these timings.</para>
+    ///
+    /// <para><b>Upper bound — there is none in the code, which is a finding rather than an omission.</b>
+    /// <c>MigrateAsync</c> has exactly one production caller, <c>DarlingWorker.RunCollectionLoopAsync</c>, and
+    /// it passes the plain stopping token: no <c>CancelAfter</c> anywhere on the path, no
+    /// <c>HostOptions.StartupTimeout</c> configured (so the framework default is infinite), no health check or
+    /// readiness probe in the repo, no <c>HEALTHCHECK</c> on the container image and no orchestrator manifest.
+    /// The installers' 60 s / 2 min <c>WaitForStatus('Running')</c> do not bound it either — the worker is a
+    /// <c>BackgroundService</c>, so the service reports Running before the first migration statement runs. The
+    /// value therefore comes from the failure ASYMMETRY: too short and the waiter throws into
+    /// <c>DarlingWorker</c>'s <c>LogCritical</c>-and-return, which takes that instance out of the collection
+    /// loop entirely with no retry until an operator restarts it; too long and it only delays its own first
+    /// cycle, because its MCP and web surfaces start independently and are already serving. Waiting is the
+    /// cheap direction, so this errs long — but stays FINITE, so a genuinely wedged holder still produces a
+    /// readable deadline instead of the silent hang #2874 exists to stop.</para>
+    ///
+    /// <para>A multiple rather than a literal so the two budgets cannot drift apart if the statement bound
+    /// moves. This NARROWS the mid-wait death rather than closing it: a fifth data-moving rung, or one rung
+    /// that genuinely needs longer than its own bound, still outlasts the wait.</para>
+    /// </summary>
+    private const int MigrationLockWaitTimeoutSeconds = 5 * MigrationCommandTimeoutSeconds;
+
+    /// <summary>
     /// Applies every migration newer than the store's current version, each in its own
     /// transaction, stamping darling_schema_version as it goes. Idempotent — a fully migrated
     /// store is a no-op — and safe under concurrent callers (advisory-locked). The connection
@@ -3927,7 +3973,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             throw new ArgumentNullException(nameof(connection));
         }
 
-        using (var acquireLock = new NpgsqlCommand("SELECT pg_advisory_lock($1)", connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
+        using (var acquireLock = new NpgsqlCommand("SELECT pg_advisory_lock($1)", connection) { CommandTimeout = MigrationLockWaitTimeoutSeconds })
         {
             acquireLock.Parameters.AddWithValue(MigrationLockKey);
             await acquireLock.ExecuteNonQueryAsync(cancellationToken);
