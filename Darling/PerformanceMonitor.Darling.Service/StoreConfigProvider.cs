@@ -42,6 +42,25 @@ public sealed class StoreConfigProvider
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
 
+    /// <summary>
+    /// Consecutive failed <see cref="LoadViewAsync"/> attempts, so a persistently unreachable store reports
+    /// once rather than on every tick.
+    ///
+    /// <para>Needed because the control-plane beacon now RETRIES: the <c>config_version</c> watermark
+    /// advances only after a reload applies, so a failing reload is re-attempted on each 15 s sweep tick
+    /// until it succeeds. That is the behaviour the fix wanted — an operator's change is no longer
+    /// discarded by a single failed read — but at one warning per attempt it would emit roughly 5,760 lines
+    /// a day against a store that is simply down, burying the collection errors that actually diagnose it.
+    /// Reporting the transition, then going quiet, then reporting recovery is the same shape the
+    /// <c>#1581</c>/<c>#2170</c> watchdog herd was tamed with.</para>
+    ///
+    /// <para>Instance state, and that is load-bearing rather than incidental: the worker builds exactly one
+    /// provider and keeps it for the life of the collection loop, so the streak spans ticks. A transiently
+    /// constructed provider elsewhere simply never accumulates one, which degrades to today's
+    /// once-per-call warning rather than to silence.</para>
+    /// </summary>
+    private int _viewReadFailureStreak;
+
     public StoreConfigProvider(NpgsqlDataSource postgres, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
@@ -1144,6 +1163,17 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
             var schedules = await ReadScheduleOverridesAsync(connection, cancellationToken);
 
+            /* Recovery is reported once, and only if something was actually reported broken — otherwise
+               every ordinary reload would announce that the store is reachable. */
+            if (_viewReadFailureStreak > 0)
+            {
+                _logger?.LogInformation(
+                    "Config store readable again after {Attempts} failed attempt(s) — applying the pending control-plane reload",
+                    _viewReadFailureStreak);
+
+                _viewReadFailureStreak = 0;
+            }
+
             return new StoreConfigView
             {
                 ConfigVersion = configVersion,
@@ -1169,7 +1199,21 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger?.LogWarning("Could not read the config store — keeping the current live config: {Message}", ex.Message);
+            /* First failure of a streak is the WARNING; the rest are Debug. The count rides the message so
+               the one line an operator sees still says how long it has been going. */
+            if (++_viewReadFailureStreak == 1)
+            {
+                _logger?.LogWarning(
+                    "Could not read the config store — keeping the current live config, and the control-plane reload will retry on each sweep tick until it succeeds: {Message}",
+                    ex.Message);
+            }
+            else
+            {
+                _logger?.LogDebug(
+                    "Could not read the config store ({Attempts} consecutive attempts) — keeping the current live config: {Message}",
+                    _viewReadFailureStreak, ex.Message);
+            }
+
             return null;
         }
     }

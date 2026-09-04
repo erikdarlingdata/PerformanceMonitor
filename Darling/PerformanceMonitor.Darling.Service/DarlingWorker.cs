@@ -1420,12 +1420,37 @@ public sealed class DarlingWorker : BackgroundService
             var configVersion = await configProvider.ReadConfigVersionAsync(stoppingToken);
             if (configVersion.HasValue && configVersion.Value != _lastConfigVersion)
             {
-                _lastConfigVersion = configVersion.Value;
-                await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+                /* The watermark advances AFTER the reload applies, not on detecting the bump. Assigning it
+                   first meant a reload whose store read failed had already recorded the version as applied:
+                   the operator's change stayed live in the store, absent from this process, and unreported
+                   until some LATER write bumped config_version again. Nothing retried it, because the
+                   beacon's next tick compared equal.
 
-                /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe here
-                   by construction — top of the sweep, and narrowing never preempts a running body. */
-                ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
+                   That ordering is why a deadline on this thread is not merely a delay — it DISCARDS the
+                   change — which is the asymmetry ServiceCommandDeadlines.SerialLoopSeconds is floored
+                   against. Fixing the bound without fixing the ordering would have left the silent-loss
+                   path intact and only made it rarer.
+
+                   Failing to apply now leaves the watermark behind, so the very next tick re-detects the
+                   same bump and retries. That is right for the transient case this guards (a store restart,
+                   a failover, a blip) and is bounded work — one single-row beacon read plus one view read
+                   per 15 s tick. StoreConfigProvider rate-limits its own failure log across the streak so a
+                   PERSISTENTLY unreachable store does not turn the retry into a log flood.
+
+                   Deliberately NOT a retry POLICY: #2936 owns that question for the adjacent migrate path,
+                   where it is a real design decision (which failures are retryable, bounded or forever,
+                   re-enter or resume) because that path has no loop of its own and its failure is terminal.
+                   This path already re-runs every tick by construction and its failure is recoverable, so
+                   the only defect here was the ordering. */
+                if (await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken))
+                {
+                    _lastConfigVersion = configVersion.Value;
+
+                    /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe
+                       here by construction — top of the sweep, and narrowing never preempts a running body.
+                       Inside the success branch because a reload that applied nothing changed no knob. */
+                    ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
+                }
             }
 
             /* Stage 2 pause gate (Lite's IsPaused): while paused, skip ALL collection/alert/analysis/purge
@@ -2460,15 +2485,31 @@ public sealed class DarlingWorker : BackgroundService
     /// reconciles the monitored-server set, recomputes each connected server's NextDue from the fresh
     /// schedule overrides, and reloads the mute-rule cache (F16). Store-unreachable is a no-op — the current
     /// live config stands, never worse than before.
+    ///
+    /// <para><b>Returns whether the reload APPLIED</b>, so the caller can hold the <c>config_version</c>
+    /// watermark back on a failure instead of recording an unapplied version as done. The line between the
+    /// two is <c>LoadViewAsync</c>, and it is the right line because that call is the atomic gate: it reads
+    /// all five <c>config</c> rows under one try/catch and returns null if any of them throws, so either
+    /// nothing was read or <c>ApplyToConfig</c> below has already swapped the whole view into the live
+    /// config — a swap that cannot un-happen and that makes the version genuinely applied.</para>
+    ///
+    /// <para>Everything after that swap is PROPAGATION, and each piece carries its own isolation rather
+    /// than relying on this return value: <c>ReassertComposeStatementTimeoutAsync</c> is non-throwing and
+    /// advances <c>_appliedComposeStatementTimeoutSeconds</c> only on success, so it self-heals on the next
+    /// reload, and <c>SyncServerEnabledStatesAsync</c> catches everything and logs at Debug. A propagation
+    /// step that did throw would leave the watermark behind too — the assignment is after the await — and
+    /// the retry re-applies idempotently, so the residual window is "applied in memory, not yet mirrored",
+    /// which is narrower than the version-discarding one this replaces rather than a new instance of
+    /// it.</para>
     /// </summary>
-    private async Task ReloadFromStoreAsync(
+    private async Task<bool> ReloadFromStoreAsync(
         StoreConfigProvider provider, DarlingConfig config, List<ServerLoopState> servers,
         MuteRuleService muteRuleService, CancellationToken cancellationToken)
     {
         var view = await provider.LoadViewAsync(config, cancellationToken);
         if (view is null)
         {
-            return;
+            return false;
         }
 
         StoreConfigProvider.ApplyToConfig(config, view);
@@ -2523,9 +2564,13 @@ public sealed class DarlingWorker : BackgroundService
 
         await muteRuleService.LoadAsync();
 
+        /* view.ConfigVersion rather than _lastConfigVersion: the caller has not advanced the watermark yet
+           (that is now this method's return value), so the field still holds the PREVIOUS version here. */
         _logger.LogInformation(
             "Control-plane reload applied (config_version {Version}, {Servers} monitored server(s), paused: {Paused})",
-            _lastConfigVersion, servers.Count, _paused);
+            view.ConfigVersion, servers.Count, _paused);
+
+        return true;
     }
 
     /// <summary>
