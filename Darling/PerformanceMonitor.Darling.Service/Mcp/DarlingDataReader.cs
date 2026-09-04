@@ -92,7 +92,12 @@ internal static class DarlingDataReader
         string? ErrorMessage,
         double? SqlOpenMs = null,
         double? SqlDrainMs = null,
-        double? WatermarkMs = null)
+        double? WatermarkMs = null,
+        long? DrainRowsRead = null,
+        long? DrainBytesRead = null,
+        double? DrainLastReadMs = null,
+        int? TargetSessionId = null,
+        double? SweepPeerMaxMs = null)
     {
         /* The residual, derived rather than read (V108 stores no other_ms column on purpose): open + drain
            + this SUM to SqlDurationMs by construction, so a large value here is a real finding - cost in
@@ -1452,7 +1457,12 @@ internal static class DarlingDataReader
             error_message,
             sql_open_ms,
             sql_drain_ms,
-            watermark_ms
+            watermark_ms,
+            drain_rows_read,
+            drain_bytes_read,
+            drain_last_read_ms,
+            target_session_id,
+            sweep_peer_max_ms
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -1516,7 +1526,17 @@ internal static class DarlingDataReader
                    to zero. A zero here would claim a measured instant open. */
                 reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
                 reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
-                reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10))));
+                reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
+                /* V109 (#2864). NULL means NOT RECORDED and no more: a row written before the rung, a path
+                   that emits no forensics (every per-database ENUMERATED collector - query_store, the
+                   Pg*Stats family - never sets the measured flag), or an abandon that fired before the
+                   counting reader was constructed. Do NOT read a NULL as 'old row'. DrainLastReadMs beside
+                   a 0 DrainRowsRead does mean nothing arrived; that pairing is the one safe inference. */
+                reader.IsDBNull(11) ? null : Convert.ToInt64(reader.GetValue(11)),
+                reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
+                reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+                reader.IsDBNull(14) ? null : Convert.ToInt32(reader.GetValue(14)),
+                reader.IsDBNull(15) ? null : Convert.ToDouble(reader.GetValue(15))));
         }
 
         return rows;

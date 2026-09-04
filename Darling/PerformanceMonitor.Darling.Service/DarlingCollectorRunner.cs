@@ -81,7 +81,11 @@ public sealed record CollectorRunResult(
     bool ServerPhasesMeasured = false,
     long ServerOpenMs = 0,
     long ServerDrainMs = 0,
-    long ServerWatermarkMs = 0)
+    long ServerWatermarkMs = 0,
+    long ServerRowsRead = -1,
+    long ServerBytesRead = -1,
+    long ServerLastReadMs = -1,
+    int? TargetSessionId = null)
 {
     /// <summary>
     /// The part of <see cref="SqlMs"/> that is neither the open nor the drain — query building, command
@@ -111,7 +115,36 @@ public sealed record CollectorRunResult(
     public ServerPhaseCost? ServerPhases => ServerPhasesMeasured
         ? new ServerPhaseCost((int)ServerOpenMs, (int)ServerDrainMs, (int)ServerWatermarkMs)
         : null;
+
+    /// <summary>
+    /// What the drain actually delivered (V109, #2864), or NULL when this path did not measure it. Gated on
+    /// <see cref="ServerPhasesMeasured"/> — the same flag and the same path, since the counting reader is
+    /// installed exactly where the phase stopwatches are.
+    ///
+    /// <para>One value rather than four loose fields, the <see cref="ServerPhases"/> discipline: a row count
+    /// without its last-read reading is the half-answer this issue was filed about. The two are only
+    /// meaningful together — a positive count says rows arrived, and only the elapsed reading says whether
+    /// they were still arriving when the budget fired.</para>
+    /// </summary>
+    public DrainForensics? Drain => ServerPhasesMeasured
+        ? new DrainForensics(ServerRowsRead, ServerBytesRead, ServerLastReadMs, TargetSessionId)
+        : null;
 }
+
+/// <summary>
+/// What a server-scoped drain delivered, as persisted by V109 (#2864).
+///
+/// <para><c>rows_collected</c> answers what a run STORED; an abandoned cycle stores nothing, so it is 0
+/// whether the target sent no rows at all or sent 149 and then went silent. These four say what actually
+/// arrived, so that distinction — a target that could not execute versus a stream that stalled — survives
+/// into the store instead of being lost with the cycle.</para>
+///
+/// <para><paramref name="LastReadMs"/> is the one that carries the diagnosis: subtracted from the drain it
+/// gives the time the reader spent with nothing arriving, which is what separates a slow stream from a
+/// stalled one when both end at the wall-clock budget. -1 on any figure means unmeasured or never-happened,
+/// never a real measurement, so an absence cannot read as a fast zero.</para>
+/// </summary>
+public readonly record struct DrainForensics(long RowsRead, long BytesRead, long LastReadMs, int? TargetSessionId);
 
 /// <summary>
 /// One server-scoped collector run's phase split, as persisted by V108: the open and the drain that
@@ -1395,6 +1428,14 @@ public sealed class DarlingCollectorRunner
                    phases of the cycle it abandoned — that is the case where "where did the time go" matters
                    most, and the one a trailing assignment would leave at zero. */
                 serverPhasesMeasured = true;
+
+                /* #2864: the target's own session id, read off the OPEN connection as a property rather than
+                   asked for with SELECT @@SPID — a round trip here would be ~25,000 extra queries an hour
+                   across the fleet to fetch a number the client already holds. It is what makes a stalled run
+                   joinable to waiting_tasks / dmv_blocking_snapshot / query_snapshots, all of which record a
+                   session id; without it "what was OUR session waiting on" cannot be asked retrospectively
+                   even for a window where the answering snapshot was captured. */
+                context.TargetSessionId = TryReadTargetSessionId(targetConnection);
                 using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
                 var itemToken = itemBudget?.Token ?? cancellationToken;
                 try
@@ -1419,13 +1460,30 @@ public sealed class DarlingCollectorRunner
 
                     using var reader = opened;
                     var drainWatch = Stopwatch.StartNew();
+
+                    /* #2864: the collector reads through a counting decorator rather than the provider reader
+                       directly, so what the drain DELIVERED is recorded whether or not the cycle survives to
+                       store it. An abandoned cycle ships nothing, so rows_collected is 0 either way and could
+                       never separate "the target never sent row 1" from "it sent 149 and stopped" — the first
+                       production capture with V108's phases read open:104ms drain:119,945ms rows=0 and could
+                       go no further. Decorating rather than editing 66 collectors' read loops means a
+                       collector cannot forget to count, and the counters ride the SAME drainWatch so the
+                       last-read reading and the drain figure it is subtracted from share one clock. */
+                    var counting = new DrainCountingDataReader(reader, drainWatch);
                     try
                     {
-                        rows = await definition.ReadAsync(reader, context, itemToken);
+                        rows = await definition.ReadAsync(counting, context, itemToken);
                     }
                     finally
                     {
                         context.ServerScopeDrainMs = drainWatch.ElapsedMilliseconds;
+
+                        /* Stamped from finally with the drain itself, and for the same #2816 reason: the run
+                           that matters most here is the one cut short, so a count only recorded on the
+                           success path would be absent from exactly the cycles it exists to explain. */
+                        context.ServerScopeRowsRead = counting.RowsRead;
+                        context.ServerScopeBytesRead = counting.PayloadBytes;
+                        context.ServerScopeLastReadMs = counting.LastReadElapsedMs;
                     }
 
                     /* #1851: a definition that declares it may hand back an OPTIONAL trailing
@@ -1469,7 +1527,15 @@ public sealed class DarlingCollectorRunner
                         ServerPhasesMeasured: true,
                         ServerOpenMs: context.ServerScopeOpenMs,
                         ServerDrainMs: context.ServerScopeDrainMs,
-                        ServerWatermarkMs: serverWatermarkMs);
+                        ServerWatermarkMs: serverWatermarkMs,
+                        /* #2864, and THIS is the arm the counters were added for: an abandoned cycle stores
+                           nothing, so rows_collected is 0 either way and cannot say whether the target sent
+                           nothing or sent rows and then stopped. The counting reader stamps from finally, so
+                           what arrived before the budget fired survives the abandon. */
+                        ServerRowsRead: context.ServerScopeRowsRead,
+                        ServerBytesRead: context.ServerScopeBytesRead,
+                        ServerLastReadMs: context.ServerScopeLastReadMs,
+                        TargetSessionId: context.TargetSessionId);
                 }
 
                 /* Optional best-effort second query on the same connection (server_properties'
@@ -1534,13 +1600,48 @@ public sealed class DarlingCollectorRunner
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
+        /* #2864: the drain forensics are recorded on the SUCCESS path too, not only on abandon. The
+           abandoned row is the one being explained, but a ratio needs a denominator - "149 rows, last read
+           at 500 ms" only reads as pathological against what this collector on this server normally
+           delivers, and that baseline has to come from the same column on ordinary rows. Storing it only on
+           failures would reproduce exactly the cross-referencing this change exists to remove.
+
+           Kept ABOVE the return rather than inside the argument list: DarlingEmptyEnumerationNoteTests pins
+           this call's arguments as one whitespace-collapsed run, so a comment between them breaks a pin
+           whose actual job is to catch a DROPPED argument. */
         return new CollectorRunResult(
             rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result,
             ServerPhasesMeasured: serverPhasesMeasured,
             ServerOpenMs: context.ServerScopeOpenMs,
             ServerDrainMs: context.ServerScopeDrainMs,
-            ServerWatermarkMs: serverWatermarkMs);
+            ServerWatermarkMs: serverWatermarkMs,
+            ServerRowsRead: context.ServerScopeRowsRead,
+            ServerBytesRead: context.ServerScopeBytesRead,
+            ServerLastReadMs: context.ServerScopeLastReadMs,
+            TargetSessionId: context.TargetSessionId);
     }
+
+    /// <summary>
+    /// The monitored target's own session id, off the OPEN connection as a property (#2864). SQL Server's
+    /// SPID via <c>SqlConnection.ServerProcessId</c>, PostgreSQL's backend pid via
+    /// <c>NpgsqlConnection.ProcessID</c>; null for any other provider.
+    ///
+    /// <para>A property read rather than <c>SELECT @@SPID</c> deliberately: the value is already on the
+    /// client after the handshake, and asking for it would add a round trip per collector per server per
+    /// cycle — on this fleet roughly 25,000 extra queries an hour to learn something already known. The
+    /// point of the number is joinability: waiting_tasks, dmv_blocking_snapshot and query_snapshots all
+    /// carry a session id, so recording ours turns "what was our own stalled session waiting on" from an
+    /// unanswerable question into a join.</para>
+    ///
+    /// <para>Best-effort by design. A provider that exposes no such property returns null, which reads as
+    /// "not available" — never as a session id of 0, which is a real SPID.</para>
+    /// </summary>
+    private static int? TryReadTargetSessionId(DbConnection connection) => connection switch
+    {
+        SqlConnection sql => sql.ServerProcessId,
+        NpgsqlConnection npgsql => npgsql.ProcessID,
+        _ => null,
+    };
 
     /// <summary>
     /// Writes the per-item app-log lines for probe failures, capped at

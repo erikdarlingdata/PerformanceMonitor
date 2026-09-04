@@ -165,6 +165,7 @@ public static class PgMigrations
         new Migration(106, "pg-cpu-utilization", V106Sql),
         new Migration(107, "plan-force-actions", V107Sql),
         new Migration(108, "collection-log-phase-split", V108Sql),
+        new Migration(109, "collection-log-drain-forensics", V109Sql),
     };
 
     /// <summary>
@@ -2404,6 +2405,79 @@ ALTER TABLE collect.collection_log
 /* Postgres FREEZES a view's SELECT * column list at CREATE, so without this refresh the passthrough every
    read goes through would keep serving the pre-V108 column list forever and the new columns would be
    invisible to an UPGRADED store while working fine on a fresh one - the V14 lesson, and V80's too. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
+
+    /// <summary>
+    /// V109 - what an abandoned collection cycle was DOING, not merely that it stopped (#2864).
+    ///
+    /// <para><b>The gap.</b> A cycle the #2673 wall-clock budget abandons records <c>ABANDONED</c> and
+    /// <c>rows_collected = 0</c> - and that zero is rows STORED, which an abandoned cycle never does by
+    /// definition. So the stored row could not distinguish a target that sent no rows at all from one that
+    /// sent 149 and then went silent: a stalled target and a stalled stream, which want unrelated fixes.
+    /// V108 made the phase split queryable and the first production capture read
+    /// <c>open:104ms drain:119,945ms rows=0</c> - proving the time was in the drain and unable to say
+    /// whether the drain was slow or simply empty. These columns end that.</para>
+    ///
+    /// <para><b><c>drain_last_read_ms</c> is the one that carries the diagnosis</b>, not the row count. A
+    /// count alone still cannot separate "streaming steadily but slowly" from "delivered everything then
+    /// hung" - both end at the budget with a positive count. Subtract this from <c>sql_drain_ms</c> and you
+    /// have the time the reader sat with nothing arriving. NULL means no row ever arrived, which is
+    /// NULL beside a 0 count says nothing came, and 0 is left free to mean what it honestly means - row 1
+    /// arrived instantly.</para>
+    ///
+    /// <para><b>NULL means NOT RECORDED and nothing more.</b> It does NOT identify a pre-rung row, and
+    /// saying so would be false in two reachable ways: an abandon firing inside <c>ExecuteReaderAsync</c>
+    /// never constructs the counting reader, so all three guard to NULL on a genuine V109 row; and no
+    /// per-database ENUMERATED collector sets the measured flag at all, so <c>query_store</c> and every
+    /// <c>Pg*Stats</c> collector read NULL here forever on a fully current store. A dashboard that treated
+    /// NULL as 'old row' would silently misclassify both an open-stall and whole collector families.</para>
+    ///
+    /// <para><b><c>drain_bytes_read</c> is the string payload, and the column name is the honest one.</b> No
+    /// <c>DbDataReader</c> exposes wire size, so this counts UTF-16 bytes off the string and binary getters
+    /// and excludes numerics and protocol framing. That is the useful scope as well as the truthful one: the
+    /// collectors this rung exists for are dominated by one large text column - plan XML at a 260 KB mean -
+    /// so string bytes ARE the payload to within a rounding error, and a number pretending to be the wire
+    /// size would be a worse measurement wearing a better name.</para>
+    ///
+    /// <para><b><c>target_session_id</c> is what makes a stalled run joinable.</b> <c>waiting_tasks</c>,
+    /// <c>dmv_blocking_snapshot</c> and <c>query_snapshots</c> all carry a session id, so without ours the
+    /// question "what was our OWN stalled session waiting on" cannot be asked even for a window where the
+    /// answering snapshot was captured. Read off the open connection as a client property, never with
+    /// <c>SELECT @@SPID</c>: a round trip per collector per server per cycle is ~25,000 extra queries an
+    /// hour against the fleet to learn a number the client already holds.</para>
+    ///
+    /// <para><b><c>sweep_peer_max_ms</c> separates the two populations automatically.</b> The slowest
+    /// NON-budgeted collector already completed in the same sweep body. A genuinely large query runs beside
+    /// peers at or below baseline (one measured sweep: <c>wait_stats</c> 1 ms, <c>latch_stats</c> 1 ms,
+    /// alongside 71,977 ms for 12,557 rows); sweep-wide degradation shows those same light collectors at
+    /// 34-47x baseline BEFORE the heavy ones burn their budget. Identical stored shape, opposite causes, and
+    /// telling them apart previously meant cross-referencing neighbouring rows by hand. Budgeted collectors
+    /// are excluded because they are the heavies being explained. Written on EVERY row rather than only
+    /// abandoned ones, because a ratio needs a denominator and the baseline has to come from the same column
+    /// on ordinary bodies - recording it only on failures would rebuild the very cross-referencing this
+    /// removes.</para>
+    ///
+    /// <para><b>No Lite twin, and for V108's reason restated.</b> The parity rule exists so state added to
+    /// one store does not read as permanently empty on the other. The source here is Darling-only: the
+    /// counting reader is installed by <c>DarlingCollectorRunner</c>'s server-scoped path and the peer mark
+    /// by <c>DarlingWorker</c>'s sweep body, neither of which Lite's runner has. A DuckDB twin would be five
+    /// forever-NULL columns - precisely the outcome the rule prevents rather than the one it demands.</para>
+    ///
+    /// <para>Nullable, no DEFAULT, no backfill - the V80/V108 reasoning: a catalog-only change that stays
+    /// instant on a large compressed hypertable. A row written before this rung does not know any of this,
+    /// and NULL says so where 0 would claim a measured drain that delivered nothing.</para>
+    /// </summary>
+    private const string V109Sql = @"
+ALTER TABLE collect.collection_log
+    ADD COLUMN IF NOT EXISTS drain_rows_read bigint,
+    ADD COLUMN IF NOT EXISTS drain_bytes_read bigint,
+    ADD COLUMN IF NOT EXISTS drain_last_read_ms integer,
+    ADD COLUMN IF NOT EXISTS target_session_id integer,
+    ADD COLUMN IF NOT EXISTS sweep_peer_max_ms integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so without this refresh the passthrough every
+   read goes through would keep serving the pre-V109 column list forever - invisible on an UPGRADED store
+   while working fine on a fresh one. The V14 lesson, V80's, and V108's. */
 CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
 
     /// <summary>

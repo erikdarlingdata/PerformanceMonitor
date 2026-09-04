@@ -166,6 +166,7 @@ public sealed class PayloadDimensionTests
         public bool AppliesTo(CollectorTargetInfo target) => true;
 
         public bool YieldsOnLockTimeout => false;
+        public TimeSpan? PerItemWallClockBudget => null;
 
         public IReadOnlyList<string> StateKeys => Array.Empty<string>();
     }

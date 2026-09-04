@@ -565,6 +565,7 @@ public sealed class PgSchemaGeneratorTests
         public bool AppliesTo(CollectorTargetInfo target) => _inner.AppliesTo(target);
 
         public bool YieldsOnLockTimeout => _inner.YieldsOnLockTimeout;
+        public TimeSpan? PerItemWallClockBudget => _inner.PerItemWallClockBudget;
 
         public IReadOnlyList<string> StateKeys => _inner.StateKeys;
     }
