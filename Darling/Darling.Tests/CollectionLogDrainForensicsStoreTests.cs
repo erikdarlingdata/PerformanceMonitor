@@ -226,10 +226,47 @@ public class CollectionLogDrainForensicsStoreTests
         foreach (var guard in new[]
                  {
                      "drain.Value.RowsRead >= 0", "drain.Value.BytesRead >= 0", "drain.Value.LastReadMs >= 0",
+                     /* #2884: the session-id twin. 0 is the provider's not-populated state, never a real
+                        SPID or backend pid, and unguarded it wrote as a real-looking id no join could land. */
+                     "drain.Value.TargetSessionId is int spid && spid > 0",
                  })
         {
             Assert.Contains(guard, writer, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// The session id is captured AFTER the open round trip, exactly once, and the helper normalizes the
+    /// provider's not-populated 0 to null (#2884).
+    ///
+    /// <para>SqlConnection.ServerProcessId is not reliably populated until the connection has round-tripped
+    /// a command. The original capture sat before ExecuteReaderAsync, so the runs it mattered most for —
+    /// budget-abandoned cycles, where the id is the join key to waiting_tasks and the peer snapshots —
+    /// recorded a literal 0. Ordering is pinned on the source because it IS a source property: the capture
+    /// call must come after the ExecuteReaderAsync await it depends on, and a refactor that hoists it back
+    /// above the open reintroduces #2884 while compiling clean and passing every behavioral test that
+    /// cannot construct a real SqlConnection.</para>
+    /// </summary>
+    [Fact]
+    public void TheSessionIdIsCapturedAfterTheOpenRoundTrip()
+    {
+        var runner = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
+
+        const string openCall = "opened = await command.ExecuteReaderAsync(";
+        const string captureCall = "context.TargetSessionId = TryReadTargetSessionId(";
+
+        var open = runner.IndexOf(openCall, StringComparison.Ordinal);
+        var capture = runner.IndexOf(captureCall, StringComparison.Ordinal);
+
+        Assert.True(open >= 0, "the server-scoped open call moved; re-anchor this pin");
+        Assert.True(capture >= 0, "the session-id capture is gone entirely");
+        Assert.True(capture > open,
+            "the session id must be captured AFTER ExecuteReaderAsync has round-tripped (#2884) — " +
+            "before it, SqlConnection.ServerProcessId reads 0 on exactly the abandoned cycles it exists to explain");
+        Assert.Equal(capture, runner.LastIndexOf(captureCall, StringComparison.Ordinal));
+
+        /* The helper's own normalization: 0 is not a session id and must become null at the source. */
+        Assert.Contains("return raw > 0 ? raw : null;", runner, StringComparison.Ordinal);
     }
 
     /// <summary>

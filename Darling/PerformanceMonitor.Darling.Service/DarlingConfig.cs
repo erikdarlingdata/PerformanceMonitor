@@ -14,6 +14,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
 
@@ -558,9 +559,11 @@ public sealed class AlertsConfig
     public int SelfDiskFreeWarnPercent { get; set; } = 10;
 
     /// <summary>#2107: how long collection may go quiet before Collection Stopped / Agent Not
-    /// Running fire (was a compile-time 30 minutes).</summary>
+    /// Running fire (was a compile-time 30 minutes). Defaults to the shared constant behind the
+    /// display's Offline band, so the two definitions of "collection stopped" agree out of the
+    /// box (#2794); widening it here widens only the ALERT window.</summary>
     [JsonPropertyName("collectionStaleMinutes")]
-    public int CollectionStaleMinutes { get; set; } = 30;
+    public int CollectionStaleMinutes { get; set; } = ServerHealthThresholds.CollectionStoppedMinutesDefault;
 
     /// <summary>#2107: the Collection Stopped fast path — consecutive failures with zero successes
     /// that fire without waiting out the staleness window (was a compile-time 10).</summary>

@@ -243,8 +243,29 @@ namespace PerformanceMonitor.Common
         /// <summary>Older than twice the cadence = the collection has visibly lagged (Warning).</summary>
         public static readonly TimeSpan StaleThreshold = TimeSpan.FromTicks(CollectorCadence.Ticks * 2);
 
-        /// <summary>Older than this (or no collection at all) = the server is treated as Offline.</summary>
-        public static readonly TimeSpan OfflineThreshold = TimeSpan.FromMinutes(15);
+        /// <summary>
+        /// The ONE default for "collection has stopped", shared by the display's Offline band and the alert
+        /// engine's Collection Stopped window (#2794). They used to disagree — display called a server dark at a
+        /// bare 15 minutes while <c>DarlingSelfAlertEvaluator.StaleWindow</c> deliberately waited 30 — so one
+        /// condition had two definitions, and the tighter one false-alarmed: a long <c>query_store</c> cycle
+        /// holds the whole sweep body (the sweep skips relaunch while a body runs), so a healthy server
+        /// legitimately goes quiet for 12–19 minutes with nothing failed anywhere. Measured on the production
+        /// fleet: the worst legitimate inter-collection gap in 24h was 12m12s across 42 servers (issue-day load
+        /// reached 19m18s), while genuine dark events run HOURS — so 30 minutes separates the two populations
+        /// with real margin on both sides, and it is the number the alert engine already committed to.
+        /// <c>AlertsConfig.CollectionStaleMinutes</c> can still widen the ALERT window per deployment; the
+        /// display band stays at this shared default (it has no live settings on every surface), which is the
+        /// conservative direction — the band can only be tighter than the alert, never looser.
+        /// </summary>
+        public const int CollectionStoppedMinutesDefault = 30;
+
+        /// <summary>
+        /// Older than this (or no collection at all) = the server is treated as Offline. Derived from
+        /// <see cref="CollectionStoppedMinutesDefault"/> so the display's "dark" and the alert engine's
+        /// "stopped" are the same claim (#2794); a server merely between stretched sweeps bands
+        /// <see cref="ServerFreshness.Stale"/>, which is the honest reading.
+        /// </summary>
+        public static readonly TimeSpan OfflineThreshold = TimeSpan.FromMinutes(CollectionStoppedMinutesDefault);
     }
 
     /// <summary>
