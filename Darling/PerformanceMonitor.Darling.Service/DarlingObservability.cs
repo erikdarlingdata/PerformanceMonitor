@@ -128,6 +128,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(UpsertServerSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(server.ServerId);
             command.Parameters.AddWithValue(server.StorageName);
             command.Parameters.AddWithValue(server.Config.DisplayName);
@@ -242,6 +243,7 @@ ON CONFLICT (server_id) DO UPDATE SET
 
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(InsertCollectionLogSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());
             command.Parameters.AddWithValue(server.ServerId);
             command.Parameters.AddWithValue(server.StorageName);
@@ -463,6 +465,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(WriteAnalysisStateSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(insufficientData);
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)message ?? DBNull.Value });

@@ -2290,6 +2290,7 @@ public sealed class DarlingWorker : BackgroundService
 
             await using (var isDue = _postgres!.CreateCommand(PgStatementText.IsDueSql))
             {
+                isDue.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
                 isDue.Parameters.AddWithValue(runtime.ServerId);
                 isDue.Parameters.AddWithValue(PgStatementText.Naive(due));
                 if (await isDue.ExecuteScalarAsync(cancellationToken) is not true)
@@ -2308,6 +2309,7 @@ public sealed class DarlingWorker : BackgroundService
             Array.Fill(stamps, now);
 
             await using var upsert = _postgres!.CreateCommand(PgStatementText.UpsertSql);
+            upsert.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             upsert.Parameters.AddWithValue(Enumerable.Repeat(runtime.ServerId, queryIds.Count).ToArray());
             upsert.Parameters.AddWithValue(queryIds.ToArray());
             upsert.Parameters.AddWithValue(texts.ToArray());
@@ -2783,6 +2785,7 @@ public sealed class DarlingWorker : BackgroundService
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT collector_name, MAX(collection_time) FROM collection_log WHERE server_id = $1 GROUP BY collector_name", connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
