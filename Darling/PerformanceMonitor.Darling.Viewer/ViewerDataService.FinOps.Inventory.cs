@@ -125,6 +125,7 @@ LEFT JOIN grants g ON true";
         var idleCutoff = DateTime.UtcNow.AddDays(-7);
 
         await using var command = _dataSource.CreateCommand(ServerMetricsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cpuCutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(idleCutoff, DateTimeKind.Unspecified) });
@@ -217,6 +218,7 @@ ORDER BY s.is_enabled DESC, server_name";
     public async Task<List<ServerPropertyRow>> GetServerInventoryAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerInventorySql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
 
         var items = new List<ServerPropertyRow>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

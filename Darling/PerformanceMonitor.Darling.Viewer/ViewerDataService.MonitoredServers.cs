@@ -219,6 +219,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         var servers = new List<DarlingServer>();
 
         await using var command = _dataSource.CreateCommand(ManagedServersSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -249,6 +250,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         try
         {
             await using var command = _dataSource.CreateCommand(ConfigSeededSql);
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             var result = await command.ExecuteScalarAsync(cancellationToken);
             return result is true;
         }
@@ -275,6 +277,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         var servers = new List<MonitoredServerRow>();
 
         await using var command = _dataSource.CreateCommand(MonitoredServersSelectSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -293,12 +296,14 @@ ORDER BY COALESCE(s.display_name, c.name)";
         if (IsReadOnly)
         {
             await using var noSecretCommand = _dataSource.CreateCommand(MonitoredServerByIdNoSecretSql);
+            noSecretCommand.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             noSecretCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             await using var noSecretReader = await noSecretCommand.ExecuteReaderAsync(cancellationToken);
             return await noSecretReader.ReadAsync(cancellationToken) ? ReadMonitoredServerRowNoSecret(noSecretReader) : null;
         }
 
         await using var command = _dataSource.CreateCommand(MonitoredServerByIdSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadMonitoredServerRow(reader) : null;
@@ -315,6 +320,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         string host, string? database, bool readOnlyIntent, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(MonitoredServerByAddressSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = host });
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)database ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = readOnlyIntent });
@@ -326,6 +332,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
     public async Task<long> GetMonitoredServerCountAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(MonitoredServersCountSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is null or DBNull ? 0 : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
     }
@@ -340,6 +347,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         ArgumentNullException.ThrowIfNull(row);
 
         await using var command = _dataSource.CreateCommand(MonitoredServerUpsertSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         BindMonitoredServer(command, row);
         await ExecuteWriteAsync(command, cancellationToken);
     }
@@ -354,6 +362,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         ArgumentNullException.ThrowIfNull(row);
 
         await using var command = _dataSource.CreateCommand(MonitoredServerInsertIfAbsentSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         BindMonitoredServer(command, row);
         return await ExecuteWriteAsync(command, cancellationToken) > 0;
     }
@@ -362,6 +371,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
     public async Task DeleteMonitoredServerAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(MonitoredServerDeleteSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await ExecuteWriteAsync(command, cancellationToken);
     }
@@ -370,6 +380,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
     public async Task SetMonitoredServerEnabledAsync(int serverId, bool enabled, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(MonitoredServerSetEnabledSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });
         await ExecuteWriteAsync(command, cancellationToken);
@@ -379,6 +390,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
     public async Task SetMonitoredServerExcludedDatabasesAsync(int serverId, IEnumerable<string> excludedDatabases, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(MonitoredServerSetExcludedDatabasesSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         AddTextArray(command, excludedDatabases);
         await ExecuteWriteAsync(command, cancellationToken);

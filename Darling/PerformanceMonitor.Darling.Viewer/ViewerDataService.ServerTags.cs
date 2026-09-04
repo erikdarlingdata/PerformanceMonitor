@@ -104,6 +104,7 @@ public sealed partial class ViewerDataService
     {
         var tags = new List<DarlingTag>();
         await using var command = _dataSource.CreateCommand(ServerTagsSelectSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -123,6 +124,7 @@ public sealed partial class ViewerDataService
     {
         var assignments = new List<DarlingTagAssignment>();
         await using var command = _dataSource.CreateCommand(ServerTagMapSelectSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -138,6 +140,7 @@ public sealed partial class ViewerDataService
         int id;
         await using (var command = _dataSource.CreateCommand(ServerTagInsertSql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });
             command.Parameters.Add(parentId is int parent
                 ? new NpgsqlParameter<int> { TypedValue = parent }
@@ -164,6 +167,7 @@ public sealed partial class ViewerDataService
     public async Task RenameServerTagAsync(int tagId, string name, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerTagRenameSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });
         await ExecuteWriteAsync(command, cancellationToken);
@@ -175,6 +179,7 @@ public sealed partial class ViewerDataService
     public async Task SetServerTagColorAsync(int tagId, string? colour, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerTagSetColourSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
         command.Parameters.Add(colour is null
             ? new NpgsqlParameter { Value = System.DBNull.Value }
@@ -187,6 +192,7 @@ public sealed partial class ViewerDataService
     public async Task ReparentServerTagAsync(int tagId, int? newParentId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerTagReparentSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
         command.Parameters.Add(newParentId is int parent
             ? new NpgsqlParameter<int> { TypedValue = parent }
@@ -198,6 +204,7 @@ public sealed partial class ViewerDataService
     public async Task<bool> ServerTagHasChildrenAsync(int tagId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerTagHasChildrenSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
         return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
@@ -206,6 +213,7 @@ public sealed partial class ViewerDataService
     public async Task DeleteServerTagAsync(int tagId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerTagDeleteSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
         await ExecuteWriteAsync(command, cancellationToken);
     }
@@ -214,6 +222,7 @@ public sealed partial class ViewerDataService
     public async Task AssignServerTagAsync(IReadOnlyList<int> serverIds, int tagId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerTagAssignSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = System.Linq.Enumerable.ToArray(serverIds) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
         await ExecuteWriteAsync(command, cancellationToken);
@@ -223,6 +232,7 @@ public sealed partial class ViewerDataService
     public async Task UnassignServerTagAsync(IReadOnlyList<int> serverIds, int tagId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerTagUnassignSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = System.Linq.Enumerable.ToArray(serverIds) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
         await ExecuteWriteAsync(command, cancellationToken);
@@ -232,6 +242,7 @@ public sealed partial class ViewerDataService
     public async Task ClearServerTagsAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerTagClearForServerSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await ExecuteWriteAsync(command, cancellationToken);
     }

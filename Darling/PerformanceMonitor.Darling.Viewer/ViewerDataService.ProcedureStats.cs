@@ -142,6 +142,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerProcedureStatsRow>();
 
         await using var command = _dataSource.CreateCommand(TopProceduresSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -298,6 +299,7 @@ public sealed partial class ViewerDataService
         var items = new List<ProcedureStatsComparisonItem>();
 
         await using var command = _dataSource.CreateCommand(ProcedureStatsComparisonSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

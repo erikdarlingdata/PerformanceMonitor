@@ -159,6 +159,7 @@ public sealed partial class ViewerDataService
         var result = new List<PlanCacheTrendPoint>();
 
         await using var command = _dataSource.CreateCommand(PlanCacheTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -179,6 +180,7 @@ public sealed partial class ViewerDataService
         var result = new List<PlanCacheSnapshotRow>();
 
         await using var command = _dataSource.CreateCommand(PlanCacheSnapshotSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -206,6 +208,7 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(PlanCacheSummarySql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))

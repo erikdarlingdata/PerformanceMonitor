@@ -243,6 +243,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerBlockedProcessRow>();
 
         await using var command = _dataSource.CreateCommand(BlockedProcessReportsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -303,6 +304,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerBlockedProcessRow>();
 
         await using var command = _dataSource.CreateCommand(DmvBlockingSnapshotsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -358,6 +360,7 @@ public sealed partial class ViewerDataService
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using (var command = connection.CreateCommand())
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.CommandText = BlockingPairRowsSql;
             AddBlockingParameters(command, serverId, startUtc, endUtc);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -369,8 +372,18 @@ public sealed partial class ViewerDataService
         // blocked-process-report XE captured nothing (threshold unset / AWS RDS). Same connection.
         /* #2443: the viewer passes its own window token — this read serves a person waiting at a
            grid, not an analysis pass, so there is no budget or service stop for it to abandon under. */
+        /* A FACTORY that stamps the deadline, not the bare `connection.CreateCommand` method group
+           (#2874). This command is constructed inside PgBlockingPairRowQuery, so a deadline set here
+           is the only one it can get - and a method-group hand-off is invisible to both of #2874's
+           census regexes, which is how this site survived the sweep of the other 192. */
         await PgBlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-            connection.CreateCommand, rows, serverId, startUtc, endUtc, cancellationToken);
+            () =>
+            {
+                var command = connection.CreateCommand();
+                command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+                return command;
+            },
+            rows, serverId, startUtc, endUtc, cancellationToken);
 
         return rows;
     }

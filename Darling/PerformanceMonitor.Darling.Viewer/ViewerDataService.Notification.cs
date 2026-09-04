@@ -102,11 +102,13 @@ ON CONFLICT (id) DO UPDATE SET
         if (IsReadOnly)
         {
             await using var noSecretCommand = _dataSource.CreateCommand(NotificationSelectNoSecretSql);
+            noSecretCommand.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             await using var noSecretReader = await noSecretCommand.ExecuteReaderAsync(cancellationToken);
             return await noSecretReader.ReadAsync(cancellationToken) ? ReadNotificationRowNoSecret(noSecretReader) : null;
         }
 
         await using var command = _dataSource.CreateCommand(NotificationSelectSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadNotificationRow(reader) : null;
     }
@@ -118,6 +120,7 @@ ON CONFLICT (id) DO UPDATE SET
         ArgumentNullException.ThrowIfNull(row);
 
         await using var command = _dataSource.CreateCommand(NotificationUpsertSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.SmtpHost });            // $1
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.SmtpPort });               // $2
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.SmtpUseSsl });            // $3
