@@ -76,7 +76,7 @@ public sealed class StatementSplitTimingTests
 
     /// <summary>
     /// #2312: the separate plan-XML and text fetches run INSIDE the driver's <c>sql:</c> stopwatch but are
-    /// their own queries against the Query Store catalogs — on ayr-01 a 0-row closed-only cycle still cost
+    /// their own queries against the Query Store catalogs — on omega-01 a 0-row closed-only cycle still cost
     /// 298s and the blended number could not say where. They must come out of drain exactly like the
     /// watermark phase, or drain silently absorbs the one cost this investigation needs isolated.
     /// </summary>
