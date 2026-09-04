@@ -102,10 +102,19 @@ SELECT TOP (60)
        DATEADD (safely inside int range for realistic uptimes, ~68 years) plus a MILLISECOND-scale DATEADD
        for the 0-999 remainder: same result as the single-step version (verified bit-identical against a
        live SQL Server across the full delta range, including values past the int boundary), because no
-       intermediate value ever leaves int range. */
+       intermediate value ever leaves int range.
+
+       SYSUTCDATETIME(), not SYSDATETIME(): this value is STORED, and every naive timestamp in the store
+       is UTC. The local-time version put sample_time one UTC offset behind the collection_time written
+       by the very same run -- measured at exactly 4h on 42 of 42 us-east-2 servers, whose collectors
+       were reporting SUCCESS the whole time, so nothing surfaced it. It also disagreed with this
+       collector's OWN Azure arm, which takes sys.dm_db_resource_stats.end_time and is already UTC: the
+       same column arrived in two different frames depending on the target. Nothing downstream can
+       recover the frame from the value, because the offset is the deployment's, not the row's, and it
+       moves with DST. */
     sample_time = DATEADD(
         MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),
-        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSDATETIME())),
+        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSUTCDATETIME())),
     sqlserver_cpu_utilization = x.process_utilization,
     other_process_cpu_utilization =
         CASE

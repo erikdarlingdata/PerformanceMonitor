@@ -118,6 +118,13 @@ SELECT
         (
             CASE
                 WHEN des.status = N'sleeping'
+                /* SYSDATETIME(), deliberately LOCAL and not SYSUTCDATETIME(): des.last_request_end_time
+                   is itself the instance's local wall clock, so both sides share a frame and the
+                   comparison is correct. Switching this to UTC would shift the 30-minute threshold by the
+                   deployment's UTC offset -- four hours in us-east-2 -- and silently reclassify idle
+                   sessions. Nothing here is STORED; only the boolean it produces is. Contrast
+                   CpuUtilizationCollector and MemoryPressureEventsCollector, where SYSDATETIME() was the
+                   base of a stored sample_time and was wrong for exactly the reason this one is right. */
                 AND des.last_request_end_time < DATEADD(MINUTE, -30, SYSDATETIME())
                 AND des.is_user_process = 1
                 THEN 1
