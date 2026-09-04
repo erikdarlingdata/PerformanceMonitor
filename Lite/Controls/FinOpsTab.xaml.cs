@@ -261,13 +261,17 @@ public partial class FinOpsTab : UserControl
     {
         if (_dataService == null || _credentialResolver == null) return;
 
-        var gen = _loads.Claim(nameof(LoadRecommendationsAsync));
-
         try
         {
             var selectedServer = ServerSelector.SelectedItem as Models.ServerConnection;
             var connectionString = selectedServer == null ? null : _credentialResolver.GetConnectionString(selectedServer);
             if (string.IsNullOrEmpty(connectionString)) return;
+
+            /* Claimed here and not at the top of the method: the return above paints nothing, so a claim
+               above it would supersede an in-flight load and then leave without replacing its paint —
+               switching from a credentialed server to one with no resolvable credentials would strand the
+               grid on the first server's answer. Caught in review on this change. */
+            var gen = _loads.Claim(nameof(LoadRecommendationsAsync));
 
             var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
             var data = await Task.Run(() => _dataService.GetRecommendationsAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));

@@ -471,6 +471,53 @@ public sealed class ScopedLoadOrderingTests
         }
     }
 
+    /// <summary>
+    /// No site claims a generation above a return that paints nothing.
+    ///
+    /// <para>A claim is a promise to write the surface. One made above an early return that leaves without
+    /// painting supersedes whatever load was in flight and then replaces nothing, which strands the surface
+    /// on the older answer — the silent loss this whole mechanism exists to avoid, reached from the other
+    /// direction. <c>LoadRecommendationsAsync</c> had exactly that: its claim sat above
+    /// <c>if (string.IsNullOrEmpty(connectionString)) return;</c>, so switching from a credentialed server
+    /// to one with no resolvable credentials left the grid on the first server's recommendations forever.
+    /// Found in review on this change.</para>
+    ///
+    /// <para>A return that DOES paint is fine and several sites have one — the empty-result clears, the
+    /// comparison-off branches, the inventory cache hit — so the rule is about the paint, not the
+    /// return.</para>
+    /// </summary>
+    [Fact]
+    public void NoSiteClaims_AboveAReturnThatPaintsNothing()
+    {
+        AssertEverySiteIsStillHere();
+
+        var withAReturn = 0;
+
+        foreach (var site in s_sites)
+        {
+            var body = LoadBody(site);
+            var claim = Matches(body, Claim(site)).Single();
+            var firstAwait = FirstAwait(site, body);
+            var paints = Paints(site, body);
+
+            foreach (var ret in Regex.Matches(body[claim..firstAwait], @"\breturn\s*;")
+                         .Select(x => x.Index + claim))
+            {
+                withAReturn++;
+
+                Assert.True(
+                    paints.Any(p => p > claim && p < ret),
+                    $"{site.File}:{site.Method} claims a generation above a return that paints nothing (body "
+                    + $"line {Line(body, ret)}), so it can supersede an in-flight load and then leave the "
+                    + "surface on that load's answer — claim below the return, or paint before it");
+            }
+        }
+
+        /* Positive control: if no site had a return between its claim and its read, the loop body would
+           never execute and this fact would hold vacuously. Several do, and they are the ones that paint. */
+        Assert.True(withAReturn >= 1, "no site returns between its claim and its read, so this holds vacuously");
+    }
+
     // ── Site mechanics ────────────────────────────────────────────────────────────────────────
 
     private static void AssertEverySiteIsStillHere() =>
@@ -516,7 +563,8 @@ public sealed class ScopedLoadOrderingTests
 
         return Regex.Matches(
                 body,
-                PaintTarget + @"\s*=(?!=)|\.\s*UpdateData\s*\(|\bApplyViewModel\s*\(")
+                PaintTarget + @"\s*=(?!=)|\.\s*UpdateData\s*\(|\bApplyViewModel\s*\("
+                + @"|\bSet\w*ComparisonMode\s*\(")
             .Where(m => !chrome.Any(c => m.Value.Replace(" ", "", StringComparison.Ordinal)
                 .StartsWith(c, StringComparison.Ordinal)))
             .Select(m => m.Index)
