@@ -204,6 +204,35 @@ public static class QueryStoreSliceRepair
     /// NULL yields NULL rather than true. Every key comparison is <c>IS NOT DISTINCT FROM</c>, so a legacy row
     /// with NULLs is matched instead of silently skipped, which would leave the very oldest rows (the ones
     /// most likely to be past raw's edge) uncollapsed while reporting success.</para>
+    ///
+    /// <para><b>The wide payload columns ride through this aggregate deliberately, and that is safe HERE
+    /// though it was not in Lite (#2876, answering the sibling question raised by #2771).</b> Lite's
+    /// equivalent collapse exhausted its memory budget pushing <c>query_plan_text</c> through a per-group
+    /// aggregate — at 31,426 split intervals it raised a hard <c>Out of Memory Error</c> — and was rewritten
+    /// to collapse in place. This shape was measured against PostgreSQL 18 rather than assumed to differ, at
+    /// the same 31,426 groups and again at 51,426, carrying 3,033 MB of decompressed plan text:</para>
+    ///
+    /// <list type="number">
+    /// <item><b>PostgreSQL spills where DuckDB dies.</b> The planner picks <c>GroupAggregate</c> over an
+    /// external merge sort — 4.3 s, 125 MB of temp files, negligible resident memory. Forced onto the
+    /// <c>HashAggregate</c> that is Lite's failure shape, it still bounded itself (45 batches, 1.1 GB peak,
+    /// spilling the rest) and completed. Neither path can raise the error Lite raised.</item>
+    /// <item><b>TOAST keeps the wide values out of the sort payload.</b> 3,033 MB of logical plan text
+    /// spilled as 125 MB, because the sorted tuples carry out-of-line pointers and <c>min()</c> detoasts
+    /// lazily. DuckDB materialises the column into the aggregate's own blocks, which is why the same row
+    /// count costs it two orders of magnitude more.</item>
+    /// <item><b>The full projection is what CHOOSES the safe plan.</b> Roughly fifty transition states per
+    /// group make <c>GroupAggregate</c> win on cost; a cut-down three-column version of this same query
+    /// plans as an unspilled <c>HashAggregate</c> at 1.6 GB. So the breadth the issue framed as the hazard
+    /// is load-bearing — narrowing this projection toward Lite's shape would move it TOWARD the risk, not
+    /// away from it.</item>
+    /// </list>
+    ///
+    /// <para>Independently, the repair has nothing left to do: the shipped <see cref="SurveySql"/> over the
+    /// whole production hypertable returns zero split groups, because #1907 stopped the collector emitting
+    /// them and the historical ones have aged past raw's 4-day edge. The bounded slicing plus
+    /// <see cref="SliceStatementTimeoutSeconds"/> is therefore the permanent answer here, not a mitigation
+    /// awaiting the in-place rewrite.</para>
     /// </summary>
     public static string BuildCollapseSql()
     {
