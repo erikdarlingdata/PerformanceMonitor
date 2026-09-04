@@ -249,14 +249,14 @@ public static class StoreConnectionSelfTest
         {
             await using (connection)
             {
-                using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection))
+                using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection) { CommandTimeout = (int)NetworkProbeTimeout.TotalSeconds })
                 {
                     await setPath.ExecuteNonQueryAsync(cancellationToken);
                 }
 
                 int storeVersion;
                 using (var readVersion = new NpgsqlCommand(
-                    "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection))
+                    "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection) { CommandTimeout = (int)NetworkProbeTimeout.TotalSeconds })
                 {
                     storeVersion = Convert.ToInt32(
                         await readVersion.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
@@ -311,7 +311,7 @@ public static class StoreConnectionSelfTest
             using var probe = new NpgsqlCommand(
                 @"SELECT (to_regclass('collect.collection_log') IS NOT NULL OR to_regclass('public.collection_log') IS NOT NULL),
                          (to_regclass('collect.darling_schema_version') IS NOT NULL OR to_regclass('public.darling_schema_version') IS NOT NULL)",
-                connection);
+                connection) { CommandTimeout = (int)NetworkProbeTimeout.TotalSeconds };
             using var reader = await probe.ExecuteReaderAsync(cancellationToken);
             await reader.ReadAsync(cancellationToken);
             var storeShapeFound = reader.GetBoolean(0);

@@ -171,6 +171,7 @@ public static class DarlingPgWriteStatsReader
         ArgumentNullException.ThrowIfNull(postgres);
 
         await using var command = postgres.CreateCommand(PgWriteStatsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified) at the BIND, same convention as every other PostgreSQL read here: Npgsql
            does not reject Kind=Utc, it infers timestamptz, and PostgreSQL then resolves the comparison

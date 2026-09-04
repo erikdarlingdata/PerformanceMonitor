@@ -116,6 +116,7 @@ public static class DarlingPgKernelStatsReader
 
         var rows = new List<PgKernelStatRow>();
         await using var command = postgres.CreateCommand(PgKernelStatsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified) at the BIND — see any sibling reader: Npgsql infers timestamptz from
            Kind=Utc and PostgreSQL resolves the comparison against these NAIVE columns at the store

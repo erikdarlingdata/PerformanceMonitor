@@ -163,6 +163,7 @@ public static class DarlingPgDatabaseReader
     {
         var rows = new List<PgDatabaseRow>();
         await using var command = postgres.CreateCommand(PgDatabaseSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then resolves the comparison against these naive
@@ -232,6 +233,7 @@ public static class DarlingPgDatabaseReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(DatabaseStatsCoverageSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));

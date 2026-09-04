@@ -375,6 +375,7 @@ public static class DarlingPgBlockingReader
     {
         var rows = new List<PgBlockingChainRow>();
         await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified), not the bare value. Npgsql does not reject Kind=Utc — it infers
            timestamptz, and PostgreSQL then zone-shifts the window against the store's NAIVE timestamp
@@ -611,6 +612,7 @@ public static class DarlingPgBlockingReader
     {
         var rows = new List<PgBlockingCycleRow>();
         await using var command = postgres.CreateCommand(PgBlockingCyclesSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified), not the bare value. Npgsql does not reject Kind=Utc — it infers
            timestamptz, and PostgreSQL then zone-shifts the window against the store's NAIVE timestamp
@@ -678,6 +680,7 @@ public static class DarlingPgBlockingReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(PgBlockingCaptureCountsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified), not the bare value. Npgsql does not reject Kind=Utc — it infers
            timestamptz, and PostgreSQL then zone-shifts the window against the store's NAIVE timestamp
