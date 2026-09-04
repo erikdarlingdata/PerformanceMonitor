@@ -308,21 +308,35 @@ public partial class FinOpsTab : UserControl
             NoUtilizationMessage.Visibility = data == null ? Visibility.Visible : Visibility.Collapsed;
             SummaryContent.Visibility = data == null ? Visibility.Collapsed : Visibility.Visible;
 
+            /* Read into locals and paint all four together at the end, rather than assigning each ItemsSource
+               straight from its own await. An assignment that IS the await statement paints the moment that
+               read completes, so a check placed after the fourth one guarded nothing: three of the four could
+               already have landed for a load a server switch had superseded. Painting together also removes
+               the duplicated null-clearing branch — no data means four nulls, which is what the locals already hold. */
+            System.Collections.IEnumerable? topTotal = null;
+            System.Collections.IEnumerable? topAvg = null;
+            System.Collections.IEnumerable? dbSizeSummary = null;
+            System.Collections.IEnumerable? provisioningTrend = null;
+
             if (data != null)
             {
-                TopTotalGrid.ItemsSource = await Task.Run(() => _dataService.GetTopResourceConsumersByTotalAsync(serverId));
-                TopAvgGrid.ItemsSource = await Task.Run(() => _dataService.GetTopResourceConsumersByAvgAsync(serverId));
-                DbSizeChart.ItemsSource = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId));
-                ProvisioningTrendGrid.ItemsSource = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId));
+                topTotal = await Task.Run(() => _dataService.GetTopResourceConsumersByTotalAsync(serverId));
+                if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
+
+                topAvg = await Task.Run(() => _dataService.GetTopResourceConsumersByAvgAsync(serverId));
+                if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
+
+                dbSizeSummary = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId));
+                if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
+
+                provisioningTrend = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
             }
-            else
-            {
-                TopTotalGrid.ItemsSource = null;
-                TopAvgGrid.ItemsSource = null;
-                DbSizeChart.ItemsSource = null;
-                ProvisioningTrendGrid.ItemsSource = null;
-            }
+
+            TopTotalGrid.ItemsSource = topTotal;
+            TopAvgGrid.ItemsSource = topAvg;
+            DbSizeChart.ItemsSource = dbSizeSummary;
+            ProvisioningTrendGrid.ItemsSource = provisioningTrend;
         }
         catch (Exception ex)
         {

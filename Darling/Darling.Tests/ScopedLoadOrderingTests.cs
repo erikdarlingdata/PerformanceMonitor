@@ -286,8 +286,16 @@ public sealed class ScopedLoadOrderingTests
     }
 
     /// <summary>
-    /// Every paint below the read sits below a supersession check. Offsets rather than counts, because the
-    /// mutation this exists for MOVES a check below a paint, and a move leaves every count invariant.
+    /// Every paint below the read is protected by a supersession check — one that sits above it with NO
+    /// <c>await</c> in between. Offsets rather than counts, because the mutation this exists for MOVES a
+    /// check below a paint and a move leaves every count invariant.
+    ///
+    /// <para><b>The await clause is the half that was missing</b>, and review on this change caught it.
+    /// "Some check above it" is satisfied by four paints that each follow their own <c>await</c> and share
+    /// one check made after the FIRST of them — which is exactly what <c>LoadUtilizationAsync</c> looked
+    /// like, four <c>ItemsSource = await ...</c> assignments where the assignment IS the await statement, so
+    /// three of the four painted before the only check ran. A paint with an <c>await</c> between it and its
+    /// nearest check is a paint nothing checked.</para>
     /// </summary>
     [Fact]
     public void EveryPaintAfterTheRead_SitsBelowASupersessionCheck()
@@ -321,8 +329,7 @@ public sealed class ScopedLoadOrderingTests
                 $"no paint in {site.File}:{site.Method} sits after its read, so this pin has nothing to say "
                 + "about it and the site does not belong in the table");
 
-            var unguarded = afterRead
-                .Where(p => !checks.Any(c => c < p))
+            var unguarded = Unguarded(body, checks, afterRead)
                 .Select(p => Line(body, p))
                 .ToList();
 
@@ -362,13 +369,13 @@ public sealed class ScopedLoadOrderingTests
                 painting++;
                 var checks = Checks(site, catchBlock).Select(m => m.Index).ToList();
 
-                var unguarded = paints.Where(p => !checks.Any(c => c < p)).ToList();
+                var unguarded = Unguarded(catchBlock, checks, paints);
 
                 Assert.True(
                     unguarded.Count == 0,
                     $"{site.File}:{site.Method} paints on an error path whose supersession check is on the "
                     + "other side of the catch, so a superseded load's failure lands on the newest load's "
-                    + "answer");
+                    + $"answer — at catch-block line(s) {string.Join(", ", unguarded.Select(p => Line(catchBlock, p)))}");
             }
         }
 
@@ -483,6 +490,17 @@ public sealed class ScopedLoadOrderingTests
             yield return CSharpSourceWalker.BraceBalanced(body, m.Index + m.Length - 1);
         }
     }
+
+    /// <summary>
+    /// The paints no check protects: a paint is protected when SOME check sits above it with no
+    /// <c>await</c> between the two. The await clause is what makes this stronger than an ordering test —
+    /// see <see cref="EveryPaintAfterTheRead_SitsBelowASupersessionCheck"/> for the shape it exists to
+    /// catch.
+    /// </summary>
+    private static List<int> Unguarded(string body, List<int> checks, IEnumerable<int> paints) =>
+        paints
+            .Where(p => !checks.Any(c => c < p && !Regex.IsMatch(body[c..p], @"\bawait\b")))
+            .ToList();
 
     private static int Line(string body, int index) => body[..index].Count(c => c == '\n') + 1;
 
