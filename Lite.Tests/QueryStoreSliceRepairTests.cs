@@ -499,10 +499,18 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
         /* Not one silent acquisition left. This is the assertion that goes red on the pre-#2465 file. */
         Assert.Empty(Regex.Matches(source, @"_duckDb\.AcquireReadLock\(\)"));
 
-        /* FOUR forward it: the marker read, the survey, the archive rewrite-to-temp, and #2748's attempt
-           COUNT. Each abandons into a state the next launch reproduces for free, so there is nothing to
-           protect by waiting — the attempt count is a question, and a question dropped is just re-asked. */
-        Assert.Equal(4, Regex.Matches(source, @"_duckDb\.AcquireReadLock\(cancellationToken\)").Count);
+        /* FIVE forward it: the marker read, #2748's attempt COUNT, the archive rewrite-to-temp, and — since
+           #2761 — the survey's TWO phases rather than one. Each abandons into a state the next launch
+           reproduces for free, so there is nothing to protect by waiting; the attempt count is a question,
+           and a question dropped is just re-asked.
+
+           The survey being two is the #2761 fix showing up in this count. It used to take one lock and hold
+           it across the hot-table GROUP BY AND a read_parquet of every archive file, and since a collection
+           write waits on the write lock behind any reader, that single hold stalled all collection for the
+           whole survey. It now locks per phase — once for the hot table, once per archive file — so a
+           waiting writer gets through at every boundary. If this number drops back to four, check that the
+           archive loop did not get folded back inside one outer acquisition. */
+        Assert.Equal(5, Regex.Matches(source, @"_duckDb\.AcquireReadLock\(cancellationToken\)").Count);
 
         /* THREE decline it, and all three are marker writes: the two completion markers, plus #2748's attempt
            marker. Same reason in each case — they record something that abandoning does not undo.
