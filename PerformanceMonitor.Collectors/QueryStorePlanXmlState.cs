@@ -57,7 +57,7 @@ public static class QueryStorePlanXmlState
     /// issues detected a "runaway" store (one whose plan population churns faster than any pass can drain)
     /// by watching for 24 CONSECUTIVE passes clamped at a high ceiling (2048), then dropping to a low one
     /// (512) with hysteresis to survive the estimator's oscillation. Verified against the 2026-08-29 peak
-    /// window on AYR — the pathological store the detector was built for: the log showed ZERO "candidate cap
+    /// window on OMEGA — the pathological store the detector was built for: the log showed ZERO "candidate cap
     /// clamped" lines and ZERO RUNAWAY/Holding lines during a stretch where plan_fetch still ran 38–73s
     /// across twelve straight passes. The learned average happened to keep "wanted" just under the 2048
     /// ceiling, so no pass ever clamped, the streak never advanced, and the throttle that existed
