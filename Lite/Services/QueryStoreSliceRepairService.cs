@@ -425,7 +425,19 @@ SELECT
                     string.Join(" | ", result.Failures));
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            /* #2761 made this REACHABLE. Until the call site handed over a real token this could not fire, so
+               the un-awaited Task.Run that starts the repair had nothing to swallow. Now that shutdown can
+               abandon a survey mid-flight, an uncaught OperationCanceledException would become an unobserved
+               task exception — a repair that stopped, with nothing anywhere saying so. Logged at Information
+               rather than Error because being abandoned on shutdown is this service working as designed: the
+               marker is withheld and the next launch redoes the work. */
+            _logger?.LogInformation(
+                "#1912 Query Store repair abandoned before completing (shutdown); the completion marker was " +
+                "withheld, so the next launch retries it");
+        }
+        catch (Exception ex)
         {
             _logger?.LogError(ex, "#1912 Query Store repair could not run; it will be retried on the next start");
         }
@@ -442,17 +454,31 @@ SELECT
     /// </summary>
     public async Task<Survey> SurveyAsync(CancellationToken cancellationToken = default)
     {
-        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(cancellationToken);
-
-        var hotColumns = await ColumnsOfTableAsync(connection, Table, cancellationToken);
-        var hotKey = KeyColumnsFor(hotColumns);
-
         long groups = 0;
         long rows = 0;
-        using (var command = connection.CreateCommand())
+
+        /* #2761 PHASE 1 of N, not one lock around everything. The read lock is what a collection write waits
+           behind — RemoteCollectorService takes the WRITE lock for every write, and ReaderWriterLockSlim
+           blocks a writer while any reader holds it — so the duration of a single hold is the duration of a
+           fleet-wide collection stall. This survey used to take ONE lock and keep it across the hot GROUP BY
+           and a read_parquet of every monthly archive file; on the store that motivated #2748 (31,426 split
+           intervals plus multiple archives) that is minutes during which no data arrives anywhere, which is
+           indistinguishable from the app having failed to start.
+
+           Scoping the lock per phase lets a waiting writer through at every boundary. The idiom is the one
+           RewriteArchiveFileAsync already uses for exactly this reason: the lock and the connection are
+           acquired together and released together, because a connection outliving its lock is a connection
+           open across a maintenance operation that reorganizes the file, which is where "Reached the end of
+           the file" comes from. */
+        using (_duckDb.AcquireReadLock(cancellationToken))
         {
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+
+            var hotColumns = await ColumnsOfTableAsync(connection, Table, cancellationToken);
+            var hotKey = KeyColumnsFor(hotColumns);
+
+            using var command = connection.CreateCommand();
             command.CommandText = $@"
 SELECT
     COUNT(*) AS groups,
@@ -473,10 +499,18 @@ FROM (SELECT COUNT(*) AS c FROM {Table} GROUP BY {string.Join(", ", hotKey)} HAV
             /* Per-file isolation in the SURVEY too, not only in the rewrite. An archive file that cannot even
                be inspected — a shape the collapse cannot express, a truncated file — must not stop the others
                being surveyed and repaired. It is reported and skipped, and its original is untouched by
-               definition because nothing was written. */
+               definition because nothing was written.
+
+               #2761: and per-file LOCKING too. Each file is an independent read, so holding one lock across
+               all of them buys nothing and costs a writer the whole sweep rather than one file. */
             try
             {
-                archive.Add(await SurveyArchiveFileAsync(connection, file, cancellationToken));
+                using (_duckDb.AcquireReadLock(cancellationToken))
+                {
+                    using var connection = _duckDb.CreateConnection();
+                    await connection.OpenAsync(cancellationToken);
+                    archive.Add(await SurveyArchiveFileAsync(connection, file, cancellationToken));
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -190,7 +190,20 @@ public partial class MainWindow : Window
                it holding wrong numbers permanently (v39 / #1832 precedent). */
             var sliceRepair = new QueryStoreSliceRepairService(
                 _databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<QueryStoreSliceRepairService>());
-            _ = Task.Run(() => sliceRepair.RepairOnStartupAsync());
+
+            /* #2761: hand the repair the app-lifetime token instead of leaving it on CancellationToken.None.
+               That default is not merely untidy — DuckDbInitializer.AcquireReadLock BRANCHES on it, taking the
+               uninterruptible EnterReadLock() path for a token that cannot be cancelled and the pollable,
+               abandonable one otherwise. So every carefully-forwarded token inside this service stopped at the
+               door, and a survey queued behind a long archival could not be interrupted by anything: not a
+               shutdown, not the operator closing the window. The service is already written to be abandoned
+               at every one of those points (#2465) — the marker is withheld and the next launch redoes the
+               work — so what was missing was only a token that can actually fire.
+
+               The CTS is created here rather than at its old site a few lines below purely so this call can
+               have it; it is still the same single app-lifetime source, cancelled once in MainWindow_Closing. */
+            _backgroundCts = new CancellationTokenSource();
+            _ = Task.Run(() => sliceRepair.RepairOnStartupAsync(_backgroundCts.Token));
 
             // Routes high-severity analysis findings to email/Slack/Teams; the background
             // service runs scheduled analysis and hands findings to it.
@@ -211,7 +224,8 @@ public partial class MainWindow : Window
             // SynchronizationContext, so StartAsync and every subsequent continuation stay off-UI.
             // Safe: the pipeline only touches DuckDB + the email/webhook notification service; the
             // UI reads data by polling DuckDB on its own timers, fully decoupled.
-            _backgroundCts = new CancellationTokenSource();
+            /* #2761 moved the CTS construction above the slice-repair launch so that call can take the same
+               app-lifetime token; this stays the only place the background service is started with it. */
             _ = Task.Run(() => _backgroundService.StartAsync(_backgroundCts.Token));
 
             // Initialize system tray
