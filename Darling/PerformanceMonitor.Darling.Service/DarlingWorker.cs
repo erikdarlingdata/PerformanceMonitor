@@ -341,6 +341,13 @@ public sealed class DarlingWorker : BackgroundService
        current sparse per-collector schedule overrides. Both updated on startup and on each reload;
        read by the schedule-resolution path (TryConnectAsync / RunDueCollectorsAsync) and the reload. */
     private long _lastConfigVersion = -1;
+
+    /* #2918: the compose statement_timeout last WRITTEN onto the viewer/mcp roles, not merely observed.
+       Startup provisioning reads the store column itself and applies it, so the baseline is seeded from the
+       first store view and a reload re-asserts only on a real change -- a config_version bump fires on any
+       config_service or schedule write, and ALTER ROLE is a catalog write we should not pay for a knob
+       nobody touched. -1 means "not yet known", which cannot equal any clamped value. */
+    private int _appliedComposeStatementTimeoutSeconds = -1;
     private IReadOnlyList<ScheduleOverride> _scheduleOverrides = Array.Empty<ScheduleOverride>();
 
     /* The service-pause flag (Stage 2): read from config_service.paused on every reload and honored by
@@ -1022,7 +1029,15 @@ public sealed class DarlingWorker : BackgroundService
             try
             {
                 var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
-                await DarlingManagedRoles.EnsureProvisionedAsync(postgres, dataDirectory, _logger, stoppingToken);
+                /* #2918: record what provisioning actually WROTE onto the roles, not what the store holds
+                   afterwards. This runs BEFORE SeedIfEmptyAsync, so on a brand-new store there is no
+                   config_service row to read and the roles get the 15 s default while the seed then inserts
+                   darling.json's value — seeding the reload baseline from the post-seed view would claim a
+                   value the roles never received, and the gate only fires on a difference, so that first-run
+                   mismatch would never be corrected. Left at -1 if provisioning throws, so the first reload
+                   re-asserts rather than trusting a write that did not land. */
+                _appliedComposeStatementTimeoutSeconds =
+                    await DarlingManagedRoles.EnsureProvisionedAsync(postgres, dataDirectory, _logger, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2459,6 +2474,28 @@ public sealed class DarlingWorker : BackgroundService
            Settings toggles round-trip to a live start/stop/rebind with no service restart. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
         _webState.Publish(config.Web.Enabled, config.Web.Port);
+
+        /* #2918: the compose statement_timeout lives on the ROLES, not in a query, so unlike every other
+           knob above it does not go live just by landing in the held config — a reload used to observe the
+           new value and leave the roles on whatever the last service start wrote. Re-assert it here, but
+           ONLY on a real change: a config_version bump fires on any config_service or schedule write, and
+           this is a catalog write. Gated exactly as startup provisioning is (managed + Windows), because
+           that is where these roles are known to exist — a BYO store provisions them out-of-band through
+           tools/provision-roles.sql and names them itself, so ALTER ROLE viewer here would be guessing.
+           The baseline advances only on SUCCESS, so a failed attempt retries on the next reload rather
+           than being recorded as applied. */
+        if (_postgres is not null
+            && DarlingManagedRoles.ShouldReassertComposeStatementTimeout(
+                view.ComposeStatementTimeoutSeconds, _appliedComposeStatementTimeoutSeconds,
+                config.Postgres.Managed, OperatingSystem.IsWindows()))
+        {
+            if (await DarlingManagedRoles.ReassertComposeStatementTimeoutAsync(
+                    _postgres, view.ComposeStatementTimeoutSeconds, _logger, cancellationToken))
+            {
+                _appliedComposeStatementTimeoutSeconds = view.ComposeStatementTimeoutSeconds;
+            }
+        }
+
         /* #2298: re-publish the server set on every reload, so a server added through add_servers or the
            Viewer reaches the MCP host's plan-fetch resolver on its next resolution — no MCP restart. */
         _registryState.Publish(view.EnabledServers);

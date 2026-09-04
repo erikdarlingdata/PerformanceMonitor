@@ -179,7 +179,17 @@ public static class DarlingManagedRoles
     /// calls this). Throws on a hard failure; the caller degrades (the Viewer/MCP cannot connect as their
     /// roles until a later start succeeds) but keeps collecting.
     /// </summary>
-    public static async Task EnsureProvisionedAsync(
+    /// <returns>
+    /// The compose <c>statement_timeout</c> in seconds that was actually WRITTEN onto the roles — which is
+    /// not necessarily what the store holds a moment later. This runs BEFORE
+    /// <c>StoreConfigProvider.SeedIfEmptyAsync</c>, so on a brand-new store there is no <c>config_service</c>
+    /// row to read and the roles get the 15 s default, while the seed then inserts <c>darling.json</c>'s
+    /// value. #2918's reload gate compares against what the roles were given, so it must be seeded from this
+    /// return value and NOT from the post-seed store view — doing the latter would record a value the roles
+    /// never received, and since the gate only fires on a difference, that first-run mismatch would never be
+    /// corrected.
+    /// </returns>
+    public static async Task<int> EnsureProvisionedAsync(
         NpgsqlDataSource dataSource, string dataDirectory, ILogger logger, CancellationToken cancellationToken = default)
     {
         if (dataSource is null)
@@ -218,6 +228,109 @@ public static class DarlingManagedRoles
 
         logger.LogInformation(
             "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + write config.custom_views; mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
+
+        /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
+           caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s'). */
+        return StoreConfigProvider.ClampComposeStatementTimeoutSeconds(composeTimeoutSeconds);
+    }
+
+    /// <summary>
+    /// The <c>statement_timeout</c> backstop on the two composed-query identities, as SQL. The SINGLE
+    /// renderer for those statements — <see cref="BuildProvisioningSql"/> embeds it at startup and
+    /// <see cref="ReassertComposeStatementTimeoutAsync"/> runs it alone on a control-plane reload (#2918),
+    /// so the two paths cannot disagree about the ceiling.
+    ///
+    /// <para>Clamped rather than trusted, because this is public and both callers reach it with an
+    /// operator-supplied number: 0 or negative would remove the backstop entirely, which is the one outcome
+    /// the whole design leans on not happening. A LIMIT bounds OUTPUT; a group-by scans and sorts before it,
+    /// so something has to bound WORK.</para>
+    ///
+    /// <para>The clamp is <see cref="StoreConfigProvider.ClampComposeStatementTimeoutSeconds"/>, not a local
+    /// copy of the formula. Re-deriving it here would be the same "two things must agree or the ceiling
+    /// silently disagrees" hazard this single-renderer design exists to remove — applied to the SQL text but
+    /// not to the bounds feeding it, which is not a coherent place to stop.</para>
+    /// </summary>
+    public static string BuildComposeStatementTimeoutSql(int composeStatementTimeoutSeconds)
+    {
+        const string viewer = DarlingManagedPostgres.ViewerRoleName;
+        const string mcp = DarlingManagedPostgres.McpRoleName;
+        var statementTimeout =
+            $"{StoreConfigProvider.ClampComposeStatementTimeoutSeconds(composeStatementTimeoutSeconds)}s";
+
+        return $@"ALTER ROLE {viewer} SET statement_timeout = '{statementTimeout}';
+ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
+    }
+
+    /// <summary>
+    /// Whether a control-plane reload should re-assert the compose <c>statement_timeout</c> onto the roles
+    /// (#2918). Pure, and deliberately separated from the reload that calls it: the decision is the whole
+    /// design (when to pay a catalog write) and it is untestable inside a hosted worker loop.
+    /// </summary>
+    /// <param name="storeSeconds">The value the store view just reported.</param>
+    /// <param name="appliedSeconds">
+    /// The value last successfully WRITTEN onto the roles, or a negative sentinel for "not yet known".
+    /// Compared unclamped on purpose — both sides come from the same clamped read, so a difference here is a
+    /// real operator change rather than a rounding artifact.
+    /// </param>
+    /// <param name="managedStore">
+    /// Managed mode only. A BYO store provisions these roles out-of-band via
+    /// <c>tools/provision-roles.sql</c> and names them itself, so <c>ALTER ROLE viewer</c> would be guessing
+    /// at an identity we do not own.
+    /// </param>
+    /// <param name="isWindows">
+    /// Mirrors startup provisioning's own gate. Not because the SQL needs Windows — it does not — but
+    /// because provisioning is where these roles get CREATED, so off-Windows they may not exist at all and
+    /// this would fail every reload.
+    /// </param>
+    public static bool ShouldReassertComposeStatementTimeout(
+        int storeSeconds, int appliedSeconds, bool managedStore, bool isWindows) =>
+        managedStore && isWindows && storeSeconds != appliedSeconds;
+
+    /// <summary>
+    /// Re-asserts the compose <c>statement_timeout</c> on the viewer/mcp roles from a control-plane reload
+    /// (#2918), so an operator's change to <c>config_service.compose_statement_timeout_seconds</c> reaches
+    /// the live roles without a service restart — the behaviour every other <c>config_service</c> knob
+    /// already had.
+    ///
+    /// <para><b>Why this is not the whole provisioning batch.</b> That batch also re-asserts all three role
+    /// passwords from the credential files and re-grants every ACL. Running it on each <c>config_version</c>
+    /// bump would do a large amount of unrelated work on a write that touched one integer, so this is the
+    /// two statements and nothing else.</para>
+    ///
+    /// <para><b>A role SET only takes on the NEXT session for that role</b>, which is what makes this cheap
+    /// and safe: it is a catalog write, it cannot disturb a query already running under the old ceiling, and
+    /// an already-connected viewer keeps its old value until it reconnects. Lowering the ceiling therefore
+    /// bounds the NEXT runaway, not the one in flight — killing that is still the operator's job.</para>
+    ///
+    /// <para>Non-throwing: a failure here must never kill a reload that has already applied the rest of the
+    /// store view, the same posture startup provisioning takes (it degrades, collection continues).</para>
+    /// </summary>
+    public static async Task<bool> ReassertComposeStatementTimeoutAsync(
+        NpgsqlDataSource dataSource, int composeStatementTimeoutSeconds, ILogger logger,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        try
+        {
+            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(
+                BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds), connection);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            logger.LogInformation(
+                "Compose statement_timeout re-asserted on the viewer/mcp roles at {Seconds}s — takes effect on each role's next session (an already-connected viewer keeps the old ceiling until it reconnects)",
+                StoreConfigProvider.ClampComposeStatementTimeoutSeconds(composeStatementTimeoutSeconds));
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(
+                "Could not re-assert the compose statement_timeout on the viewer/mcp roles ({Message}) — the live ceiling is whatever the last successful provisioning set, and the next service start will converge it.",
+                ex.Message);
+            return false;
+        }
     }
 
     /// <summary>
@@ -353,12 +466,11 @@ public static class DarlingManagedRoles
         const string collect = PgSchemaGenerator.CollectSchema;
         const string config = PgSchemaGenerator.ConfigSchema;
         const string marker = RoleMarker;
-        /* #2357: was ComposeLimits.StatementTimeout, a bare "15s". Clamped here as well as on the config
-           read, because this method is public and a caller passing 0 would remove the backstop entirely --
-           and the backstop is the whole reason the value exists: a LIMIT bounds output, a group-by scans and
-           sorts before it, so something has to bound WORK. */
-        var statementTimeout =
-            $"{Math.Clamp(composeStatementTimeoutSeconds <= 0 ? 15 : composeStatementTimeoutSeconds, 5, 600)}s";
+        /* #2357: was ComposeLimits.StatementTimeout, a bare "15s". Rendered by the SHARED builder rather
+           than inline, because #2918 made the reload path re-assert the same two statements: two renderers
+           for one pair of ALTER ROLEs is a drift waiting to happen, and the drift would be invisible (both
+           sides run, the roles just disagree about the ceiling depending on which path touched them last). */
+        var composeTimeoutStatements = BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds);
 
         /* The fail-closed viewer column-ACL carve for the secret-bearing config tables (see
            ViewerRestrictedConfigTables). Runs AFTER the blanket config GRANT below, so it strips
@@ -414,8 +526,7 @@ ALTER ROLE {mcp}    LOGIN NOSUPERUSER PASSWORD '{mcpPassword}';
 --     admin (the Settings writer, small config writes) is deliberately NOT bounded. NOT a versioned migration:
 --     a role statement_timeout has no probeable schema footprint, so tying it to StorageVersion would break the
 --     viewer's connect-time version gate.
-ALTER ROLE {viewer} SET statement_timeout = '{statementTimeout}';
-ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';
+{composeTimeoutStatements}
 
 -- 2. Schema usage + SELECT everywhere (ALL TABLES covers tables AND views). collect holds no secrets,
 --    so admin+viewer read all of it. config: admin (the writer, and the Settings window's identity) reads
