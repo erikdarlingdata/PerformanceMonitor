@@ -121,7 +121,7 @@ public class StoreStartupFailureTriageTests
         { "53400", "configuration limit exceeded" },
         { "58030", "I/O error under the store" },
         { "58P01", "undefined file" },
-        /* Deliberately absent from the class-08 allowlist. */
+        /* Deliberately absent from the class 08 allowlist. */
         { "08P01", "protocol violation — a defect that recurs identically" },
         { "08007", "transaction resolution unknown — worth saying out loud" },
         /* Not a state this code knows: default-deny. */

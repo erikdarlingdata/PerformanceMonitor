@@ -1018,7 +1018,14 @@ public sealed class DarlingWorker : BackgroundService
            unit rather than just the open. Re-entering MigrateAsync is safe because the applier commits
            each rung's DDL and its darling_schema_version stamp in ONE transaction: a rung that failed
            part-way left nothing applied and nothing stamped, and rungs at or below the stamp are skipped,
-           so a retry resumes at the rung that failed instead of redoing the ladder. */
+           so a retry resumes at the rung that failed instead of redoing the ladder. That rests on the
+           rungs being transactional, which was measured rather than assumed, because the ladder's
+           expensive ones are not plain DDL: V23's own statement set — create_hypertable with
+           migrate_data => true, ALTER TABLE SET (timescaledb.compress ...), add_compression_policy — run
+           against 200,000 rows on PostgreSQL 17.11 / TimescaleDB 2.29.2 built 139 chunks and a policy job
+           inside the transaction and left, after ROLLBACK, a plain table with every row, no chunks, no
+           job and no reloptions. No rung uses CREATE INDEX CONCURRENTLY or any other statement that
+           cannot be transacted. */
         var retryBudget = System.Diagnostics.Stopwatch.StartNew();
         for (var attempt = 1; ; attempt++)
         {
