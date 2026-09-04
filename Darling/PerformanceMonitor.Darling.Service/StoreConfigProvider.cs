@@ -1185,6 +1185,17 @@ ON CONFLICT (server_id) DO NOTHING", connection);
 
     internal static int ClampConcurrentSweeps(int value) => Math.Clamp(value, MinConcurrentSweeps, MaxConcurrentSweepsLimit);
 
+    /// <summary>The #2862 procedure_stats plan-capture cadence clamp. The FLOOR is 1, not 2, and that is
+    /// deliberate: 1 means capture on every cycle, which is byte-identical to the pre-#2862 collector, so
+    /// the knob is fully reversible without a code change. 0 and negatives degrade to 1 (capture always)
+    /// rather than to the default, because a nonsense value must not silently START skipping plans. The
+    /// ceiling of 60 bounds worst-case plan staleness at sixty cycles.</summary>
+    internal const int MinProcedureStatsPlanCycleInterval = 1;
+    internal const int MaxProcedureStatsPlanCycleInterval = 60;
+
+    internal static int ClampProcedureStatsPlanCycleInterval(int value) =>
+        Math.Clamp(value, MinProcedureStatsPlanCycleInterval, MaxProcedureStatsPlanCycleInterval);
+
     /// <summary>The V75 plan-content horizon clamps (#2316) — 0 (and any negative) means DISABLED
     /// (the fact-coupled dimension horizon stands alone); an enabled value clamps to [7,365], because a
     /// sub-week horizon would age plan XML out from under the viewer's default history windows.</summary>

@@ -84,8 +84,8 @@ WHERE s.is_enabled
       (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id);";
 
     private const string InsertCollectionLogSql = @"
-INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms, drain_rows_read, drain_bytes_read, drain_last_read_ms, target_session_id, sweep_peer_max_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22);";
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms, drain_rows_read, drain_bytes_read, drain_last_read_ms, target_session_id, sweep_peer_max_ms, plan_fetch_probe_ms, plan_fetch_target_ms, plan_fetch_write_ms, plan_fetch_ids_attempted, plan_fetch_probe_ids, text_fetch_probe_ms, text_fetch_target_ms, text_fetch_write_ms, text_fetch_ids_attempted, text_fetch_probe_ids)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32);";
 
     /* The fleet-sentinel server_id the daily retention purge writes its run-record under. collection_log's
        server_id is NOT NULL and Collection Health reads per real server_id, but the purge is fleet-wide (per
@@ -227,6 +227,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         FanoutCost? fanout,
         ServerPhaseCost? phases,
         DrainForensics? drain,
+        FetchPhaseCost? fetchPhases,
         int? sweepPeerMaxMs,
         ILogger? logger,
         CancellationToken cancellationToken)
@@ -303,6 +304,34 @@ ON CONFLICT (server_id) DO UPDATE SET
                could ever land. Belt beside braces, same as the -1 sentinels. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain.HasValue && drain.Value.TargetSessionId is int spid && spid > 0 ? spid : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = sweepPeerMaxMs is int peer ? peer : (object)DBNull.Value });
+
+            /* V110 (#2860): the per-database fetch split, summed across the fan-out. Nullable PER HALF, not
+               per group of ten: a run that fetched text but no plans writes the five text figures and leaves
+               the five plan ones NULL, matching how the log line emits its two sub-lines independently.
+               Within a half it is all or nothing, because a target time without its id count cannot be turned
+               into the ms-per-id rate the counts are here for.
+
+               NULL means no fetch RAN, which for these columns is the honest reading rather than a lost
+               measurement - a 0 ms fetch is a fetch that found nothing to do, unlike V108's 0 ms open, which
+               is a real event measured at zero and is why that path needs a MEASURED flag and this one does
+               not. See V110's doc comment; the cost of the difference is that a sub-millisecond fetch is
+               indistinguishable from none, and that is stated there rather than hidden.
+
+               other: is NOT stored, #2859's rule - and note that unlike V108 the parent is not a column
+               either, so the residual is not derivable from the store at all. It measured 0.1% of both
+               fetches fleet-wide, which makes probe + target + write the parent to within a rounding error. */
+            var planFetch = fetchPhases?.Plan;
+            var textFetch = fetchPhases?.Text;
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.ProbeMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.TargetMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.WriteMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.IdsAttempted : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.ProbeIds : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.ProbeMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.TargetMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.WriteMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.IdsAttempted : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.ProbeIds : (object)DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -385,6 +414,24 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // drain_last_read_ms
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // target_session_id
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sweep_peer_max_ms
+
+            /* And V110's fetch phase sums, NULL by the same shared-statement rule V108 learned and V109
+               restated: TWO writers bind this one statement, and widening the column list without widening
+               EVERY binding block raises 08P01 at runtime - which fails SILENTLY here, because an
+               observability write must never break the collection loop and so is failure-isolated to a Debug
+               log. The retention sweep performs no deferred plan or text fetch (it never touches a monitored
+               server at all), so there is nothing to record; NULL says that, where ten zeros would claim a
+               fetch that ran and cost nothing. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_probe_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_target_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_write_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_ids_attempted
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_probe_ids
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_target_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_write_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_ids_attempted
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ids
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

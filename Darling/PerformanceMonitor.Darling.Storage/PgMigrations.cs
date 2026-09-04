@@ -166,6 +166,7 @@ public static class PgMigrations
         new Migration(107, "plan-force-actions", V107Sql),
         new Migration(108, "collection-log-phase-split", V108Sql),
         new Migration(109, "collection-log-drain-forensics", V109Sql),
+        new Migration(110, "collection-log-fetch-phase-sums", V110Sql),
     };
 
     /// <summary>
@@ -2478,6 +2479,120 @@ ALTER TABLE collect.collection_log
 /* Postgres FREEZES a view's SELECT * column list at CREATE, so without this refresh the passthrough every
    read goes through would keep serving the pre-V109 column list forever - invisible on an UPGRADED store
    while working fine on a fresh one. The V14 lesson, V80's, and V108's. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
+
+    /// <summary>
+    /// V110 — the PER-DATABASE fetch split, summed across the fan-out and persisted on the run's row (#2860).
+    /// V108's twin one path over: V108 decomposed a SERVER-scoped collector's <c>sql_duration_ms</c>, and this
+    /// decomposes the deferred plan/text fetch that only the ENUMERATED path performs.
+    ///
+    /// <para><b>The gap.</b> #2811's sub-split reports <c>plan_fetch:Nms = probe: + target: + write: +
+    /// other:</c> per database, and every bit of it lived only in an app-log line. Measured over 38.2 h on 42
+    /// members, the store <c>probe:</c> is the LARGEST single term — 55.4% of <c>plan_fetch</c> and 80.6% of
+    /// <c>text_fetch</c>, with the target second at 41.1% / 18.2% and <c>write:</c> a rounding error at 3.5% /
+    /// 1.1%. That inverts the illustrative shape #2811/#2812 were written against, and it is the single fact
+    /// most likely to be misread, so it needs to be queryable rather than scraped per server over SSM.</para>
+    ///
+    /// <para><b>Why SUMS, which was not one of the three options the issue offered.</b> The split is emitted
+    /// once per DATABASE while <c>collection_log</c> holds one row per RUN, so it is N:1 — N &gt; 1 on 68.8% of
+    /// <c>query_store</c> runs (mean 2.7 databases, max 7). The issue offered a slowest-database rollup, a
+    /// per-item table, and jsonb; sums dissolve the N:1 problem instead of trading against it, because the two
+    /// questions are already separated across two mechanisms. WHICH DATABASE is answered by V80's
+    /// <c>fanout_item_count</c> / <c>slowest_item</c> / <c>slowest_item_ms</c> — 1:1, persisted, and the fetch
+    /// is the dominant term inside a <c>query_store</c> item, so V80 already fingers the right one. WHICH PHASE
+    /// is what this split is for, and a sum answers it EXACTLY rather than by proxy.</para>
+    ///
+    /// <para><b>Why the slowest-database rollup was declined, stated as the measurement that decided it.</b>
+    /// It is not that it loses information — it is that its residual error points one way. The slowest database
+    /// alone names the same winning phase as the run's true argmax on 92.8% of <c>plan_fetch</c> runs (89.5%
+    /// among the multi-database ones). Of the 199 disagreements, 170 read the truth <c>probe</c> as
+    /// <c>target</c> and only 26 the reverse: a <b>~6.5 : 1 bias toward indicting the monitored target when the
+    /// cost was actually the store probe</b>. That is precisely the misreading this instrumentation family
+    /// exists to end, so a 90%-right instrument whose 10% error is systematically anti-target is the wrong
+    /// instrument for the one question anyone asks of this split. Sums carry no such bias.</para>
+    ///
+    /// <para><b>The blind spot, plainly.</b> Sums cannot say whether ONE database inside a run was pathological
+    /// while its siblings were fine — the ~10.5% of multi-database runs whose slowest database's phase mix
+    /// differs from the run's aggregate. Nothing here recovers that; the columns trade per-database resolution
+    /// for an unbiased per-run answer, and if the per-database question ever becomes live the increment is three
+    /// more columns for the slowest database's mix, an addition on top rather than a different shape.</para>
+    ///
+    /// <para><b>Row cost: zero.</b> These are columns on a row that is written anyway. The split fires on only
+    /// 22.2% of <c>query_store</c> runs (a fetch has to actually run), so they are NULL on ~98% of
+    /// <c>collection_log</c> — the V80/V108/V109 trade, very nearly free on a hypertable compressed and
+    /// segmented by <c>server_id</c>. For contrast, the per-item table the issue offered would have been
+    /// ~167 rows/day/server against ~11,955 <c>collection_log</c> rows/day/server.</para>
+    ///
+    /// <para><b>Why the counters are here after all, when #2860 §7 argued for leaving them out.</b> That
+    /// section's own condition was "add them if a question actually needs them", and #2902 supplied one: the
+    /// fetch carryover has NO eviction — no count cap, no byte cap, no age-out — and narrowing its key to
+    /// include the collector dropped drain opportunities ~52%. If <c>query_store</c>'s candidate cap cannot
+    /// cover what its probe finds missing, the backlog grows silently, and #2902 concluded twice that
+    /// <c>ids attempted</c> versus <c>probe ids</c> per run is the only instrument that would see it. They also
+    /// turn the durations into RATES, which is where the phase question stops being descriptive: <c>target</c>
+    /// ÷ <c>ids_attempted</c> measured 31.65 ms/id on production's cold plans against the ~1.6 ms/id #2806's
+    /// controlled A/B saw on hot ones — a ~20x gap that bears directly on that open issue — and <c>probe</c> ÷
+    /// <c>probe_ids</c> reproduces the documented ~0.61 ms/reference, which is what calibrated the parse.
+    /// <c>chunks</c> is still left out: it is a batching artifact no question has asked for.</para>
+    ///
+    /// <para><b>Deliberately NOT generalised to #2855's Azure per-database split.</b> Two reasons that both
+    /// survive being checked. The row-volume profile is OPPOSITE: #2893's line is explicitly not gated on
+    /// <c>batch.Count &gt; 0</c> ("the connect is paid on a quiet database exactly as on a busy one"), so its
+    /// emissions are one per database per cycle — the ungated shape V80 priced at ~10% and declined, and the
+    /// cheapness above comes entirely from this rung's gating and does not transfer. And the NAMES collide: a
+    /// persisted per-database <c>open_ms</c> / <c>drain_ms</c> would sit beside V108's <c>sql_open_ms</c> /
+    /// <c>sql_drain_ms</c>, which mean the SERVER-scoped open and drain. jsonb is the only shape that would
+    /// generalise, and it costs the cheap aggregation that is the entire reason to persist any of this.</para>
+    ///
+    /// <para><b>No <c>other:</c> column, and no stored parent — #2859's rule with one honest consequence.</b>
+    /// <c>other:</c> is a residual (<c>fetch - probe - target - write</c>) and a stored copy could drift from
+    /// the parent it completes. But unlike V108, the parent here is NOT already a column: there is no
+    /// <c>plan_fetch_ms</c>, so <c>other:</c> is not derivable from the store at all — it is simply not
+    /// recorded. That is a real loss and it is accepted rather than overlooked, because <c>other:</c> measured
+    /// 0.1% of both fetches fleet-wide: the three stored terms ARE the parent to within a rounding error, so
+    /// their sum is the fetch total and storing it separately would be storing a derived number.</para>
+    ///
+    /// <para><b>No Lite twin, and the reasoning is stronger here than V108's.</b> The parity rule exists so
+    /// state added to one store does not read as permanently empty on the other. Lite never sets
+    /// <c>CollectorContext.CapturePlanXml</c> or <c>FetchQueryTextSeparately</c> — that is what makes Darling
+    /// the plan-capturing SKU — so neither fetch ever RUNS under Lite. A DuckDB twin would be ten columns that
+    /// are NULL on every row Lite will ever write, which is the outcome the rule prevents rather than the one
+    /// it demands.</para>
+    ///
+    /// <para><b>NULL means no fetch ran</b>, per half and independently: a run that fetched text but no plans
+    /// stores the five text columns and leaves the five plan ones NULL, matching how the log line emits its two
+    /// sub-lines separately. The gate is the same <c>PerItem*FetchMs &gt; 0</c> the log line uses, deliberately,
+    /// so the stored population and the logged population are the same one and the figures above transfer
+    /// without re-deriving. The cost of reusing it is stated rather than hidden: it cannot separate "no fetch
+    /// ran" from "a fetch ran and was sub-millisecond". That is the opposite call from V108's MEASURED flag, and
+    /// on purpose — a 0 ms open is a real measurement of an event that happened, while a 0 ms fetch means the
+    /// fetch found nothing to do, so NULL is the honest record and ten zeros would be noise on the ~78% of runs
+    /// that fetch nothing.</para>
+    ///
+    /// <para>Nullable, no DEFAULT, no backfill — the V80/V108/V109 reasoning: a catalog-only change that stays
+    /// instant on a large compressed hypertable, where adding a column WITH a default is the shape TimescaleDB
+    /// has historically refused. A row written before this rung does not know its fetch split, and NULL says so.
+    /// <c>integer</c> throughout and no <c>numeric</c> anywhere: every figure is a whole millisecond or a whole
+    /// id count, matching <c>sql_duration_ms</c> and V108's columns, so there is no precision or scale to
+    /// choose. The derived rates (ms per id) are computed by the reader in floating point, which is where that
+    /// decision belongs — baking a scale into the schema would fix it for every future consumer.</para>
+    /// </summary>
+    private const string V110Sql = @"
+ALTER TABLE collect.collection_log
+    ADD COLUMN IF NOT EXISTS plan_fetch_probe_ms integer,
+    ADD COLUMN IF NOT EXISTS plan_fetch_target_ms integer,
+    ADD COLUMN IF NOT EXISTS plan_fetch_write_ms integer,
+    ADD COLUMN IF NOT EXISTS plan_fetch_ids_attempted integer,
+    ADD COLUMN IF NOT EXISTS plan_fetch_probe_ids integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_probe_ms integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_target_ms integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_write_ms integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_ids_attempted integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_probe_ids integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so without this refresh the passthrough every
+   read goes through would keep serving the pre-V110 column list forever - invisible on an UPGRADED store
+   while working fine on a fresh one. The V14 lesson, V80's, V108's and V109's. */
 CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
 
     /// <summary>
