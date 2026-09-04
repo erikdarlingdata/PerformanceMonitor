@@ -1027,7 +1027,7 @@ It decrypts the `network.role` credential and prints a paste-ready connection st
 
 **"Configuration problem: ..."** (critical, service idles) — validation failed. The messages are literal and per-field, e.g. `postgres.connectionString is required.`, `servers must contain at least one entry.`, `server 'X': host is required.`, `server 'X': sql auth requires username.`, `server 'X': sql auth requires encryptedPassword (preferred; see --encrypt-password) or password.`, `server 'X': auth must be 'integrated' or 'sql'`. Fix the file and restart the service.
 
-**"Cannot reach or migrate the Postgres store"** (critical, service idles) — the store connection string is wrong, PostgreSQL is down/unreachable, or the login cannot create tables. Collection does not start until this succeeds; fix and restart.
+**"Cannot reach or migrate the Postgres store"** (critical, service idles) — the store connection string is wrong, PostgreSQL is down/unreachable, or the login cannot create tables. Collection does not start until this succeeds; fix and restart. A transient failure does not reach this line: a store that is restarting, failing over or still coming up, and a sibling instance holding the migration advisory lock, are retried for two minutes first, logged as `"Cannot reach or migrate the Postgres store yet ... attempt N of 25"` at warning. A rung that cannot apply against this store is never retried, so this line arrives immediately for it.
 
 **"uses a plaintext password in darling.json"** (warning, every connect) — you set `"password"` instead of `"encryptedPassword"`. It works, but run `--encrypt-password` on the service machine and switch.
 
