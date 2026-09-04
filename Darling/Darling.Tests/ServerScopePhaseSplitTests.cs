@@ -11,9 +11,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Reflection.Metadata;
-using System.Reflection.Metadata.Ecma335;
-using System.Reflection.PortableExecutable;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -263,96 +260,17 @@ public sealed class ServerScopePhaseSplitTests
     }
 
     /// <summary>
-    /// Walks every method body in the built service assembly and, for each call to one of the tracked
-    /// setters, records whether the call offset falls inside an exception-handler region. Reads IL rather
-    /// than source text or strings: a UTF-16-from-offset-0 scan of this same assembly recently reported a
-    /// shipped change as absent on both the box and the artifact, because it found only strings at even byte
-    /// offsets and its positive controls did not share that failure mode.
+    /// For each tracked setter, how many times it is called in the built service assembly and how many of
+    /// those calls sit inside an exception-handler region. The walk itself lives in
+    /// <see cref="IlCallSiteScanner"/> — this pin carried its own copy until #2898, and that copy advanced its
+    /// cursor four bytes past a match, which can step over a genuine call instruction's own token and report a
+    /// stamp that IS called from a handler as never called from one.
     /// </summary>
     private static Dictionary<string, (int Total, int InHandler)> ScanServiceAssembly()
     {
         var assemblyPath = typeof(DarlingCollectorRunner).Assembly.Location;
         Assert.True(File.Exists(assemblyPath), $"Service assembly not found at '{assemblyPath}'.");
 
-        var tracked = PhaseSetters.Append(ControlSetter).ToArray();
-        var results = tracked.ToDictionary(name => name, _ => (Total: 0, InHandler: 0));
-
-        using var stream = File.OpenRead(assemblyPath);
-        using var peReader = new PEReader(stream);
-        var metadata = peReader.GetMetadataReader();
-
-        /* A setter resolves through a MemberReference or a MethodDefinition depending on whether the caller
-           sits in this assembly or another, and async state machines move the call around. Collect both so
-           the scan does not depend on where the compiler happened to put it. */
-        var tokenToName = new Dictionary<int, string>();
-
-        foreach (var handle in metadata.MemberReferences)
-        {
-            var name = metadata.GetString(metadata.GetMemberReference(handle).Name);
-            if (results.ContainsKey(name))
-            {
-                tokenToName[MetadataTokens.GetToken(handle)] = name;
-            }
-        }
-
-        foreach (var handle in metadata.MethodDefinitions)
-        {
-            var name = metadata.GetString(metadata.GetMethodDefinition(handle).Name);
-            if (results.ContainsKey(name))
-            {
-                tokenToName[MetadataTokens.GetToken(handle)] = name;
-            }
-        }
-
-        foreach (var handle in metadata.MethodDefinitions)
-        {
-            var method = metadata.GetMethodDefinition(handle);
-            if (method.RelativeVirtualAddress == 0)
-            {
-                continue;
-            }
-
-            var body = peReader.GetMethodBody(method.RelativeVirtualAddress);
-            var il = body.GetILBytes();
-            if (il is null)
-            {
-                continue;
-            }
-
-            var regions = body.ExceptionRegions;
-
-            for (var i = 0; i + 4 < il.Length; i++)
-            {
-                /* call (0x28) and callvirt (0x6F) are the only two forms a property setter is emitted as,
-                   each followed by a 4-byte metadata token. */
-                if (il[i] != 0x28 && il[i] != 0x6F)
-                {
-                    continue;
-                }
-
-                var token = BitConverter.ToInt32(il, i + 1);
-                if (!tokenToName.TryGetValue(token, out var setterName))
-                {
-                    continue;
-                }
-
-                var current = results[setterName];
-                var inHandler = current.InHandler;
-
-                foreach (var region in regions)
-                {
-                    if (i >= region.HandlerOffset && i < region.HandlerOffset + region.HandlerLength)
-                    {
-                        inHandler++;
-                        break;
-                    }
-                }
-
-                results[setterName] = (current.Total + 1, inHandler);
-                i += 4;
-            }
-        }
-
-        return results;
+        return IlCallSiteScanner.CountCalls(assemblyPath, PhaseSetters.Append(ControlSetter));
     }
 }
