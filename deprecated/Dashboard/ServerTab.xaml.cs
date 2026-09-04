@@ -363,7 +363,8 @@ namespace PerformanceMonitorDashboard
                          e.OriginalSource is not System.Windows.Controls.TextBox &&
                          PlanViewerTabItem.IsSelected)
                 {
-                    if (ClipboardText.TryRead(out var xml) && !string.IsNullOrWhiteSpace(xml))
+                    var (ok, xml) = await ClipboardText.TryReadAsync();
+                    if (ok && !string.IsNullOrWhiteSpace(xml))
                     {
                         e.Handled = true;
                         OpenPlanTab(xml, "Pasted Plan");

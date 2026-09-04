@@ -251,9 +251,10 @@ public sealed class StandalonePlanViewerController
             }
         };
 
-        pasteBtn.Click += (_, _) =>
+        pasteBtn.Click += async (_, _) =>
         {
-            if (!ClipboardText.TryRead(out var xml))
+            var (ok, xml) = await ClipboardText.TryReadAsync();
+            if (!ok)
             {
                 MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
                     "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -409,14 +410,17 @@ public sealed class StandalonePlanViewerController
         }
     }
 
-    /// <summary>Key-down handler (forwarded from the host's XAML wire): Ctrl+V pastes plan XML into the active tab.</summary>
-    public void HandleKeyDown(KeyEventArgs e)
+    /// <summary>Key-down handler (forwarded from the host's XAML wire): Ctrl+V pastes plan XML into the active
+    /// tab. <c>async void</c> because it is a fire-and-forget key handler that awaits the async clipboard read
+    /// so the message pump stays responsive on the rare clipboard-can't-open retry path (#2837).</summary>
+    public async void HandleKeyDown(KeyEventArgs e)
     {
         if (e.Key == Key.V &&
             Keyboard.Modifiers == ModifierKeys.Control &&
             e.OriginalSource is not TextBox)
         {
-            if (ClipboardText.TryRead(out var xml) && !string.IsNullOrWhiteSpace(xml))
+            var (ok, xml) = await ClipboardText.TryReadAsync();
+            if (ok && !string.IsNullOrWhiteSpace(xml))
             {
                 e.Handled = true;
                 LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");

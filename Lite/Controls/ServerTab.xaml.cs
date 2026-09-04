@@ -438,14 +438,15 @@ public partial class ServerTab : UserControl
         Focusable = true;
     }
 
-    private void ServerTab_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    private async void ServerTab_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key == System.Windows.Input.Key.V &&
             System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control &&
             e.OriginalSource is not System.Windows.Controls.TextBox &&
             PlanViewerTabItem.IsSelected)
         {
-            if (ClipboardText.TryRead(out var xml) && !string.IsNullOrWhiteSpace(xml))
+            var (ok, xml) = await ClipboardText.TryReadAsync();
+            if (ok && !string.IsNullOrWhiteSpace(xml))
             {
                 e.Handled = true;
                 OpenPlanTab(xml, "Pasted Plan");

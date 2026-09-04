@@ -164,7 +164,8 @@ public partial class PlanViewerControl
         if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control
             && e.OriginalSource is not TextBox)
         {
-            if (ClipboardText.TryRead(out var text) && !string.IsNullOrWhiteSpace(text))
+            var (ok, text) = await ClipboardText.TryReadAsync();
+            if (ok && !string.IsNullOrWhiteSpace(text))
             {
                 e.Handled = true;
                 try
