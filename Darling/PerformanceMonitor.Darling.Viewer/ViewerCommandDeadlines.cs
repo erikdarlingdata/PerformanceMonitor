@@ -35,9 +35,13 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// 30 s for the MCP read surface and its derivation does not transfer. The MCP's worst verified read
 /// was 685 ms and its permit is an unbounded pool; the viewer's worst measured read is 3.0 s — 4.4x
 /// slower — yet its permit is ten times scarcer (<c>MaxPoolSize = 10</c>, set on the managed-derived
-/// string in <c>ViewerSettings</c>), a single control fans out to exactly ten concurrent reads and so
-/// can hold every one of them, and an unguarded fleet-timer read can re-fire every 10 s. Slower reads
-/// against a scarcer permit land BELOW 30 s, not at it.</para>
+/// string in <c>ViewerSettings</c>), and a single control fans out to exactly ten concurrent reads and
+/// so can hold every one of them. Slower reads against a scarcer permit land BELOW 30 s, not at it.
+/// (This paragraph also read "and an unguarded fleet-timer read can re-fire every 10 s" when it landed,
+/// which was true and is no longer: the fan-out those timers fire unawaited is single-flight since
+/// #2907, so a slow read is no longer joined by the next tick's. The panel fan-out above it is the
+/// binding permit argument on its own, and it is not a guarding problem — those ten reads are one
+/// deliberate <c>Task.WhenAll</c>, not an overlap.)</para>
 /// </summary>
 public static class ViewerCommandDeadlines
 {
