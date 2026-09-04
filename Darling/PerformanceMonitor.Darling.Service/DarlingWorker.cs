@@ -1001,21 +1001,70 @@ public sealed class DarlingWorker : BackgroundService
         storeConnectionString = EnsureStoreSearchPath(storeConnectionString);
         await using var postgres = NpgsqlDataSource.Create(storeConnectionString);
         _postgres = postgres;
-        try
+        /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
+           a moment — restarting, failing over, still coming up alongside this service — and a sibling
+           instance holding the migration advisory lock both succeed seconds later; a rung that cannot
+           apply against this store never will. StoreStartupFailureTriage decides which arrived and carries
+           the reasoning for where that boundary sits, including why anything it cannot place positively
+           stays terminal. This block is the ONLY step of the collection loop's start that kills collection,
+           so the degrade-vs-kill question the next block answers out loud is answered here too: a
+           transient store failure now degrades to a delayed first cycle, and everything else keeps the
+           critical line and the stand-down byte for byte. Both caps are load-bearing: an attempt is not
+           quick just because a refused connect is — one that blocks behind a peer's advisory lock can
+           spend MigrationLockWaitTimeoutSeconds — so the wall-clock budget is what stops 25 attempts from
+           becoming ten hours, and the attempt count is what the warning line reports.
+           A FRESH connection per attempt, not a reuse of the old one — its connector is dead after a
+           transport failure, the same reason DarlingManagedPostgres.EnsureDatabaseAsync retries the whole
+           unit rather than just the open. Re-entering MigrateAsync is safe because the applier commits
+           each rung's DDL and its darling_schema_version stamp in ONE transaction: a rung that failed
+           part-way left nothing applied and nothing stamped, and rungs at or below the stamp are skipped,
+           so a retry resumes at the rung that failed instead of redoing the ladder. That rests on the
+           rungs being transactional, which was measured rather than assumed, because the ladder's
+           expensive ones are not plain DDL: V23's own statement set — create_hypertable with
+           migrate_data => true, ALTER TABLE SET (timescaledb.compress ...), add_compression_policy — run
+           against 200,000 rows on PostgreSQL 17.11 / TimescaleDB 2.29.2 built 139 chunks and a policy job
+           inside the transaction and left, after ROLLBACK, a plain table with every row, no chunks, no
+           job and no reloptions. No rung uses CREATE INDEX CONCURRENTLY or any other statement that
+           cannot be transacted. */
+        var retryBudget = System.Diagnostics.Stopwatch.StartNew();
+        for (var attempt = 1; ; attempt++)
         {
-            await using var migrateConnection = await postgres.OpenConnectionAsync(stoppingToken);
-            /* MigrateAsync (logger overload) also best-effort sets the database-default search_path to
-               collect/config for every future connection (V8 security split); a least-privilege BYO
-               login that cannot ALTER DATABASE is warned, not failed — the managed connection strings
-               carry Search Path regardless. */
-            var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken);
-            _logger.LogInformation("Postgres store ready (schema v{Version}, {Applied} migration(s) applied)",
-                StorageVersion.SchemaVersion, applied);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogCritical("Cannot reach or migrate the Postgres store: {Message}", ex.Message);
-            return;
+            try
+            {
+                await using var migrateConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                /* MigrateAsync (logger overload) also best-effort sets the database-default search_path to
+                   collect/config for every future connection (V8 security split); a least-privilege BYO
+                   login that cannot ALTER DATABASE is warned, not failed — the managed connection strings
+                   carry Search Path regardless. */
+                var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken);
+                _logger.LogInformation("Postgres store ready (schema v{Version}, {Applied} migration(s) applied)",
+                    StorageVersion.SchemaVersion, applied);
+                break;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && attempt < StoreStartupFailureTriage.MigrateAttempts
+                && retryBudget.Elapsed < StoreStartupFailureTriage.MigrateRetryBudget
+                && StoreStartupFailureTriage.IsRetryable(ex))
+            {
+                /* Every placeholder appears ONCE. A repeated name is not a duplicate here, it is an extra
+                   positional slot: LogValuesFormatter numbers placeholders by occurrence, so a template
+                   naming four things in five slots throws FormatException out of the logger, and out of
+                   this BackgroundService, and StopHost then takes the process down - a retry path that
+                   kills the service harder than the failure it was retrying. */
+                _logger.LogWarning(
+                    "Cannot reach or migrate the Postgres store yet ({Message}) — attempt {Attempt} of " +
+                    "{Total}, retrying in {Delay}s. A store that is restarting, failing over or still " +
+                    "coming up recovers on its own; after the last attempt this becomes a critical line " +
+                    "and collection does not start.",
+                    ex.Message, attempt, StoreStartupFailureTriage.MigrateAttempts,
+                    (int)StoreStartupFailureTriage.MigrateRetryDelay.TotalSeconds);
+                await Task.Delay(StoreStartupFailureTriage.MigrateRetryDelay, stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogCritical("Cannot reach or migrate the Postgres store: {Message}", ex.Message);
+                return;
+            }
         }
 
         /* Least-privilege role provisioning (V8 security hardening), managed mode only: create /
