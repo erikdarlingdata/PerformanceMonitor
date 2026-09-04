@@ -1543,6 +1543,14 @@ ORDER BY name", connection);
         config.QueryStoreBackfillEnabled = view.QueryStoreBackfillEnabled;
         config.QueryStoreTextBudgetMb = view.QueryStoreTextBudgetMb;
         config.PlanContentRetentionDays = view.PlanContentRetentionDays;
+        /* #2357's effective timeout is NOT taken from here: startup role provisioning reads
+           config_service.compose_statement_timeout_seconds straight out of the store and bakes it into
+           ALTER ROLE viewer/mcp SET statement_timeout, so a change reaches the live roles on the next
+           service start, not on this reload. The assignment is still required: it is the only scalar in
+           StoreConfigView with a same-named DarlingConfig property, and leaving it out left the held
+           value pinned to darling.json forever while the store said otherwise -- a future reader of
+           config.ComposeStatementTimeoutSeconds would have silently gotten the file value. */
+        config.ComposeStatementTimeoutSeconds = view.ComposeStatementTimeoutSeconds;
         config.MaxConcurrentSweeps = view.MaxConcurrentSweeps;
         config.PlanXmlCompression = view.PlanXmlCompression;
         config.Mcp.Enabled = view.McpEnabled;
