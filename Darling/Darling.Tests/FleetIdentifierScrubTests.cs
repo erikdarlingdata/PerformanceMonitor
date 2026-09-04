@@ -25,11 +25,12 @@ namespace Darling.Tests;
 */
 public sealed class FleetIdentifierScrubTests
 {
-    /* Greek letters and role words -- nothing here names a real customer. */
+    /* Greek letters and role words -- nothing here names a real customer. pgmonitor is a role
+       word too: it names one of the maintainer's own monitoring hosts, the same as monitor. */
     private static readonly HashSet<string> SyntheticSlugs = new(StringComparer.OrdinalIgnoreCase)
     {
         "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "omega",
-        "monitor", "multi", "primary", "replica", "secondary", "reporting",
+        "monitor", "pgmonitor", "multi", "primary", "replica", "secondary", "reporting",
         "test", "sample", "example", "demo", "fake", "dummy", "placeholder",
     };
 
