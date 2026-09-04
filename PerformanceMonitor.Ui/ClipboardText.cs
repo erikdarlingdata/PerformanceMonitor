@@ -45,7 +45,8 @@ public static class ClipboardText
     /// the clipboard could not be opened after the bounded retries. Only the clipboard-open failure family
     /// (<see cref="COMException"/> / <see cref="ExternalException"/>) is swallowed; any other exception
     /// propagates. Blocks the calling thread with <see cref="Thread.Sleep(int)"/> between attempts, so a
-    /// UI-thread caller should prefer <see cref="TryReadAsync"/>.
+    /// UI-thread caller should prefer <see cref="TryReadAsync"/>. This is the synchronous entry point, kept
+    /// for any non-async / non-UI-thread caller.
     /// </summary>
     public static bool TryRead(out string text)
     {

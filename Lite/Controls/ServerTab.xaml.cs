@@ -445,10 +445,12 @@ public partial class ServerTab : UserControl
             e.OriginalSource is not System.Windows.Controls.TextBox &&
             PlanViewerTabItem.IsSelected)
         {
+            // Claim the paste gesture during event routing, before the async read yields on the retry path
+            // (#2837): setting e.Handled after the await would leave the key event unsuppressed.
+            e.Handled = true;
             var (ok, xml) = await ClipboardText.TryReadAsync();
             if (ok && !string.IsNullOrWhiteSpace(xml))
             {
-                e.Handled = true;
                 OpenPlanTab(xml, "Pasted Plan");
                 PlanViewerTabItem.IsSelected = true;
             }

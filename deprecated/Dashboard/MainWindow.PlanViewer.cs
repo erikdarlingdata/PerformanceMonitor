@@ -447,10 +447,12 @@ namespace PerformanceMonitorDashboard
                 System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control &&
                 e.OriginalSource is not System.Windows.Controls.TextBox)
             {
+                // Claim the paste gesture during event routing, before the async read yields on the retry
+                // path (#2837): setting e.Handled after the await would leave the key event unsuppressed.
+                e.Handled = true;
                 var (ok, xml) = await ClipboardText.TryReadAsync();
                 if (ok && !string.IsNullOrWhiteSpace(xml))
                 {
-                    e.Handled = true;
                     LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
                 }
             }

@@ -425,10 +425,12 @@ public sealed class StandalonePlanViewerController
             Keyboard.Modifiers == ModifierKeys.Control &&
             e.OriginalSource is not TextBox)
         {
+            // Claim the paste gesture during event routing, before the async read yields on the retry path
+            // (#2837): setting e.Handled after the await would let the key event finish routing unsuppressed.
+            e.Handled = true;
             var (ok, xml) = await ClipboardText.TryReadAsync();
             if (ok && !string.IsNullOrWhiteSpace(xml))
             {
-                e.Handled = true;
                 LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
             }
         }

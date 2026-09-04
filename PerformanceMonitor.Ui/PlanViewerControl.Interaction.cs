@@ -164,10 +164,12 @@ public partial class PlanViewerControl
         if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control
             && e.OriginalSource is not TextBox)
         {
+            // Claim the paste gesture during event routing, before the async read yields on the retry path
+            // (#2837): setting e.Handled after the await would let the key event finish routing unsuppressed.
+            e.Handled = true;
             var (ok, text) = await ClipboardText.TryReadAsync();
             if (ok && !string.IsNullOrWhiteSpace(text))
             {
-                e.Handled = true;
                 try
                 {
                     /* LoadPlan parses+analyzes off the UI thread and throws XmlException for
