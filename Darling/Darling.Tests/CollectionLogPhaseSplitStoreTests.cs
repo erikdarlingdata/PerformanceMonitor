@@ -198,7 +198,11 @@ public class CollectionLogPhaseSplitStoreTests
             .Matches(source[source.IndexOf("INSERT INTO collection_log", StringComparison.Ordinal)..].Split(';')[0], @"\$\d+")
             .Select(m => m.Value).Distinct().Count();
 
-        Assert.Equal(17, placeholders);
+        /* Deliberately a literal, and deliberately maintained by hand: it is the tripwire that makes
+           widening this statement a conscious act. 17 at V108, 22 at V109 (#2864's five drain-forensics
+           columns). Bumping it is the moment you are forced to ask whether EVERY writer was widened
+           too - which is the failure it was written for. */
+        Assert.Equal(22, placeholders);
 
         var writerStarts = System.Text.RegularExpressions.Regex
             .Matches(source, @"new NpgsqlCommand\(InsertCollectionLogSql")

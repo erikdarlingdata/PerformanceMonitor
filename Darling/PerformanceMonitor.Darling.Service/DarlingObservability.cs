@@ -84,8 +84,8 @@ WHERE s.is_enabled
       (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id);";
 
     private const string InsertCollectionLogSql = @"
-INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);";
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms, drain_rows_read, drain_bytes_read, drain_last_read_ms, target_session_id, sweep_peer_max_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22);";
 
     /* The fleet-sentinel server_id the daily retention purge writes its run-record under. collection_log's
        server_id is NOT NULL and Collection Health reads per real server_id, but the purge is fleet-wide (per
@@ -226,6 +226,8 @@ ON CONFLICT (server_id) DO UPDATE SET
         string? errorMessage,
         FanoutCost? fanout,
         ServerPhaseCost? phases,
+        DrainForensics? drain,
+        int? sweepPeerMaxMs,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -267,6 +269,24 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = phases.HasValue ? phases.Value.OpenMs : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = phases.HasValue ? phases.Value.DrainMs : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = phases.HasValue ? phases.Value.WatermarkMs : (object)DBNull.Value });
+
+            /* V109 (#2864): what the drain DELIVERED, as opposed to what the run stored. rows_collected is
+               0 for every abandoned cycle by definition - it ships nothing - so it could never separate a
+               target that sent no rows from one that sent 149 and went silent. Written together with the
+               phases and on the same MEASURED gate, since the counting reader is installed exactly where
+               the phase stopwatches are.
+
+               drain_last_read_ms is the one that carries the diagnosis: subtracted from sql_drain_ms it is
+               the time the reader spent with nothing arriving. It stores NULL when the run read no row at
+               all, which is NOT ambiguous with 'not recorded' here because drain_rows_read is non-null
+               whenever this group is written - a NULL beside a 0 count says 'nothing ever arrived', and a
+               NULL beside a NULL count says the row predates this rung. 0 is left free to mean what it
+               honestly means: row 1 arrived instantly. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue ? drain.Value.RowsRead : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue ? drain.Value.BytesRead : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain.HasValue && drain.Value.LastReadMs >= 0 ? (int)drain.Value.LastReadMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain?.TargetSessionId is int spid ? spid : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = sweepPeerMaxMs is int peer ? peer : (object)DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -337,6 +357,18 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sql_open_ms
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sql_drain_ms
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // watermark_ms
+
+            /* And V109's drain forensics, NULL by the same shared-statement rule that caught V108: this
+               statement has TWO writers, and widening the column list without widening EVERY binding block
+               raises 08P01 - which fails SILENTLY here, because an observability write must never break the
+               collection loop and so is failure-isolated to a Debug log. The retention sweep drains no
+               monitored-server reader and holds no target session, so there is nothing to record; NULL says
+               that, where a 0 would claim a measured drain that delivered nothing. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value });  // drain_rows_read
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value });  // drain_bytes_read
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // drain_last_read_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // target_session_id
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sweep_peer_max_ms
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

@@ -92,7 +92,12 @@ internal static class DarlingDataReader
         string? ErrorMessage,
         double? SqlOpenMs = null,
         double? SqlDrainMs = null,
-        double? WatermarkMs = null)
+        double? WatermarkMs = null,
+        long? DrainRowsRead = null,
+        long? DrainBytesRead = null,
+        double? DrainLastReadMs = null,
+        int? TargetSessionId = null,
+        double? SweepPeerMaxMs = null)
     {
         /* The residual, derived rather than read (V108 stores no other_ms column on purpose): open + drain
            + this SUM to SqlDurationMs by construction, so a large value here is a real finding - cost in
@@ -1441,7 +1446,12 @@ internal static class DarlingDataReader
             error_message,
             sql_open_ms,
             sql_drain_ms,
-            watermark_ms
+            watermark_ms,
+            drain_rows_read,
+            drain_bytes_read,
+            drain_last_read_ms,
+            target_session_id,
+            sweep_peer_max_ms
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -1505,7 +1515,17 @@ internal static class DarlingDataReader
                    to zero. A zero here would claim a measured instant open. */
                 reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
                 reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
-                reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10))));
+                reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
+                /* V109 (#2864). NULL on every row written before the rung and on every path that emits no
+                   drain forensics. DrainLastReadMs is additionally NULL when the run read no row at all -
+                   unambiguous, because DrainRowsRead is non-null whenever this group was written: NULL
+                   beside a 0 count means nothing arrived, NULL beside a NULL count means the row predates
+                   the rung. */
+                reader.IsDBNull(11) ? null : Convert.ToInt64(reader.GetValue(11)),
+                reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
+                reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+                reader.IsDBNull(14) ? null : Convert.ToInt32(reader.GetValue(14)),
+                reader.IsDBNull(15) ? null : Convert.ToDouble(reader.GetValue(15))));
         }
 
         return rows;

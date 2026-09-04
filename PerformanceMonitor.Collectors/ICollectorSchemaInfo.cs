@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 
 namespace PerformanceMonitor.Collectors;
@@ -84,6 +85,22 @@ public interface ICollectorSchemaInfo
     /// other collector had to come from somewhere unexpected and stays an ERROR.
     /// </summary>
     bool YieldsOnLockTimeout { get; }
+
+    /// <summary>
+    /// The host-enforced wall-clock ceiling on ONE item's read + drain (#2673), or null for a collector
+    /// with no ceiling. Host-enforced rather than definition-enforced because only the host owns the
+    /// cancellation token and the loop, and the point is to bound the definition's own read.
+    ///
+    /// <para>On the base interface rather than <c>ICollectorDefinition&lt;TRow&gt;</c> (#2864), alongside
+    /// <see cref="AppliesTo"/> and <see cref="YieldsOnLockTimeout"/> and for the same reason those are:
+    /// the catalog is keyed by NAME and holds this interface, so a host that knows only which collector
+    /// ran could not otherwise ask whether that collector is one of the budgeted heavy ones. Having a
+    /// budget at all is what distinguishes the four collectors capable of occupying a target for minutes
+    /// from the rest of a sweep body, which is a question the worker asks per run and must not answer
+    /// from a hardcoded name list - the list that has to be edited whenever a fifth collector earns a
+    /// budget is the list that silently stops being right.</para>
+    /// </summary>
+    TimeSpan? PerItemWallClockBudget { get; }
 
     /// <summary>
     /// Named pieces of per-server collector state the host loads from its own store before the query is

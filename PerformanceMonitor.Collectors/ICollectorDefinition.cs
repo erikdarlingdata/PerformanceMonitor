@@ -123,7 +123,10 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     /// <para>Host-enforced rather than definition-enforced, unlike the byte budget: only the host owns the
     /// cancellation token and the loop, and the point is to bound the definition's own read.</para>
     /// </summary>
-    TimeSpan? PerItemWallClockBudget { get; }
+    /* Declared on the base ICollectorSchemaInfo since #2864, alongside AppliesTo and
+       YieldsOnLockTimeout and for the same reason: the catalog holds ICollectorSchemaInfo, so a
+       host holding only a collector NAME could not ask this question at all. Not restated here,
+       because two declarations of one contract are two things to drift. */
 
     /// <summary>
     /// Builds the T-SQL (and any bound parameters) for this cycle. Constant for most collectors;
