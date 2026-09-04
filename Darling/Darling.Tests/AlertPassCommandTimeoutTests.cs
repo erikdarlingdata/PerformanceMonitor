@@ -303,12 +303,23 @@ public sealed class AlertPassCommandTimeoutTests
         "var command = _postgres.CreateCommand(Sql);\n"
         + "await command.ExecuteNonQueryAsync();\n",
         false)]
+    /* A comment that NAMES a deadline is not one. This case was green before the value regex moved onto
+       the stripped span: the construction match excluded comments while the deadline test did not, so
+       prose could satisfy it. False-negative direction - it reported success on the defect. */
+    [InlineData(
+        "var command = new NpgsqlCommand(Sql, connection);\n"
+        + "/* no deadline needed here; CommandTimeout = 10 is applied by the caller. */\n"
+        + "await command.ExecuteNonQueryAsync();\n",
+        false)]
     public void TheScanner_SeesADeadlineThroughCommentsAndVerbatimSql(string source, bool expectedTimed)
     {
-        var ctor = s_commandCtor.Match(source);
+        /* Stripped, exactly as ScanForUntimedCommands does it - a fixture that walked the raw text would
+           pass while the shipped scan failed, which is how this defect survived its own theory. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var ctor = s_commandCtor.Match(code);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
+        var span = CSharpSourceWalker.StatementSpanFrom(code, ctor.Index, statements: 2);
 
         Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
     }
