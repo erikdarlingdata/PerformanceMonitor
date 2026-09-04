@@ -905,6 +905,13 @@ public sealed class DarlingMcpDataTools
                 /* Deliberate 1s lock-timeout yields (#1805) — benign, distinct from errors; clustering
                    here is a lock-contention signal about the monitored server. */
                 yields = r.YieldCount,
+                /* #2804: runs the #2673 wall-clock budget gave up on. Unlike a yield, which retries, an
+                   abandoned cycle stored nothing and advanced no watermark — it is data LOSS, and it is
+                   the reason a WARNING here may have nothing to do with `errors`. Before this it reached
+                   the surface only inside note_summary's prose, so there was no number to threshold,
+                   alert or trend on. */
+                abandoned = r.AbandonedCount,
+                abandon_rate_pct = Math.Round(r.AbandonRatePercent, 2),
                 failure_rate_pct = Math.Round(r.FailureRatePercent, 1),
                 avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
                 /* #2460: the mean above is a blend whenever a collector's runs come in two sizes, and
