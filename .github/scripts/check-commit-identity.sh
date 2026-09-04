@@ -10,6 +10,13 @@
 #
 # Reads the commit list from the API rather than from a checkout of the pull request, because the
 # calling workflow runs on pull_request_target and deliberately never checks out pull request head.
+#
+# What this is NOT, so nobody later reads more into a green result than it carries: author and
+# committer are self-declared git fields that nothing authenticates. Anyone who can push can set
+# user.email to an allowlisted value and sail through. What this catches is a MISCONFIGURED clone
+# -- the wrong user.email left set on a machine, which is the case #2891 was opened about -- and
+# nothing more. It is not an impersonation control, and a pass here is not evidence that a commit
+# came from whoever it names. Enforced commit signing is the only thing that gets you that.
 set -euo pipefail
 
 REPO=${REPO:-${1:-}}
@@ -20,9 +27,9 @@ if [ -z "$REPO" ] || [ -z "$PR" ]; then
   exit 2
 fi
 
-# The allowlist. Pinned addresses, NOT a *@users.noreply.github.com pattern: that pattern admits
-# any GitHub account's noreply address, including one belonging to a different identity, which is
-# the exact failure this check exists to stop.
+# The allowlist. Pinned addresses, NOT a *@users.noreply.github.com pattern: that pattern would
+# admit any GitHub account's noreply address, including one belonging to a different identity,
+# so it would wave through the very thing being screened for.
 #
 #   1. The maintainer's noreply address -- 1437 of dev's 1448 commits are authored by it.
 #   2/3. GitHub's own committer, for merge commits it creates and for web-UI edits. This repo's
