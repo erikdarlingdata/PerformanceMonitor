@@ -667,6 +667,72 @@ public sealed class DarlingCollectorRunner
             rows == 0 ? "no new Performance Insights CPU samples this cycle" : null);
     }
 
+    /// <summary>
+    /// The per-database phase line for a database that FAULTED (#2896) — the case the #2855 split was added
+    /// to attribute and the one case it could not print, because its only log site sat on the success path
+    /// past the flush.
+    ///
+    /// <para><b>One method rather than two call sites</b> because both fault arms need it and the three
+    /// things that are easy to get wrong here are all decided once inside it: the null test, the read-once
+    /// rule, and the gate. A copy in each arm is how the budget arm and the generic arm would drift, and a
+    /// drifted decomposition is worse than an absent one — it still looks precise.</para>
+    ///
+    /// <para><b>The gate is the flag, and that is sufficient here rather than merely conventional.</b>
+    /// <c>PerDatabasePhasesMeasured</c> is set only from the connect's <c>finally</c>, which is downstream of
+    /// both the per-iteration clear and the stopwatch, so a true flag implies the stamps are this database's
+    /// own AND that the slice was started. A false flag means the fault landed before the connect — the
+    /// watermark read, the adaptive shrink's store write, <c>BuildQuery</c> — where there is no split to
+    /// print and no parent to print it against, and nothing is the honest answer.</para>
+    ///
+    /// <para><b>The stopwatch is read exactly once</b>, the #2472 rule this path already carries on its
+    /// success side. It is still running in the handler, so a second read a few statements later returns a
+    /// larger number: the gate and the line would then disagree about the parent, the residual would have
+    /// been computed against the smaller one, and the printed terms would not sum to the printed total. A
+    /// line that does not add up is the one outcome worse than no line.</para>
+    ///
+    /// <para><b>Same decomposition substring as the success line</b>, deliberately. These lines are parsed
+    /// by tooling outside this repo (#2811/#2851), so a fault split an existing parser already matches beats
+    /// a second shape it has to learn. Only the tail differs, and it has to: there are no rows and there was
+    /// no flush, so borrowing the success tail would print <c>(0 rows, pg:0ms)</c> and make a failed database
+    /// read as a quiet one.</para>
+    ///
+    /// <para><b>The level is the caller's</b>, not this method's. The budget arm is a Warning because a
+    /// collector that could not finish is not routine; the generic arm is Debug because one database being
+    /// offline or mid-restore is. A phase line louder than the error it decomposes would put a timing on the
+    /// default log with no reason beside it.</para>
+    ///
+    /// <para>Nothing here is persisted and nothing here is read back — a per-database split is N:1 against
+    /// <c>collection_log</c> and shaping that is the open decision in #2860. <c>internal</c> only so the pin
+    /// can call the shipped method instead of asserting on its source text.</para>
+    /// </summary>
+    internal static void LogPerDatabaseFaultSplit(
+        ILogger? logger,
+        LogLevel level,
+        CollectorContext context,
+        Stopwatch? databaseSqlSlice,
+        string displayName,
+        string collectorName,
+        string databaseName,
+        string outcome)
+    {
+        if (databaseSqlSlice is null)
+        {
+            return;
+        }
+
+        var databaseSqlMs = databaseSqlSlice.ElapsedMilliseconds;
+        if (context.PerDatabasePhasesFrom(databaseSqlMs) is not { } phases)
+        {
+            return;
+        }
+
+        logger?.Log(
+            level,
+            "  [{Server}] {Collector} [{Database}] {Outcome} after sql:{SqlMs}ms = connect:{ConnectMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms (nothing stored)",
+            displayName, collectorName, databaseName, outcome, databaseSqlMs,
+            phases.ConnectMs, phases.OpenMs, phases.DrainMs, phases.OtherMs);
+    }
+
     public async Task<CollectorRunResult> RunAsync<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerRuntime server,
@@ -990,11 +1056,47 @@ public sealed class DarlingCollectorRunner
                    after its read and flush succeed — per iteration, so a fault cannot leak a stamp
                    into a sibling database's landing. */
                 string? stagedOpenIntervalStamp = null;
+
+                /* #2896: the DECLARATION is hoisted, the START is not. The catch arms below print this
+                   database's split and a split needs its parent, so the stopwatch has to be in scope
+                   there — but it is still started at exactly the statement it was started at before, so
+                   the interval it measures is unchanged and dbSqlMs is the same number it always was.
+                   That matters because dbSqlMs is not log-only: it feeds sqlMs, fanout.Observe and
+                   collection_log.sql_duration_ms, and starting the stopwatch above the watermark read
+                   and BuildQuery to make it non-null would widen all three to satisfy a log line.
+
+                   Null therefore means "the fault landed before the timed region" — in the watermark
+                   read, the adaptive shrink's store write, or BuildQuery. There is genuinely no parent
+                   in that case, and the compiler enforces the check rather than a comment claiming it. */
+                Stopwatch? sqlSlice = null;
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
                        CollectorContext.CurrentDatabaseName. */
                     context.CurrentDatabaseName = databaseName;
+
+                    /* #2855: cleared once per iteration, because this loop reuses ONE context across every
+                       database and without the reset a database whose read faults would print the PREVIOUS
+                       database's split as its own — a stale timing that looks precise is worse than no
+                       timing at all. Same rule, and the same reason, as the enumerated readItem's clear of
+                       its own stamps.
+
+                       #2896 moved it from just below the stopwatch to HERE, above the watermark read and
+                       BuildQuery. #2855 only needed it before the CONNECT, because only the success path
+                       read the split; the catch arms now read it too, and a fault in the watermark read
+                       reaches them without having passed the old position — so the flag and the three
+                       stamps would still hold the previous database's values and the fault line would
+                       confidently attribute another database's connect to this one. Nothing between here
+                       and the connect reads any PerDatabase* field, so the success path is unchanged.
+
+                       This is also what makes PerDatabasePhasesMeasured a SUFFICIENT gate on the fault
+                       path: the flag is only ever set from the connect's finally below, which is
+                       downstream of both this clear and the stopwatch, so a true flag now implies both
+                       that these stamps are this database's own and that sqlSlice was started. */
+                    context.PerDatabaseConnectMs = 0;
+                    context.PerDatabaseOpenMs = 0;
+                    context.PerDatabaseDrainMs = 0;
+                    context.PerDatabasePhasesMeasured = false;
 
                     var dbPlan = plan;
                     if (dbPlan is null)
@@ -1103,18 +1205,8 @@ public sealed class DarlingCollectorRunner
                         }
                     }
 
-                    var sqlSlice = Stopwatch.StartNew();
+                    sqlSlice = Stopwatch.StartNew();
                     List<TRow> batch;
-
-                    /* #2855: cleared BEFORE the connect, once per iteration. This loop reuses ONE context
-                       across every database, so without the reset a database whose connect faults would
-                       print the PREVIOUS database's split as its own — and a stale timing that looks
-                       precise is worse than no timing at all. Same rule, and the same reason, as the
-                       enumerated readItem's clear of its own stamps. */
-                    context.PerDatabaseConnectMs = 0;
-                    context.PerDatabaseOpenMs = 0;
-                    context.PerDatabaseDrainMs = 0;
-                    context.PerDatabasePhasesMeasured = false;
 
                     /* dbToken, not cancellationToken (#2150): connect, execute and drain are the phases the
                        budget bounds. The FLUSH below deliberately stays on cancellationToken — abandoning a
@@ -1236,17 +1328,19 @@ public sealed class DarlingCollectorRunner
                        grep". Nothing here is persisted — a per-database split is N:1 against collection_log
                        and shaping that is the open decision in #2860.
 
-                       KNOWN LATENCY, stated rather than implied: this site is on the SUCCESS path, so a
-                       database whose connect times out stamps its phases and sets the flag (both from the
-                       finally above) and then reaches a catch arm that prints no split. Same standing as the
-                       enumerated path's #2854 note — the stamp is worth having regardless, because it is
-                       correct and it survives on the context into the catch, so emitting from the fault path
-                       is a later addition rather than a re-instrumentation. It is NOT done here because the
-                       parent this line decomposes is not available in the catch: sqlSlice is declared inside
-                       the try, and hoisting it above the watermark read and BuildQuery would silently widen
-                       dbSqlMs — which feeds sqlMs, the fan-out rollup and collection_log's sql_duration_ms.
-                       So the choices are a second stopwatch or a second line shape, and neither belongs in a
-                       change whose scope is the split itself. */
+                       THE SUCCESS PATH IS NO LONGER THE ONLY ONE (#2896). This site still prints only when
+                       the read and flush both landed; a database that faults is printed by
+                       LogPerDatabaseFaultSplit from the catch arms below, which is the case #2855's stamps
+                       were placed in a finally to serve and which used to reach a log that said nothing but
+                       an error string.
+
+                       The obstacle #2855 recorded was that dbSqlMs is out of scope in the catch, and that
+                       hoisting sqlSlice above the watermark read and BuildQuery to fix it would silently
+                       widen dbSqlMs — which is not log-only: it feeds sqlMs, the fan-out rollup and
+                       collection_log's sql_duration_ms. Neither of the two options it named was taken. Only
+                       the DECLARATION moved above the try; the START stayed exactly where it was, so the
+                       interval is unchanged, dbSqlMs is the same number, and no second stopwatch measures a
+                       second interval that a reader would then have to reconcile with this one. */
                     if (context.PerDatabasePhasesFrom(dbSqlMs) is { } dbPhases)
                     {
                         _logger?.LogInformation(
@@ -1327,6 +1421,13 @@ public sealed class DarlingCollectorRunner
                     _logger?.LogWarning(
                         "{Collector} on '{Server}' database [{Database}] {Message}",
                         definition.Name, server.Config.DisplayName, databaseName, budgetFailure.Message);
+
+                    /* #2896: and the split behind it, at the arm's own WARNING. This is the case the budget
+                       exists to bound, and connect: is the term that says whether the wall clock went on
+                       reaching the database or on reading it — which the message above cannot say. */
+                    LogPerDatabaseFaultSplit(
+                        _logger, LogLevel.Warning, context, sqlSlice,
+                        server.Config.DisplayName, definition.Name, databaseName, "budget expired");
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
@@ -1347,6 +1448,31 @@ public sealed class DarlingCollectorRunner
                     }
 
                     _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
+
+                    /* #2896: the split, at the SAME Debug as the skip it decomposes — deliberately, and it
+                       is the level question the issue raises answered rather than dodged.
+
+                       This arm stays Debug because the level is not what makes a persistently-failing
+                       database visible, and treating it as though it were would trade a real signal for a
+                       loud one. A partial loss already composes BuildPartialFailureNote below — "N of M
+                       database(s) failed", up to three named, plus the first error — into
+                       collection_log.error_message, which is PERSISTED and queryable and is what
+                       get_collection_health reports as last_note/note_count. A database failing every cycle
+                       for a week shows up there as a note on every run; a Warning would only have shown up
+                       in whatever log window had not yet rolled. And a TOTAL loss is already a Warning plus
+                       a rethrow further down, so it classifies and reaches the Capture Down self-alert.
+                       Raising this arm would emit one Warning per database per cycle per collector, which on
+                       a target with many databases is the flood #1875's one-capped-burst rule exists to
+                       stop.
+
+                       So the split rides the arm rather than the arm rising to meet it: a phase line louder
+                       than the error it decomposes puts a timing on the default log with no reason beside
+                       it, which reads as an unexplained slow database rather than a skipped one. At Debug
+                       the two lines arrive together, which is the state the issue is about — before this,
+                       turning Debug on bought the error string and no timing at all. */
+                    LogPerDatabaseFaultSplit(
+                        _logger, LogLevel.Debug, context, sqlSlice,
+                        server.Config.DisplayName, definition.Name, databaseName, "failed");
                 }
             }
 
