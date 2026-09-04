@@ -348,25 +348,51 @@ public class CollectionLogFetchPhaseSumsStoreTests
         {
             Assert.Contains(column, observability, StringComparison.Ordinal);
             Assert.Contains(column, DarlingDataReader.CollectionLogSql, StringComparison.Ordinal);
-
-            /* Emitted, not merely selected. */
-            Assert.Contains($"{column} = ", tools, StringComparison.Ordinal);
         }
 
-        /* And the family this rung joins, whose columns were selected but never emitted until now. */
-        foreach (var sibling in new[]
+        /* The tool GROUPS these into nullable blocks rather than emitting nineteen flat fields, which is a
+           measurement rather than a preference: flat, a 200-row read measured 138,481 characters against
+           41,221 for the eight fields it carried before - 3.36x, and ~97KB of that the literal text "null",
+           because a row carries at most ONE family and most carry none.
+
+           So the emit assertion is BLOCK-SCOPED, and that is the point of doing it this way rather than
+           asserting the short names against the whole file: "probe_ms" appears in both fetch blocks, so a
+           whole-file Contains would pass with the text block empty and the plan block carrying everything
+           twice. Slicing each block first is what makes the pin able to fail. */
+        foreach (var (block, members) in new[]
                  {
-                     "sql_open_ms", "sql_drain_ms", "watermark_ms", "drain_rows_read",
-                     "drain_bytes_read", "drain_last_read_ms", "target_session_id", "sweep_peer_max_ms",
+                     ("sql_phases = ", new[] { "open_ms = ", "drain_ms = ", "other_ms = ", "watermark_ms = " }),
+                     ("drain = ", ["rows_read = ", "bytes_read = ", "last_read_ms = ", "target_session_id = "]),
+                     ("plan_fetch = ", ["probe_ms = ", "target_ms = ", "write_ms = ", "ids_attempted = ", "probe_ids = "]),
+                     ("text_fetch = ", ["probe_ms = ", "target_ms = ", "write_ms = ", "ids_attempted = ", "probe_ids = "]),
                  })
         {
-            Assert.Contains($"{sibling} = ", tools, StringComparison.Ordinal);
+            var at = tools.IndexOf(block, StringComparison.Ordinal);
+            Assert.True(at > 0, $"get_collection_log's projection does not emit a '{block}' block. Persisting a "
+                + "column nothing reports is half a feature - which is what V108 and V109 both shipped.");
+
+            /* To the end of this anonymous object, so a member belonging to a LATER block cannot satisfy
+               an earlier one's assertion. */
+            var close = tools.IndexOf("\r\n                },", at, StringComparison.Ordinal);
+            if (close < 0)
+            {
+                close = tools.IndexOf("\n                },", at, StringComparison.Ordinal);
+            }
+
+            Assert.True(close > at, $"Could not find the end of the '{block}' block.");
+            var body = tools[at..close];
+
+            foreach (var member in members)
+            {
+                Assert.Contains(member, body, StringComparison.Ordinal);
+            }
         }
 
-        /* The residual stays DERIVED and is reported as such - V108 stores no other_ms column so the terms
-           cannot drift from the parent they decompose, but a large residual is itself the finding and was
-           unreachable while the projection dropped it. */
-        Assert.Contains("sql_other_ms = ", tools, StringComparison.Ordinal);
+        /* sweep_peer_max_ms stays FLAT and outside every block. V109 records it on every row deliberately -
+           a ratio needs a denominator drawn from ordinary bodies, not only from failures - so grouping it
+           with the conditional blocks would imply it shares their fate and vanish it from exactly the rows
+           it exists to provide a baseline from. */
+        Assert.Contains("sweep_peer_max_ms = r.SweepPeerMaxMs", tools, StringComparison.Ordinal);
     }
 
     /// <summary>
