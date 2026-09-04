@@ -2422,9 +2422,15 @@ CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collect
     /// count alone still cannot separate "streaming steadily but slowly" from "delivered everything then
     /// hung" - both end at the budget with a positive count. Subtract this from <c>sql_drain_ms</c> and you
     /// have the time the reader sat with nothing arriving. NULL means no row ever arrived, which is
-    /// unambiguous because <c>drain_rows_read</c> is non-null whenever this group is written at all: NULL
-    /// beside a 0 count says nothing came, NULL beside a NULL count says the row predates this rung. 0 is
-    /// left free to mean what it honestly means - row 1 arrived instantly.</para>
+    /// NULL beside a 0 count says nothing came, and 0 is left free to mean what it honestly means - row 1
+    /// arrived instantly.</para>
+    ///
+    /// <para><b>NULL means NOT RECORDED and nothing more.</b> It does NOT identify a pre-rung row, and
+    /// saying so would be false in two reachable ways: an abandon firing inside <c>ExecuteReaderAsync</c>
+    /// never constructs the counting reader, so all three guard to NULL on a genuine V109 row; and no
+    /// per-database ENUMERATED collector sets the measured flag at all, so <c>query_store</c> and every
+    /// <c>Pg*Stats</c> collector read NULL here forever on a fully current store. A dashboard that treated
+    /// NULL as 'old row' would silently misclassify both an open-stall and whole collector families.</para>
     ///
     /// <para><b><c>drain_bytes_read</c> is the string payload, and the column name is the honest one.</b> No
     /// <c>DbDataReader</c> exposes wire size, so this counts UTF-16 bytes off the string and binary getters

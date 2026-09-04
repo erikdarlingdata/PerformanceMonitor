@@ -277,11 +277,17 @@ ON CONFLICT (server_id) DO UPDATE SET
                the phase stopwatches are.
 
                drain_last_read_ms is the one that carries the diagnosis: subtracted from sql_drain_ms it is
-               the time the reader spent with nothing arriving. It stores NULL when the run read no row at
-               all, which is NOT ambiguous with 'not recorded' here because drain_rows_read is non-null
-               whenever this group is written - a NULL beside a 0 count says 'nothing ever arrived', and a
-               NULL beside a NULL count says the row predates this rung. 0 is left free to mean what it
-               honestly means: row 1 arrived instantly. */
+               the time the reader spent with nothing arriving. NULL beside a 0 count says nothing ever
+               arrived; 0 is left free to mean what it honestly means, that row 1 arrived instantly.
+
+               NULL means NOT RECORDED, and deliberately says no more than that. It was tempting to claim NULL
+               beside a NULL count identifies a pre-rung row, but that is false in two reachable ways: an
+               abandon that fires inside ExecuteReaderAsync leaves all three at their -1 default and they are
+               guarded to NULL just below, and NO per-database enumerated collector sets the measured flag at
+               all, so query_store and every Pg*Stats collector will read NULL here forever on a store that is
+               fully current. A reader wanting 'was this measured' must ask that question of the column it
+               cares about, not infer the store's version from an absence.
+            */
             /* Every figure guarded on >= 0, not just the last-read one (#2864 review). The budget can fire
                INSIDE ExecuteReaderAsync, before the counting reader is constructed at all - the abandon arm
                then returns ServerPhasesMeasured: true with these still at their -1 default, because only

@@ -276,6 +276,36 @@ public class CollectionLogDrainForensicsStoreTests
         Assert.Equal(2, Regex.Matches(worker, @"peerMaxAtDispatchMs: null").Count);
     }
 
+    /// <summary>
+    /// NULL means NOT RECORDED and nothing more - pinned because the first version of this rung claimed more
+    /// than that, in three places at once (#2864 review).
+    ///
+    /// <para>The claim was that a NULL count beside a NULL last-read identifies a row written before the
+    /// rung. It is false in two reachable ways. An abandon firing inside <c>ExecuteReaderAsync</c> never
+    /// constructs the counting reader, so a genuine V109 row guards all three to NULL - the case
+    /// <see cref="TheUnmeasuredSentinelIsNeverWrittenAsALiteral"/> constructs directly. And no per-database
+    /// ENUMERATED collector sets the measured flag at all, so <c>query_store</c> and the <c>Pg*Stats</c>
+    /// family read NULL forever on a fully current store. A dashboard built on the claim would misclassify
+    /// an open-stall and whole collector families as "no data".</para>
+    /// </summary>
+    [Fact]
+    public void NullMeansNotRecordedAndTheDocsDoNotClaimMore()
+    {
+        foreach (var file in new[]
+                 {
+                     "Darling/PerformanceMonitor.Darling.Service/DarlingObservability.cs",
+                     "Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs",
+                     "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs",
+                 })
+        {
+            var source = ReadSource(file);
+            var v109 = source[source.IndexOf("2864", StringComparison.Ordinal)..];
+
+            Assert.DoesNotContain("predates this rung", v109, StringComparison.Ordinal);
+            Assert.DoesNotContain("predates the rung", v109, StringComparison.Ordinal);
+        }
+    }
+
     private static string ReadSource(string relativePath)
     {
         var dir = AppContext.BaseDirectory;

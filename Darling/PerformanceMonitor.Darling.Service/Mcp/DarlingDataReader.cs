@@ -1527,11 +1527,11 @@ internal static class DarlingDataReader
                 reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
                 reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
                 reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
-                /* V109 (#2864). NULL on every row written before the rung and on every path that emits no
-                   drain forensics. DrainLastReadMs is additionally NULL when the run read no row at all -
-                   unambiguous, because DrainRowsRead is non-null whenever this group was written: NULL
-                   beside a 0 count means nothing arrived, NULL beside a NULL count means the row predates
-                   the rung. */
+                /* V109 (#2864). NULL means NOT RECORDED and no more: a row written before the rung, a path
+                   that emits no forensics (every per-database ENUMERATED collector - query_store, the
+                   Pg*Stats family - never sets the measured flag), or an abandon that fired before the
+                   counting reader was constructed. Do NOT read a NULL as 'old row'. DrainLastReadMs beside
+                   a 0 DrainRowsRead does mean nothing arrived; that pairing is the one safe inference. */
                 reader.IsDBNull(11) ? null : Convert.ToInt64(reader.GetValue(11)),
                 reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
                 reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
