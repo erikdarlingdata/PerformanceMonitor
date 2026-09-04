@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -278,7 +279,8 @@ namespace PerformanceMonitorDashboard
                     {
                         var xml = System.IO.File.ReadAllText(fileName);
                         var targetTab = isFirst ? subTab : AddNewEmptyPlanSubTab();
-                        LoadPlanIntoSubTab(targetTab, xml, System.IO.Path.GetFileName(fileName));
+                        // Fire-and-forget (open-file, not paste): discard the Task (CS4014 is an error here).
+                        _ = LoadPlanIntoSubTab(targetTab, xml, System.IO.Path.GetFileName(fileName));
                     }
                     catch (Exception ex)
                     {
@@ -306,7 +308,8 @@ namespace PerformanceMonitorDashboard
                     }
                     if (!string.IsNullOrWhiteSpace(xml))
                     {
-                        LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
+                        // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                        await LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
                         return;
                     }
                     MessageBox.Show("The clipboard does not contain any text.", "Paste Plan XML",
@@ -336,9 +339,12 @@ namespace PerformanceMonitorDashboard
 
         /// <summary>
         /// Loads plan XML into an existing sub-tab (replacing whatever was there before).
-        /// Updates the sub-tab header label and shows the viewer layer.
+        /// Updates the sub-tab header label and shows the viewer layer. Returns a <see cref="Task"/> (not
+        /// <c>async void</c>) so the paste entry points can <c>await</c> it inside their <c>_pasteInProgress</c>
+        /// guard: the real parse runs off-thread in <c>LoadPlan</c>, so the guard has to span the load, not just
+        /// the clipboard read (#2870). Fire-and-forget callers (open-file, drag-drop) discard the Task.
         /// </summary>
-        private async void LoadPlanIntoSubTab(TabItem subTab, string planXml, string label, string? queryText = null)
+        private async Task LoadPlanIntoSubTab(TabItem subTab, string planXml, string label, string? queryText = null)
         {
             if (subTab.Content is not Grid subTabContent) return;
             if (subTabContent.Children.Count < 2) return;
@@ -447,7 +453,8 @@ namespace PerformanceMonitorDashboard
                 try
                 {
                     var xml = System.IO.File.ReadAllText(planFiles[i]);
-                    LoadPlanIntoSubTab(newTab, xml, System.IO.Path.GetFileName(planFiles[i]));
+                    // Fire-and-forget (drag-drop, not paste): discard the Task (CS4014 is an error here).
+                    _ = LoadPlanIntoSubTab(newTab, xml, System.IO.Path.GetFileName(planFiles[i]));
                 }
                 catch (Exception ex)
                 {
@@ -476,7 +483,8 @@ namespace PerformanceMonitorDashboard
                     var (ok, xml) = await ClipboardText.TryReadAsync();
                     if (ok && !string.IsNullOrWhiteSpace(xml))
                     {
-                        LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
+                        // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                        await LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
                     }
                 }
                 finally { _pasteInProgress = false; }
@@ -488,7 +496,8 @@ namespace PerformanceMonitorDashboard
             try
             {
                 var xml = System.IO.File.ReadAllText(path);
-                LoadPlanIntoActivePlanSubTab(xml, System.IO.Path.GetFileName(path));
+                // Fire-and-forget (drag-drop, not paste): discard the Task (CS4014 is an error here).
+                _ = LoadPlanIntoActivePlanSubTab(xml, System.IO.Path.GetFileName(path));
             }
             catch (Exception ex)
             {
@@ -497,11 +506,11 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void LoadPlanIntoActivePlanSubTab(string planXml, string label)
+        private async Task LoadPlanIntoActivePlanSubTab(string planXml, string label)
         {
             var activeSubTab = GetActivePlanSubTab();
             if (activeSubTab != null)
-                LoadPlanIntoSubTab(activeSubTab, planXml, label);
+                await LoadPlanIntoSubTab(activeSubTab, planXml, label);
         }
 
         private static bool IsPlanFile(string path)

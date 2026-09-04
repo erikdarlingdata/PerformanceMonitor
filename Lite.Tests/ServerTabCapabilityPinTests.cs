@@ -128,6 +128,51 @@ public sealed class ServerTabCapabilityPinTests
             "keypress (#2870). Restore the guard around the awaited clipboard read in ServerTab_KeyDown.");
     }
 
+    /// <summary>
+    /// #2870 hardening pin: the ServerTab paste guard must span read + PARSE + tab-create, not just the clipboard
+    /// read. <c>OpenPlanTab</c> awaits <c>PlanViewerControl.LoadPlan</c>, whose real parse runs off the UI thread
+    /// (a <c>Task.Run</c>). If <c>ServerTab_KeyDown</c> fire-and-forgets <c>OpenPlanTab</c> (<c>async void</c>, or
+    /// <c>_ = OpenPlanTab(...)</c>), the <c>finally</c> clears <c>_pasteInProgress</c> when the parse is KICKED
+    /// OFF, not when it FINISHES, and a held Ctrl+V re-enters during the parse. This asserts the guarded block
+    /// AWAITS <c>OpenPlanTab</c>. The build enforces <c>OpenPlanTab</c> is Task-returning (you cannot
+    /// <c>await</c> an <c>async void</c>), so await-in-guard + a green build == the guard spans the load.
+    /// </summary>
+    [Fact]
+    public void ServerTabPaste_GuardSpansTheLoad()
+    {
+        var combined = string.Join("\n", ServerTabCsFiles().Select(File.ReadAllText));
+        AssertGuardBlocksAwaitLoad(combined, "Lite ServerTab", "await OpenPlanTab");
+    }
+
+    /// <summary>
+    /// Asserts that EVERY <c>_pasteInProgress = true;</c> ... <c>_pasteInProgress = false;</c> block in
+    /// <paramref name="source"/> contains <paramref name="awaitLoadToken"/> (the load is awaited inside the
+    /// guard, so the guard spans the parse, not just the clipboard read -- #2870).
+    /// </summary>
+    private static void AssertGuardBlocksAwaitLoad(string source, string where, string awaitLoadToken)
+    {
+        const string open = "_pasteInProgress = true;";
+        const string close = "_pasteInProgress = false;";
+        var blocks = 0;
+        var idx = 0;
+        while ((idx = source.IndexOf(open, idx, StringComparison.Ordinal)) >= 0)
+        {
+            var end = source.IndexOf(close, idx + open.Length, StringComparison.Ordinal);
+            Assert.True(end > idx,
+                $"a '{open}' guard in {where} has no matching '{close}' reset -- the guard's finally is gone (#2870).");
+            var block = source.Substring(idx, end - idx);
+            Assert.True(block.Contains(awaitLoadToken, StringComparison.Ordinal),
+                $"a _pasteInProgress guard block in {where} does not await the load ('{awaitLoadToken}' not found in " +
+                "the guarded block) -- a fire-and-forget load clears the guard when the parse is KICKED OFF, not " +
+                "when it FINISHES, so a held Ctrl+V re-enters during the parse window and spawns a second tab (the " +
+                "#2870 symptom, moved to the parse). Await the load inside the guarded try (ServerTab_KeyDown).");
+            blocks++;
+            idx = end + close.Length;
+        }
+        Assert.True(blocks > 0,
+            $"no _pasteInProgress guard block found in {where} -- the scan is broken or the guard was removed (#2870).");
+    }
+
     /* ---------------- scans ---------------- */
 
     private static ISet<string> ScanTabs()

@@ -125,7 +125,8 @@ namespace PerformanceMonitorDashboard
             PerformanceTab.Initialize(_databaseService, s => StatusText.Text = s);
             _viewPlanHandler = (planXml, label, queryText) =>
             {
-                OpenPlanTab(planXml, label, queryText);
+                // Fire-and-forget (View Plan, not paste): discard the Task (CS4014 is an error here).
+                _ = OpenPlanTab(planXml, label, queryText);
                 PlanViewerTabItem.IsSelected = true;
             };
             _actualPlanStartedHandler = (label) => ShowPlanLoading(label);
@@ -383,7 +384,8 @@ namespace PerformanceMonitorDashboard
                         var (ok, xml) = await ClipboardText.TryReadAsync();
                         if (ok && !string.IsNullOrWhiteSpace(xml))
                         {
-                            OpenPlanTab(xml, "Pasted Plan");
+                            // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                            await OpenPlanTab(xml, "Pasted Plan");
                             PlanViewerTabItem.IsSelected = true;
                         }
                     }

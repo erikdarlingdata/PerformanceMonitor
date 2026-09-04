@@ -127,6 +127,25 @@ public sealed class PlanViewerCapabilityPinTests
     }
 
     /// <summary>
+    /// #2870 hardening pin: the guard must span read + PARSE + tab-create, not just the clipboard read. The real
+    /// plan parse runs off the UI thread inside <c>PlanViewerControl.LoadPlan</c> (a <c>Task.Run</c>), so if the
+    /// paste handler FIRE-AND-FORGETS the load (<c>async void</c> loader, or <c>_ = LoadPlan...</c>), the
+    /// <c>finally</c> clears <c>_pasteInProgress</c> the moment the load is KICKED OFF, not when it FINISHES --
+    /// and a held Ctrl+V re-enters during the (often longer) parse window and spawns a second tab: the same
+    /// #2870 symptom, moved from the read window to the parse window. This asserts every <c>_pasteInProgress</c>
+    /// guard block in the shared controller and <c>PlanViewerControl.Interaction.cs</c> AWAITS the load
+    /// (<c>await LoadPlan...</c> -- covers <c>LoadPlan</c>, <c>LoadPlanIntoSubTab</c>,
+    /// <c>LoadPlanIntoActivePlanSubTab</c>). The build enforces the loaders are Task-returning (you cannot
+    /// <c>await</c> an <c>async void</c>), so await-in-guard + a green build == the guard spans the load.
+    /// </summary>
+    [Fact]
+    public void PlanViewerPaste_GuardSpansTheLoad()
+    {
+        AssertGuardBlocksAwaitLoad(File.ReadAllText(ControllerCs()), "StandalonePlanViewerController.cs", "await LoadPlan");
+        AssertGuardBlocksAwaitLoad(File.ReadAllText(InteractionCs()), "PlanViewerControl.Interaction.cs", "await LoadPlan");
+    }
+
+    /// <summary>
     /// #2828 regression pin: the inner plan <c>TabControl</c>'s <c>SelectionChanged</c> subscription must be
     /// wired in the controller CONSTRUCTOR (exactly once for the controller's lifetime), NEVER inside
     /// <c>EnsureInitialized</c>. <c>Reset()</c> (Plan Viewer close) clears the <c>_initialized</c> guard, so a
@@ -255,6 +274,36 @@ public sealed class PlanViewerCapabilityPinTests
     {
         yield return ControllerCs();
         yield return InteractionCs();
+    }
+
+    /// <summary>
+    /// Asserts that EVERY <c>_pasteInProgress = true;</c> ... <c>_pasteInProgress = false;</c> block in
+    /// <paramref name="source"/> contains <paramref name="awaitLoadToken"/> (the load is awaited inside the
+    /// guard, so the guard spans the parse, not just the clipboard read -- #2870). Fails if a guard block
+    /// fire-and-forgets the load, or if a guard has no matching finally reset.
+    /// </summary>
+    private static void AssertGuardBlocksAwaitLoad(string source, string where, string awaitLoadToken)
+    {
+        const string open = "_pasteInProgress = true;";
+        const string close = "_pasteInProgress = false;";
+        var blocks = 0;
+        var idx = 0;
+        while ((idx = source.IndexOf(open, idx, StringComparison.Ordinal)) >= 0)
+        {
+            var end = source.IndexOf(close, idx + open.Length, StringComparison.Ordinal);
+            Assert.True(end > idx,
+                $"a '{open}' guard in {where} has no matching '{close}' reset -- the guard's finally is gone (#2870).");
+            var block = source.Substring(idx, end - idx);
+            Assert.True(block.Contains(awaitLoadToken, StringComparison.Ordinal),
+                $"a _pasteInProgress guard block in {where} does not await the load ('{awaitLoadToken}' not found in " +
+                "the guarded block) -- a fire-and-forget load clears the guard when the parse is KICKED OFF, not " +
+                "when it FINISHES, so a held Ctrl+V re-enters during the parse window and spawns a second tab (the " +
+                "#2870 symptom, moved to the parse). Await the load inside the guarded try.");
+            blocks++;
+            idx = end + close.Length;
+        }
+        Assert.True(blocks > 0,
+            $"no _pasteInProgress guard block found in {where} -- the scan is broken or the guard was removed (#2870).");
     }
 
     private static string BaselineDir([CallerFilePath] string thisFile = "") =>

@@ -464,7 +464,8 @@ public partial class ServerTab : UserControl
                 var (ok, xml) = await ClipboardText.TryReadAsync();
                 if (ok && !string.IsNullOrWhiteSpace(xml))
                 {
-                    OpenPlanTab(xml, "Pasted Plan");
+                    // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                    await OpenPlanTab(xml, "Pasted Plan");
                     PlanViewerTabItem.IsSelected = true;
                 }
             }

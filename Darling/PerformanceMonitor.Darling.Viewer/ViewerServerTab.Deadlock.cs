@@ -51,7 +51,7 @@ public partial class ViewerServerTab
            the right-clicked row's own statement text would mis-pair on a non-victim row. The plan XML carries
            its own statement text; the side panel simply stays empty (unlike the blocking rows, which each own
            their blocked/blocking SQL+plan pair and so pass it). */
-        OpenPlanTab(row.VictimQueryPlanXml!, "Victim Plan", null);
+        _ = OpenPlanTab(row.VictimQueryPlanXml!, "Victim Plan", null);
     }
 
     /// <summary>Double-clicking a deadlock row opens the same graph viewer.</summary>
