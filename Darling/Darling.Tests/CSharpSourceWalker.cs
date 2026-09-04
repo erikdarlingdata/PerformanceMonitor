@@ -462,8 +462,9 @@ internal static class CSharpSourceWalker
                 return j + 1;
             }
 
-            /* Not a char literal after all — no valid one spans a line. Give back the quote as one
-               character so the scan cannot stall, and let the next iteration treat it as code. */
+            /* Not a char literal after all — no valid one spans a line, so the file is malformed here.
+               Consume just the quote so the scan cannot stall, and resume classifying at the next
+               character. Unreachable for source that compiles. */
             if (text[j] == '\n')
             {
                 return i + 1;

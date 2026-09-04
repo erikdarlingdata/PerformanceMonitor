@@ -276,15 +276,20 @@ public sealed class CSharpSourceWalkerTests
     public void AVerbatimStringsQuoteRunIsAnEscape_NotARawDelimiter()
     {
         var fixture = Lines(
-            """"        var open = Regex.Match(source, @"\[""" + Escape(name) + @"""\]");"""",
+            """"        var open = Regex.Match(source, @"LEFT""" + Escape(name) + @"""RIGHT");"""",
             """        var after = Reached();""");
 
         var walked = CSharpSourceWalker.StripCommentsAndStrings(fixture);
 
-        /* Both concatenation operands are literals; the code between and after them is not. */
+        /* Both concatenation operands are literals and both bodies have to be blanked — the second one is
+           the one whose `@"""` prefix carries the quote run, and getting it wrong swallows everything after
+           it, which is what the last assertion here is really about. */
+        AssertBlanked(fixture, walked, "LEFT");
+        AssertBlanked(fixture, walked, "RIGHT");
+
+        /* The code BETWEEN the two literals, and the statement after them, are not. */
         Assert.Contains("Escape(name)", walked, StringComparison.Ordinal);
         Assert.Contains("Reached()", walked, StringComparison.Ordinal);
-        AssertBlanked(fixture, walked, "Match(source, @");
 
         /* And the structural consequence, which is what a mis-read delimiter actually costs. */
         Assert.Equal(0, Balance(walked, '(', ')'));
