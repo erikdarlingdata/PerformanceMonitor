@@ -157,8 +157,25 @@ LIMIT 5000";
 
         // Always-on DMV blocking snapshot fallback. Merge BEFORE the empty check so DMV-only blocking
         // (blocked-process-report unavailable, e.g. AWS RDS) still reconstructs.
+        /* A FACTORY that stamps the deadline, not the bare `connection.CreateCommand` method group
+           (#2874) - same shape and same reason as the fact collector's sibling call. The command is
+           built inside AppendDmvSnapshotRowsAsync, which sets only its CommandText, so this is the
+           only place its ceiling can come from.
+
+           DrillDownCommandTimeoutSeconds, which is what every other command in this pass already
+           carries. It equals Npgsql's inherited default, so this changes no timing - the point is that
+           30 is now CHOSEN here rather than arrived at, which is the whole claim of that constant's
+           own doc comment ("pinning it here makes the bound explicit and independent of any global
+           default"). It is also why a shared floor inside the helper could not have fixed this: the
+           helper cannot tell a caller that deliberately wants 30 from one that never chose. */
         await PgBlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-            connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+            () =>
+            {
+                var dmvCommand = connection.CreateCommand();
+                dmvCommand.CommandTimeout = DrillDownCommandTimeoutSeconds;
+                return dmvCommand;
+            },
+            rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
             context.CancellationToken);
 
         if (rows.Count == 0) return;
