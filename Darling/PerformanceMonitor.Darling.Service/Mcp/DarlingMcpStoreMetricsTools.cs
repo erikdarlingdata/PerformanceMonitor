@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -35,7 +36,7 @@ public sealed class DarlingMcpStoreMetricsTools
     public const int MaxDaysBack = StoreSelfMetrics.RetentionDays;
 
     [McpServerTool(Name = "get_store_metrics"), Description(
-        "Gets the monitoring store's OWN size and growth metrics — not a monitored SQL Server's. The service records an hourly self-metrics snapshot: per-hypertable total size, pre/post-compression bytes and chunk count; the query-text and query-plan payload dimension tables' total size (the store's dominant payloads) and row counts; the whole store's size with the enabled-server count; and one row per TimescaleDB background job (CAGG refresh, compression, retention) with its last run duration, schedule interval, duration-vs-cadence percent, and run/failure totals — the jobs whose runtimes scale with fleet size. Returns the latest snapshot per object plus a daily series over the window, with the whole-store daily growth in bytes and the derived per-server ingest rate (daily growth / enabled servers). Use for capacity forecasting: what is driving store growth, how fast, what adding N servers would multiply, and which background job is closest to outgrowing its own cadence.")]
+        "Gets the monitoring store's OWN size and growth metrics — not a monitored SQL Server's. The service records an hourly self-metrics snapshot: per-hypertable total size, pre/post-compression bytes and chunk count; the query-text and query-plan payload dimension tables' total size (the store's dominant payloads) and row counts; the whole store's size with the enabled-server count; and one row per TimescaleDB background job (CAGG refresh, compression, retention) with its last run duration, schedule interval, duration-vs-cadence percent, and run/failure totals — the jobs whose runtimes scale with fleet size. Returns the latest snapshot per object plus a daily series over the window, with the whole-store daily growth in bytes and the derived per-server ingest rate (daily growth / enabled servers). Also reports, read LIVE from the catalog rather than from the recorded series, every retention policy the rollup-coverage gate is holding PAUSED, with the tier's actual data span and how many times its configured drop_after horizon it is really holding — a held policy records zero failures and a normal-looking last run, so it is invisible in the stored job telemetry and is a common cause of unexplained store growth. Use for capacity forecasting: what is driving store growth, how fast, what adding N servers would multiply, which background job is closest to outgrowing its own cadence, and whether retention is actually running.")]
     public static async Task<string> GetStoreMetrics(
         NpgsqlDataSource postgres,
         [Description("Days of daily-series history. Default 30; max 400 (the series' own retention).")] int days_back = 30)
@@ -67,6 +68,31 @@ public sealed class DarlingMcpStoreMetricsTools
 
             var storeLatest = latest.FirstOrDefault(r => r.ObjectKind == "store");
 
+            /* #2813: retention holds are read LIVE from the catalog, not from the series, because the
+               series does not carry them. StoreSelfMetrics records total_runs and total_failures but not
+               j.scheduled, so a policy the coverage gate has PAUSED reports zero failures and a plausible
+               last run — indistinguishable from a healthy job in every stored column. On the production
+               store that shape hid five held policies for 16 days while the tier grew to 4.5x its horizon.
+               One catalog round trip answers it for the current moment; persisting it into the series is a
+               migration rung's worth of work and the better long-term answer, tracked separately.
+
+               This checks out its OWN connection (review catch — an earlier comment here claimed it reused
+               one, which was not true of any code path in this method: the two readers above go through
+               postgres.CreateCommand and leave nothing open). That is a third pooled checkout per call,
+               which is cheap but is not free, and saying so is the point — a comment that overstates what
+               the code does is worse than none. */
+            List<RetentionHoldReading> holds;
+            await using (var connection = await postgres.OpenConnectionAsync())
+            {
+                holds = (await TimescaleSupport.ReadRetentionHoldReadingsAsync(connection, logger: null))
+                    .ToList();
+            }
+
+            var heldPolicies = holds
+                .Where(h => !h.Armed)
+                .OrderByDescending(h => h.OverHorizonRatio ?? 0)
+                .ToList();
+
             return JsonSerializer.Serialize(new
             {
                 as_of = latest.Max(r => r.MetricTime).ToString("o"),
@@ -81,6 +107,31 @@ public sealed class DarlingMcpStoreMetricsTools
                         day = g.Day.ToString("yyyy-MM-dd"),
                         delta_bytes = g.DeltaBytes,
                         per_server_bytes = g.PerServerBytes is { } rate ? Math.Round(rate) : (double?)null,
+                    }),
+                },
+                /* #2813. Present on EVERY response, including when nothing is held — an absent block and
+                   "nothing is held" must not look alike, which is the entire failure this reports on. */
+                retention = new
+                {
+                    policy_count = holds.Count,
+                    held_count = heldPolicies.Count,
+                    note = holds.Count == 0
+                        ? "No retention policies found (a plain-PostgreSQL store, or TimescaleDB is unavailable)."
+                        : heldPolicies.Count == 0
+                            ? "Every retention policy is armed."
+                            : "HELD policies are PAUSED by the rollup-coverage gate so retention cannot drop history a "
+                              + "rollup has never materialized. They arm themselves once the consumer catches up; the "
+                              + "missing step is a backfill (--backfill-rollups). Arming one by hand drops the only copy "
+                              + "of that history. over_horizon_ratio is how many times its configured depth the tier is "
+                              + "actually holding — the cost of the hold.",
+                    held = heldPolicies.Select(h => new
+                    {
+                        hypertable = h.HypertableName,
+                        job_id = h.JobId,
+                        drop_after = h.DropAfter,
+                        chunk_count = h.ChunkCount,
+                        actual_span_days = h.SpanSeconds is { } sec ? Math.Round(sec / 86400.0, 1) : (double?)null,
+                        over_horizon_ratio = h.OverHorizonRatio is { } r ? Math.Round(r, 2) : (double?)null,
                     }),
                 },
                 objects = latest
