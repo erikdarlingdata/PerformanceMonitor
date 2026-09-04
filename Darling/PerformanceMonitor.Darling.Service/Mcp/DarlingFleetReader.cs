@@ -220,12 +220,18 @@ GROUP BY server_id";
     /// — a collector that has gone dark entirely (its AppliesTo gate flipped off, say) must not read as
     /// FAILING just because its last SUCCESS is old; a collector still being invoked and erroring every cycle
     /// has a recent last_run_time and correctly stays FAILING.</summary>
-    public const string FleetCollectionHealthSql = @"
+    public const string FleetCollectionHealthSql = $@"
 SELECT
     server_id,
     collector_name,
     COUNT(*) AS total_runs,
-    SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+    -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+    -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+    -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+    -- the shared predicate is for: NULL under this NOT would have dropped it.
+    SUM(CASE WHEN status = 'SUCCESS'
+              AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+             THEN 1 ELSE 0 END) AS success_count,
     SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
     MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
     SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
@@ -236,7 +242,17 @@ SELECT
     -- HEALTHY while every other surface called it WARNING -- and it would COMPILE, because the
     -- default is silent. That is the #2779/#2784 failure shape: one surface fixed, its sibling
     -- quietly left on the old reading.
-    SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
+    --
+    -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+    -- window can still hold cycles written before #2803 gave abandonment its own status:
+    -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+    -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+    -- filter correct against current writes and silently wrong against older ones, failing in
+    -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+    -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+    -- for query_store), so equality against one rendered sentence matches one collector.
+    SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+             THEN 1 ELSE 0 END) AS abandoned_count
 FROM v_collection_log
 WHERE collection_time >= $1
 GROUP BY server_id, collector_name";
@@ -598,6 +614,7 @@ GROUP BY server_id, collector_name";
     {
         var rows = new List<FleetServerRow>();
         await using var command = postgres.CreateCommand(FleetServersSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -617,6 +634,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, List<FleetTag>>();
         await using var command = postgres.CreateCommand(FleetTagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -642,6 +660,7 @@ GROUP BY server_id, collector_name";
     {
         var forest = new List<FleetTagNode>();
         await using var command = postgres.CreateCommand(FleetTagForestSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -662,6 +681,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, CpuRow>();
         await using var command = postgres.CreateCommand(FleetCpuSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -677,6 +697,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, MemoryRow>();
         await using var command = postgres.CreateCommand(FleetMemorySql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -692,6 +713,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, MemoryPressureRow>();
         await using var command = postgres.CreateCommand(FleetMemoryPressureSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -709,6 +731,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, ThreadsRow>();
         await using var command = postgres.CreateCommand(FleetThreadsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -727,6 +750,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, BlockingRow>();
         await using var command = postgres.CreateCommand(FleetBlockingSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -747,6 +771,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, DeadlockRow>();
         await using var command = postgres.CreateCommand(FleetDeadlockSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -764,6 +789,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, DateTime>();
         await using var command = postgres.CreateCommand(FleetLastCollectionSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, DateTime.SpecifyKind(now.AddHours(-48), DateTimeKind.Unspecified));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -784,6 +810,7 @@ GROUP BY server_id, collector_name";
     {
         var counts = new Dictionary<int, CollectorCounts>();
         await using var command = postgres.CreateCommand(FleetCollectionHealthSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

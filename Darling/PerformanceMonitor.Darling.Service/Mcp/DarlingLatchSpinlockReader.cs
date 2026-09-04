@@ -114,6 +114,7 @@ internal static class DarlingLatchSpinlockReader
     {
         var rows = new List<LatchStatRow>();
         await using var command = postgres.CreateCommand(LatchStatsTopNSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -195,6 +196,7 @@ internal static class DarlingLatchSpinlockReader
     {
         var rows = new List<SpinlockStatRow>();
         await using var command = postgres.CreateCommand(SpinlockStatsTopNSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
