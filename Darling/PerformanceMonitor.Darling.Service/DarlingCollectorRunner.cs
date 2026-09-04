@@ -85,7 +85,13 @@ public sealed record CollectorRunResult(
     long ServerRowsRead = -1,
     long ServerBytesRead = -1,
     long ServerLastReadMs = -1,
-    int? TargetSessionId = null)
+    int? TargetSessionId = null,
+    /* V110 (#2860): the per-database fetch split, summed across the fan-out. Passed in already ROLLED UP
+       rather than as loose figures plus a flag, unlike the Server* members above, because the rollup is a
+       cross-item accumulation the enumerated branch performs and this record cannot: the Server* pattern
+       works only because those are single-shot stamps on one path. Same reasoning as FanoutCost, which
+       arrives the same way for the same reason. */
+    FetchPhaseCost? FetchPhases = null)
 {
     /// <summary>
     /// The part of <see cref="SqlMs"/> that is neither the open nor the drain — query building, command
@@ -153,6 +159,121 @@ public readonly record struct DrainForensics(long RowsRead, long BytesRead, long
 /// what makes the stored triple readable: a row with an open but no drain would be un-interpretable.
 /// </summary>
 public readonly record struct ServerPhaseCost(int OpenMs, int DrainMs, int WatermarkMs);
+
+/// <summary>
+/// One fetch half's phase split, SUMMED across a run's fan-out, as persisted by V110 (#2860).
+///
+/// <para>Five figures rather than three, because the counts are what turn the durations into rates and the
+/// rates are where the phase question stops being descriptive: <see cref="TargetMs"/> ÷
+/// <see cref="IdsAttempted"/> measured 31.65 ms/id against production's cold plans where #2806's controlled
+/// A/B saw ~1.6 ms/id on hot ones, and <see cref="ProbeMs"/> ÷ <see cref="ProbeIds"/> reproduces the
+/// ~0.61 ms/reference already documented on <c>PerItemPlanProbeIds</c>. #2902 wants them for a second reason:
+/// the fetch carryover has no eviction of any kind, so <see cref="IdsAttempted"/> beside
+/// <see cref="ProbeIds"/> is the only stored signal that would show a backlog growing.</para>
+///
+/// <para><c>other:</c> is deliberately absent, #2859's rule — it is a residual, and a stored copy could drift
+/// from the parent it completes. Unlike V108 the parent is not itself a column here, so the honest statement
+/// is that the residual is not recorded at all: it measured 0.1% of both fetches fleet-wide, which makes the
+/// three durations the parent to within a rounding error. <c>chunks</c> is absent too, as a batching artifact
+/// no question has asked for.</para>
+/// </summary>
+/// <param name="ProbeMs">Milliseconds in the store touch/probe round trip that decides which ids are missing.</param>
+/// <param name="TargetMs">Milliseconds inside the TARGET statements only, across every chunk.</param>
+/// <param name="WriteMs">Milliseconds writing what came back into the store.</param>
+/// <param name="IdsAttempted">Ids the fetch actually attempted — those the probe found MISSING.</param>
+/// <param name="ProbeIds">References the probe EXAMINED, which is what <paramref name="ProbeMs"/> scales with.</param>
+public readonly record struct FetchPhaseSums(int ProbeMs, int TargetMs, int WriteMs, int IdsAttempted, int ProbeIds);
+
+/// <summary>
+/// A run's plan-fetch and text-fetch phase sums (V110, #2860), each half null when THAT fetch never ran.
+///
+/// <para>Two independently-nullable halves rather than ten loose fields, and the nullability is per half on
+/// purpose: the log line emits its two sub-lines separately, so a run that fetched text but no plans has to
+/// store the text figures and leave the plan ones NULL rather than claiming five measured zeros. Within a
+/// half it is all-or-nothing — the <see cref="FetchPhaseSums"/> and <see cref="FanoutCost"/> discipline, where
+/// a target time without its id count is the half-answer that cannot be turned into the rate it exists for.</para>
+/// </summary>
+public readonly record struct FetchPhaseCost(FetchPhaseSums? Plan, FetchPhaseSums? Text);
+
+/// <summary>
+/// Accumulates a fan-out's PER-DATABASE fetch splits into one <see cref="FetchPhaseCost"/> of sums (V110,
+/// #2860).
+///
+/// <para><b>Why sums are the right rollup</b> is argued at length on V110's own doc comment; the short of it
+/// is that the split is N:1 against this row (N &gt; 1 on 68.8% of <c>query_store</c> runs) and the two
+/// questions are already split across two mechanisms — V80's rollup answers WHICH DATABASE, and a sum answers
+/// WHICH PHASE exactly rather than at 92.8% with a ~6.5 : 1 bias toward blaming the target for what was
+/// actually the store probe. Sums also compose against a row whose <c>duration_ms</c> and
+/// <c>sql_duration_ms</c> are already cross-item totals, so nothing new has to be decided about cardinality.</para>
+///
+/// <para><b>Observed for EVERY completed item, not only the ones the log line prints.</b> The per-database
+/// line is gated on <c>batchCount &gt; 0</c> and stays silent on a quiet database — but a quiet database can
+/// still pay real fetch time, because #2902's carryover means a pass with an empty batch may drain ids
+/// deferred from an earlier one. Counting only the noisy items would drop that time, which is the same
+/// reasoning that made V80's <see cref="FanoutCostAccumulator"/> count quiet items too. So this deliberately
+/// records MORE than the log line reports, and the log line is untouched.</para>
+/// </summary>
+public sealed class FetchPhaseCostAccumulator
+{
+    /* long, then clamped on the way out. Each per-item figure is an int, but a 7-database fan-out summing
+       them is arithmetic the accumulator does rather than the column, and a silent int overflow here would
+       surface as a negative duration in the store - the one thing a duration column must never hold. */
+    private long _planProbeMs, _planTargetMs, _planWriteMs, _planIds, _planProbeIds;
+    private long _textProbeMs, _textTargetMs, _textWriteMs, _textIds, _textProbeIds;
+
+    /* Per half, and set from the SAME condition the log line gates its two sub-lines on, so the stored
+       population and the logged population are the same one. See V110's doc comment for why that is the
+       right call here and the opposite of V108's MEASURED flag: a 0 ms open is a real event measured at
+       zero, while a 0 ms fetch is a fetch that found nothing to do. */
+    private bool _planRan, _textRan;
+
+    /// <summary>
+    /// Folds one completed item's per-database split into the run's totals. Reads the context's
+    /// <c>PerItem*</c> members, which are live at this point: they are cleared at the START of the next
+    /// item's read, not at the end of this one.
+    /// </summary>
+    public void Observe(CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (context.PerItemPlanFetchMs > 0)
+        {
+            _planRan = true;
+            _planProbeMs += context.PerItemPlanProbeMs;
+            _planTargetMs += context.PerItemPlanTargetMs;
+            _planWriteMs += context.PerItemPlanWriteMs;
+            _planIds += context.PerItemPlanIdsAttempted;
+            _planProbeIds += context.PerItemPlanProbeIds;
+        }
+
+        if (context.PerItemTextFetchMs > 0)
+        {
+            _textRan = true;
+            _textProbeMs += context.PerItemTextProbeMs;
+            _textTargetMs += context.PerItemTextTargetMs;
+            _textWriteMs += context.PerItemTextWriteMs;
+            _textIds += context.PerItemTextIdsAttempted;
+            _textProbeIds += context.PerItemTextProbeIds;
+        }
+    }
+
+    /// <summary>
+    /// The two halves, or null when NEITHER fetch ran anywhere in this run — which is every collector except
+    /// the plan/text-fetching ones, and ~78% of even those runs. Null is the honest answer there: the columns
+    /// say "this run performed no deferred fetch", which is not the claim "its fetch was free".
+    /// </summary>
+    public FetchPhaseCost? Result =>
+        _planRan || _textRan
+            ? new FetchPhaseCost(
+                _planRan ? Narrow(_planProbeMs, _planTargetMs, _planWriteMs, _planIds, _planProbeIds) : null,
+                _textRan ? Narrow(_textProbeMs, _textTargetMs, _textWriteMs, _textIds, _textProbeIds) : null)
+            : null;
+
+    private static FetchPhaseSums Narrow(long probeMs, long targetMs, long writeMs, long ids, long probeIds) =>
+        new((int)Math.Min(probeMs, int.MaxValue), (int)Math.Min(targetMs, int.MaxValue),
+            (int)Math.Min(writeMs, int.MaxValue), (int)Math.Min(ids, int.MaxValue),
+            (int)Math.Min(probeIds, int.MaxValue));
+}
 
 /// <summary>
 /// Runs a shared collector definition against one monitored server and binary-COPYs the rows
@@ -780,6 +901,13 @@ public sealed class DarlingCollectorRunner
            fans out never calls Observe and the accumulator stays empty, which is how the columns end up
            NULL on ~98 percent of collection_log rows. */
         var fanout = new FanoutCostAccumulator();
+
+        /* The per-database FETCH split, summed (#2860). Only the enumerated branch feeds it — the plan and
+           text fetches run inside its per-item read and nowhere else — so a collector that never fetches
+           never calls Observe and the accumulator stays empty, which is how these ten columns end up NULL on
+           ~98 percent of collection_log rows. Declared beside the fan-out accumulator because it is the same
+           kind of thing: a cross-item rollup the run's single row could not otherwise carry. */
+        var fetchPhases = new FetchPhaseCostAccumulator();
 
         /* The collection_log note for this run (#1837) — null on every ordinary path. Only the enumeration
            branch sets it, but it is declared here so the note reaches the single success return below when
@@ -1580,6 +1708,15 @@ public sealed class DarlingCollectorRunner
                            dominance ratio of whichever database happened to have rows. */
                         fanout.Observe(item, itemSqlMs + itemStorageMs);
 
+                        /* #2860: and this item's FETCH split into the run's sums, for every completed item
+                           rather than only the ones the line below prints. That line is gated on
+                           batchCount > 0, but a quiet database can still pay real fetch time — #2902's
+                           carryover means an empty-batch pass may drain ids deferred from an earlier one —
+                           so gating the sums the same way would drop exactly the time hardest to attribute.
+                           The accumulator reads the PerItem* members, which are still live here: they clear
+                           at the START of the next item's read, not at the end of this one. */
+                        fetchPhases.Observe(context);
+
                         /* #2111: a completed item resets the adaptive-shrink count — recovery returns
                            the member to the full catch-up width on its next cycle. */
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
@@ -1915,7 +2052,8 @@ public sealed class DarlingCollectorRunner
             ServerRowsRead: context.ServerScopeRowsRead,
             ServerBytesRead: context.ServerScopeBytesRead,
             ServerLastReadMs: context.ServerScopeLastReadMs,
-            TargetSessionId: context.TargetSessionId);
+            TargetSessionId: context.TargetSessionId,
+            FetchPhases: fetchPhases.Result);
     }
 
     /// <summary>

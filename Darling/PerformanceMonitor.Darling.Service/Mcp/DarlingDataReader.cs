@@ -97,7 +97,24 @@ internal static class DarlingDataReader
         long? DrainBytesRead = null,
         double? DrainLastReadMs = null,
         int? TargetSessionId = null,
-        double? SweepPeerMaxMs = null)
+        double? SweepPeerMaxMs = null,
+        /* V110 (#2860): the per-database fetch split, SUMMED across the run's fan-out. Nullable per HALF -
+           a run that fetched text but no plans has the five text figures and NULL plans. NULL means no
+           fetch ran (see V110's doc comment for why that is the honest reading here and why it cannot be
+           told apart from a sub-millisecond fetch). Never populated on the same row as SqlOpenMs above:
+           these come from the ENUMERATED path, which never sets V108's measured flag, and those come from
+           the server-scoped one, which performs no deferred fetch. The two are complementary, not
+           alternatives. */
+        double? PlanFetchProbeMs = null,
+        double? PlanFetchTargetMs = null,
+        double? PlanFetchWriteMs = null,
+        long? PlanFetchIdsAttempted = null,
+        long? PlanFetchProbeIds = null,
+        double? TextFetchProbeMs = null,
+        double? TextFetchTargetMs = null,
+        double? TextFetchWriteMs = null,
+        long? TextFetchIdsAttempted = null,
+        long? TextFetchProbeIds = null)
     {
         /* The residual, derived rather than read (V108 stores no other_ms column on purpose): open + drain
            + this SUM to SqlDurationMs by construction, so a large value here is a real finding - cost in
@@ -1462,7 +1479,17 @@ internal static class DarlingDataReader
             drain_bytes_read,
             drain_last_read_ms,
             target_session_id,
-            sweep_peer_max_ms
+            sweep_peer_max_ms,
+            plan_fetch_probe_ms,
+            plan_fetch_target_ms,
+            plan_fetch_write_ms,
+            plan_fetch_ids_attempted,
+            plan_fetch_probe_ids,
+            text_fetch_probe_ms,
+            text_fetch_target_ms,
+            text_fetch_write_ms,
+            text_fetch_ids_attempted,
+            text_fetch_probe_ids
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -1536,7 +1563,23 @@ internal static class DarlingDataReader
                 reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
                 reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
                 reader.IsDBNull(14) ? null : Convert.ToInt32(reader.GetValue(14)),
-                reader.IsDBNull(15) ? null : Convert.ToDouble(reader.GetValue(15))));
+                reader.IsDBNull(15) ? null : Convert.ToDouble(reader.GetValue(15)),
+                /* V110 (#2860). NULL means the run performed no deferred fetch - which is every collector
+                   but the plan/text-fetching ones, and ~78% of even those runs, since a fetch only runs when
+                   the probe finds something missing. Read raw rather than pre-divided into ms-per-id: the
+                   rate is the interesting number (31.65 ms/id measured on production's cold plans against
+                   ~1.6 on #2806's hot ones), but there are three useful rates over these five figures and
+                   blessing one in the record would hide the others. The consumer divides. */
+                reader.IsDBNull(16) ? null : Convert.ToDouble(reader.GetValue(16)),
+                reader.IsDBNull(17) ? null : Convert.ToDouble(reader.GetValue(17)),
+                reader.IsDBNull(18) ? null : Convert.ToDouble(reader.GetValue(18)),
+                reader.IsDBNull(19) ? null : Convert.ToInt64(reader.GetValue(19)),
+                reader.IsDBNull(20) ? null : Convert.ToInt64(reader.GetValue(20)),
+                reader.IsDBNull(21) ? null : Convert.ToDouble(reader.GetValue(21)),
+                reader.IsDBNull(22) ? null : Convert.ToDouble(reader.GetValue(22)),
+                reader.IsDBNull(23) ? null : Convert.ToDouble(reader.GetValue(23)),
+                reader.IsDBNull(24) ? null : Convert.ToInt64(reader.GetValue(24)),
+                reader.IsDBNull(25) ? null : Convert.ToInt64(reader.GetValue(25))));
         }
 
         return rows;

@@ -672,7 +672,7 @@ public sealed class DarlingObservabilityTests
         /* A collector that does NOT fan out: the three V80 columns must come back NULL rather than zero,
            which is what tells "this run had no fan-out" apart from "its fan-out was free" (#2472). */
         await DarlingObservability.LogCollectionAsync(
-            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null, fanout: null, phases: null, drain: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
+            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         using (var read = new NpgsqlCommand(
             "SELECT collector_name, status, rows_collected, duration_ms, sql_duration_ms, duckdb_duration_ms, error_message, fanout_item_count, slowest_item, slowest_item_ms FROM v_collection_log WHERE server_id = $1", connection))
@@ -701,7 +701,7 @@ public sealed class DarlingObservabilityTests
            blind to it — a failure that only a read through the view can see (#2472, and V14 before it). */
         await DarlingObservability.LogCollectionAsync(
             postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
-            new FanoutCost(8, "the-busy-one", 61_900), phases: null, drain: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
+            new FanoutCost(8, "the-busy-one", 61_900), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         using (var read = new NpgsqlCommand(
             "SELECT duration_ms, fanout_item_count, slowest_item, slowest_item_ms FROM v_collection_log WHERE server_id = $1", connection))
@@ -772,16 +772,16 @@ public sealed class DarlingObservabilityTests
            PERCENTILE_DISC — sees the same number for both, which is the whole reason the rollup exists. */
         await DarlingObservability.LogCollectionAsync(
             postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
-            new FanoutCost(8, "even-worst", 10_100), phases: null, drain: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
+            new FanoutCost(8, "even-worst", 10_100), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         await DarlingObservability.LogCollectionAsync(
             postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
-            new FanoutCost(8, "the-busy-one", 61_900), phases: null, drain: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
+            new FanoutCost(8, "the-busy-one", 61_900), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         /* And a collector that does not fan out at all, so the null path is exercised by the same read. */
         await DarlingObservability.LogCollectionAsync(
             postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null,
-            fanout: null, phases: null, drain: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
+            fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         var rows = await DarlingDataReader.GetCollectionHealthAsync(
             postgres, TestServerId, DateTime.UtcNow.AddDays(-1), TestContext.Current.CancellationToken);

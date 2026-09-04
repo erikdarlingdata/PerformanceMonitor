@@ -200,9 +200,10 @@ public class CollectionLogPhaseSplitStoreTests
 
         /* Deliberately a literal, and deliberately maintained by hand: it is the tripwire that makes
            widening this statement a conscious act. 17 at V108, 22 at V109 (#2864's five drain-forensics
-           columns). Bumping it is the moment you are forced to ask whether EVERY writer was widened
-           too - which is the failure it was written for. */
-        Assert.Equal(22, placeholders);
+           columns), 32 at V110 (#2860's ten fetch-phase-sum columns). Bumping it is the moment you are
+           forced to ask whether EVERY writer was widened too - which is the failure it was written for,
+           and V110 is the third rung in a row to have to answer it. */
+        Assert.Equal(32, placeholders);
 
         var writerStarts = System.Text.RegularExpressions.Regex
             .Matches(source, @"new NpgsqlCommand\(InsertCollectionLogSql")

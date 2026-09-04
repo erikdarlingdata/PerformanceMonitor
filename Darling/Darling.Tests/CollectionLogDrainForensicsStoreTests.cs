@@ -304,9 +304,19 @@ public class CollectionLogDrainForensicsStoreTests
         Assert.Contains("var peerMaxAtDispatchMs = PeerMaxOrNull(server);", worker, StringComparison.Ordinal);
         Assert.Contains("RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken)", worker, StringComparison.Ordinal);
 
-        /* The write uses the captured parameter. Re-reading live server state here is the defect. */
-        Assert.Contains("result.Drain, peerMaxAtDispatchMs, _logger", worker, StringComparison.Ordinal);
-        Assert.DoesNotContain("result.Drain, PeerMaxOrNull(server)", worker, StringComparison.Ordinal);
+        /* The write uses the captured parameter. Re-reading live server state here is the defect.
+
+           The positive literal names the argument BEFORE the mark, so it moves whenever one is inserted
+           there - V110 (#2860) put result.FetchPhases between result.Drain and the mark, and this is the
+           second literal that had to follow the call's shape rather than its claim.
+
+           The negative form was narrowed to what the DEFECT actually looks like instead: a live re-read at
+           the write site puts PeerMaxOrNull(server) immediately before _logger, whatever precedes it. The
+           old spelling was anchored on result.Drain, so V110's insertion would have made it un-matchable and
+           it would have gone on passing while guarding nothing - a pin that cannot fail, which is worse than
+           no pin. This form is adjacency-independent on the left and still pinned on the right. */
+        Assert.Contains("result.FetchPhases, peerMaxAtDispatchMs, _logger", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("PeerMaxOrNull(server), _logger", worker, StringComparison.Ordinal);
 
         /* The two callers that are not a scheduled body pass null rather than folding a previous body's
            bookkeeping into their rows. */
@@ -321,6 +331,11 @@ public class CollectionLogDrainForensicsStoreTests
 
         /* drain STAYS null on those arms: nothing was drained, so there is nothing to describe. */
         Assert.Equal(7, Regex.Matches(worker, @"drain: null").Count);
+
+        /* And V110's fetch sums stay null on the same seven arms and for the same reason: no item completed,
+           so no fetch was performed. Counted rather than merely present, so an arm that starts passing a
+           real value - which would mean attributing another run's fetch to a failure row - is a red. */
+        Assert.Equal(7, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     /// <summary>
