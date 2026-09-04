@@ -102,6 +102,41 @@ public sealed class PlanViewerCapabilityPinTests
         }
     }
 
+    /// <summary>
+    /// #2828 regression pin: the inner plan <c>TabControl</c>'s <c>SelectionChanged</c> subscription must be
+    /// wired in the controller CONSTRUCTOR (exactly once for the controller's lifetime), NEVER inside
+    /// <c>EnsureInitialized</c>. <c>Reset()</c> (Plan Viewer close) clears the <c>_initialized</c> guard, so a
+    /// subscription living in <c>EnsureInitialized</c> re-ran on every reopen; the controller instance and its
+    /// injected <c>TabControl</c> both persist across open/close cycles, so N cycles leaked N handlers (a
+    /// delegate/CPU leak). Guards the SHARED controller: if the subscription drifts back into
+    /// <c>EnsureInitialized</c>, or a second subscription appears, this fails.
+    /// </summary>
+    [Fact]
+    public void PlanViewerSelectionHandler_SubscribedOnceInConstructor()
+    {
+        var controller = ControllerCs();
+        Assert.True(File.Exists(controller),
+            $"controller source not found: {controller} (scan is broken -- fix the path).");
+        var source = File.ReadAllText(controller);
+
+        var ctorIdx = source.IndexOf("public StandalonePlanViewerController(", StringComparison.Ordinal);
+        var ensureIdx = source.IndexOf("public void EnsureInitialized()", StringComparison.Ordinal);
+        Assert.True(ctorIdx >= 0, "constructor signature not found -- scan is broken (renamed?); fix the scan.");
+        Assert.True(ensureIdx >= 0, "EnsureInitialized signature not found -- scan is broken (renamed?); fix the scan.");
+        Assert.True(ctorIdx < ensureIdx, "constructor no longer precedes EnsureInitialized -- fix the scan.");
+
+        var firstSub = source.IndexOf("SelectionChanged +=", StringComparison.Ordinal);
+        var lastSub = source.LastIndexOf("SelectionChanged +=", StringComparison.Ordinal);
+        Assert.True(firstSub >= 0, "the inner TabControl's 'SelectionChanged +=' subscription is gone entirely (#2828).");
+        Assert.True(firstSub == lastSub,
+            "more than one 'SelectionChanged +=' subscription on the inner plan TabControl -- it must be wired " +
+            "EXACTLY once, in the constructor (#2828).");
+        Assert.True(firstSub > ctorIdx && firstSub < ensureIdx,
+            "the inner plan TabControl's 'SelectionChanged +=' subscription must live in the CONSTRUCTOR, not in " +
+            "EnsureInitialized -- Reset() clears _initialized, so re-subscribing there leaks a handler on every " +
+            "Plan Viewer reopen (#2828).");
+    }
+
     /* ---------------- scan ---------------- */
 
     private static ISet<string> ScanCapabilities()

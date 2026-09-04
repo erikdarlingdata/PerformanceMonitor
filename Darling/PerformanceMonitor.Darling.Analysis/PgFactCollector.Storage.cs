@@ -39,7 +39,7 @@ WHERE rn = 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(DatabaseSizeSql, connection);
+            using var cmd = new NpgsqlCommand(DatabaseSizeSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
@@ -81,7 +81,7 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(IoLatencySql, connection);
+            using var cmd = new NpgsqlCommand(IoLatencySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -167,7 +167,7 @@ AND   collection_time <= $3";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(TempDbSql, connection);
+            using var cmd = new NpgsqlCommand(TempDbSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -255,7 +255,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(FileAutogrowthSql, connection);
+            using var cmd = new NpgsqlCommand(FileAutogrowthSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -314,7 +314,7 @@ FROM latest WHERE rn = 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(DiskSpaceSql, connection);
+            using var cmd = new NpgsqlCommand(DiskSpaceSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 

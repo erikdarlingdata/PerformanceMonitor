@@ -63,7 +63,7 @@ AND   v.delta_execution_count > 0";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(QueryStatsSql, connection);
+            using var cmd = new NpgsqlCommand(QueryStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -175,7 +175,7 @@ LIMIT 20";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(ParameterSensitivitySql, connection);
+            using var cmd = new NpgsqlCommand(ParameterSensitivitySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -440,7 +440,7 @@ LIMIT 20";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(PlanRegressionSql, connection);
+            using var cmd = new NpgsqlCommand(PlanRegressionSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays)));
 
@@ -535,7 +535,7 @@ AND   delta_execution_count > 0";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(ProcedureStatsSql, connection);
+            using var cmd = new NpgsqlCommand(ProcedureStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -605,7 +605,7 @@ LIMIT 10";
                the parse, even though PG holds no lock. */
             await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
-                using var command = new NpgsqlCommand(PlanAdvisorySql, connection);
+                using var command = new NpgsqlCommand(PlanAdvisorySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
                 command.Parameters.AddWithValue(context.ServerId);
                 command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
