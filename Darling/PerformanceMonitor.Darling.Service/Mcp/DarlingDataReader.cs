@@ -1169,7 +1169,9 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>16 columns since #2460, and no longer column-identical to the WPF viewer's own
+    /// <para>21 columns since #2804 (16 at #2460, plus #2472's four fan-out columns and #2804's
+    /// abandoned_count) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
     /// the SAME ordinals, which is the parity that matters here — both MCP surfaces read positionally.</para>
@@ -1259,7 +1261,14 @@ internal static class DarlingDataReader
             MAX(CASE WHEN slowest_rank = 1 THEN fanout_item_count END) AS fanout_items,
             MAX(CASE WHEN slowest_rank = 1 THEN slowest_item END) AS slowest_item,
             MAX(CASE WHEN slowest_rank = 1 THEN slowest_item_ms END) AS slowest_item_ms,
-            MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms
+            MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms,
+            -- #2804: runs the #2673 wall-clock budget abandoned. Appended LAST rather than placed beside
+            -- yield_count, which is where it belongs by meaning: both MCP surfaces read this result set
+            -- POSITIONALLY and Lite's DuckDB read mirrors these ordinals, so inserting mid-list would
+            -- silently re-map every column after it in whichever surface was not edited in the same
+            -- breath. An ABANDONED run was previously counted by total_runs and by nothing else, so it
+            -- grew the failure-rate denominator while contributing nothing to the numerator.
+            SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1348,6 +1357,8 @@ internal static class DarlingDataReader
                 SlowestItem = reader.IsDBNull(17) ? null : reader.GetString(17),
                 SlowestItemMs = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18)),
                 SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19)),
+                /* Appended (#2804), for the same reason the four above were. */
+                AbandonedCount = reader.IsDBNull(20) ? 0 : Convert.ToInt64(reader.GetValue(20)),
             });
         }
 
@@ -1821,6 +1832,15 @@ internal sealed class CollectorHealth
     public long YieldCount { get; set; }
 
     /// <summary>
+    /// Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from errors for the
+    /// same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike a yield it is
+    /// data LOSS: the cycle stored nothing and advanced no watermark. Feeds
+    /// <see cref="CollectorHealthClassifier.WarningAbandonRatePercent"/>, and reaches the surface as its own
+    /// number so a WARNING can always be attributed to abandonment rather than to errors.
+    /// </summary>
+    public long AbandonedCount { get; set; }
+
+    /// <summary>
     /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
     /// enumeration probe failed. Null for the ordinary run. Informational — never an input to
     /// <see cref="HealthStatus"/>.
@@ -1883,6 +1903,14 @@ internal sealed class CollectorHealth
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 
+    /// <summary>
+    /// Share of runs the #2673 budget abandoned (#2804). Its own rate rather than part of
+    /// <see cref="FailureRatePercent"/>: the two carry very different thresholds (0.5 against 20) because
+    /// they mean different things, and merging them would report a 2%-abandoning collector as a
+    /// 2%-erroring one — a rate no run of this collector actually produced.
+    /// </summary>
+    public double AbandonRatePercent => TotalRuns > 0 ? (double)AbandonedCount / TotalRuns * 100 : 0;
+
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
         : 999;
@@ -1907,6 +1935,6 @@ internal sealed class CollectorHealth
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount,
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, AbandonedCount,
         HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
 }

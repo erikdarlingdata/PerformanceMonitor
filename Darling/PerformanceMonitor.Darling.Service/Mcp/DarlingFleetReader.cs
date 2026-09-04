@@ -229,7 +229,14 @@ SELECT
     SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
     MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
     SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-    MAX(collection_time) AS last_run_time
+    MAX(collection_time) AS last_run_time,
+    -- #2804: the fleet rollup bands through the SAME CollectorHealth.HealthStatus as the per-server
+    -- grid, so it has to feed the classifier the same inputs. Left unselected, AbandonedCount would
+    -- default to 0 here and this count alone would keep calling a partially-abandoning collector
+    -- HEALTHY while every other surface called it WARNING -- and it would COMPILE, because the
+    -- default is silent. That is the #2779/#2784 failure shape: one surface fixed, its sibling
+    -- quietly left on the old reading.
+    SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
 FROM v_collection_log
 WHERE collection_time >= $1
 GROUP BY server_id, collector_name";
@@ -791,6 +798,7 @@ GROUP BY server_id, collector_name";
                 LastSuccessTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
                 PermissionDeniedCount = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
                 LastRunTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                AbandonedCount = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8)),
             };
 
             counts.TryGetValue(serverId, out var existing);

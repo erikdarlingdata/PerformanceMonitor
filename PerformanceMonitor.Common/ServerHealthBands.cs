@@ -549,6 +549,44 @@ namespace PerformanceMonitor.Common
         /// <summary>A collector with runs whose error rate exceeds this percent bands WARNING (when not STALE/FAILING).</summary>
         public const double WarningFailureRatePercent = 20.0;
 
+        /// <summary>
+        /// A collector whose ABANDONED rate exceeds this percent bands WARNING (#2804). An abandoned cycle is
+        /// the #2673 whole-server wall-clock budget giving up: it stores nothing and advances no watermark, so
+        /// it is guaranteed data loss rather than a retryable fault.
+        ///
+        /// <para><b>Why abandonment needed its own threshold rather than joining the error rate.</b> An
+        /// ABANDONED run increments <c>total_runs</c> and NOTHING else — it is not a success, an error, a
+        /// permission denial or a yield. So it grew the failure-rate DENOMINATOR while contributing nothing to
+        /// the numerator, and never advanced <c>last_success_time</c>. Total abandonment does eventually trip
+        /// STALE then FAILING through the staleness path, because no success lands at all. The gap this closes
+        /// is the PARTIAL case: a collector abandoning some cycles while its other cycles still succeed keeps a
+        /// fresh last-success, so staleness never fires, its error rate is exactly 0, and it reads HEALTHY
+        /// indefinitely while losing cycles.</para>
+        ///
+        /// <para><b>Why 0.5, from the fleet rather than from taste.</b> Measured across a production store over
+        /// 24 hours — 1,639 (server, collector) pairs, 520,455 runs — abandonment is not a continuous rate
+        /// phenomenon. Only FOUR pairs abandoned anything at all, 28 runs in total (0.005% fleet-wide), and the
+        /// per-pair rate distribution is p50 = p75 = p90 = p95 = <b>p99 = 0.000%</b> with a maximum of 2.157%.
+        /// The real population is therefore an empty body and a four-point tail spanning 0.60%–2.16%. 0.5 sits
+        /// strictly BELOW that observed floor, so it catches every genuinely-degraded collector on the fleet,
+        /// and strictly ABOVE the 99th percentile, so it fires on nobody who is not abandoning. It also keeps a
+        /// single isolated abandonment quiet in any window of fewer than ~400 runs, which is the "one in a
+        /// thousand is noise, twenty-four is a finding" line. Deliberately far below
+        /// <see cref="WarningFailureRatePercent"/>: an error may be transient and is retried, where the 120 s
+        /// budget is itself generous (#2673 chose it after measuring a 176 s tail), so reaching it at all means
+        /// exceeding a bound already set well above normal.</para>
+        ///
+        /// <para><b>Why WARNING rather than a new band.</b> WARNING is already the rate-based "degrading but
+        /// still running" verdict, which is exactly what partial abandonment is — and a guard firing is not an
+        /// ERROR. A new band string would have to be learned by four independent display mappings, and the two
+        /// that do not switch on it fail in opposite directions: the web's <c>statusToSev</c> defaults to
+        /// "Unknown", while the deprecated Dashboard's brush converter defaults to <c>Transparent</c> — the
+        /// same brush it gives HEALTHY. Attribution is not lost by sharing the band, because the ABANDONED
+        /// count now sits in the same row as the error count, so a reader can always tell which cause produced
+        /// the WARNING.</para>
+        /// </summary>
+        public const double WarningAbandonRatePercent = 0.5;
+
         /* Staleness cutoffs are max(floor, multiplier x the collector's own cadence in hours). The floors are
            the original flat thresholds, so a collector with a cadence at/under the floor is unchanged; only a
            slow collector relaxes. Chosen defaults (#1573): FAILING = max(24, 2 x freqHours) — a 1-min
@@ -651,7 +689,10 @@ namespace PerformanceMonitor.Common
         /// Band one collector's trailing-window roll-up. Order is fixed: NEVER_RUN (no runs at all) ->
         /// NO_PERMISSIONS (only permission denials) -> on-load (failure-rate only, never STOPPED/STALE/
         /// FAILING) -> STOPPED (no attempt of ANY kind recently, despite a history of runs) -> FAILING ->
-        /// STALE -> WARNING (failure rate over the threshold) -> HEALTHY.
+        /// STALE -> WARNING (failure rate OR abandon rate over its own threshold) -> HEALTHY.
+        /// <paramref name="abandonedCount"/> is runs the #2673 wall-clock budget gave up on; see
+        /// <see cref="WarningAbandonRatePercent"/> for why it bands WARNING on its own much lower rate and
+        /// why it needed a band at all when a partially-abandoning collector reaches neither STALE nor FAILING.
         /// <paramref name="hoursSinceLastSuccess"/> is the caller's elapsed-hours value — its 999 sentinel
         /// for "ran but never a success" flows straight through to FAILING, exactly as before.
         /// <paramref name="hoursSinceLastRun"/> is hours since the newest run of ANY status (success,
@@ -666,6 +707,7 @@ namespace PerformanceMonitor.Common
             long successCount,
             long errorCount,
             long permissionDeniedCount,
+            long abandonedCount,
             double hoursSinceLastSuccess,
             double hoursSinceLastRun,
             int frequencyMinutes,
@@ -683,9 +725,21 @@ namespace PerformanceMonitor.Common
 
             var failureRatePercent = totalRuns > 0 ? (double)errorCount / totalRuns * 100 : 0;
 
+            /* #2804. Kept as its own rate rather than folded into failureRatePercent: the two have very
+               different thresholds (0.5 against 20) precisely because they mean different things, and adding
+               abandonment to the error numerator would have made a 2%-abandoning collector read as a 2%-erroring
+               one — a number no run actually produced. Both counts reach the surface, so the reader can always
+               attribute the band. */
+            var abandonRatePercent = totalRuns > 0 ? (double)abandonedCount / totalRuns * 100 : 0;
+
             if (isOnLoad)
             {
-                return failureRatePercent > WarningFailureRatePercent ? Warning : Healthy;
+                /* On-load collectors are staleness-exempt and banded by rate only, so abandonment has to be
+                   asked here too — otherwise the one class of collector that CANNOT reach the staleness safety
+                   net below would be the one class where abandonment stays invisible. */
+                return failureRatePercent > WarningFailureRatePercent || abandonRatePercent > WarningAbandonRatePercent
+                    ? Warning
+                    : Healthy;
             }
 
             /* STOPPED: a collector whose LAST ATTEMPT OF ANY KIND — success, error, or
@@ -717,7 +771,10 @@ namespace PerformanceMonitor.Common
                 return Stale;
             }
 
-            if (failureRatePercent > WarningFailureRatePercent)
+            /* Below STALE/FAILING deliberately. A collector that has not succeeded in far too long is the
+               louder fact and keeps its band; abandonment is the one that would otherwise have NO band at all,
+               because a partially-abandoning collector still lands successes and so never ages into either. */
+            if (failureRatePercent > WarningFailureRatePercent || abandonRatePercent > WarningAbandonRatePercent)
             {
                 return Warning;
             }

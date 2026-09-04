@@ -37,53 +37,102 @@ public sealed class CollectorHealthClassifierTests
 
     [Theory]
     /* NEVER_RUN wins first, whatever else is set (including on-load). */
-    [InlineData(0, 0, 0, 0, 999, 999, OneMinute, false, CollectorHealthClassifier.NeverRun)]
-    [InlineData(0, 0, 0, 0, 0, 0, OnLoadFreq, true, CollectorHealthClassifier.NeverRun)]
+    [InlineData(0, 0, 0, 0, 0, 999, 999, OneMinute, false, CollectorHealthClassifier.NeverRun)]
+    [InlineData(0, 0, 0, 0, 0, 0, 0, OnLoadFreq, true, CollectorHealthClassifier.NeverRun)]
 
     /* NO_PERMISSIONS (only permission denials) is checked before the on-load branch and before STOPPED -
        a collector whose every run this window was a denied grant is still actively RUNNING (hoursSinceLastRun
        is small), so this is not a STOPPED case, but the precedence is worth pinning regardless. */
-    [InlineData(5, 0, 0, 5, 999, 2, OneMinute, false, CollectorHealthClassifier.NoPermissions)]
-    [InlineData(5, 0, 0, 5, 999, 2, OnLoadFreq, true, CollectorHealthClassifier.NoPermissions)]
+    [InlineData(5, 0, 0, 5, 0, 999, 2, OneMinute, false, CollectorHealthClassifier.NoPermissions)]
+    [InlineData(5, 0, 0, 5, 0, 999, 2, OnLoadFreq, true, CollectorHealthClassifier.NoPermissions)]
 
     /* On-load collectors are staleness-exempt: banded by failure rate only, never STOPPED/STALE/FAILING. */
-    [InlineData(10, 10, 0, 0, 500, 500, OnLoadFreq, true, CollectorHealthClassifier.Healthy)]
-    [InlineData(10, 7, 3, 0, 500, 500, OnLoadFreq, true, CollectorHealthClassifier.Warning)]   // 30% > 20%
+    [InlineData(10, 10, 0, 0, 0, 500, 500, OnLoadFreq, true, CollectorHealthClassifier.Healthy)]
+    [InlineData(10, 7, 3, 0, 0, 500, 500, OnLoadFreq, true, CollectorHealthClassifier.Warning)]   // 30% > 20%
 
     /* Frequent (1-min) collector - the floors mean these are IDENTICAL to the old flat thresholds for the
        cases where hoursSinceLastRun stays recent. */
-    [InlineData(10, 10, 0, 0, 2, 2, OneMinute, false, CollectorHealthClassifier.Healthy)]    // < 4h
-    [InlineData(10, 7, 3, 0, 2, 2, OneMinute, false, CollectorHealthClassifier.Warning)]     // recent, 30% fail
-    [InlineData(10, 10, 0, 0, 5, 5, OneMinute, false, CollectorHealthClassifier.Stale)]      // > 4h, < 24h
+    [InlineData(10, 10, 0, 0, 0, 2, 2, OneMinute, false, CollectorHealthClassifier.Healthy)]    // < 4h
+    [InlineData(10, 7, 3, 0, 0, 2, 2, OneMinute, false, CollectorHealthClassifier.Warning)]     // recent, 30% fail
+    [InlineData(10, 10, 0, 0, 0, 5, 5, OneMinute, false, CollectorHealthClassifier.Stale)]      // > 4h, < 24h
 
     /* STOPPED vs FAILING is the whole point of this pair: same hoursSinceLastSuccess (30h, past the 24h
        cutoff), but one collector is STILL BEING INVOKED (a recent failed attempt, hoursSinceLastRun=2) and
        the other has gone completely dark (hoursSinceLastRun=30, nothing attempted since that old success). */
-    [InlineData(20, 15, 5, 0, 30, 2, OneMinute, false, CollectorHealthClassifier.Failing)]   // recent failure -> still trying
-    [InlineData(10, 10, 0, 0, 25, 25, OneMinute, false, CollectorHealthClassifier.Stopped)]  // nothing since -> gone dark
+    [InlineData(20, 15, 5, 0, 0, 30, 2, OneMinute, false, CollectorHealthClassifier.Failing)]   // recent failure -> still trying
+    [InlineData(10, 10, 0, 0, 0, 25, 25, OneMinute, false, CollectorHealthClassifier.Stopped)]  // nothing since -> gone dark
 
     /* Ran, never a success (999 sentinel on hoursSinceLastSuccess) - but the collector is still being
        invoked (hoursSinceLastRun=1), so this correctly stays FAILING rather than reading STOPPED. This is
        the exact interaction #1573's original 999-sentinel comment described, now proven against STOPPED too. */
-    [InlineData(5, 0, 5, 0, 999, 1, OneMinute, false, CollectorHealthClassifier.Failing)]
+    [InlineData(5, 0, 5, 0, 0, 999, 1, OneMinute, false, CollectorHealthClassifier.Failing)]
 
     /* Hourly (60-min) collector - 1.5h/2h are both under the 4h/24h floors, so still floor-bound. */
-    [InlineData(10, 10, 0, 0, 5, 5, Hourly, false, CollectorHealthClassifier.Stale)]         // > 4h floor
-    [InlineData(10, 10, 0, 0, 25, 25, Hourly, false, CollectorHealthClassifier.Stopped)]     // > 24h floor, dark since
+    [InlineData(10, 10, 0, 0, 0, 5, 5, Hourly, false, CollectorHealthClassifier.Stale)]         // > 4h floor
+    [InlineData(10, 10, 0, 0, 0, 25, 25, Hourly, false, CollectorHealthClassifier.Stopped)]     // > 24h floor, dark since
 
     /* Daily (1440-min) collector - the FIX. STALE line 36h, FAILING/STOPPED line 48h. */
-    [InlineData(30, 30, 0, 0, 27, 27, Daily, false, CollectorHealthClassifier.Healthy)]      // THE #1573 BUG: was FAILING, now HEALTHY
-    [InlineData(30, 30, 0, 0, 35, 35, Daily, false, CollectorHealthClassifier.Healthy)]      // still under the 36h stale line
-    [InlineData(30, 30, 0, 0, 37, 37, Daily, false, CollectorHealthClassifier.Stale)]        // > 36h, < 48h
-    [InlineData(30, 30, 0, 0, 47, 47, Daily, false, CollectorHealthClassifier.Stale)]        // still stale, not failing
-    [InlineData(30, 30, 0, 0, 49, 49, Daily, false, CollectorHealthClassifier.Stopped)]      // > 48h, dark since (was FAILING)
-    [InlineData(10, 7, 3, 0, 1, 1, Daily, false, CollectorHealthClassifier.Warning)]         // recent, 30% fail -> WARNING not STALE
+    [InlineData(30, 30, 0, 0, 0, 27, 27, Daily, false, CollectorHealthClassifier.Healthy)]      // THE #1573 BUG: was FAILING, now HEALTHY
+    [InlineData(30, 30, 0, 0, 0, 35, 35, Daily, false, CollectorHealthClassifier.Healthy)]      // still under the 36h stale line
+    [InlineData(30, 30, 0, 0, 0, 37, 37, Daily, false, CollectorHealthClassifier.Stale)]        // > 36h, < 48h
+    [InlineData(30, 30, 0, 0, 0, 47, 47, Daily, false, CollectorHealthClassifier.Stale)]        // still stale, not failing
+    [InlineData(30, 30, 0, 0, 0, 49, 49, Daily, false, CollectorHealthClassifier.Stopped)]      // > 48h, dark since (was FAILING)
+    [InlineData(10, 7, 3, 0, 0, 1, 1, Daily, false, CollectorHealthClassifier.Warning)]         // recent, 30% fail -> WARNING not STALE
+
+    /* ---- #2804: ABANDONED cycles. ------------------------------------------------------------------
+       An abandoned run is the #2673 whole-server wall-clock budget giving up: it stores nothing and
+       advances no watermark. Before this it incremented total_runs and NOTHING else, so it grew the
+       failure-rate DENOMINATOR while contributing nothing to the numerator, and never touched the success
+       clock. TOTAL abandonment still reaches FAILING through staleness, because no success lands at all;
+       the gap these rows close is the PARTIAL case, where the collector keeps succeeding often enough to
+       stay fresh and so reads HEALTHY forever while losing cycles.
+
+       The threshold (0.5%) is positioned by the fleet, not by taste: over 24h across 1,639
+       (server, collector) pairs and 520,455 runs, only FOUR pairs abandoned anything at all and the
+       per-pair rate distribution is p50 = p75 = p90 = p95 = p99 = 0.000% with a max of 2.157%. 0.5 sits
+       below that observed floor (0.60%) and above the 99th percentile. */
+
+    /* THE BUG, at the exact shape measured in production: 24 abandoned of 1,226 runs (1.96%), zero
+       errors, and a success recent enough that neither STALE nor FAILING can fire. Read HEALTHY before
+       this change. The sibling row is the same server's query_stats at 14 of 1,226 (1.14%). */
+    [InlineData(1226, 1202, 0, 0, 24, 1, 1, OneMinute, false, CollectorHealthClassifier.Warning)]
+    [InlineData(1226, 1212, 0, 0, 14, 1, 1, OneMinute, false, CollectorHealthClassifier.Warning)]
+
+    /* The boundary, either side of 0.5% of 1,226 runs (= 6.13 runs). Six abandoned is 0.489% and stays
+       quiet; seven is 0.571% and bands. This is what keeps a single isolated abandonment from flapping a
+       collector in any window under ~400 runs - "one in a thousand is noise, twenty-four is a finding". */
+    [InlineData(1226, 1220, 0, 0, 6, 1, 1, OneMinute, false, CollectorHealthClassifier.Healthy)]
+    [InlineData(1226, 1219, 0, 0, 7, 1, 1, OneMinute, false, CollectorHealthClassifier.Warning)]
+
+    /* One abandonment in a small window stays HEALTHY (1 of 500 = 0.2%), and the fleet's own resting
+       state - zero abandoned - is untouched. */
+    [InlineData(500, 499, 0, 0, 1, 1, 1, OneMinute, false, CollectorHealthClassifier.Healthy)]
+    [InlineData(1226, 1226, 0, 0, 0, 1, 1, OneMinute, false, CollectorHealthClassifier.Healthy)]
+
+    /* On-load collectors are staleness-exempt and banded by rate ONLY, so abandonment has to be asked on
+       that branch too - otherwise the one class of collector that cannot reach the staleness safety net
+       would be the one class where abandonment stays invisible. */
+    [InlineData(1000, 980, 0, 0, 20, 1, 1, OnLoadFreq, true, CollectorHealthClassifier.Warning)]
+    [InlineData(1000, 998, 0, 0, 2, 1, 1, OnLoadFreq, true, CollectorHealthClassifier.Healthy)]
+
+    /* Precedence: abandonment sits at the WARNING tier, so the louder facts still win. A collector that
+       has not succeeded in 30h is FAILING whatever its abandon rate, and one that has gone dark entirely
+       is STOPPED - abandonment never downgrades either, and NEVER_RUN still wins outright. */
+    [InlineData(1226, 1000, 0, 0, 226, 30, 2, OneMinute, false, CollectorHealthClassifier.Failing)]
+    [InlineData(1226, 1000, 0, 0, 226, 30, 30, OneMinute, false, CollectorHealthClassifier.Stopped)]
+    [InlineData(1226, 1200, 0, 0, 26, 5, 5, OneMinute, false, CollectorHealthClassifier.Stale)]
+    [InlineData(0, 0, 0, 0, 0, 999, 999, OneMinute, false, CollectorHealthClassifier.NeverRun)]
+
+    /* A collector abandoning EVERY cycle already had a band - it lands no successes, so the success clock
+       runs out and staleness carries it to FAILING. Pinned so the new rate cannot be mistaken for the only
+       thing standing between total abandonment and a green row. */
+    [InlineData(100, 0, 0, 0, 100, 999, 1, OneMinute, false, CollectorHealthClassifier.Failing)]
     public void Classify_BandsTheDecisionTable(
-        long totalRuns, long successCount, long errorCount, long permissionDeniedCount,
+        long totalRuns, long successCount, long errorCount, long permissionDeniedCount, long abandonedCount,
         double hoursSinceLastSuccess, double hoursSinceLastRun, int frequencyMinutes, bool isOnLoad, string expected)
     {
         Assert.Equal(expected, CollectorHealthClassifier.Classify(
-            totalRuns, successCount, errorCount, permissionDeniedCount,
+            totalRuns, successCount, errorCount, permissionDeniedCount, abandonedCount,
             hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes, isOnLoad));
     }
 
@@ -98,7 +147,7 @@ public sealed class CollectorHealthClassifierTests
     public void Classify_LongDormantCollector_WithNoRecentActivityOfAnyKind_IsStoppedNotFailing()
     {
         Assert.Equal(CollectorHealthClassifier.Stopped, CollectorHealthClassifier.Classify(
-            totalRuns: 882, successCount: 882, errorCount: 0, permissionDeniedCount: 0,
+            totalRuns: 882, successCount: 882, errorCount: 0, permissionDeniedCount: 0, abandonedCount: 0,
             hoursSinceLastSuccess: 120, hoursSinceLastRun: 120, frequencyMinutes: 5, isOnLoad: false));
     }
 
