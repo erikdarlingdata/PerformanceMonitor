@@ -10,7 +10,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Text;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -76,7 +75,7 @@ public sealed class ViewerCommandTimeoutTests
             {
                 total++;
 
-                var span = StatementSpanFrom(text, ctor.Index, statements: 2);
+                var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
 
                 if (!s_setsTimeout.IsMatch(span))
                 {
@@ -116,7 +115,7 @@ public sealed class ViewerCommandTimeoutTests
 
         foreach (var path in ViewerSources())
         {
-            var code = StripCommentsAndStrings(File.ReadAllText(path));
+            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
 
             foreach (Match handoff in s_commandFactoryHandoff.Matches(code))
             {
@@ -251,7 +250,7 @@ public sealed class ViewerCommandTimeoutTests
         var ctor = s_commandCtor.Match(source);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = StatementSpanFrom(source, ctor.Index, statements: 2);
+        var span = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
 
         Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
     }
@@ -269,175 +268,16 @@ public sealed class ViewerCommandTimeoutTests
     [InlineData("        var command = connection.CreateCommand();\n", false)]
     public void TheFactoryHandoffScan_ReadsCodeNotProse(string source, bool expectedOffender)
     {
-        var code = StripCommentsAndStrings(source);
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
 
         Assert.Equal(expectedOffender, s_commandFactoryHandoff.IsMatch(code));
     }
 
-    /* The span walker below is the CI-proven copy from StorageCommandTimeoutTests — string- and
-       comment-aware, terminating on the Nth semicolon at depth <= 0 so a span can never leak out of
-       the member it started in. Kept as a private copy the way the sibling pins keep theirs;
-       extracting a shared helper across four test files is a refactor those lanes should take
-       together or not at all. */
-
-    private static string StatementSpanFrom(string text, int start, int statements)
-    {
-        var depth = 0;
-        var seen = 0;
-        var i = start;
-
-        while (i < text.Length)
-        {
-            var c = text[i];
-
-            if (c == '@' && i + 1 < text.Length && text[i + 1] == '"')
-            {
-                i = SkipVerbatimString(text, i + 2);
-                continue;
-            }
-
-            if (c == '"')
-            {
-                i = SkipRegularString(text, i + 1);
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '/')
-            {
-                var nl = text.IndexOf('\n', i);
-                i = nl < 0 ? text.Length : nl + 1;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
-            {
-                var end = text.IndexOf("*/", i + 2, System.StringComparison.Ordinal);
-                i = end < 0 ? text.Length : end + 2;
-                continue;
-            }
-
-            if (c is '(' or '[' or '{')
-            {
-                depth++;
-            }
-            else if (c is ')' or ']' or '}')
-            {
-                depth--;
-            }
-            else if (c == ';' && depth <= 0 && ++seen >= statements)
-            {
-                return text[start..(i + 1)];
-            }
-
-            i++;
-        }
-
-        return text[start..];
-    }
-
-    /// <summary>
-    /// Blanks out comments and string literals while preserving newlines, so a regex meant for code
-    /// cannot match prose or a literal. Newlines survive because the offenders are reported by line.
-    /// </summary>
-    private static string StripCommentsAndStrings(string text)
-    {
-        var sb = new StringBuilder(text.Length);
-        var i = 0;
-
-        while (i < text.Length)
-        {
-            var c = text[i];
-
-            if (c == '@' && i + 1 < text.Length && text[i + 1] == '"')
-            {
-                var end = SkipVerbatimString(text, i + 2);
-                Blank(sb, text, i, end);
-                i = end;
-                continue;
-            }
-
-            if (c == '"')
-            {
-                var end = SkipRegularString(text, i + 1);
-                Blank(sb, text, i, end);
-                i = end;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '/')
-            {
-                var nl = text.IndexOf('\n', i);
-                var end = nl < 0 ? text.Length : nl;
-                Blank(sb, text, i, end);
-                i = end;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
-            {
-                var close = text.IndexOf("*/", i + 2, System.StringComparison.Ordinal);
-                var end = close < 0 ? text.Length : close + 2;
-                Blank(sb, text, i, end);
-                i = end;
-                continue;
-            }
-
-            sb.Append(c);
-            i++;
-        }
-
-        return sb.ToString();
-    }
-
-    private static void Blank(StringBuilder sb, string text, int start, int end)
-    {
-        for (var j = start; j < end; j++)
-        {
-            sb.Append(text[j] == '\n' ? '\n' : ' ');
-        }
-    }
-
-    private static int SkipVerbatimString(string text, int i)
-    {
-        while (i < text.Length)
-        {
-            if (text[i] == '"')
-            {
-                if (i + 1 < text.Length && text[i + 1] == '"')
-                {
-                    i += 2;
-                    continue;
-                }
-
-                return i + 1;
-            }
-
-            i++;
-        }
-
-        return i;
-    }
-
-    private static int SkipRegularString(string text, int i)
-    {
-        while (i < text.Length)
-        {
-            if (text[i] == '\\')
-            {
-                i += 2;
-                continue;
-            }
-
-            if (text[i] == '"')
-            {
-                return i + 1;
-            }
-
-            i++;
-        }
-
-        return i;
-    }
+    /* The literal- and comment-aware walk this pin used to carry lives in CSharpSourceWalker as of
+       #2913. It was one of five private copies, and all five blanked an interpolated string's HOLES along
+       with the literal text around them, so a call written inside an interpolation was invisible to every
+       scan built on them. The reasoning that shaped the walk moved there with it, and
+       CSharpSourceWalkerTests carries the witnesses. */
 
     private static IEnumerable<string> ViewerSources()
     {

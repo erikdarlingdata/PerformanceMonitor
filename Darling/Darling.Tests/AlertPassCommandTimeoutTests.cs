@@ -102,7 +102,7 @@ public sealed class AlertPassCommandTimeoutTests
                    initializer on the construction, or — for the CreateCommand shape, whose method
                    result cannot take one — the statement immediately after it, so two statements are
                    examined. */
-                var span = StatementSpanFrom(text, ctor.Index, statements: 2);
+                var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
 
                 if (!s_setsTimeout.IsMatch(span))
                 {
@@ -177,122 +177,17 @@ public sealed class AlertPassCommandTimeoutTests
         var ctor = s_commandCtor.Match(source);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = StatementSpanFrom(source, ctor.Index, statements: 2);
+        var span = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
 
         Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
     }
 
-    /// <summary>
-    /// The text from <paramref name="start"/> through the end of the Nth following statement,
-    /// counting only semicolons that sit outside string literals, outside comments, and outside any
-    /// nesting. Verbatim SQL in this family contains both semicolons and quote characters, so a naive
-    /// scan for ';' stops in the middle of a query and reports every multi-line construction as
-    /// untimed.
-    ///
-    /// <para>Comments are skipped for the same reason and it is not hypothetical: the two-statement
-    /// window exists for the <c>CreateCommand</c> shape, whose deadline is the statement AFTER the
-    /// construction, and this codebase's style actively encourages an explanatory comment in exactly
-    /// that gap. A semicolon inside one would end the span early and report a correctly-timed site as
-    /// an offender — a false positive in the guard, which is worse than a miss because it fails a
-    /// green build and trains people to distrust the pin.</para>
-    /// </summary>
-    private static string StatementSpanFrom(string text, int start, int statements)
-    {
-        var depth = 0;
-        var seen = 0;
-        var i = start;
-
-        while (i < text.Length)
-        {
-            var c = text[i];
-
-            if (c == '@' && i + 1 < text.Length && text[i + 1] == '"')
-            {
-                i = SkipVerbatimString(text, i + 2);
-                continue;
-            }
-
-            if (c == '"')
-            {
-                i = SkipRegularString(text, i + 1);
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '/')
-            {
-                var nl = text.IndexOf('\n', i);
-                i = nl < 0 ? text.Length : nl + 1;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
-            {
-                var end = text.IndexOf("*/", i + 2, System.StringComparison.Ordinal);
-                i = end < 0 ? text.Length : end + 2;
-                continue;
-            }
-
-            if (c is '(' or '[' or '{')
-            {
-                depth++;
-            }
-            else if (c is ')' or ']' or '}')
-            {
-                depth--;
-            }
-            else if (c == ';' && depth <= 0 && ++seen >= statements)
-            {
-                return text[start..(i + 1)];
-            }
-
-            i++;
-        }
-
-        return text[start..];
-    }
-
-    private static int SkipVerbatimString(string text, int i)
-    {
-        while (i < text.Length)
-        {
-            if (text[i] == '"')
-            {
-                /* "" is an escaped quote inside a verbatim string, not the end of it. */
-                if (i + 1 < text.Length && text[i + 1] == '"')
-                {
-                    i += 2;
-                    continue;
-                }
-
-                return i + 1;
-            }
-
-            i++;
-        }
-
-        return i;
-    }
-
-    private static int SkipRegularString(string text, int i)
-    {
-        while (i < text.Length)
-        {
-            if (text[i] == '\\')
-            {
-                i += 2;
-                continue;
-            }
-
-            if (text[i] == '"')
-            {
-                return i + 1;
-            }
-
-            i++;
-        }
-
-        return i;
-    }
+    /* The literal- and comment-aware walk this pin used to carry lives in CSharpSourceWalker as of
+       #2913. It was one of five private copies, and all five blanked an interpolated string's HOLES along
+       with the literal text around them, so a call written inside an interpolation was invisible to every
+       scan built on them. The reasoning that shaped the walk moved there with it, and
+       CSharpSourceWalkerTests carries the witnesses. Verbatim SQL in this family carries both
+       semicolons and quote characters, which is why the span walker was never a naive scan for ';'. */
 
     private static IEnumerable<string> AlertPassSources()
     {

@@ -68,7 +68,7 @@ public sealed class StorageCommandTimeoutTests
             {
                 total++;
 
-                var span = StatementSpanFrom(text, ctor.Index, statements: 2);
+                var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
 
                 if (!s_setsTimeout.IsMatch(span))
                 {
@@ -151,113 +151,16 @@ public sealed class StorageCommandTimeoutTests
         var ctor = s_commandCtor.Match(source);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = StatementSpanFrom(source, ctor.Index, statements: 2);
+        var span = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
 
         Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
     }
 
-    /* The span walker below is the CI-proven copy from AlertPassCommandTimeoutTests — string- and
-       comment-aware, terminating on the Nth semicolon at depth <= 0 so a span can never leak out of
-       the member it started in. Kept as a private copy the way the three sibling pins keep theirs;
-       extracting a shared helper across four test files is a refactor those lanes should take
-       together or not at all. */
-
-    private static string StatementSpanFrom(string text, int start, int statements)
-    {
-        var depth = 0;
-        var seen = 0;
-        var i = start;
-
-        while (i < text.Length)
-        {
-            var c = text[i];
-
-            if (c == '@' && i + 1 < text.Length && text[i + 1] == '"')
-            {
-                i = SkipVerbatimString(text, i + 2);
-                continue;
-            }
-
-            if (c == '"')
-            {
-                i = SkipRegularString(text, i + 1);
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '/')
-            {
-                var nl = text.IndexOf('\n', i);
-                i = nl < 0 ? text.Length : nl + 1;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
-            {
-                var end = text.IndexOf("*/", i + 2, System.StringComparison.Ordinal);
-                i = end < 0 ? text.Length : end + 2;
-                continue;
-            }
-
-            if (c is '(' or '[' or '{')
-            {
-                depth++;
-            }
-            else if (c is ')' or ']' or '}')
-            {
-                depth--;
-            }
-            else if (c == ';' && depth <= 0 && ++seen >= statements)
-            {
-                return text[start..(i + 1)];
-            }
-
-            i++;
-        }
-
-        return text[start..];
-    }
-
-    private static int SkipVerbatimString(string text, int i)
-    {
-        while (i < text.Length)
-        {
-            if (text[i] == '"')
-            {
-                if (i + 1 < text.Length && text[i + 1] == '"')
-                {
-                    i += 2;
-                    continue;
-                }
-
-                return i + 1;
-            }
-
-            i++;
-        }
-
-        return i;
-    }
-
-    private static int SkipRegularString(string text, int i)
-    {
-        while (i < text.Length)
-        {
-            if (text[i] == '\\')
-            {
-                i += 2;
-                continue;
-            }
-
-            if (text[i] == '"')
-            {
-                return i + 1;
-            }
-
-            i++;
-        }
-
-        return i;
-    }
+    /* The literal- and comment-aware walk this pin used to carry lives in CSharpSourceWalker as of
+       #2913. It was one of five private copies, and all five blanked an interpolated string's HOLES along
+       with the literal text around them, so a call written inside an interpolation was invisible to every
+       scan built on them. The reasoning that shaped the walk moved there with it, and
+       CSharpSourceWalkerTests carries the witnesses. */
 
     private static IEnumerable<string> StorageSources()
     {
