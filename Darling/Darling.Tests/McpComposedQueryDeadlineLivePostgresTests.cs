@@ -16,12 +16,6 @@ using Xunit;
 
 namespace Darling.Tests;
 
-/*  #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here MUTATES
-    config.config_service.compose_statement_timeout_seconds and one asserts the behaviour of a store whose
-    row is NOT seeded, so it cannot share the collection's long-lived database with sixty other classes —
-    it reaches DARLING_TEST_PG only to CREATE and DROP a scratch database of its own, exactly as
-    DarlingAlertTuningKnobsTests and QueryStoreCorrectedRollupLiveTests do.  */
-
 /// <summary>
 /// The live half of the composed-query deadline (#2874, group A): the resolver reads the operator's ACTUAL
 /// <c>config.config_service.compose_statement_timeout_seconds</c>, and it SEES A CHANGE to it.
@@ -42,6 +36,13 @@ namespace Darling.Tests;
 /// the read returns no rows at all, and the resolver has to land on its fallback rather than throw or return
 /// zero — pinned below, because "brand new store, first panel run" is a real state and not an edge case.</para>
 /// </summary>
+/*  #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here MUTATES
+    config.config_service.compose_statement_timeout_seconds, and one asserts the behaviour of a store whose
+    row is NOT seeded, so this cannot share the collection's long-lived database with sixty other classes —
+    it reaches DARLING_TEST_PG only to CREATE and DROP a scratch database of its own, exactly as
+    DarlingAlertTuningKnobsTests and QueryStoreCorrectedRollupLiveTests do. Placed immediately above the
+    declaration on purpose: LivePostgresCollectionHygieneTests only reads the 25 lines above it, and this
+    marker started 26 lines up, above the doc comment, where it was invisible to the very rule it answers.  */
 public sealed class McpComposedQueryDeadlineLivePostgresTests
 {
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
