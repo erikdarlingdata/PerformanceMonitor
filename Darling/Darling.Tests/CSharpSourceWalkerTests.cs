@@ -291,7 +291,7 @@ public sealed class CSharpSourceWalkerTests
         Assert.Equal(0, Balance(walked, '{', '}'));
     }
 
-    /// <summary>
+    /// <summary>
     /// <para>A <c>char</c> literal holding a quote. This is the one gap in #2913 that was NOT latent:
     /// <c>value.Contains('"')</c> is a real line in <c>ViewerServerTab.ChartContextMenu.cs</c>, inside the
     /// directory both viewer pins glob recursively, and the legacy walk read that quote as opening a string
