@@ -42,6 +42,14 @@ namespace Darling.Tests;
 /// current underneath it. Against a store BELOW that version there are rungs to apply and no safe way to
 /// apply them, so it must throw. A test that only covered one half would pass on a build that always did
 /// that half.</para>
+///
+/// <para><b>Teardown goes through <c>LiveStoreCleanup.RunOwnedAsync</c>, not <c>RunAsync</c></b> (#1902).
+/// <c>RunAsync</c> opens its own connection, which is the safer default and is wrong here: the release is
+/// <c>pg_advisory_unlock</c>, and only the session HOLDING a session-scoped advisory lock can release it,
+/// so a fresh connection would report success while leaving the lock held for every later class in the
+/// collection. The stamp restore rides the same session because that is the one whose <c>search_path</c>
+/// the applier set. <c>bodySucceeded</c> is the last statement of each <c>try</c> so a throw from the
+/// teardown stays silent while the body's own exception is in flight.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class MigrationLockWaitContentionTests
@@ -89,6 +97,7 @@ public sealed class MigrationLockWaitContentionTests
            closing it, and a lock leaked by a failed assertion then blocks every later class in this
            collection until the pool prunes that connection. Measured: a leak here cost a sibling test
            290 s of waiting on a lock nothing was using. */
+        var bodySucceeded = false;
         try
         {
             Assert.True(
@@ -96,10 +105,13 @@ public sealed class MigrationLockWaitContentionTests
                 $"An uncontended acquire took {started.Elapsed.TotalMilliseconds:F0}ms, over the "
                 + $"{UncontendedAcquireCeiling.TotalMilliseconds:F0}ms ceiling — it slept a poll interval "
                 + "instead of taking the lock on its first attempt.");
+            bodySucceeded = true;
         }
         finally
         {
-            await ReleaseAsync(connection, CancellationToken.None);
+            await LiveStoreCleanup.RunOwnedAsync(
+                bodySucceeded,
+                () => ReleaseAsync(connection, CancellationToken.None));
         }
     }
 
@@ -115,6 +127,7 @@ public sealed class MigrationLockWaitContentionTests
         await PgMigrations.MigrateAsync(holder, TestContext.Current.CancellationToken);
         await HoldAsync(holder, TestContext.Current.CancellationToken);
 
+        var bodySucceeded = false;
         try
         {
             await using var waiter = new NpgsqlConnection(connectionString);
@@ -144,10 +157,13 @@ public sealed class MigrationLockWaitContentionTests
 
             Assert.Equal(versionBefore, await ReadMaxVersionAsync(holder, TestContext.Current.CancellationToken));
             Assert.Equal(stampsBefore, await ReadStampCountAsync(holder, TestContext.Current.CancellationToken));
+            bodySucceeded = true;
         }
         finally
         {
-            await ReleaseAsync(holder, CancellationToken.None);
+            await LiveStoreCleanup.RunOwnedAsync(
+                bodySucceeded,
+                () => ReleaseAsync(holder, CancellationToken.None));
         }
     }
 
@@ -187,6 +203,7 @@ public sealed class MigrationLockWaitContentionTests
            which assertion fails. Staging the store first and opening the try afterwards leaves a failed
            run's store un-restored for every later test in the collection — which is exactly how the first
            version of this class poisoned its own re-runs. */
+        var bodySucceeded = false;
         try
         {
             await ExecuteAsync(holder, "DELETE FROM darling_schema_version WHERE version = " + topVersion.ToString(CultureInfo.InvariantCulture), TestContext.Current.CancellationToken);
@@ -218,16 +235,20 @@ public sealed class MigrationLockWaitContentionTests
                identical form — a DoesNotContain that can only ever pass proves nothing. */
             Assert.DoesNotContain("reading from stream", thrown.Message, StringComparison.Ordinal);
             Assert.Contains("reading from stream", "Exception while reading from stream", StringComparison.Ordinal);
+            bodySucceeded = true;
         }
         finally
         {
-            await ReleaseAsync(holder, CancellationToken.None);
-            await ExecuteAsync(
-                holder,
-                "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ("
-                + topVersion.ToString(CultureInfo.InvariantCulture) + ", '" + topName!.Replace("'", "''", StringComparison.Ordinal)
-                + "', now() AT TIME ZONE 'UTC') ON CONFLICT (version) DO NOTHING",
-                CancellationToken.None);
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                await ReleaseAsync(holder, CancellationToken.None);
+                await ExecuteAsync(
+                    holder,
+                    "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ("
+                    + topVersion.ToString(CultureInfo.InvariantCulture) + ", '" + topName!.Replace("'", "''", StringComparison.Ordinal)
+                    + "', now() AT TIME ZONE 'UTC') ON CONFLICT (version) DO NOTHING",
+                    CancellationToken.None);
+            });
         }
     }
 
@@ -243,6 +264,7 @@ public sealed class MigrationLockWaitContentionTests
         await PgMigrations.MigrateAsync(holder, TestContext.Current.CancellationToken);
         await HoldAsync(holder, TestContext.Current.CancellationToken);
 
+        var bodySucceeded = false;
         try
         {
             await using var waiter = new NpgsqlConnection(connectionString);
@@ -263,10 +285,13 @@ public sealed class MigrationLockWaitContentionTests
             await Assert.ThrowsAnyAsync<OperationCanceledException>(
                 () => PgMigrations.TryAcquireMigrationLockForTestsAsync(
                     waiter, logger: null, waitBudgetSeconds: 60, cancelSoon.Token));
+            bodySucceeded = true;
         }
         finally
         {
-            await ReleaseAsync(holder, CancellationToken.None);
+            await LiveStoreCleanup.RunOwnedAsync(
+                bodySucceeded,
+                () => ReleaseAsync(holder, CancellationToken.None));
         }
     }
 
