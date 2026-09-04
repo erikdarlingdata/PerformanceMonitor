@@ -227,8 +227,26 @@ LIMIT 5000";
 
             // Always-on DMV blocking snapshot fallback (works when the blocked-process-report XE is empty,
             // e.g. AWS RDS). Merge BEFORE the empty check so DMV-only blocking still produces facts.
+            /* A FACTORY that stamps the deadline, not the bare `connection.CreateCommand` method
+               group (#2874). AppendDmvSnapshotRowsAsync sets only CommandText on what this returns, so
+               a deadline set HERE is the only one that command can get - and a method group matches
+               neither of the census regexes (there is no `(` after it), which is how this site read as
+               clean through #2810's sweep of this collector's thirty-one commands and #2871's of the
+               assembly's other thirty-two.
+
+               FactCommandTimeoutSeconds, not a new number: this read is one of THIS collector's
+               commands and shares the same 120s pass budget the other thirty-one were derived against,
+               and its own doc comment already claims every command here. The value was not copied from
+               the drill-down's 30 - that constant governs a different pass and #2871 left it alone
+               deliberately. */
             await PgBlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-                connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                () =>
+                {
+                    var dmvCommand = connection.CreateCommand();
+                    dmvCommand.CommandTimeout = FactCommandTimeoutSeconds;
+                    return dmvCommand;
+                },
+                rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 context.CancellationToken);
 
             if (rows.Count == 0) return;
