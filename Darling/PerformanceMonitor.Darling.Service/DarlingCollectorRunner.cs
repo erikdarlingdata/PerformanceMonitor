@@ -798,14 +798,78 @@ public sealed class DarlingCollectorRunner
 
                     var sqlSlice = Stopwatch.StartNew();
                     List<TRow> batch;
+
+                    /* #2855: cleared BEFORE the connect, once per iteration. This loop reuses ONE context
+                       across every database, so without the reset a database whose connect faults would
+                       print the PREVIOUS database's split as its own — and a stale timing that looks
+                       precise is worse than no timing at all. Same rule, and the same reason, as the
+                       enumerated readItem's clear of its own stamps. */
+                    context.PerDatabaseConnectMs = 0;
+                    context.PerDatabaseOpenMs = 0;
+                    context.PerDatabaseDrainMs = 0;
+                    context.PerDatabasePhasesMeasured = false;
+
                     /* dbToken, not cancellationToken (#2150): connect, execute and drain are the phases the
                        budget bounds. The FLUSH below deliberately stays on cancellationToken — abandoning a
                        write already in flight would trade a slow cycle for a partially-written one. */
-                    using (var dbConnection = await OpenDatabaseConnectionAsync(perDbProvider, server, databaseName, dbToken))
-                    using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
-                    using (var dbReader = await dbCommand.ExecuteReaderAsync(dbToken))
+                    /* #2855: the CONNECT is a phase in its own right here, and only here. This branch opens a
+                       connection per database, so on Azure SQL DB every cycle pays a fresh login per
+                       database — a cost that had nowhere to appear and therefore sat inside the blended
+                       number with everything else. Timed around OpenDatabaseConnectionAsync alone, so
+                       command construction lands in the residual rather than in a phase that is supposed to
+                       mean "reaching the database".
+
+                       Stamped from a finally, with the flag, for the #2854 reason: a login that times out or
+                       a per-database budget that fires during the handshake is exactly the case this exists
+                       to attribute, and a trailing assignment is skipped on precisely that path. The stamp
+                       would then read connect:0ms and hand its whole cost to other: — the one term whose job
+                       is to be small and unattributed. The flag rides the same finally so the two can never
+                       disagree about whether a measurement happened. */
+                    var connectWatch = Stopwatch.StartNew();
+                    DbConnection openedConnection;
+                    try
                     {
-                        batch = await definition.ReadAsync(dbReader, context, dbToken);
+                        openedConnection = await OpenDatabaseConnectionAsync(perDbProvider, server, databaseName, dbToken);
+                    }
+                    finally
+                    {
+                        context.PerDatabaseConnectMs = connectWatch.ElapsedMilliseconds;
+                        context.PerDatabasePhasesMeasured = true;
+                    }
+
+                    using (var dbConnection = openedConnection)
+                    using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
+                    {
+                        /* #2855: the open, same contract as the other two paths — ExecuteReaderAsync returns
+                           only when the first rowset is available, so this is server-side work before the
+                           first row, which no client-side budget shortens. Hoisted out of the `using` header
+                           only so the reader below keeps its original disposal scope. */
+                        var openWatch = Stopwatch.StartNew();
+                        DbDataReader openedReader;
+                        try
+                        {
+                            openedReader = await dbCommand.ExecuteReaderAsync(dbToken);
+                        }
+                        finally
+                        {
+                            context.PerDatabaseOpenMs = openWatch.ElapsedMilliseconds;
+                        }
+
+                        using var dbReader = openedReader;
+
+                        /* #2855: the drain, measured rather than inferred — the ServerScopeDrainMs argument.
+                           A residual drain would silently absorb command construction and the trailing
+                           probe-failure rowset below, and then a large other: would say nothing about our
+                           own code. From a finally so a budget expiry mid-stream reports how far it got. */
+                        var drainWatch = Stopwatch.StartNew();
+                        try
+                        {
+                            batch = await definition.ReadAsync(dbReader, context, dbToken);
+                        }
+                        finally
+                        {
+                            context.PerDatabaseDrainMs = drainWatch.ElapsedMilliseconds;
+                        }
 
                         /* #1875: the payload path's probe-failure contract, on the path that used to
                            ignore it. blocked_process_report is the declaring collector that also runs per
@@ -842,6 +906,36 @@ public sealed class DarlingCollectorRunner
                        completion hook fires after the flush: both slices are only known once the write is
                        done. */
                     fanout.Observe(databaseName, dbSqlMs + dbStorageMs);
+
+                    /* #2855: this branch's per-database phase line — the line it did not emit at all. Read
+                       after the flush, like the other two paths, so pg: is this database's own figure.
+
+                       Gated on the split being present rather than on a figure being non-zero, and the
+                       null-or-value decision lives on the context so "no split" and "no line" are one
+                       decision made once. A `connect: > 0` gate would suppress the whole line for a pooled
+                       connect that really did cost nothing — the case where the rest of the line is most
+                       worth reading, and the mistake #2854 had to undo on the enumerated path.
+
+                       NOT gated on batch.Count > 0, unlike the enumerated path's #1565 quiet-on-zero rule.
+                       That rule guards a ROW-COUNT line, whose payload is the row count, and a zero-row one
+                       carries nothing. This is a PHASE line, and its payload — the connect above all — is
+                       paid on a quiet database exactly as on a busy one. The server-scoped phase line is the
+                       closer sibling and prints for every measured run regardless of rows; suppressing quiet
+                       databases here would leave them emitting nothing whatsoever, which is the state this
+                       issue is about.
+
+                       Its OWN line rather than folded into anything, the #2811/#2851 rule: these lines are
+                       parsed by tooling outside this repo, so "don't break the parser" outranks "one line to
+                       grep". Nothing here is persisted — a per-database split is N:1 against collection_log
+                       and shaping that is the open decision in #2860. */
+                    if (context.PerDatabasePhasesFrom(dbSqlMs) is { } dbPhases)
+                    {
+                        _logger?.LogInformation(
+                            "  [{Server}] {Collector} [{Database}] sql:{SqlMs}ms = connect:{ConnectMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms ({Rows} rows, pg:{PgMs}ms)",
+                            server.Config.DisplayName, definition.Name, databaseName, dbSqlMs,
+                            dbPhases.ConnectMs, dbPhases.OpenMs, dbPhases.DrainMs, dbPhases.OtherMs,
+                            batch.Count, dbStorageMs);
+                    }
 
                     /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the

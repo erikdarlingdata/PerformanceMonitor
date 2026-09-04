@@ -14,6 +14,7 @@ using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
+using System.Runtime.CompilerServices;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -45,6 +46,19 @@ namespace Darling.Tests;
 /// so the line still read as precise. <c>DrainMsFrom</c> made it worse again: it subtracts the phases from
 /// the item total, so a timed-out open reported its whole cost as <c>drain:</c> — blaming row streaming for a
 /// statement that never returned a row.</para>
+///
+/// <para><b>#2855 added the third path, and with it the third decomposition.</b> The Azure per-database
+/// branch emitted no split at all — not a mis-stamped one, none — so a slow database could not be attributed
+/// even in principle. It opens a connection PER DATABASE, which neither other path does, so its split is
+/// <c>connect: + open: + drain:</c> and <c>OpenDatabaseConnectionAsync</c> is a phase in its own right: on
+/// Azure SQL DB that is a fresh login per database per cycle, the exact kind of recurring term that hides
+/// inside a blended number. The stamps took a <c>PerDatabase*Ms</c> prefix and the derivation above was
+/// widened to match, because a stamp named outside the pattern is a stamp nothing guards.</para>
+///
+/// <para>The split is emitted and logged only. Persisting it is <b>not</b> settled: it is N:1 against
+/// <c>collection_log</c> — a run visits every database — where the server-scoped split V108 stores is 1:1,
+/// so there is no row for it to land on. That shape is the open decision in #2860, and nothing here writes
+/// to the store or moves the schema off V109.</para>
 /// </summary>
 public sealed class ServerScopePhaseSplitTests
 {
@@ -57,7 +71,16 @@ public sealed class ServerScopePhaseSplitTests
 
        Derivation cannot silently SHRINK, which is the objection to deriving: MinimumPhaseStamps below fails
        loudly if a stamp is deleted or renamed out of the pattern, so the set can grow on its own but cannot
-       quietly cover less. */
+       quietly cover less.
+
+       #2855 WIDENED the pattern to a third prefix. The Azure per-database branch opens a connection per
+       database, so its split is connect: + open: + drain: rather than open: + drain:, and it took
+       PerDatabase*Ms rather than reusing PerItem*Ms — the enumerated log site keys on its own flag and
+       prints an item name, so sharing those fields would make an Azure run print as an enumerated one. That
+       is the same collision ServerScopeOpenMs's doc comment records as the reason the server-scoped path got
+       its own prefix, so the precedent decided it. The cost of the honest name is that the derivation had to
+       be widened HERE in the same change, because a stamp outside the pattern is a stamp nothing guards —
+       worse than no stamp, since this file's whole claim is that a new one is covered the day it appears. */
     private static readonly string[] PhaseSetters =
         typeof(CollectorContext)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -65,15 +88,45 @@ public sealed class ServerScopePhaseSplitTests
                         && p.CanWrite
                         && p.Name.EndsWith("Ms", StringComparison.Ordinal)
                         && (p.Name.StartsWith("PerItem", StringComparison.Ordinal)
-                            || p.Name.StartsWith("ServerScope", StringComparison.Ordinal)))
+                            || p.Name.StartsWith("ServerScope", StringComparison.Ordinal)
+                            || p.Name.StartsWith("PerDatabase", StringComparison.Ordinal)))
             .Select(p => "set_" + p.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-    /* The count at the time this pin was written: 10 enumerated + 2 server-scoped. Deleting a stamp, or
-       renaming one out of the pattern above, drops the derived set and fails HERE with a number rather than
-       silently checking less. */
-    private const int MinimumPhaseStamps = 12;
+    /* The TRUE count today, not a round number: 10 enumerated + 3 server-scoped + 3 per-database. Deleting a
+       stamp, or renaming one out of the pattern above, drops the derived set and fails HERE with a number
+       rather than silently checking less.
+
+       Two of the four raised it. #2855 added the three PerDatabase*Ms stamps. The fourth server-scoped one
+       is #2864's ServerScopeLastReadMs, which matched the pattern the day it landed and so was covered
+       automatically — exactly as designed — but left the floor one behind the real count at 12, where a
+       deletion could have gone unnoticed. Set to the exact count so it cannot drift silently again; a
+       legitimate new stamp raises it in the same change, which is the two-line price of the guarantee. */
+    private const int MinimumPhaseStamps = 16;
+
+    /* The MEASURED FLAGS, derived on the same rule and scanned by the same IL walk (#2855). They were not
+       covered before, and the omission is structural rather than an oversight in any one change: the
+       derivation above selects on `long`, so a bool could never appear in it however it was named.
+
+       That left the flag's placement guarded by prose only, and the flag is half the fix. #2854's whole
+       lesson is that a stamp and its flag must be set in the SAME finally — a flag assigned after the await
+       leaves a faulting phase declaring itself unmeasured, which suppresses the split line for exactly the
+       run worth reading, and the *Ms pin above would stay green throughout because the number is stamped
+       correctly. Two flags live on the context today (the enumerated one and #2855's per-database one); the
+       server-scoped path's is a method local, so it is out of reach here and is covered instead by the
+       ServerPhasesMeasured arithmetic tests. */
+    private static readonly string[] MeasuredFlagSetters =
+        typeof(CollectorContext)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.PropertyType == typeof(bool)
+                        && p.CanWrite
+                        && p.Name.EndsWith("PhasesMeasured", StringComparison.Ordinal))
+            .Select(p => "set_" + p.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+    private const int MinimumMeasuredFlags = 2;
 
     /* A setter assigned WITHOUT an exception handler, in the same assembly, resolved through the same
        metadata tables and the same IL walk. Two jobs: if the scanner stops resolving tokens its Total goes to
@@ -226,14 +279,162 @@ public sealed class ServerScopePhaseSplitTests
             "changed and the IL pin below is the only thing left guarding the stamps.");
     }
 
+    /* ── #2855: the Azure per-database split ── */
+
+    [Fact]
+    public void ThePerDatabaseSplitSumsToItsParent_SoTheResidualIsAResidualAndNotASlushFund()
+    {
+        /* Three phases here, not two, and the third is the point: the connect is a real per-cycle cost on
+           Azure SQL DB because this branch logs in once per database. Pin the SHIPPED expressions — the
+           residual method and the gate the log site calls — rather than a copy of the arithmetic. */
+        var context = PerDatabaseContext();
+        context.PerDatabasePhasesMeasured = true;
+        context.PerDatabaseConnectMs = 1_451;
+        context.PerDatabaseOpenMs = 247;
+        context.PerDatabaseDrainMs = 36;
+
+        /* 1,800 total: 1,451 connect + 247 open + 36 drain leaves 66 in command construction and the
+           trailing probe-failure rowset. */
+        Assert.Equal(66, context.PerDatabaseOtherMsFrom(1_800));
+
+        var split = Assert.NotNull(context.PerDatabasePhasesFrom(1_800));
+        Assert.Equal(
+            1_800,
+            split.ConnectMs + split.OpenMs + split.DrainMs + split.OtherMs);
+    }
+
+    [Fact]
+    public void ThePerDatabaseResidualClampsAtZero_SoStopwatchSkewNeverPrintsNegative()
+    {
+        /* THREE stopwatches against one parent now, so the skew this clamps is a millisecond larger than the
+           server-scoped case, not smaller. A negative term would make the whole line look broken. */
+        var context = PerDatabaseContext();
+        context.PerDatabasePhasesMeasured = true;
+        context.PerDatabaseConnectMs = 60;
+        context.PerDatabaseOpenMs = 45;
+        context.PerDatabaseDrainMs = 10;
+
+        Assert.Equal(0, context.PerDatabaseOtherMsFrom(100));
+        Assert.Equal(0, Assert.NotNull(context.PerDatabasePhasesFrom(100)).OtherMs);
+    }
+
+    [Fact]
+    public void AnUnmeasuredDatabaseEmitsNoSplit_SoTheLogLineCannotPrintOneItDidNotMeasure()
+    {
+        /* Lite does not measure this path. The gate returns null, the log site's `is { }` pattern fails, and
+           no line prints — which is the honest answer for a host that measured nothing.
+
+           The values are set NON-ZERO here on purpose: they stand in for a stale split left by a previous
+           database in the same loop, and the assertion is that the FLAG alone decides, so a leftover figure
+           can never be printed as this database's own. */
+        var context = PerDatabaseContext();
+        context.PerDatabaseConnectMs = 4_100;
+        context.PerDatabaseOpenMs = 700;
+        context.PerDatabaseDrainMs = 90;
+
+        Assert.False(context.PerDatabasePhasesMeasured);
+        Assert.Null(context.PerDatabasePhasesFrom(5_000));
+    }
+
+    [Fact]
+    public void AMeasuredZeroConnectStillEmitsItsSplit_WhichIsWhyTheGateIsAFlagAndNotAGreaterThanZero()
+    {
+        /* THE case a `connect: > 0` gate loses, and the #2854 mistake one path over. A pooled or
+           already-warm connect really does measure 0ms while the read behind it costs seconds — and that is
+           precisely the database whose open: and drain: are worth reading, because the connect has been
+           ruled out. Gating on the value would suppress the entire line for it, and a reader could not tell
+           that from a host that emits no split at all. */
+        var pooled = PerDatabaseContext();
+        pooled.PerDatabasePhasesMeasured = true;
+        pooled.PerDatabaseConnectMs = 0;
+        pooled.PerDatabaseOpenMs = 3_900;
+        pooled.PerDatabaseDrainMs = 700;
+
+        var split = Assert.NotNull(pooled.PerDatabasePhasesFrom(4_644));
+        Assert.Equal(0, split.ConnectMs);
+        Assert.Equal(44, split.OtherMs);
+
+        /* And a database where every phase legitimately measured zero still declares itself measured, with
+           zeros that mean what they say rather than an absent line. */
+        var instant = PerDatabaseContext();
+        instant.PerDatabasePhasesMeasured = true;
+
+        var zeroes = Assert.NotNull(instant.PerDatabasePhasesFrom(0));
+        Assert.Equal(new PerDatabasePhaseSplit(0, 0, 0, 0), zeroes);
+    }
+
+    [Fact]
+    public void TheThreePathsDoNotMasqueradeAsEachOther_WhichIsWhyTheThirdPrefixExists()
+    {
+        /* The reason PerDatabase*Ms is not PerItem*Ms. An enumerated run stamps its own fields and must not
+           acquire a per-database line it has no connect for; a per-database run must not acquire the
+           enumerated one, which would print an item name it does not have. Reusing PerItemOpenMs would have
+           made both happen at once. */
+        var enumerated = PerDatabaseContext();
+        enumerated.PerItemPhasesMeasured = true;
+        enumerated.PerItemOpenMs = 900;
+
+        Assert.Null(enumerated.PerDatabasePhasesFrom(4_000));
+
+        var perDatabase = PerDatabaseContext();
+        perDatabase.PerDatabasePhasesMeasured = true;
+        perDatabase.PerDatabaseConnectMs = 1_451;
+
+        Assert.NotNull(perDatabase.PerDatabasePhasesFrom(1_800));
+        Assert.False(perDatabase.PerItemPhasesMeasured);
+        Assert.Equal(0, perDatabase.PerItemOpenMs);
+
+        /* And neither of them is the server-scoped path, whose own flag stays false on both. */
+        Assert.False(new CollectorRunResult(Rows: 1, SqlMs: 1, StorageMs: 0).ServerPhasesMeasured);
+    }
+
+    [Fact]
+    public void TheAzureLogSiteGatesOnTheSharedExpression_NotOnAFigureBeingNonZero()
+    {
+        /* The emission itself takes a live ILogger, a live server and a live Azure connection, so it is
+           pinned at source the way the probe-failure log lines are: the gate must be the shared
+           PerDatabasePhasesFrom expression the tests above exercise, never a hand-written comparison that
+           could drift back to the `> 0` form #2854 removed. */
+        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+
+        Assert.Contains("context.PerDatabasePhasesFrom(dbSqlMs) is { } dbPhases", source, StringComparison.Ordinal);
+        Assert.Contains("connect:{ConnectMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms", source, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("PerDatabaseConnectMs > 0", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("PerDatabaseOpenMs > 0", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("PerDatabaseDrainMs > 0", source, StringComparison.Ordinal);
+    }
+
+    private static CollectorContext PerDatabaseContext() => new()
+    {
+        ServerId = 1,
+        ServerName = "alpha",
+        CollectionTime = new DateTime(2026, 9, 4, 0, 0, 0, DateTimeKind.Utc),
+        Deltas = new CollectorDeltaCalculator(),
+    };
+
+    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
+    {
+        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, relative);
+            if (File.Exists(candidate))
+            {
+                return File.ReadAllText(candidate);
+            }
+        }
+
+        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
+    }
+
     [Fact]
     public void PhaseStamps_AreReachableFromExceptionHandlers_SoAThrowingPhaseStillReportsItsTime()
     {
         Assert.True(
             PhaseSetters.Length >= MinimumPhaseStamps,
             $"Only {PhaseSetters.Length} phase stamps were derived from CollectorContext, expected at least " +
-            $"{MinimumPhaseStamps}. A stamp was deleted or renamed out of the PerItem*Ms / ServerScope*Ms " +
-            "pattern, so this pin is now guarding less than it was written to guard.");
+            $"{MinimumPhaseStamps}. A stamp was deleted, or renamed out of the PerItem*Ms / ServerScope*Ms / " +
+            "PerDatabase*Ms pattern, so this pin is now guarding less than it was written to guard.");
 
         var counts = ScanServiceAssembly();
 
@@ -262,6 +463,35 @@ public sealed class ServerScopePhaseSplitTests
         }
     }
 
+    [Fact]
+    public void MeasuredFlags_AreReachableFromExceptionHandlers_SoAFaultingPhaseStillDeclaresItselfMeasured()
+    {
+        Assert.True(
+            MeasuredFlagSetters.Length >= MinimumMeasuredFlags,
+            $"Only {MeasuredFlagSetters.Length} measured flags were derived from CollectorContext, expected " +
+            $"at least {MinimumMeasuredFlags}. A flag was deleted or renamed out of the *PhasesMeasured " +
+            "pattern, so this pin is now guarding less than it was written to guard.");
+
+        var counts = ScanServiceAssembly();
+
+        foreach (var setter in MeasuredFlagSetters)
+        {
+            var (total, inHandler) = counts[setter];
+
+            Assert.True(
+                total > 0,
+                $"{setter} was not called anywhere in the service assembly — the flag is never set, so its " +
+                "log line can never print and the split is dead code.");
+
+            Assert.True(
+                inHandler > 0,
+                $"{setter} is never set from inside an exception handler ({total} call site(s), all on " +
+                "success paths). The flag GATES the split line, so a phase that faults would declare itself " +
+                "unmeasured and print nothing at all — losing the reading for the timed-out connect or the " +
+                "expired budget, which is the only case the split was added to explain. #2854, one flag over.");
+        }
+    }
+
     /// <summary>
     /// Walks every method body in the built service assembly and, for each call to one of the tracked
     /// setters, records whether the call offset falls inside an exception-handler region. Reads IL rather
@@ -274,7 +504,7 @@ public sealed class ServerScopePhaseSplitTests
         var assemblyPath = typeof(DarlingCollectorRunner).Assembly.Location;
         Assert.True(File.Exists(assemblyPath), $"Service assembly not found at '{assemblyPath}'.");
 
-        var tracked = PhaseSetters.Append(ControlSetter).ToArray();
+        var tracked = PhaseSetters.Concat(MeasuredFlagSetters).Append(ControlSetter).ToArray();
         var results = tracked.ToDictionary(name => name, _ => (Total: 0, InHandler: 0));
 
         using var stream = File.OpenRead(assemblyPath);
