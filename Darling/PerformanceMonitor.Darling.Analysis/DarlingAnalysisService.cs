@@ -56,6 +56,41 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// </summary>
 public sealed class DarlingAnalysisService
 {
+    /// <summary>
+    /// The deadline every command in the analysis pass runs under (#2871), and the reason it is a
+    /// number rather than an inheritance.
+    ///
+    /// <para><b>Why not the default.</b> An <see cref="NpgsqlCommand"/> with no
+    /// <c>CommandTimeout</c> inherits Npgsql's undocumented 30 s, which nobody chose. #2810 found
+    /// that in <see cref="PgFactCollector"/>; the rest of the pass had it too. On the dogfood box
+    /// the <c>io_latency</c> baseline failed nineteen times over two days and EVERY sample landed
+    /// between 30.1 s and 31.4 s — a fixed wall, not a variable-duration fault, and not the 15 s
+    /// connection timeout. The same read completes in ~1.6 s normally (measured against the live
+    /// store on the three busiest servers), so it only crosses the ceiling when the store stalls,
+    /// which is why it looked intermittent. #2820 had already made that query 5.6x faster and #2826
+    /// had made the failure visible; neither touched what it was failing against.</para>
+    ///
+    /// <para><b>Lower bound.</b> The failure record is RIGHT-CENSORED — every run was killed at
+    /// 30 s, so nothing says whether it wanted 35 s or 300 s. 60 s is therefore chosen as twice
+    /// what it had rather than as a fitted value: it doubles the headroom without claiming a number
+    /// the data does not contain, and clears the measured ~1.6 s steady state by a wide margin.</para>
+    ///
+    /// <para><b>Upper bound, which is the one that binds.</b> The whole pass gets 120 s
+    /// (<c>DarlingWorker.s_analysisTimeout</c>), and the fact collector's thirty-one reads, up to
+    /// eleven baseline computations per server, the anomaly detector and the drill-down all share
+    /// it. A per-command deadline at or near 120 s would let ONE stalled read consume the pass and
+    /// cost the server every other fact — strictly worse than today's failure, which loses one
+    /// metric. At half the budget a stalled command still leaves half the pass for everything
+    /// else. It matches <c>PgFactCollector.FactCommandTimeoutSeconds</c> deliberately: two numbers
+    /// in one budget would have to be reasoned about together every time either moved.</para>
+    ///
+    /// <para>A generous ceiling is inert on a query that returns in milliseconds, so applying it
+    /// uniformly costs nothing and removes the trap. When a store genuinely outgrows it the read
+    /// starts warning (#2826) instead of failing silently — that is the signal to look at the
+    /// window being scanned, not at this constant.</para>
+    /// </summary>
+    internal const int AnalysisCommandTimeoutSeconds = 60;
+
     private readonly NpgsqlDataSource _postgres;
     private readonly PgFindingStore _findingStore;
     private readonly PgFactCollector _collector;
@@ -511,7 +546,7 @@ WHERE server_id = $1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            using var cmd = new NpgsqlCommand(TotalDataSpanSql, connection);
+            using var cmd = new NpgsqlCommand(TotalDataSpanSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
 
             var result = await cmd.ExecuteScalarAsync(cancellationToken);

@@ -31,7 +31,7 @@ LIMIT 3";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(TopDeadlocksSql, connection);
+        using var cmd = new NpgsqlCommand(TopDeadlocksSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -90,7 +90,7 @@ LIMIT 5";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(TopBlockingChainsSql, connection);
+        using var cmd = new NpgsqlCommand(TopBlockingChainsSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -143,7 +143,7 @@ LIMIT 5000";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(ReconstructedChainsSql, connection);
+        using var cmd = new NpgsqlCommand(ReconstructedChainsSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -210,7 +210,7 @@ LIMIT 10";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(LockModeBreakdownSql, connection);
+        using var cmd = new NpgsqlCommand(LockModeBreakdownSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));

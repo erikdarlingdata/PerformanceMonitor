@@ -62,6 +62,12 @@ public sealed partial class QueryStoreSliceRepairService
 {
     private const string Table = "query_store_stats";
 
+    /// <summary>
+    /// The staging column that names which slice of a collapsed group SURVIVES (#2771). Prefixed so it
+    /// cannot collide with a real Query Store column, present or future.
+    /// </summary>
+    private const string KeepRowIdColumn = "pm_keep_rowid";
+
     private readonly DuckDbInitializer _duckDb;
     private readonly string _archivePath;
     private readonly ILogger<QueryStoreSliceRepairService>? _logger;
@@ -546,7 +552,27 @@ FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {str
 
             var hotColumns = await ColumnsOfTableAsync(connection, Table, cancellationToken);
             var key = KeyColumnsFor(hotColumns);
-            var projection = BuildProjection(hotColumns, key);
+
+            /* #2771: stage the MEASUREMENTS ONLY, never the wide payload. The original staged the full
+               projection — every column of every collapsed group, including query_plan_text's showplan XML —
+               and on a store with a large pre-#1907 backlog that aggregate does not fit in Lite's 1 GB
+               memory_limit. Reproduced with tools/SliceRepairRepro at the reporting store's own 31,426 split
+               intervals with 64 KB of plan text per row: "Out of Memory Error: failed to pin block of size
+               256.0 KiB (953.4 MiB/953.6 MiB used)". On Windows x64 that same pressure fast-fails the process
+               natively (0xc0000409), which is why RepairOnStartupAsync's catch never ran and #2748's reporter
+               could not start the app at all.
+
+               The attributes never needed to be in the aggregate. ANY_VALUE was picking an arbitrary row's
+               copy of a value every slice of the interval already carries identically — so leaving them on a
+               row that survives is the same answer, reached without moving the bytes. Only the numbers are
+               recombined, against a staging table that is the key plus a rowid plus the measurements.
+
+               Measured with the same harness: staging drops from OOM to 37-132 ms at 31,426 groups, and the
+               repair still completes at 100,000 groups / ~12.8 GB of plan text — 3.2x the reporting store —
+               inside the same 1 GB budget. Verified byte-identical to the original at a size where BOTH
+               strategies complete: same final row count, same SUM(execution_count), same full-row hash. */
+            var measurements = BuildMeasurementProjection(hotColumns, key, "MIN(rowid)", KeepRowIdColumn);
+            var assignments = BuildMeasurementAssignments(hotColumns, key, "r");
 
             using var transaction = connection.BeginTransaction();
 
@@ -555,29 +581,37 @@ FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {str
                 command.Transaction = transaction;
                 command.CommandText = $@"
 CREATE OR REPLACE TEMP TABLE qs_slice_repair AS
-SELECT {projection}
+SELECT {measurements}
 FROM {Table}
 GROUP BY {string.Join(", ", key)}
 HAVING COUNT(*) > 1";
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            /* DELETE by the key, then re-insert the combined rows. IS NOT DISTINCT FROM because the key
-               carries NULLABLE columns — runtime_stats_interval_id is NULL on every row collected before
-               #1841 tier 2 — and = against NULL is NULL, which would skip exactly the oldest rows. */
+            /* Match on the key with IS NOT DISTINCT FROM because the key carries NULLABLE columns —
+               runtime_stats_interval_id is NULL on every row collected before #1841 tier 2 — and = against
+               NULL is NULL, which would skip exactly the oldest rows. */
             var match = string.Join(" AND ", key.Select(k => $"t.{k} IS NOT DISTINCT FROM r.{k}"));
+
+            /* DELETE the slices that are not the survivor, THEN write the recombined numbers onto the one
+               that is. That order is load-bearing: DuckDB implements UPDATE as delete+insert, so an updated
+               row's rowid CHANGES, and updating first would leave the survivor carrying a rowid the delete
+               predicate no longer recognises — deleting the row it had just repaired. After the delete each
+               collapsed group holds exactly one row, so the update matches on the key alone and never has to
+               trust a rowid across a mutation. */
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
-                command.CommandText = $"DELETE FROM {Table} AS t WHERE EXISTS (SELECT 1 FROM qs_slice_repair AS r WHERE {match})";
+                command.CommandText =
+                    $"DELETE FROM {Table} AS t WHERE EXISTS (SELECT 1 FROM qs_slice_repair AS r WHERE {match} AND t.rowid <> r.{KeepRowIdColumn})";
                 removed += Convert.ToInt64(await command.ExecuteNonQueryAsync(cancellationToken), CultureInfo.InvariantCulture);
             }
 
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
-                command.CommandText = $"INSERT INTO {Table} SELECT * FROM qs_slice_repair";
-                removed -= Convert.ToInt64(await command.ExecuteNonQueryAsync(cancellationToken), CultureInfo.InvariantCulture);
+                command.CommandText = $"UPDATE {Table} AS t SET {assignments} FROM qs_slice_repair AS r WHERE {match}";
+                await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
             transaction.Commit();

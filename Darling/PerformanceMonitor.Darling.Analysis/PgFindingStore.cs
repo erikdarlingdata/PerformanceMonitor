@@ -392,7 +392,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             var windowEnd = DateTime.SpecifyKind(asOfUtc ?? DateTime.UtcNow, DateTimeKind.Unspecified);
 
             await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(GetRecentFindingsSql, connection);
+            using var command = new NpgsqlCommand(GetRecentFindingsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(windowEnd.AddHours(-hoursBack));
             command.Parameters.AddWithValue(asOfUtc is null ? NoUpperBound : windowEnd);
@@ -429,7 +429,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(GetLatestFindingsSql, connection);
+            using var command = new NpgsqlCommand(GetLatestFindingsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
 
             using var reader = await command.ExecuteReaderAsync();
@@ -459,7 +459,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(MuteStorySql, connection);
+            using var command = new NpgsqlCommand(MuteStorySql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());
             // serverId 0 is the MCP "mute across all servers" sentinel; persist it as NULL, the
             // canonical global marker every reader filters on (legacy 0 rows are still honored).
@@ -490,7 +490,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(UnmuteStorySql, connection);
+            using var command = new NpgsqlCommand(UnmuteStorySql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(muteId);
             await command.ExecuteNonQueryAsync();
         }
@@ -523,7 +523,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(GetMutedStoriesSql, connection);
+            using var command = new NpgsqlCommand(GetMutedStoriesSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
 
             using var reader = await command.ExecuteReaderAsync();
@@ -559,7 +559,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(CleanupOldFindingsSql, connection);
+            using var command = new NpgsqlCommand(CleanupOldFindingsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(NaiveUtcNow().AddDays(-retentionDays));
             await command.ExecuteNonQueryAsync();
         }
@@ -582,7 +582,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
         try
         {
-            using var command = new NpgsqlCommand(GetMutedHashesSql, connection);
+            using var command = new NpgsqlCommand(GetMutedHashesSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
 
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -628,7 +628,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     private async Task InsertFindingAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, AnalysisFinding finding)
     {
-        using var command = new NpgsqlCommand(InsertFindingSql, connection, transaction);
+        using var command = new NpgsqlCommand(InsertFindingSql, connection, transaction) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
         command.Parameters.AddWithValue(finding.FindingId);
         command.Parameters.AddWithValue(AsNaive(finding.AnalysisTime));
         command.Parameters.AddWithValue(finding.ServerId);
