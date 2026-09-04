@@ -309,7 +309,7 @@ public class QueryStorePlanFetchTests
     /// <summary>
     /// The smallest measured fleet quartile (15 KB) wants ~1229 plans at a 12 MB budget — past the flat
     /// 512 ceiling (#2683/#2685's adaptive runaway detector was retired in favor of this: it failed to
-    /// engage during the 2026-08-29 AYR peak precisely because "wanted" stayed just under the old 2048
+    /// engage during the 2026-08-29 OMEGA peak precisely because "wanted" stayed just under the old 2048
     /// ceiling, so the throttle never armed). A flat ceiling applies unconditionally, so this database-shape
     /// now converges over more cycles instead of fewer — the accepted trade for query_store, which serves
     /// historical analysis rather than in-the-moment troubleshooting.
@@ -438,7 +438,7 @@ public class QueryStorePlanFetchTests
 
     /* ---------------------------------------------------------------------------------------------
        #2791: the fetch statements read TVF-backed Query Store views, for which the optimizer has no
-       statistics and uses a fixed guess (1,000 estimated against 14,633 actual on AYR, 1,463% off).
+       statistics and uses a fixed guess (1,000 estimated against 14,633 actual on OMEGA, 1,463% off).
        That guess put QUERY_STORE_PLAN_IN_MEM on the INNER side of a Nested Loops join, re-executed
        once per candidate id up to MaxCandidatePlans = 512, at 55,000-61,000ms CPU per fetch. The
        query-level hint is the only lever - the joins live inside the view definition.

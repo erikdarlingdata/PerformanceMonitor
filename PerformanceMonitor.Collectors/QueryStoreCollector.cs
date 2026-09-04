@@ -1270,7 +1270,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            HASH JOIN on the fetch statement (#2791), and it is the whole fix rather than a tuning knob.
            sys.query_store_plan's view definition unions the on-disk table with the in-memory TVF
            QUERY_STORE_PLAN_IN_MEM, and the optimizer has NO statistics for that TVF - it uses a fixed guess.
-           Measured on AYR the guess is 1,000 rows against 14,633 actual, 1,463% off, which is what makes
+           Measured on OMEGA the guess is 1,000 rows against 14,633 actual, 1,463% off, which is what makes
            Nested Loops look cheap: the TVF lands on the INNER side and is re-executed once per candidate
            plan_id, up to MaxCandidatePlans = 512 times, each execution scanning the whole in-memory Query
            Store before a single plan is decompressed. sp_QuickieStore put this statement at 55,000-61,000ms
@@ -1416,7 +1416,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            out in the open: sys.query_store_query and sys.query_store_query_text are BOTH TVF-backed unions
            over their in-memory halves, driven by an IN list, which is exactly the shape that put the plan
            fetch on the inner side of a loop 512 times over. The plan fetch is the variant that carries the
-           AYR measurement; this one is the same defect treated the same way, and that distinction is stated
+           OMEGA measurement; this one is the same defect treated the same way, and that distinction is stated
            rather than blurred - the join-strategy change and the identical-rowset property are verified
            here, the 60s->0.5s number is not this statement's and is not claimed for it.
 

@@ -422,7 +422,7 @@ public sealed class CollectorContext
     /// runs one (Darling; Lite has no separate fetch and leaves it zero). The fetch is INSIDE the driver's
     /// per-item <c>sql:</c> stopwatch but is neither open nor drain — it is its own query against
     /// <c>sys.query_store_plan</c>, and on a database with a huge Query Store catalog it can dominate the
-    /// whole item (ayr-01: a 0-row closed-only cycle still cost 298s, and the blended number could not say
+    /// whole item (omega-01: a 0-row closed-only cycle still cost 298s, and the blended number could not say
     /// where). Measured so drain stops absorbing it, exactly the #2164 argument one seam further down.
     /// </summary>
     public long PerItemPlanFetchMs { get; set; }

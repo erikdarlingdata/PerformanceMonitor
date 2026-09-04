@@ -121,7 +121,7 @@ public sealed class QueryStorePlanSizeLearnTests
     /// <summary>
     /// #2683/#2685 tried an adaptive runaway detector here (a streak of clamped passes armed a reduced
     /// ceiling, with hysteresis to survive oscillation) and it failed at the moment it mattered: the
-    /// 2026-08-29 peak verification on AYR showed zero clamped passes and zero runaway arms while
+    /// 2026-08-29 peak verification on OMEGA showed zero clamped passes and zero runaway arms while
     /// plan_fetch still ran 38-73s across twelve straight passes, because the learned average happened to
     /// keep "wanted" just under the ceiling. MaxCandidatePlans is now a flat 512 instead, so the throttle
     /// applies unconditionally and cannot fail to engage. This pins that the ceiling used by
