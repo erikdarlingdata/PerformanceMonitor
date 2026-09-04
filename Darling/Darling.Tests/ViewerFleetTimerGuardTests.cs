@@ -11,7 +11,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Text;
 using System.Text.RegularExpressions;
 using Xunit;
 
@@ -685,7 +684,7 @@ public sealed class ViewerFleetTimerGuardTests
             return cached;
         }
 
-        return s_stripped[path] = StripCommentsAndStrings(File.ReadAllText(path));
+        return s_stripped[path] = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
     }
 
     private static IEnumerable<string> ShellFiles() =>
@@ -726,107 +725,13 @@ public sealed class ViewerFleetTimerGuardTests
             || string.Equals(s, "obj", StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string StripCommentsAndStrings(string text)
-    {
-        var sb = new StringBuilder(text.Length);
-        var i = 0;
-
-        while (i < text.Length)
-        {
-            var c = text[i];
-
-            if (c == '@' && i + 1 < text.Length && text[i + 1] == '"')
-            {
-                var end = SkipVerbatimString(text, i + 2);
-                Blank(sb, text, i, end);
-                i = end;
-                continue;
-            }
-
-            if (c == '"')
-            {
-                var end = SkipRegularString(text, i + 1);
-                Blank(sb, text, i, end);
-                i = end;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '/')
-            {
-                var nl = text.IndexOf('\n', i);
-                var end = nl < 0 ? text.Length : nl;
-                Blank(sb, text, i, end);
-                i = end;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
-            {
-                var close = text.IndexOf("*/", i + 2, StringComparison.Ordinal);
-                var end = close < 0 ? text.Length : close + 2;
-                Blank(sb, text, i, end);
-                i = end;
-                continue;
-            }
-
-            sb.Append(c);
-            i++;
-        }
-
-        return sb.ToString();
-    }
-
-    private static void Blank(StringBuilder sb, string text, int start, int end)
-    {
-        for (var j = start; j < end; j++)
-        {
-            sb.Append(text[j] == '\n' ? '\n' : ' ');
-        }
-    }
-
-    private static int SkipVerbatimString(string text, int i)
-    {
-        while (i < text.Length)
-        {
-            if (text[i] == '"')
-            {
-                if (i + 1 < text.Length && text[i + 1] == '"')
-                {
-                    i += 2;
-                    continue;
-                }
-
-                return i + 1;
-            }
-
-            i++;
-        }
-
-        return text.Length;
-    }
-
-    private static int SkipRegularString(string text, int i)
-    {
-        while (i < text.Length)
-        {
-            var c = text[i];
-
-            if (c == '\\')
-            {
-                i += 2;
-                continue;
-            }
-
-            if (c == '"' || c == '\n')
-            {
-                return i + 1;
-            }
-
-            i++;
-        }
-
-        return text.Length;
-    }
+    /* The literal- and comment-aware walk this pin used to carry lives in CSharpSourceWalker as of
+       #2913. It was one of five private copies, and all five blanked an interpolated string's HOLES along
+       with the literal text around them, so a call written inside an interpolation was invisible to every
+       scan built on them — including this one, whose whole job is to follow call edges. This copy had
+       also drifted from the other four (its regular-string skip had grown a newline stop the others
+       lacked), which is the other half of the argument for having one. CSharpSourceWalkerTests carries
+       the witnesses. */
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {
