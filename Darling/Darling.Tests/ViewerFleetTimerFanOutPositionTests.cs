@@ -308,27 +308,7 @@ public sealed class ViewerFleetTimerFanOutPositionTests
 
         Assert.True(open >= 0, $"{name} has no body in MainWindow.xaml.cs");
 
-        return BraceBalanced(code, open);
-    }
-
-    /// <summary>The brace-balanced block starting at <paramref name="open"/>, that brace included.</summary>
-    private static string BraceBalanced(string code, int open)
-    {
-        var depth = 0;
-
-        for (var i = open; i < code.Length; i++)
-        {
-            if (code[i] == '{')
-            {
-                depth++;
-            }
-            else if (code[i] == '}' && --depth == 0)
-            {
-                return code[open..(i + 1)];
-            }
-        }
-
-        return code[open..];
+        return CSharpSourceWalker.BraceBalanced(code, open);
     }
 
     private static string ShellPath()
