@@ -150,16 +150,13 @@ public sealed class CSharpSourceWalkerTests
         var doubled = """"    var b = $$"""x={{Deeper()}}""";"""";
         var shortRun = """"    var c = $$"""x={notAHole}""";"""";
 
-        Assert.DoesNotContain("Probe()", LegacyStrip(single), StringComparison.Ordinal);
+        AssertBlanked(single, LegacyStrip(single), "Probe()");
         Assert.Contains("Probe()", CSharpSourceWalker.StripCommentsAndStrings(single), StringComparison.Ordinal);
 
-        Assert.DoesNotContain("Deeper()", LegacyStrip(doubled), StringComparison.Ordinal);
+        AssertBlanked(doubled, LegacyStrip(doubled), "Deeper()");
         Assert.Contains("Deeper()", CSharpSourceWalker.StripCommentsAndStrings(doubled), StringComparison.Ordinal);
 
-        Assert.DoesNotContain(
-            "notAHole",
-            CSharpSourceWalker.StripCommentsAndStrings(shortRun),
-            StringComparison.Ordinal);
+        AssertBlanked(shortRun, CSharpSourceWalker.StripCommentsAndStrings(shortRun), "notAHole");
     }
 
     /// <summary>
@@ -183,11 +180,11 @@ public sealed class CSharpSourceWalkerTests
 
         /* The literal text on the far side of the hole still has to be blanked, or the walker has stopped
            being a stripper — which would also satisfy the two Contains above. */
-        Assert.DoesNotContain("tail", walkedIndexer, StringComparison.Ordinal);
-        Assert.DoesNotContain("tail", walkedConditional, StringComparison.Ordinal);
+        AssertBlanked(indexer, walkedIndexer, "tail");
+        AssertBlanked(conditional, walkedConditional, "tail");
 
-        Assert.DoesNotContain("Key()", LegacyStrip(indexer), StringComparison.Ordinal);
-        Assert.DoesNotContain("Yes()", LegacyStrip(conditional), StringComparison.Ordinal);
+        AssertBlanked(indexer, LegacyStrip(indexer), "Key()");
+        AssertBlanked(conditional, LegacyStrip(conditional), "Yes()");
     }
 
     /// <summary>
@@ -201,10 +198,7 @@ public sealed class CSharpSourceWalkerTests
         var escaped = """    var a = $"{{Hidden()}}";""";
         var hole = """    var b = $"{{{Hidden()}}}";""";
 
-        Assert.DoesNotContain(
-            "Hidden()",
-            CSharpSourceWalker.StripCommentsAndStrings(escaped),
-            StringComparison.Ordinal);
+        AssertBlanked(escaped, CSharpSourceWalker.StripCommentsAndStrings(escaped), "Hidden()");
 
         Assert.Contains(
             "Hidden()",
@@ -226,7 +220,7 @@ public sealed class CSharpSourceWalkerTests
         var walked = CSharpSourceWalker.StripCommentsAndStrings(fixture);
 
         Assert.Contains("Count()", walked, StringComparison.Ordinal);
-        Assert.DoesNotContain("N0", walked, StringComparison.Ordinal);
+        AssertBlanked(fixture, walked, "N0");
 
         /* An alignment is a constant EXPRESSION rather than format text, so it stays code — and the call
            ahead of the comma has to survive either way. */
@@ -251,7 +245,7 @@ public sealed class CSharpSourceWalkerTests
                      CSharpSourceWalker.StripCommentsAndStrings(escapedQuote),
                  })
         {
-            Assert.DoesNotContain("say", stripped, StringComparison.Ordinal);
+            AssertBlanked(escapedQuote, stripped, "say");
             Assert.Contains("Kept()", stripped, StringComparison.Ordinal);
         }
 
@@ -261,7 +255,7 @@ public sealed class CSharpSourceWalkerTests
                      """    var c = @$"v={Probe()}";""",
                  })
         {
-            Assert.DoesNotContain("Probe()", LegacyStrip(fixture), StringComparison.Ordinal);
+            AssertBlanked(fixture, LegacyStrip(fixture), "Probe()");
             Assert.Contains("Probe()", CSharpSourceWalker.StripCommentsAndStrings(fixture), StringComparison.Ordinal);
         }
     }
@@ -285,7 +279,7 @@ public sealed class CSharpSourceWalkerTests
             """        if (value.Contains('"')) { Guarded(); }""",
             """    }""");
 
-        Assert.DoesNotContain("Guarded()", LegacyStrip(fixture), StringComparison.Ordinal);
+        AssertBlanked(fixture, LegacyStrip(fixture), "Guarded()");
         Assert.Contains("Guarded()", CSharpSourceWalker.StripCommentsAndStrings(fixture), StringComparison.Ordinal);
     }
 
@@ -435,6 +429,17 @@ public sealed class CSharpSourceWalkerTests
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Asserts <paramref name="needle"/> is absent from <paramref name="stripped"/>, having first
+    /// confirmed the FIXTURE contains it. A <c>DoesNotContain</c> that passes because the needle was never
+    /// there proves nothing, and that is how a sweep goes quiet without anybody noticing.
+    /// </summary>
+    private static void AssertBlanked(string fixture, string stripped, string needle)
+    {
+        Assert.Contains(needle, fixture, StringComparison.Ordinal);
+        Assert.DoesNotContain(needle, stripped, StringComparison.Ordinal);
+    }
 
     private static int Occurrences(string haystack, string needle)
     {
