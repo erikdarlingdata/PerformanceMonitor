@@ -325,7 +325,7 @@ public sealed class AlertPassCommandTimeoutTests
     /// closure that resolves to the WRONG members — or to none — would report clean on whatever it
     /// failed to read, which is exactly how the site this PR fixes stayed hidden.
     ///
-    /// <para>The fixture carries all four things that can go wrong, so one green run is evidence about
+    /// <para>The fixture carries every shape that can go wrong, so one green run is evidence about
     /// each. <c>RootAsync</c> must reach <c>DeeperAsync</c> TRANSITIVELY, through a member that
     /// contains no command of its own. <c>OtherRegimeAsync</c> holds an UNTIMED command and must not be
     /// reached, which is the claim that lets this scope be narrower than its file — get that wrong and
@@ -333,6 +333,13 @@ public sealed class AlertPassCommandTimeoutTests
     /// look like declarations must not register as members: <c>new Dictionary&lt;int, int&gt;(4) { }</c>
     /// (an initialiser, not a body) and <c>new Npgsql.NpgsqlCommand(</c> (a qualified type name). Both
     /// were observed doing exactly that while this walk was being built.</para>
+    ///
+    /// <para><c>ExprBodiedAsync</c> is the shape review caught: an <c>=&gt;</c>-bodied member reached
+    /// only by a METHOD-GROUP reference, holding an untimed command. Both halves are load-bearing
+    /// together — before the fix it did not register as a member at all, so it was neither swept nor
+    /// reported, and a count-based control could not see the hole. It is written the way the three real
+    /// ones are (<c>Select(BuildPgDeadlockIncident)</c>), not as a call, because a method group is what
+    /// the graph has to follow.</para>
     /// </summary>
     [Fact]
     public void TheReachabilityWalk_FollowsCallsAndStopsAtOtherRegimes()
@@ -352,7 +359,9 @@ public sealed class AlertPassCommandTimeoutTests
             + "    async Task DeeperAsync()\n"
             + "    {\n"
             + "        using var timed = new Npgsql.NpgsqlCommand(Sql, conn) { CommandTimeout = 10 };\n"
+            + "        var mapped = rows.Select(ExprBodiedAsync).ToList();\n"
             + "    }\n"
+            + "    Task<int> ExprBodiedAsync(int id) => Run(new NpgsqlCommand(Sql, conn));\n"
             + "    async Task OtherRegimeAsync()\n"
             + "    {\n"
             + "        using var untimed = new NpgsqlCommand(Sql, conn);\n"
@@ -369,10 +378,11 @@ public sealed class AlertPassCommandTimeoutTests
         var reachable = ReachableFrom(stripped, members, "RootAsync");
 
         Assert.Equal(
-            new[] { "DeeperAsync", "ReachedAsync", "RootAsync" },
+            new[] { "DeeperAsync", "ExprBodiedAsync", "ReachedAsync", "RootAsync" },
             reachable.OrderBy(m => m, System.StringComparer.Ordinal).ToArray());
 
-        /* The closure's own command census: one site, and it is timed. */
+        /* The closure's own command census: two sites — the block-bodied timed one and the
+           expression-bodied UNTIMED one, which is reported rather than skipped. */
         var offenders = new List<string>();
         var total = 0;
 
@@ -385,8 +395,8 @@ public sealed class AlertPassCommandTimeoutTests
             }
         }
 
-        Assert.Equal(1, total);
-        Assert.Empty(offenders);
+        Assert.Equal(2, total);
+        Assert.Equal(new[] { "ExprBodiedAsync:17" }, offenders.ToArray());
 
         /* The negative control, and the reason the whole design holds: the excluded member really does
            carry a defect the scanner would report. So "no offenders" above is the SCOPE working, not
@@ -460,6 +470,25 @@ public sealed class AlertPassCommandTimeoutTests
     /// kept as multiple spans under one name and all of them are swept: a name-keyed walk cannot tell
     /// which overload a call resolves to, and sweeping all of them errs toward demanding a deadline
     /// rather than toward missing one.</para>
+    ///
+    /// <para><b>BOTH body shapes, and the expression-bodied one is not a nicety.</b> The first cut of
+    /// this walk took only <c>) {</c>, so an <c>=&gt;</c>-bodied member never registered here at all —
+    /// and <c>ReachableFrom</c>'s <c>ContainsKey</c> test then made it invisible rather than
+    /// unreachable, silently, with no count moving. Review caught it, and it was already live on this
+    /// exact call graph: <c>BuildPgDeadlockIncident</c>, <c>BuildPgBlockingIncident</c> and
+    /// <c>BuildPgLongRunningQueryIncident</c> are all <c>internal static ... =&gt; new(...)</c>, all
+    /// referenced by METHOD GROUP (<c>rows.Select(BuildPgDeadlockIncident)</c>) from members that are
+    /// in the closure. They hold no commands, so no census moved and nothing failed — which is exactly
+    /// what made it worth fixing: turning a small read into
+    /// <c>private Task&lt;Foo&gt; ReadFooAsync(...) =&gt; ...;</c> is an ordinary refactor, and it
+    /// would have been invisible to this pin the same way <c>ReadLatestCpuAsync</c> was invisible to
+    /// the file-list scope this pin exists to replace. The same defect one level down.</para>
+    ///
+    /// <para>Note this is the OPPOSITE choice from
+    /// <c>CollectionSweepCommandTimeoutTests.BodyStart</c>, deliberately. That helper uses the
+    /// block-body test to pick one NAMED member's declaration out of its own call sites, so treating
+    /// an expression-bodied match as "not a declaration" is right there. This one enumerates every
+    /// declaration as a graph NODE, so a shape it cannot see is a hole in the graph.</para>
     /// </summary>
     private static Dictionary<string, List<(int Start, int End)>> MemberBodies(string stripped)
     {
@@ -474,14 +503,7 @@ public sealed class AlertPassCommandTimeoutTests
                 continue;
             }
 
-            var open = BodyStart(stripped, signature.Index);
-
-            if (open < 0)
-            {
-                continue;
-            }
-
-            var end = BodyEnd(stripped, open);
+            var end = DeclarationEnd(stripped, signature.Index);
 
             if (end < 0)
             {
@@ -595,11 +617,22 @@ public sealed class AlertPassCommandTimeoutTests
     }
 
     /// <summary>
-    /// Index of the <c>{</c> opening the body of the declaration at <paramref name="at"/>, or -1 when
-    /// what follows the parameter list is not a block — which is how a CALL to a member, or an
-    /// expression-bodied one, is told apart from a block-bodied declaration.
+    /// Index just past the body of the declaration at <paramref name="at"/>, or -1 when what follows
+    /// the parameter list is neither a block nor <c>=&gt;</c> — which is how a CALL to a member is told
+    /// apart from a declaration of one.
+    ///
+    /// <para>The token after the parameter list is the whole discriminator, and it is sound in both
+    /// directions: only a declaration can be followed by <c>=&gt;</c> there (a lambda's <c>=&gt;</c>
+    /// has no <c>name(</c> before its parameter list, and <c>new T(...) { }</c> is rejected upstream by
+    /// <see cref="PrecededByNew"/>), while a call is followed by <c>;</c>, <c>)</c>, <c>,</c> or
+    /// <c>.</c>.</para>
+    ///
+    /// <para>The expression-bodied span is delegated to the SHARED walker rather than scanning for
+    /// <c>;</c> here: an expression body can carry a block-bodied lambda, verbatim SQL and interpolated
+    /// holes, and <see cref="CSharpSourceWalker.StatementSpanFrom"/> already counts only code
+    /// characters at bracket depth zero or below — the reason it exists.</para>
     /// </summary>
-    private static int BodyStart(string stripped, int at)
+    private static int DeclarationEnd(string stripped, int at)
     {
         var depth = 0;
 
@@ -618,7 +651,14 @@ public sealed class AlertPassCommandTimeoutTests
                         continue;
                     }
 
-                    return stripped[j] == '{' ? j : -1;
+                    if (stripped[j] == '{')
+                    {
+                        return BlockEnd(stripped, j);
+                    }
+
+                    return stripped[j] == '=' && j + 1 < stripped.Length && stripped[j + 1] == '>'
+                        ? at + CSharpSourceWalker.StatementSpanFrom(stripped, at, statements: 1).Length
+                        : -1;
                 }
 
                 return -1;
@@ -629,7 +669,7 @@ public sealed class AlertPassCommandTimeoutTests
     }
 
     /// <summary>Index just past the <c>}</c> matching the brace at <paramref name="open"/>, or -1.</summary>
-    private static int BodyEnd(string stripped, int open)
+    private static int BlockEnd(string stripped, int open)
     {
         var depth = 0;
 
