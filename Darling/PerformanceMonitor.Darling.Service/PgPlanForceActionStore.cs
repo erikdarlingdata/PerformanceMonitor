@@ -108,7 +108,7 @@ INSERT INTO collect.plan_force_actions (
     regression_factor, latest_cpu_per_exec_us, best_cpu_per_exec_us,
     replica_role, parameter_sensitivity_cofired, outcome, detail, related_action_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-RETURNING action_id", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+RETURNING action_id", connection);
 
         /* Naive UTC per the store convention — Kind=Utc would make Npgsql infer timestamptz and
            silently zone-shift (the two-store parity trap). */
@@ -182,7 +182,7 @@ SELECT
      AND   pfa.query_id = $3
      AND   pfa.action_time > $5
      AND   ((pfa.action = 'force' AND pfa.outcome = 'failed')
-            OR (pfa.action = 'unforce' AND pfa.decision IN ('not_net_benefit', 'force_failing')))) AS recent_failed", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            OR (pfa.action = 'unforce' AND pfa.decision IN ('not_net_benefit', 'force_failing')))) AS recent_failed", connection);
 
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(database);
@@ -261,7 +261,7 @@ AND   NOT EXISTS (
         WHERE closer.related_action_id = pfa.action_id
         AND   closer.action IN ('unforce', 'review'))
 ORDER BY pfa.action_time
-LIMIT 16", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+LIMIT 16", connection);
 
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(
@@ -291,7 +291,7 @@ FROM collect.plan_force_actions AS pfa
 WHERE pfa.action_time > $1
 AND   ($2::integer IS NULL OR pfa.server_id = $2)
 ORDER BY pfa.action_time DESC
-LIMIT $3", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+LIMIT $3", connection);
 
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue((object?)serverId ?? DBNull.Value);

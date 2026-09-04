@@ -19,7 +19,7 @@ namespace Darling.Tests;
 /// <summary>
 /// Every read in the alert evaluation pass must carry an EXPLICIT command deadline (#2874).
 ///
-/// <para>All forty-nine commands across the seven alert-pass types ran with no
+/// <para>All forty-five commands across the six alert-pass types ran with no
 /// <c>CommandTimeout</c>, so every one inherited Npgsql's undocumented 30 s default. On 2026-09-04
 /// the forced-plan read failed five times on the production store, each surfacing as "Exception
 /// while reading from stream" — how Npgsql renders its own deadline, and the exact misdiagnosis
@@ -43,9 +43,14 @@ namespace Darling.Tests;
 public sealed class AlertPassCommandTimeoutTests
 {
     /// <summary>
-    /// The seven types that make up one alert evaluation pass. Named explicitly rather than globbed,
+    /// The six types that make up one alert evaluation pass. Named explicitly rather than globbed,
     /// because "runs inside <c>EvaluateAlertsAsync</c>" is a budget boundary that no filename pattern
-    /// expresses — a future file in this directory may belong to a different budget.
+    /// expresses — a future file in this directory may belong to a different budget. That is not
+    /// hypothetical: <c>PgPlanForceActionStore</c> looks like a member of this family and is not one.
+    /// Its only caller is <c>PlanForceBot.RunAfterAnalysisAsync</c>, dispatched as the analysis pass's
+    /// post-pass hook over the plain stopping token, so it shares the unbudgeted shape but runs on the
+    /// analysis interval rather than this pass's 30 s cadence — a different upper bound, and therefore
+    /// a different group.
     /// </summary>
     private static readonly string[] s_alertPassSources =
     {
@@ -54,7 +59,6 @@ public sealed class AlertPassCommandTimeoutTests
         "PgAlertStateStore.cs",
         "PgMuteRuleStore.cs",
         "PgAlertHistoryStore.cs",
-        "PgPlanForceActionStore.cs",
         "DarlingSelfAlertEvaluator.cs",
     };
 

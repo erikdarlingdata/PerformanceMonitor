@@ -41,7 +41,7 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// <summary>
     /// The explicit command deadline for EVERY read in the alert evaluation pass (#2874).
     ///
-    /// <para>All forty-nine commands across the seven alert-pass types ran with no
+    /// <para>All forty-five commands across the six alert-pass types ran with no
     /// <c>CommandTimeout</c>, so every one inherited Npgsql's undocumented 30 s default. Nobody chose
     /// 30 s; it was simply what happened. On 2026-09-04 the forced-plan read failed five times on the
     /// production store, each time surfacing as "Exception while reading from stream" — which is how
@@ -53,7 +53,7 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// bounds the whole pass however long an individual command runs. <b>This pass has no enclosing
     /// budget at all</b> — <c>EvaluateAlertsAsync</c> is called with the plain stopping token — so the
     /// per-command deadline IS the pass budget, multiplied by however many reads run in sequence.
-    /// At the inherited 30 s that is 49 x 30 s of worst-case exposure while the body holds one of only
+    /// At the inherited 30 s that is 45 x 30 s of worst-case exposure while the body holds one of only
     /// <see cref="DarlingWorker.MaxConcurrentServerSweeps"/> fleet permits, and the sweep skips
     /// relaunch for that server the whole time. Copying 60 s here would have doubled it.</para>
     ///
@@ -66,7 +66,7 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// <para><b>Bounded above</b> by the cadence this pass runs on: <c>s_alertSweepInterval</c> is
     /// 30 s, so one stalled read must still leave the pass able to finish inside the interval that
     /// will start it again. Ten seconds keeps a single stall well inside that, and caps the unbudgeted
-    /// worst case at 49 x 10 s instead of 49 x 30 s.</para>
+    /// worst case at 45 x 10 s instead of 45 x 30 s.</para>
     ///
     /// <para><b>The asymmetry is why erring SHORT is right here, and it is the reverse of #2810.</b>
     /// A read that exceeds this deadline skips one alert check and logs it; the next pass runs 30 s
@@ -79,6 +79,12 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// so the record is right-censored: nothing here establishes whether a stalled read wanted 35 s or
     /// 300 s. Ten seconds is chosen from the measured cost and the cadence above, NOT fitted to the
     /// failure distribution — a number claiming to fit that data would be invented.</para>
+    ///
+    /// <para><b>What this does NOT cover.</b> <c>PgPlanForceActionStore</c> sits beside these
+    /// types and is not one of them: its only caller is <c>PlanForceBot.RunAfterAnalysisAsync</c>,
+    /// dispatched as the analysis pass's post-pass hook over the plain stopping token. It shares
+    /// the unbudgeted shape but runs on the analysis interval, not this pass's 30 s cadence, so the
+    /// upper bound derived above does not apply to it and it is left for its own group (#2874).</para>
     /// </summary>
     internal const int AlertPassCommandTimeoutSeconds = 10;
 
