@@ -507,7 +507,12 @@ public partial class MainWindow : Window
         _refreshTimer.Start();
 
         /* The Overview keeps its own timer so it refreshes when it is the visible tab and the aggregate timer
-           skips it (they never double-refresh the same grid); both run at the one configurable fleet interval. */
+           skips it; both run at the one configurable fleet interval.
+
+           "They never double-refresh the same GRID" is the whole of the claim, and it is worth stating that
+           narrowly: the aggregate timer's Overview early-return is what guarantees it, and that return sits
+           BELOW its freshness fan-out. So the grid was never double-refreshed while the freshness reads were,
+           on every Overview cycle, until OnOverviewTimerTick stopped duplicating them. */
         _overviewTimer = new DispatcherTimer { Interval = _refreshInterval };
         _overviewTimer.Tick += OnOverviewTimerTick;
         _overviewTimer.Start();
@@ -551,8 +556,17 @@ public partial class MainWindow : Window
 
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
-        /* Refresh the sidebar status dots + the status bar every cycle regardless of the visible tab (a
-           cheap pair of single-query reads), so freshness stays current even while a per-server tab is up. */
+        /* Refresh the sidebar status dots + the status bar every cycle regardless of the visible tab, so
+           freshness stays current even while a per-server tab is up.
+
+           NOT the "cheap pair of single-query reads" this comment used to claim, which is why all three of
+           these are single-flight: RefreshServerStatusAsync is a pair BY ITSELF (the freshness query, then
+           UpdateCollectorHealthTextAsync's collector-health read) and PollAlertsAsync is another (history,
+           then UpdateServerSilencedAsync's mute rules), so this fan-out is FIVE store reads before
+           RefreshVisibleAsync starts — six on the fleets that ship with the AG tab hidden, which is most of
+           them. Each is capped at ViewerCommandDeadlines.InteractiveReadSeconds (15) by #2901, against a
+           ten-connection pool, on an interval an operator can set to 10s — so the deadline bounds how long
+           one of them holds a permit and the guards are what stop ticks from stacking. */
         _ = RefreshServerStatusAsync();
         _ = RefreshStoreSizeAsync();
 
@@ -594,8 +608,16 @@ public partial class MainWindow : Window
     {
         if (ReferenceEquals(MainTabs.SelectedItem, OverviewTab))
         {
-            /* Refresh the sidebar dots on the Overview cadence too, so they track the cards. */
-            _ = RefreshServerStatusAsync();
+            /* The sidebar dots are deliberately NOT refreshed here, even though they read the same freshness
+               signal the Overview cards do. OnRefreshTimerTick already fans them out unconditionally, at this
+               same interval, and its Overview early-return happens AFTER that fan-out — so firing them here
+               too issued two concurrent freshness read-pairs per cycle whenever the Overview was the visible
+               tab, which is the one tab that ships selected. The dots still track the cards: both timers are
+               started back-to-back at the one interval, so the aggregate timer's fan-out lands in the same
+               cycle this tick does. Re-adding the call would now be worse than redundant rather than merely
+               wasteful — RefreshServerStatusAsync is single-flight, so a periodic caller's second call can
+               only be dropped, and one that asked to replay would guarantee the extra pass the guard exists
+               to prevent. */
             await RefreshVisibleAsync();
         }
     }
@@ -999,8 +1021,14 @@ public partial class MainWindow : Window
             }
 
             /* Seed the sidebar status dots + the status bar's collector-health / collection / database-size
-               fields (each a single lightweight store read). */
-            _ = RefreshServerStatusAsync();
+               fields.
+
+               replayIfBusy, because this is the one caller whose request a timer's in-flight read cannot
+               answer: this path runs on connect and after every add/edit/remove, and a freshness dictionary
+               fetched before a server was registered has no entry for it — the row it paints after the fleet
+               rebuild reads as never-collected. Dropping that would leave a just-added server's dot wrong for
+               a whole interval. The store-size read takes no scope, so it drops like any other caller. */
+            _ = RefreshServerStatusAsync(replayIfBusy: true);
             _ = RefreshStoreSizeAsync();
         }
         catch (Exception ex)

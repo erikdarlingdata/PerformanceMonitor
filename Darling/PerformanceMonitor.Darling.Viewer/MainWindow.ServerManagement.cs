@@ -81,12 +81,72 @@ public partial class MainWindow
         ServerList.SelectedItem = _fleet.ResolveSelection(selected);
     }
 
+    /// <summary>Single-flight guard for <see cref="RefreshServerStatusAsync"/>. Declared beside the one method
+    /// that owns it rather than with the shell's other guards, so a future caller reads the rule where the rule
+    /// applies. Dispatcher-affine like every other guard here: the fleet timers, the connect path and the tab
+    /// handlers all run on the UI thread, so the check-then-set needs no interlock.</summary>
+    private bool _statusRefreshInFlight;
+    private bool _statusRefreshRequested;
+
     /// <summary>
     /// Refreshes the sidebar status dots and the status bar's collector-health + collection fields from a
-    /// single collection-freshness query (the same MAX(collection_time) signal the Overview cards use).
+    /// collection-freshness query (the same MAX(collection_time) signal the Overview cards use).
     /// Updates each row in place so the dots recolour without resetting the list's selection.
+    ///
+    /// <para><b>Single-flight</b>, because both fleet timers fire this unawaited on an interval an operator can
+    /// dial down to 10s (<see cref="ViewerAppSettings.NocRefreshIntervalSeconds"/>) and nothing else bounds it.
+    /// One pass is TWO store reads — the freshness query plus <see cref="UpdateCollectorHealthTextAsync"/>'s own
+    /// — each capped at <see cref="ViewerCommandDeadlines.InteractiveReadSeconds"/> (15), so an unguarded pass
+    /// could hold a permit for 30s against a pool of ten (<c>MaxPoolSize = 10</c> on the managed-derived string
+    /// in <c>ViewerSettings</c>) while the next tick started another. The deadline #2901 added caps how long one
+    /// stacked read holds a permit; it cannot stop the stacking, which is what this does.</para>
+    ///
+    /// <para><paramref name="replayIfBusy"/> is why this is not <c>_alertPollInFlight</c>'s plain drop. A
+    /// PERIODIC caller drops, because the next tick IS its retry and replaying one would delete the interval's
+    /// gap exactly when the store is slowest — back-to-back reads is the state being fixed, not a fix. A caller
+    /// whose STATE changed under the in-flight read replays, because that read cannot answer for it: the
+    /// freshness dictionary is fetched before an add/edit/remove and applied to <c>_fleet.All</c> after it, so a
+    /// server registered mid-read is simply absent from the dictionary and paints as never-collected until
+    /// something re-reads. The flag coalesces, so N requests during one pass cost one extra pass, not N.</para>
     /// </summary>
-    private async Task RefreshServerStatusAsync()
+    private async Task RefreshServerStatusAsync(bool replayIfBusy = false)
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        if (_statusRefreshInFlight)
+        {
+            if (replayIfBusy)
+            {
+                _statusRefreshRequested = true;
+            }
+
+            return;
+        }
+
+        _statusRefreshInFlight = true;
+        try
+        {
+            do
+            {
+                _statusRefreshRequested = false;
+                await ReadAndApplyServerStatusAsync();
+            }
+            while (_statusRefreshRequested);
+        }
+        finally
+        {
+            _statusRefreshInFlight = false;
+        }
+    }
+
+    /// <summary>
+    /// One pass of the freshness read + status-bar paint, with no guarding of its own — every caller must come
+    /// through <see cref="RefreshServerStatusAsync"/>, which is the only thing keeping the passes serialized.
+    /// </summary>
+    private async Task ReadAndApplyServerStatusAsync()
     {
         if (_dataService is null)
         {
@@ -201,14 +261,28 @@ public partial class MainWindow
         }
     }
 
-    /// <summary>Refreshes the status bar's database-size field from the store's on-disk size.</summary>
+    /// <summary>Single-flight guard for <see cref="RefreshStoreSizeAsync"/>. See that method for why this one
+    /// has no replay companion.</summary>
+    private bool _storeSizeRefreshInFlight;
+
+    /// <summary>
+    /// Refreshes the status bar's database-size field from the store's on-disk size.
+    ///
+    /// <para><b>Single-flight with a plain drop</b> — <c>_alertPollInFlight</c>'s shape, not
+    /// <see cref="RefreshServerStatusAsync"/>'s replay — because a dropped request here is genuinely redundant
+    /// rather than merely late. This read takes no scope: one store-wide size, painted into one status-bar
+    /// field. So the in-flight read writes the same field with an answer no staler than a fresh read's, and no
+    /// caller can be left waiting on a value the running read will not produce. A replay flag would only buy a
+    /// second read of a number that moves in gigabytes per day, on the exact cadence being throttled.</para>
+    /// </summary>
     private async Task RefreshStoreSizeAsync()
     {
-        if (_dataService is null)
+        if (_dataService is null || _storeSizeRefreshInFlight)
         {
             return;
         }
 
+        _storeSizeRefreshInFlight = true;
         try
         {
             var bytes = await _dataService.GetStoreSizeBytesAsync();
@@ -217,6 +291,10 @@ public partial class MainWindow
         catch (Exception ex)
         {
             ViewerLogger.Warn("ServerStatus", $"store size read failed: {ex.Message}");
+        }
+        finally
+        {
+            _storeSizeRefreshInFlight = false;
         }
     }
 
