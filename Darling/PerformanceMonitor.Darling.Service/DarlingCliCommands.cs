@@ -2814,7 +2814,7 @@ public static class DarlingCliCommands
         {
             await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
-            await using var command = new NpgsqlCommand(sql, connection);
+            await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
             returnedPort = await command.ExecuteScalarAsync(cancellationToken);
         }
         catch (OperationCanceledException)
@@ -3842,8 +3842,9 @@ public static class DarlingCliCommands
     /// <para><b>Why it must still say so.</b> The same fallback on a box whose port HAS been moved in the Viewer is
     /// the whole of #2414: a rule for a port nothing serves, recreated on every run of the verb that is supposed to
     /// fix it. So the reason travels back with the nulls and is printed, rather than being swallowed into a silent
-    /// default. Bounded to ten seconds because "the store is down" and "the store is slow" must not differ in how
-    /// long an installer hangs.</para>
+    /// default. Bounded to <see cref="ServiceCommandDeadlines.CliStoreReadSeconds"/> because "the store is down"
+    /// and "the store is slow" must not differ in how long an installer hangs — the same bound the command itself
+    /// now carries, so the budget and the deadline cannot disagree about one wait.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
     private static async Task<((bool Enabled, int Port)? Mcp, (bool Enabled, int Port)? Web, string? Unavailable)>
@@ -3876,13 +3877,13 @@ public static class DarlingCliCommands
         }
 
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        budget.CancelAfter(TimeSpan.FromSeconds(10));
+        budget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.CliStoreReadSeconds));
 
         try
         {
             await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(budget.Token);
-            await using var command = new NpgsqlCommand(ReadEndpointTogglesSql, connection);
+            await using var command = new NpgsqlCommand(ReadEndpointTogglesSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
             await using var reader = await command.ExecuteReaderAsync(budget.Token);
             if (!await reader.ReadAsync(budget.Token))
             {
@@ -3893,7 +3894,8 @@ public static class DarlingCliCommands
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return (null, null, "the store did not answer within 10 seconds");
+            return (null, null,
+                $"the store did not answer within {ServiceCommandDeadlines.CliStoreReadSeconds} seconds");
         }
         catch (OperationCanceledException)
         {
@@ -4326,7 +4328,11 @@ public static class DarlingCliCommands
         try
         {
             await using var codec = new NpgsqlCommand(
-                "SELECT plan_xml_compression FROM config_service WHERE id = 1", connection);
+                "SELECT plan_xml_compression FROM config_service WHERE id = 1", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+
             return await codec.ExecuteScalarAsync(cancellationToken) is string mode
                 && string.Equals(mode.Trim(), "none", StringComparison.OrdinalIgnoreCase);
         }
@@ -4417,7 +4423,25 @@ public static class DarlingCliCommands
         /* #2171: a store configured plan_xml_compression = 'none' WANTS text rows — the operator chose
            direct-SQL readability, and this verb would convert exactly the rows the live writer keeps
            producing, the two fighting forever. Refuse with the way out rather than silently churning. */
-        if (await StoreIsSetToPlainTextPlansAsync(connection, cancellationToken))
+        bool plainTextPlans;
+        try
+        {
+            plainTextPlans = await StoreIsSetToPlainTextPlansAsync(connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* #2874: the only store call in this verb with no handler, and the one whose failure was
+               therefore an unhandled CONSOLE STACK TRACE rather than a message — Program.cs's verb
+               dispatch has no try/catch of its own, so anything escaping here escapes the process.
+               StoreIsSetToPlainTextPlansAsync catches exactly one thing, SQLSTATE 42703 for the pre-V62
+               store it exists to convert; a command deadline is an NpgsqlException wrapping a
+               TimeoutException, which is neither that nor any PostgresException, so it walked straight
+               out. A deadline on its own would have changed only how long the trace took to appear. */
+            error.WriteLine($"Could not read the store's plan_xml_compression setting: {ex.Message}");
+            return 1;
+        }
+
+        if (plainTextPlans)
         {
             error.WriteLine(
                 "This store is configured plan_xml_compression = 'none' (plans deliberately stored as " +
