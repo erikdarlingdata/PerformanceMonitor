@@ -88,6 +88,7 @@ internal static class DarlingPlanCacheSchedulerReader
     {
         var rows = new List<PlanCacheGroupRow>();
         await using var command = postgres.CreateCommand(PlanCacheBloatSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -164,6 +165,7 @@ internal static class DarlingPlanCacheSchedulerReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(CpuSchedulerPressureSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))

@@ -3939,7 +3939,7 @@ SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
 FROM cpu_utilization_stats
 WHERE server_id = $1
 ORDER BY sample_time DESC
-LIMIT 1", connection);
+LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);

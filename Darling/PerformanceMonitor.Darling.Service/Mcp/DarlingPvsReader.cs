@@ -105,6 +105,7 @@ ORDER BY p.database_name, p.collection_time";
     {
         var rows = new List<PvsStatsRow>();
         await using var command = postgres.CreateCommand(PvsStatsLatestSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -134,6 +135,7 @@ ORDER BY p.database_name, p.collection_time";
     {
         var rows = new List<PvsTrendPoint>();
         await using var command = postgres.CreateCommand(PvsTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
 
