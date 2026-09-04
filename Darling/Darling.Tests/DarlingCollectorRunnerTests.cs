@@ -915,113 +915,33 @@ public class ServerWatermarkDispatchGateTests
         var assemblyPath = typeof(DarlingCollectorRunner).Assembly.Location;
         Assert.True(File.Exists(assemblyPath), $"Service assembly not found at '{assemblyPath}'.");
 
-        using var stream = File.OpenRead(assemblyPath);
-        using var peReader = new PEReader(stream);
-        var metadata = peReader.GetMetadataReader();
-
-        /* A call resolves through a MemberReference or a MethodDefinition depending on where the caller
-           sits, and async state machines move the call into a generated MoveNext. Collect both forms. */
-        var tokenToName = new Dictionary<int, string>();
-        foreach (var handle in metadata.MemberReferences)
-        {
-            var name = metadata.GetString(metadata.GetMemberReference(handle).Name);
-            if (name is Read or Gate)
-            {
-                tokenToName[MetadataTokens.GetToken(handle)] = name;
-            }
-        }
-
-        foreach (var handle in metadata.MethodDefinitions)
-        {
-            var name = metadata.GetString(metadata.GetMethodDefinition(handle).Name);
-            if (name is Read or Gate)
-            {
-                tokenToName[MetadataTokens.GetToken(handle)] = name;
-            }
-        }
-
-        /* And the third form, which is the one that actually matters here and cost this pin its first
-           red: a call to a GENERIC method is emitted against a MethodSpec token, not against the
-           MethodDef or MemberRef the other two loops collect. ServerWatermarkIsDiscarded is generic in
-           TRow, so without this the scan reported it as never called while it was called on every cycle.
-           Resolved back to the underlying method so the name lookup is the same one. */
-        var methodSpecCount = metadata.GetTableRowCount(TableIndex.MethodSpec);
-        for (var row = 1; row <= methodSpecCount; row++)
-        {
-            var specHandle = MetadataTokens.MethodSpecificationHandle(row);
-            var target = metadata.GetMethodSpecification(specHandle).Method;
-
-            var name = target.Kind switch
-            {
-                HandleKind.MethodDefinition =>
-                    metadata.GetString(metadata.GetMethodDefinition((MethodDefinitionHandle)target).Name),
-                HandleKind.MemberReference =>
-                    metadata.GetString(metadata.GetMemberReference((MemberReferenceHandle)target).Name),
-                _ => null,
-            };
-
-            if (name is Read or Gate)
-            {
-                tokenToName[MetadataTokens.GetToken(specHandle)] = name;
-            }
-        }
-
-        Assert.True(tokenToName.Count >= 2,
-            $"Only {tokenToName.Count} of the two tracked members resolved to a metadata token — the scan "
-            + "read nothing useful, so it would pass for reasons unrelated to the gate.");
+        /* One shared scan (#2898). This pin's first cut carried its own IL walk, and the two things it got
+           right the hard way are now properties of the scanner: MethodSpec resolution, without which the
+           generic gate read as never called, and no cursor skip. Grouped by METHOD TOKEN rather than by name,
+           so two overloads cannot be merged into one apparent body. */
+        var byBody = IlCallSiteScanner.FindCalls(assemblyPath, [Read, Gate])
+            .GroupBy(c => c.MethodToken);
 
         var readerBodies = 0;
         var gatedBodies = 0;
         var totalGateCalls = 0;
 
-        foreach (var handle in metadata.MethodDefinitions)
+        foreach (var bodyCalls in byBody)
         {
-            var method = metadata.GetMethodDefinition(handle);
-            if (method.RelativeVirtualAddress == 0)
-            {
-                continue;
-            }
-
-            var il = peReader.GetMethodBody(method.RelativeVirtualAddress).GetILBytes();
-            if (il is null)
-            {
-                continue;
-            }
-
             var callsRead = false;
             var callsGate = false;
 
-            for (var i = 0; i + 4 < il.Length; i++)
+            foreach (var call in bodyCalls)
             {
-                /* call (0x28) and callvirt (0x6F), each followed by a 4-byte metadata token. */
-                if (il[i] != 0x28 && il[i] != 0x6F)
+                if (call.CalleeName == Read)
                 {
-                    continue;
+                    callsRead = true;
                 }
-
-                if (tokenToName.TryGetValue(BitConverter.ToInt32(il, i + 1), out var name))
+                else
                 {
-                    if (name == Read)
-                    {
-                        callsRead = true;
-                    }
-                    else
-                    {
-                        callsGate = true;
-                        totalGateCalls++;
-                    }
+                    callsGate = true;
+                    totalGateCalls++;
                 }
-
-                /* DELIBERATELY no `i += 4` here, unlike the older scan in ServerScopePhaseSplitTests.
-                   This is an opcode-shaped byte scan, not a real IL decoder, so a byte inside some other
-                   instruction's operand can look like a call and then the skip steps over the four bytes
-                   AFTER it — which can be a genuine call's own token. Measured on this very assembly: the
-                   single call to the generic gate sits at IL offset 743 of <RunAsync>MoveNext, and the
-                   skipping form walked straight past it and reported zero call sites. A false NEGATIVE here
-                   is the dangerous direction, because it would let an ungated read read as gated once the
-                   offsets shifted. Scanning every offset is a superset: it can only over-report, and the
-                   chance of four arbitrary operand bytes equalling one of exactly two tracked metadata
-                   tokens inside the same body is negligible. */
             }
 
             if (callsRead)
