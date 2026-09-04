@@ -160,9 +160,15 @@ public sealed class ComposeStatementTimeoutReloadTests
     /// therefore has roles at 15 s and a store saying 30.
     ///
     /// <para>Seeding the reload baseline from the post-seed store view records 30 as applied when the roles
-    /// never received it — and because the gate fires only on a difference, that mismatch is **permanent**
+    /// never received it — and because the gate fires only on a difference, that mismatch is <b>permanent</b>
     /// for the life of the process. So the baseline is seeded from what <c>EnsureProvisionedAsync</c>
     /// RETURNS. Caught in review of #2921; the two cases below are the before and after.</para>
+    ///
+    /// <para><b>Scope, stated because it is easy to over-read.</b> This exercises the gate's arithmetic on
+    /// the two scenarios — it would still pass if the worker were rewired to seed from the store view, since
+    /// it supplies the baselines itself. The WIRING is what
+    /// <see cref="ProvisioningReportsWhatItWrote_SoTheBaselineCanComeFromTheRolesAndNotTheStore"/> pins.
+    /// Neither test alone is sufficient, which is the point of having both.</para>
     /// </summary>
     [Fact]
     public void AFreshStore_SeedsTheBaselineFromWhatTheRolesGot_NotFromThePostSeedView()
@@ -181,6 +187,41 @@ public sealed class ComposeStatementTimeoutReloadTests
             DarlingManagedRoles.ShouldReassertComposeStatementTimeout(
                 storeAfterSeeding, appliedSeconds: provisioningWroteToTheRoles,
                 managedStore: true, isWindows: true));
+    }
+
+    /// <summary>
+    /// <b>The wiring half of the fresh-store fix.</b> A <c>Task</c>-returning
+    /// <c>EnsureProvisionedAsync</c> leaves the worker no way to learn what the roles were actually given,
+    /// so the baseline could only come from the post-seed store view — which IS the bug. Pinning the return
+    /// type is therefore a real regression detector for the most likely reversion, and it is checked against
+    /// the built assembly rather than the source.
+    ///
+    /// <para>What it does NOT prove is that the worker stores the result in
+    /// <c>_appliedComposeStatementTimeoutSeconds</c> rather than discarding it; that is a dataflow question
+    /// <see cref="IlCallSiteScanner"/> does not answer (it decodes call sites, not field stores). So this
+    /// also asserts provisioning is genuinely CALLED from the service assembly — a mechanism that exists but
+    /// is never invoked would otherwise satisfy the type check while delivering nothing.</para>
+    /// </summary>
+    [Fact]
+    public void ProvisioningReportsWhatItWrote_SoTheBaselineCanComeFromTheRolesAndNotTheStore()
+    {
+        var method = typeof(DarlingManagedRoles).GetMethod(nameof(DarlingManagedRoles.EnsureProvisionedAsync))!;
+
+        Assert.Equal(typeof(System.Threading.Tasks.Task<int>), method.ReturnType);
+
+        /* And it is reached. The startup path is async, so the call lives in ExecuteAsync's generated state
+           machine rather than in a method named ExecuteAsync. */
+        var assemblyPath = typeof(DarlingManagedRoles).Assembly.Location;
+        Assert.True(System.IO.File.Exists(assemblyPath), $"Service assembly not found at '{assemblyPath}'.");
+
+        var calls = IlCallSiteScanner.CountCalls(
+            assemblyPath,
+            new[] { nameof(DarlingManagedRoles.EnsureProvisionedAsync) });
+
+        Assert.True(
+            calls[nameof(DarlingManagedRoles.EnsureProvisionedAsync)].Total > 0,
+            "EnsureProvisionedAsync is never called in the service assembly — the roles would never be "
+                + "provisioned and the reload baseline would have nothing to seed from.");
     }
 
     /// <summary>
