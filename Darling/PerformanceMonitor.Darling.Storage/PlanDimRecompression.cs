@@ -113,12 +113,6 @@ public static class PlanDimRecompression
     public const string VacuumFullSql = "VACUUM FULL query_plan_dim";
 
     /// <summary>
-    /// A fast estimate of the compacted relation's size, for the disk preflight: heap + indexes copy
-    /// as-is, and the TOAST rebuilds to roughly row-count × the SAMPLED average gzip size. Sampled
-    /// (<see cref="DryRunSampleSize"/> rows) because summing octet_length over the whole dimension detoasts
-    /// the entire content — minutes of read for a preflight that needs one significant digit.
-    /// </summary>
-    /// <summary>
     /// One bound for every non-VACUUM statement in this maintenance pass (#2874). Same value the
     /// estimate already chose deliberately; hoisted so the survey, fetch and update loops cannot
     /// silently fall back to Npgsql's inherited 30 s default. VACUUM FULL keeps its explicit
@@ -126,6 +120,12 @@ public static class PlanDimRecompression
     /// </summary>
     private const int MaintenanceStatementTimeoutSeconds = 300;
 
+    /// <summary>
+    /// A fast estimate of the compacted relation's size, for the disk preflight: heap + indexes copy
+    /// as-is, and the TOAST rebuilds to roughly row-count × the SAMPLED average gzip size. Sampled
+    /// (<see cref="DryRunSampleSize"/> rows) because summing octet_length over the whole dimension detoasts
+    /// the entire content — minutes of read for a preflight that needs one significant digit.
+    /// </summary>
     public const string EstimateCompactedSql = """
         SELECT
             pg_relation_size('query_plan_dim')

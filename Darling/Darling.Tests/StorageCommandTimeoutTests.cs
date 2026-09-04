@@ -115,12 +115,15 @@ public sealed class StorageCommandTimeoutTests
     /// <summary>
     /// Scanner blind spots, pinned — a false positive here fails a green build on correct code.
     ///
-    /// <para>The last case is the one this group's own tooling got wrong: a construction inside a
-    /// <c>using (...) { }</c> STATEMENT, where the deadline legally sits inside the block and the
-    /// enclosing method's brace closes before any semicolon. A scanner that clamps its nesting depth
-    /// at zero extends the span into the NEXT member and reads a neighbour's deadline — it judged
-    /// exactly one of the 69 real sites (PgMigrations' version read) already-timed when it was not.
-    /// The <c>depth &lt;= 0</c> termination below is what keeps that from recurring.</para>
+    /// <para>The last case is the shape this group's own tooling got wrong: an untimed command inside
+    /// a <c>using (...) { }</c> STATEMENT, with the block's closing brace between it and the next
+    /// command's deadline. The two statements after the untimed construction (<c>a = ...; b = ...;</c>)
+    /// are both INSIDE the block, so a correct scan finds no <c>CommandTimeout</c> and reports the
+    /// site, as it must. A scanner whose depth counter cannot go negative treats the block's closing
+    /// <c>}</c> as still depth-zero, keeps consuming past it, and reads the FOLLOWING command's
+    /// deadline — calling the untimed site clean. That is how two Python scanners each missed the real
+    /// <c>QueryStoreSliceRepair</c> rail-lift during this change; the <c>depth &lt;= 0</c> walker below
+    /// reports it.</para>
     /// </summary>
     [Theory]
     [InlineData(
@@ -136,14 +139,12 @@ public sealed class StorageCommandTimeoutTests
         + "await command.ExecuteNonQueryAsync();\n",
         false)]
     [InlineData(
-        "using (var read = new NpgsqlCommand(\"SELECT 1\", connection))\n"
+        "using (var untimed = new NpgsqlCommand(\"SELECT 1\", connection))\n"
         + "{\n"
-        + "    value = (int)await read.ExecuteScalarAsync();\n"
+        + "    a = (int)await untimed.ExecuteScalarAsync();\n"
+        + "    b = a + 1;\n"
         + "}\n"
-        + "}\n"
-        + "private void Next()\n"
-        + "{\n"
-        + "    using var other = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
         false)]
     public void TheScanner_JudgesTheSiteItself_NotItsNeighbours(string source, bool expectedTimed)
     {
