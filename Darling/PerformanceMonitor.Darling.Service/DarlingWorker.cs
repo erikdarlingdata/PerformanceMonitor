@@ -3351,10 +3351,12 @@ public sealed class DarlingWorker : BackgroundService
     /// How far back "the most recent capture" is allowed to reach before it stops counting as "now", for the
     /// Postgres Long-Running Query alert (#2711). See
     /// <see cref="DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync"/>'s doc comment for why this
-    /// is the fleet's own 15-minute staleness convention rather than a tight multiple of the collector's
-    /// 1-minute configured cadence.
+    /// is the fleet's own staleness convention rather than a tight multiple of the collector's 1-minute
+    /// configured cadence. Derived rather than copied (#2794): a recency bound tighter than the fleet's
+    /// staleness definition would make this alert silently never fire on exactly the servers whose stretched
+    /// sweeps most need it.
     /// </summary>
-    private const int PgLongRunningQueryRecencyMinutes = 15;
+    private const int PgLongRunningQueryRecencyMinutes = ServerHealthThresholds.CollectionStoppedMinutesDefault;
 
     /// <summary>
     /// The live-state Postgres Long-Running Query alert (#2711): fires when the most recent
