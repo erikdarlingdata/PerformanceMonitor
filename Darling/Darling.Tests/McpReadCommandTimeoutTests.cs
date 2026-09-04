@@ -56,9 +56,18 @@ public sealed class McpReadCommandTimeoutTests
     /// Both ways a command is constructed in this codebase — <c>new NpgsqlCommand(</c> and
     /// <c>.CreateCommand(</c>. The second is the shape #2874's original census missed entirely, and here it
     /// is 121 of the 125 sites.
+    ///
+    /// <para><b>The type name may be QUALIFIED, which every regex in this sweep so far could not see.</b>
+    /// Found by a red-first variant of this pin whose planted offender came back GREEN: a scan for
+    /// <c>new NpgsqlCommand(</c> does not match <c>new Npgsql.NpgsqlCommand(</c>. The form occurs exactly
+    /// once in the repo — <c>DarlingWorker.cs</c>'s <c>pg_stat_statements</c> text fetch, which is a
+    /// MONITORED-TARGET command and already carries its own 60 s, so the blind spot has no defect behind it
+    /// today and the untimed census is unaffected. It is closed here anyway, because declining to close a
+    /// shape a census demonstrably cannot see would be this issue's own mistake in miniature — it changes
+    /// no count in this scope, which has none of them.</para>
     /// </summary>
     private static readonly Regex s_commandCtor = new(
-        @"new NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
+        @"new (?:Npgsql\.)?NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex s_setsTimeout = new(
@@ -98,7 +107,7 @@ public sealed class McpReadCommandTimeoutTests
     /// distinction this group's pin has to encode and the earlier ones did not.</para>
     /// </summary>
     private static readonly Regex s_storeReceiver = new(
-        @"(?:postgres|_dataSource)\.CreateCommand\s*\(|new NpgsqlCommand\s*\([A-Za-z_][A-Za-z0-9_.]*\s*,\s*connection\s*\)",
+        @"(?:postgres|_dataSource)\.CreateCommand\s*\(|new (?:Npgsql\.)?NpgsqlCommand\s*\([A-Za-z_][A-Za-z0-9_.]*\s*,\s*connection\s*\)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     [Fact]
@@ -388,6 +397,8 @@ public sealed class McpReadCommandTimeoutTests
     [InlineData("/* the readers above go through postgres.CreateCommand(Sql) and leave nothing open. */", false)]
     [InlineData("// TODO: replace with new NpgsqlCommand(Sql, connection)", false)]
     [InlineData("var doc = \"await using var c = postgres.CreateCommand(Sql);\";", false)]
+    /* The qualified form, which the pre-widening regex read as no construction at all. */
+    [InlineData("await using var command = new Npgsql.NpgsqlCommand(Sql, connection);", true)]
     public void TheConstructionScan_ReadsCodeNotProse(string source, bool expectedSite)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
@@ -411,6 +422,14 @@ public sealed class McpReadCommandTimeoutTests
        server-side SET LOCAL statement_timeout rather than by any constant here. */
     [InlineData("await using var command = new NpgsqlCommand(sql, connection, (NpgsqlTransaction)transaction);", false)]
     [InlineData("await using var reset = new NpgsqlCommand(\"SELECT hypopg_reset()\", connection);", false)]
+    /* A monitored-target command whose connection is not named `connection`: rejected on the receiver,
+       whether the type name is qualified or not. DarlingWorker's pg_stat_statements fetch is the real
+       qualified one, and it is a target command. */
+    [InlineData("await using var command = new NpgsqlCommand(Sql, target, (NpgsqlTransaction)tx);", false)]
+    [InlineData("await using var command = new Npgsql.NpgsqlCommand(Sql, target);", false)]
+    /* ...and the qualified STORE form is accepted, so widening the ctor regex cannot turn a legitimate
+       qualified store construction into an unclassified-receiver false positive. */
+    [InlineData("await using var command = new Npgsql.NpgsqlCommand(Sql, connection);", true)]
     public void TheReceiverAllowlist_AcceptsStoreShapesAndRejectsTargetShapes(string source, bool expectedStore)
     {
         Assert.Equal(expectedStore, s_storeReceiver.IsMatch(source));
