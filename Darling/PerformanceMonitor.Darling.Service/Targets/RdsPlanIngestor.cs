@@ -141,6 +141,12 @@ public sealed class RdsPlanIngestor
         using (var importer = await connection.BeginBinaryImportAsync(
             PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
         {
+            /* #2874: the COPY's own deadline, on NpgsqlBinaryImporter.Timeout — a TimeSpan on a different type
+               from the rest of the regime, invisible to a command-shaped regex, and inherited from the
+               connection's CommandTimeout (30 s) when left unset. Same constant, same regime, and the same
+               narrows-not-closes caveat about the Begin phase as DarlingCollectorRunner.WriteBatchAsync. */
+            importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
+
             writer.Importer = importer;
 
             foreach (var row in rows)
