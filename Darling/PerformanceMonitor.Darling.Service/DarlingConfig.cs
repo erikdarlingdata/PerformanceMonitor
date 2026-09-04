@@ -89,7 +89,7 @@ public sealed class DarlingConfig
     /// <summary>
     /// The per-session <c>statement_timeout</c> applied to the viewer and mcp roles — the hard backstop a
     /// composed query can never exceed (#2357). Seeds <c>config_service.compose_statement_timeout_seconds</c>;
-    /// the store is authoritative afterwards, like every other value here.
+    /// the store is authoritative for this property afterwards, but NOT on the same terms as its siblings.
     ///
     /// <para><b>Its delivery is restart-scoped, unlike the other store-backed knobs.</b> The timeout lives
     /// on the roles, not in a query: startup provisioning reads the store column directly and emits
