@@ -343,13 +343,6 @@ public sealed class QueryStoreServerGateTests
         Assert.Equal(1, CountOccurrences(source, StepCallAnchor));
 
         Assert.Null(FindLeaseScopedToTheSlice(source));
-
-        /* And the handoff is an ARGUMENT of the step call, not a statement after it — no statement
-           boundary may sit between the two. */
-        var call = source.IndexOf(StepCallAnchor, StringComparison.Ordinal);
-        var handoff = source.IndexOf(HandoffAnchor, StringComparison.Ordinal);
-        Assert.True(call < handoff, "the handoff must be inside the step call, not before it");
-        Assert.DoesNotContain(";", source[call..handoff], StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -387,9 +380,28 @@ public sealed class QueryStoreServerGateTests
             offender!,
             StringComparison.Ordinal);
 
-        /* The same scanner also reports a missing anchor rather than silently passing — the other way a
-           source pin rots into a no-op. */
+        /* Positive control for the statement-boundary arm, through the same scanner: a handoff that has
+           drifted out of the call's argument list must be named, not passed over. Asserted because a
+           "must not contain" check is the kind that can only ever pass if nothing feeds it. */
+        var driftedOut = string.Join("\n",
+            "                var gate = _queryStoreGates.GetOrAdd(runtime.ServerId, static _ => new QueryStoreServerGate()).TryAcquire();",
+            "                var result = await step.RunAsync(() => backfill.RunServerSliceAsync(runtime, stoppingToken), BackfillSliceDeadline);",
+            "                Hand(holdUntilStepEnds: gate);");
+
+        var drifted = FindLeaseScopedToTheSlice(driftedOut);
+        Assert.NotNull(drifted);
+        Assert.Contains("statement boundary", drifted!, StringComparison.Ordinal);
+        Assert.Contains(
+            driftedOut.IndexOf(';', driftedOut.IndexOf(StepCallAnchor, StringComparison.Ordinal))
+                      .ToString(CultureInfo.InvariantCulture),
+            drifted!,
+            StringComparison.Ordinal);
+
+        /* And the scanner reports a missing anchor rather than silently passing — the other way a source
+           pin rots into a no-op. Each of the three anchors, so none of them can go missing quietly. */
         Assert.Contains("anchor", FindLeaseScopedToTheSlice("nothing relevant here")!, StringComparison.Ordinal);
+        Assert.Contains(HandoffAnchor, FindLeaseScopedToTheSlice(AcquireAnchor)!, StringComparison.Ordinal);
+        Assert.Contains(StepCallAnchor, FindLeaseScopedToTheSlice(AcquireAnchor + " " + HandoffAnchor)!, StringComparison.Ordinal);
     }
 
     private const string AcquireAnchor = "var gate = _queryStoreGates";
@@ -422,6 +434,27 @@ public sealed class QueryStoreServerGateTests
         if (handoff <= acquire)
         {
             return "the handoff must follow the acquire";
+        }
+
+        var call = source.IndexOf(StepCallAnchor, StringComparison.Ordinal);
+        if (call < 0)
+        {
+            return $"the step-call anchor '{StepCallAnchor}' is gone — this pin cannot see the call site";
+        }
+
+        /* The handoff must be an ARGUMENT of the step call, not a statement after it. A statement
+           boundary between the two means the lease is being disposed (or re-taken) by the caller again,
+           which is the defect wearing different syntax. */
+        if (call > handoff)
+        {
+            return $"the handoff at offset {handoff} precedes the step call at offset {call}";
+        }
+
+        var betweenCallAndHandoff = source[call..handoff];
+        if (betweenCallAndHandoff.Contains(';', StringComparison.Ordinal))
+        {
+            return $"a statement boundary at offset {call + betweenCallAndHandoff.IndexOf(';', StringComparison.Ordinal)} "
+                   + "separates the step call from the handoff — the lease is not an argument of the call";
         }
 
         var match = LeaseScope.Match(source[acquire..handoff]);
