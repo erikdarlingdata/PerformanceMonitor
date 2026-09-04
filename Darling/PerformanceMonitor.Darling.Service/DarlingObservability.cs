@@ -297,7 +297,11 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue && drain.Value.RowsRead >= 0 ? drain.Value.RowsRead : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue && drain.Value.BytesRead >= 0 ? drain.Value.BytesRead : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain.HasValue && drain.Value.LastReadMs >= 0 ? (int)drain.Value.LastReadMs : (object)DBNull.Value });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain?.TargetSessionId is int spid ? spid : (object)DBNull.Value });
+            /* spid guarded on > 0, the session-id twin of the >= 0 count guards above (#2884): the
+               capture path normalizes 0 to null at the source, but DrainForensics is a public record any
+               caller can construct, and a 0 here would read as a real-looking session id that no join
+               could ever land. Belt beside braces, same as the -1 sentinels. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain.HasValue && drain.Value.TargetSessionId is int spid && spid > 0 ? spid : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = sweepPeerMaxMs is int peer ? peer : (object)DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
