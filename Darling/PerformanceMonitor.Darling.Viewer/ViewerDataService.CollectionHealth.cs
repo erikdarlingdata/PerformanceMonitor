@@ -338,8 +338,9 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>Maps one row of the shared 15-column health projection (per-server or fleet, ordinals 0-14) to a
-/// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY through
-/// this one mapper, so it must match them exactly (15 since #2804 appended abandoned_count at ordinal 14).</summary>
+    /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY
+    /// through this one mapper, so it must match them exactly (15 since #2804 appended abandoned_count at
+    /// ordinal 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
