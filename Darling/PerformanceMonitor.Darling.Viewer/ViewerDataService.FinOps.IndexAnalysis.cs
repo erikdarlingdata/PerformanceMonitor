@@ -333,6 +333,7 @@ LIMIT 1";
         var inputs = new List<IndexCleanupIndexInput>();
 
         await using var command = _dataSource.CreateCommand(IndexObjectStatsLatestSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -352,6 +353,7 @@ LIMIT 1";
         DateTime? startTime = null;
 
         await using var command = _dataSource.CreateCommand(ServerCompressionInfoSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

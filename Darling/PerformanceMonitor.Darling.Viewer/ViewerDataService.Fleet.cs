@@ -102,6 +102,7 @@ SELECT
     public async Task<FleetTotals> GetFleetTotalsAsync(DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(FleetTotalsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
             TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified),

@@ -54,6 +54,7 @@ WHERE id = 1";
     public async Task<ServiceConfigRow?> GetServiceConfigAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServiceConfigSelectSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -98,6 +99,7 @@ WHERE id = 1";
         bool capturePlans, bool mcpEnabled, int mcpPort, bool webEnabled, int webPort, bool queryStoreBackfillEnabled, int queryStoreTextBudgetMb, int maxConcurrentSweeps, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServiceConfigUpdateFlagsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = capturePlans });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = mcpEnabled });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = mcpPort });
@@ -125,6 +127,7 @@ WHERE id = 1";
     public async Task SignalConfigReloadAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ConfigReloadSignalSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await ExecuteWriteAsync(command, cancellationToken);
     }
 }

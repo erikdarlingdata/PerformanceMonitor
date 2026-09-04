@@ -196,6 +196,7 @@ public sealed partial class ViewerDataService
         var items = new List<BlockingTrendPoint>();
 
         await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -225,6 +226,7 @@ public sealed partial class ViewerDataService
         var items = new List<LockWaitTrendPoint>();
 
         await using var command = _dataSource.CreateCommand(LockWaitTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -253,6 +255,7 @@ public sealed partial class ViewerDataService
         var items = new List<WaitingTaskTrendPoint>();
 
         await using var command = _dataSource.CreateCommand(WaitingTaskTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -281,6 +284,7 @@ public sealed partial class ViewerDataService
         var items = new List<BlockedSessionTrendPoint>();
 
         await using var command = _dataSource.CreateCommand(BlockedSessionTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {

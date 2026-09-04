@@ -178,6 +178,7 @@ WHERE server_id = $1";
            number alongside (Lite's headline). */
         await using (var command = _dataSource.CreateCommand(ServerSummaryCpuSql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -190,6 +191,7 @@ WHERE server_id = $1";
         /* Latest total server memory + buffer pool. */
         await using (var command = _dataSource.CreateCommand(ServerSummaryMemorySql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -202,6 +204,7 @@ WHERE server_id = $1";
         /* Latest resource-semaphore pressure (grant waiters / timeouts / forced grants + granted MB). */
         await using (var command = _dataSource.CreateCommand(ServerSummaryMemoryPressureSql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -216,6 +219,7 @@ WHERE server_id = $1";
         /* Latest worker-thread pressure (max / in-use / runnable-waiting / work-queue). Absent on Azure. */
         await using (var command = _dataSource.CreateCommand(ServerSummaryThreadsSql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -230,6 +234,7 @@ WHERE server_id = $1";
         /* Blocking count + worst wait in the last hour (XE preferred, DMV fallback — same source for both). */
         await using (var command = _dataSource.CreateCommand(ServerSummaryBlockingSql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -268,6 +273,7 @@ WHERE server_id = $1";
         /* Deadlock count in the last hour + the newest deadlock ever (for "Last: N ago"). */
         await using (var command = _dataSource.CreateCommand(ServerSummaryDeadlockSql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -281,6 +287,7 @@ WHERE server_id = $1";
         /* Newest collection time across all collectors — drives the freshness status. */
         await using (var command = _dataSource.CreateCommand(ServerSummaryLastCollectionSql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is not null && result != DBNull.Value)

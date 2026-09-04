@@ -114,6 +114,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerQueryStatsHistoryRow>();
 
         await using var command = _dataSource.CreateCommand(QueryStatsHistorySql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddItemWindowParameters(command, serverId, databaseName, queryHash, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -237,6 +238,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerProcedureStatsHistoryRow>();
 
         await using var command = _dataSource.CreateCommand(ProcStatsHistorySql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName ?? "" });
@@ -375,6 +377,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerQueryStoreHistoryRow>();
 
         await using var command = _dataSource.CreateCommand(QueryStoreHistorySql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });

@@ -49,6 +49,7 @@ GROUP BY server_id";
         var result = new Dictionary<int, DateTime>();
 
         await using var command = _dataSource.CreateCommand(ServerFreshnessSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -65,6 +66,7 @@ GROUP BY server_id";
     public async Task<long?> GetStoreSizeBytesAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(StoreSizeSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is null || result == DBNull.Value ? null : Convert.ToInt64(result);
     }

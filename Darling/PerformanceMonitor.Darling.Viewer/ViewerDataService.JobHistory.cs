@@ -179,6 +179,7 @@ LIMIT {limitParam}";
         var rows = new List<ViewerJobHistoryRow>();
 
         await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
         if (serverId.HasValue)
         {
@@ -264,6 +265,7 @@ ORDER BY server_name";
         var rows = new List<ViewerAgentStatusRow>();
 
         await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         if (serverId.HasValue)
         {
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
