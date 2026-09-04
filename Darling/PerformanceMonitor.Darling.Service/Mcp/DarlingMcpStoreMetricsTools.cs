@@ -73,9 +73,14 @@ public sealed class DarlingMcpStoreMetricsTools
                j.scheduled, so a policy the coverage gate has PAUSED reports zero failures and a plausible
                last run — indistinguishable from a healthy job in every stored column. On the production
                store that shape hid five held policies for 16 days while the tier grew to 4.5x its horizon.
-               One catalog round trip on an already-open connection answers it for the current moment;
-               persisting it into the series is a migration rung's worth of work and the better long-term
-               answer, tracked separately. */
+               One catalog round trip answers it for the current moment; persisting it into the series is a
+               migration rung's worth of work and the better long-term answer, tracked separately.
+
+               This checks out its OWN connection (review catch — an earlier comment here claimed it reused
+               one, which was not true of any code path in this method: the two readers above go through
+               postgres.CreateCommand and leave nothing open). That is a third pooled checkout per call,
+               which is cheap but is not free, and saying so is the point — a comment that overstates what
+               the code does is worse than none. */
             List<RetentionHoldReading> holds;
             await using (var connection = await postgres.OpenConnectionAsync())
             {
