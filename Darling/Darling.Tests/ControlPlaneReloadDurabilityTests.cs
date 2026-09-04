@@ -225,46 +225,67 @@ public sealed class ControlPlaneReloadDurabilityTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(SourceText("DarlingWorker.cs"));
 
         var guard = new Regex(
-            @"if\s*\(\s*await ReloadFromStoreAsync\s*\([^)]*\)\s*\)\s*\{",
+            @"var appliedVersion = await ReloadFromStoreAsync\s*\([^)]*\)\s*;\s*if\s*\(\s*appliedVersion\.HasValue\s*\)\s*\{",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         var match = guard.Match(code);
         Assert.True(
             match.Success,
-            "the reload beacon no longer guards on ReloadFromStoreAsync's result, so a reload that read "
-            + "nothing can record its config_version as applied and will never be retried");
+            "the reload beacon no longer guards on ReloadFromStoreAsync's applied version, so a reload "
+            + "that read nothing can record its config_version as applied and will never be retried");
 
         var branch = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', match.Index + match.Length - 1));
 
-        Assert.Contains("_lastConfigVersion = configVersion.Value;", branch, StringComparison.Ordinal);
+        /* Stamped from the APPLIED version, not from the beacon's own earlier read. Review caught that the
+           first version of this fix used `configVersion.Value` — correct about ordering, imprecise about
+           WHICH version: LoadViewAsync re-reads config_version, so a write landing between the two makes
+           the applied view newer than the beacon saw, and the older stamp leaves the watermark behind a
+           live config. Self-healing rather than lossy, but the same class of imprecision as the defect
+           this class exists for, and the startup path already stamped it correctly. */
+        Assert.Contains("_lastConfigVersion = appliedVersion.Value;", branch, StringComparison.Ordinal);
 
-        /* And nowhere else in the beacon: exactly one assignment from the beacon's own local, so a second
-           one outside the branch cannot re-introduce the early advance alongside the correct one. */
+        /* The beacon's own outer read must NOT be what lands on the watermark anywhere — this is the
+           assertion that would have failed on the first version of the fix. */
+        Assert.Empty(Regex.Matches(code, @"_lastConfigVersion\s*=\s*configVersion\.Value\s*;"));
+
+        /* And exactly one assignment from the applied version, so a second one outside the branch cannot
+           re-introduce the early advance alongside the correct one. */
         Assert.Equal(
             1,
-            Regex.Matches(code, @"_lastConfigVersion\s*=\s*configVersion\.Value\s*;").Count);
+            Regex.Matches(code, @"_lastConfigVersion\s*=\s*appliedVersion\.Value\s*;").Count);
+
+        /* Positive control on the negative above, through the identical pattern: an assertion that can
+           only pass is not an assertion. */
+        Assert.Single(Regex.Matches(
+            "_lastConfigVersion = configVersion.Value;",
+            @"_lastConfigVersion\s*=\s*configVersion\.Value\s*;"));
 
         /* ReloadFromStoreAsync has to REPORT failure for the guard to mean anything — a method that
            always returned true would satisfy every assertion above, which is why the signature check is
            not the end of it. */
-        var reload = code.IndexOf("private async Task<bool> ReloadFromStoreAsync(", StringComparison.Ordinal);
-        Assert.True(reload > 0, "ReloadFromStoreAsync no longer reports whether the reload applied");
+        var reload = code.IndexOf("private async Task<long?> ReloadFromStoreAsync(", StringComparison.Ordinal);
+        Assert.True(reload > 0, "ReloadFromStoreAsync no longer reports WHICH config_version it applied");
 
         var reloadBody = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', reload)));
 
         /* The unreadable-view branch must return FALSE. This is the assertion that separates "the plumbing
            is shaped right" from "the plumbing carries the answer". */
         var nullBranch = new Regex(
-            @"if\s*\(\s*view is null\s*\)\s*\{[^}]*return false\s*;[^}]*\}",
+            @"if\s*\(\s*view is null\s*\)\s*\{[^}]*return null\s*;[^}]*\}",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         Assert.True(
             nullBranch.IsMatch(reloadBody),
-            "ReloadFromStoreAsync does not return false when LoadViewAsync could not read the store, so the "
+            "ReloadFromStoreAsync does not return null when LoadViewAsync could not read the store, so the "
             + "caller's guard always succeeds and the config_version watermark advances on a reload that "
             + "applied nothing — the original defect, reachable again through the new return value");
 
-        Assert.Equal(1, Regex.Matches(reloadBody, @"return false\s*;").Count);
+        Assert.Equal(1, Regex.Matches(reloadBody, @"return null\s*;").Count);
+
+        /* And what it returns on SUCCESS is the view's own version, so the watermark, the log line and the
+           applied config can never disagree. A method returning any other long would satisfy every
+           assertion above. */
+        Assert.Contains("return view.ConfigVersion;", reloadBody, StringComparison.Ordinal);
     }
 
     /// <summary>

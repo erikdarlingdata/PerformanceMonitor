@@ -1557,9 +1557,18 @@ public sealed class DarlingWorker : BackgroundService
                    re-enter or resume) because that path has no loop of its own and its failure is terminal.
                    This path already re-runs every tick by construction and its failure is recoverable, so
                    the only defect here was the ordering. */
-                if (await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken))
+                /* Stamped from the version the reload ACTUALLY applied, not from the beacon's own earlier
+                   read. ReloadFromStoreAsync re-reads config_version inside LoadViewAsync, so a write
+                   landing in the window between the two makes the applied view NEWER than
+                   configVersion.Value — and recording the older number would leave the watermark behind a
+                   config that is already live, costing one redundant idempotent re-apply on the next tick.
+                   Self-healing rather than lossy, but it is the same class of imprecision as the defect
+                   above ("the version recorded as applied must be the version that was applied"), and the
+                   startup path at :1179 already does it this way. */
+                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+                if (appliedVersion.HasValue)
                 {
-                    _lastConfigVersion = configVersion.Value;
+                    _lastConfigVersion = appliedVersion.Value;
 
                     /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe
                        here by construction — top of the sweep, and narrowing never preempts a running body.
@@ -2601,9 +2610,10 @@ public sealed class DarlingWorker : BackgroundService
     /// schedule overrides, and reloads the mute-rule cache (F16). Store-unreachable is a no-op — the current
     /// live config stands, never worse than before.
     ///
-    /// <para><b>Returns whether the reload APPLIED</b>, so the caller can hold the <c>config_version</c>
-    /// watermark back on a failure instead of recording an unapplied version as done. The line between the
-    /// two is <c>LoadViewAsync</c>, and it is the right line because that call is the atomic gate: it reads
+    /// <para><b>Returns the <c>config_version</c> that was APPLIED</b>, or null when nothing was, so the
+    /// caller can both hold the watermark back on a failure and stamp the version the store actually
+    /// served rather than the one its own earlier beacon read saw. The line between applied and not is
+    /// <c>LoadViewAsync</c>, and it is the right line because that call is the atomic gate: it reads
     /// all five <c>config</c> rows under one try/catch and returns null if any of them throws, so either
     /// nothing was read or <c>ApplyToConfig</c> below has already swapped the whole view into the live
     /// config — a swap that cannot un-happen and that makes the version genuinely applied.</para>
@@ -2617,14 +2627,14 @@ public sealed class DarlingWorker : BackgroundService
     /// which is narrower than the version-discarding one this replaces rather than a new instance of
     /// it.</para>
     /// </summary>
-    private async Task<bool> ReloadFromStoreAsync(
+    private async Task<long?> ReloadFromStoreAsync(
         StoreConfigProvider provider, DarlingConfig config, List<ServerLoopState> servers,
         MuteRuleService muteRuleService, CancellationToken cancellationToken)
     {
         var view = await provider.LoadViewAsync(config, cancellationToken);
         if (view is null)
         {
-            return false;
+            return null;
         }
 
         StoreConfigProvider.ApplyToConfig(config, view);
@@ -2680,12 +2690,14 @@ public sealed class DarlingWorker : BackgroundService
         await muteRuleService.LoadAsync();
 
         /* view.ConfigVersion rather than _lastConfigVersion: the caller has not advanced the watermark yet
-           (that is now this method's return value), so the field still holds the PREVIOUS version here. */
+           (it advances from this method's RETURN value), so the field still holds the PREVIOUS version
+           here — and the returned version is this same one, so the log line and the watermark can never
+           disagree about what was applied. */
         _logger.LogInformation(
             "Control-plane reload applied (config_version {Version}, {Servers} monitored server(s), paused: {Paused})",
             view.ConfigVersion, servers.Count, _paused);
 
-        return true;
+        return view.ConfigVersion;
     }
 
     /// <summary>
