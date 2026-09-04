@@ -1009,13 +1009,17 @@ public sealed class DarlingWorker : BackgroundService
            stays terminal. This block is the ONLY step of the collection loop's start that kills collection,
            so the degrade-vs-kill question the next block answers out loud is answered here too: a
            transient store failure now degrades to a delayed first cycle, and everything else keeps the
-           critical line and the stand-down byte for byte.
+           critical line and the stand-down byte for byte. Both caps are load-bearing: an attempt is not
+           quick just because a refused connect is — one that blocks behind a peer's advisory lock can
+           spend MigrationLockWaitTimeoutSeconds — so the wall-clock budget is what stops 25 attempts from
+           becoming ten hours, and the attempt count is what the warning line reports.
            A FRESH connection per attempt, not a reuse of the old one — its connector is dead after a
            transport failure, the same reason DarlingManagedPostgres.EnsureDatabaseAsync retries the whole
            unit rather than just the open. Re-entering MigrateAsync is safe because the applier commits
            each rung's DDL and its darling_schema_version stamp in ONE transaction: a rung that failed
            part-way left nothing applied and nothing stamped, and rungs at or below the stamp are skipped,
            so a retry resumes at the rung that failed instead of redoing the ladder. */
+        var retryBudget = System.Diagnostics.Stopwatch.StartNew();
         for (var attempt = 1; ; attempt++)
         {
             try
@@ -1032,6 +1036,7 @@ public sealed class DarlingWorker : BackgroundService
             }
             catch (Exception ex) when (ex is not OperationCanceledException
                 && attempt < StoreStartupFailureTriage.MigrateAttempts
+                && retryBudget.Elapsed < StoreStartupFailureTriage.MigrateRetryBudget
                 && StoreStartupFailureTriage.IsRetryable(ex))
             {
                 /* Every placeholder appears ONCE. A repeated name is not a duplicate here, it is an extra

@@ -220,19 +220,60 @@ public class StoreStartupFailureTriageTests
     {
         Assert.Equal(25, StoreStartupFailureTriage.MigrateAttempts);
         Assert.Equal(5, (int)StoreStartupFailureTriage.MigrateRetryDelay.TotalSeconds);
+        Assert.Equal(120, (int)StoreStartupFailureTriage.MigrateRetryBudget.TotalSeconds);
 
-        var totalWaitSeconds =
-            (StoreStartupFailureTriage.MigrateAttempts - 1) * (int)StoreStartupFailureTriage.MigrateRetryDelay.TotalSeconds;
+        Assert.True(
+            StoreStartupFailureTriage.MigrateRetryBudget.TotalSeconds >= 2 * 60,
+            "must outlast the 60s this repo allows a PostgreSQL start (DarlingManagedPostgres.PgCtlWaitSeconds)");
+        Assert.True(
+            StoreStartupFailureTriage.MigrateRetryBudget.TotalSeconds <= 150,
+            "must stay inside DarlingWorker.ColdStartSpreadSeconds so even a spent budget lands in a normal cold start");
 
-        Assert.Equal(120, totalWaitSeconds);
-        Assert.True(totalWaitSeconds >= 2 * 60, "must outlast the 60s this repo allows a PostgreSQL start (PgCtlWaitSeconds)");
-        Assert.True(totalWaitSeconds <= 150, "must stay inside DarlingWorker.ColdStartSpreadSeconds so a spent budget still lands in a normal cold start");
+        /* The two caps must AGREE on the ordinary case, which is a failure that returns immediately: the
+           pauses the attempt count allows have to fill the wall-clock budget rather than expire early
+           (retrying for less than the derived two minutes) or overrun it (an attempt count that can never
+           be reached, making the log line's "of 25" a number nothing counts to). */
+        var pausesAllowed =
+            (StoreStartupFailureTriage.MigrateAttempts - 1) * StoreStartupFailureTriage.MigrateRetryDelay.TotalSeconds;
+
+        Assert.Equal(StoreStartupFailureTriage.MigrateRetryBudget.TotalSeconds, pausesAllowed);
     }
 
     /// <summary>
-    /// The retry arm's filter, read off the shipped source. Three conjuncts, and every one of them is
+    /// The wall-clock cap is in the retry filter, not just declared.
+    ///
+    /// <para>Without it the attempt count is not a bound at all: an attempt that blocks behind a peer's
+    /// migration advisory lock can spend <c>MigrationLockWaitTimeoutSeconds</c> = 1500 s, so 25 of them is
+    /// over ten hours of retrying rather than the two minutes the constant is derived for, and the one
+    /// definitive line arrives most of a day after the failure it describes. Measured on a live store: a
+    /// second session holding that lock made a single attempt wait 38 s, silently.</para>
+    /// </summary>
+    [Fact]
+    public void TheRetryArmAlsoStopsOnAWallClockDeadline()
+    {
+        var source = ReadWorkerSource();
+        var retryArm = ExtractMigrateRetryArm(source);
+
+        Assert.Contains(
+            "retryBudget.Elapsed < StoreStartupFailureTriage.MigrateRetryBudget",
+            retryArm,
+            StringComparison.Ordinal);
+
+        /* The stopwatch has to start OUTSIDE the loop, or every attempt resets the deadline and the cap
+           measures one attempt instead of the whole retry. A relocation, so asserted by offset. */
+        var startedAt = source.IndexOf("var retryBudget = System.Diagnostics.Stopwatch.StartNew();", StringComparison.Ordinal);
+        var loopAt = source.IndexOf("for (var attempt = 1; ; attempt++)", StringComparison.Ordinal);
+
+        Assert.True(startedAt > 0, "the retry deadline's stopwatch is gone");
+        Assert.True(loopAt > 0, "the retry loop is gone");
+        Assert.True(startedAt < loopAt, "the stopwatch must start BEFORE the loop, not per attempt");
+    }
+
+    /// <summary>
+    /// The retry arm's filter, read off the shipped source. Four conjuncts, and every one of them is
     /// load-bearing: drop the cancellation exclusion and shutdown becomes a two-minute retry; drop the
-    /// attempt bound and a permanent failure never reaches its critical line; drop
+    /// attempt bound or the wall-clock deadline and a permanent failure reaches its critical line late or
+    /// never (see <see cref="TheRetryArmAlsoStopsOnAWallClockDeadline"/> for why one cap is not two); drop
     /// <see cref="StoreStartupFailureTriage.IsRetryable"/> and everything is retried, which is the
     /// failure mode #2936 exists to avoid and the one that looks like success.
     /// </summary>
@@ -244,6 +285,7 @@ public class StoreStartupFailureTriageTests
 
         Assert.Contains("ex is not OperationCanceledException", retryArm, StringComparison.Ordinal);
         Assert.Contains("attempt < StoreStartupFailureTriage.MigrateAttempts", retryArm, StringComparison.Ordinal);
+        Assert.Contains("retryBudget.Elapsed < StoreStartupFailureTriage.MigrateRetryBudget", retryArm, StringComparison.Ordinal);
         Assert.Contains("StoreStartupFailureTriage.IsRetryable(ex)", retryArm, StringComparison.Ordinal);
 
         /* Negative control, run through the IDENTICAL slice and the identical comparison, so

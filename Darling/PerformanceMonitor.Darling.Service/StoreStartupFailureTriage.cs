@@ -111,28 +111,14 @@ namespace PerformanceMonitor.Darling.Service;
 internal static class StoreStartupFailureTriage
 {
     /// <summary>
-    /// Total wall clock the collection loop's first store interaction may spend retrying a failure
-    /// <see cref="IsRetryable"/> accepts, expressed as <see cref="MigrateAttempts"/> tries
-    /// <see cref="MigrateRetryDelay"/> apart: 24 waits of 5 s, so two minutes.
+    /// How many times the collection loop's first store interaction may be tried before a failure
+    /// <see cref="IsRetryable"/> accepts becomes terminal anyway.
     ///
-    /// <para><b>BELOW — it has to outlast the store restarting.</b> This codebase's own statement of how
-    /// long a PostgreSQL start may take is <c>DarlingManagedPostgres.PgCtlWaitSeconds</c> = 60, what
-    /// <c>pg_ctl -w</c> is allowed for the bundled store; two minutes is twice that. The measured case is
-    /// far smaller — SIGKILL of a 1.7 GB store carrying 701 MB of unreplayed WAL refused connections for
-    /// 2.0 s end to end on local NVMe (26 transport failures, then 74 <c>57P03</c>s, then service) — so
-    /// the ordinary blip is gone inside the FIRST wait and the rest of the budget exists for the cold,
-    /// large, contended restart and for a sibling instance holding the migration lock while it applies
-    /// rungs.</para>
-    ///
-    /// <para><b>ABOVE — it has to stay finite, and short of looking like a hang.</b> The terminal line is
-    /// the only diagnosis this failure ever produces, and the process does not exit when it lands, so an
-    /// unbounded retry would convert the single most common permanent case — a wrong port or host in
-    /// <c>darling.json</c>, which presents as a retryable <see cref="SocketException"/> forever — from one
-    /// loud, literal, documented line into a service that reports Running and says nothing conclusive
-    /// ever. Two minutes also sits inside <c>DarlingWorker.ColdStartSpreadSeconds</c> = 150, the window
-    /// the fleet's first sweep is already deliberately staggered across, so even a fully spent budget
-    /// delivers the first collection cycle inside the span a normal cold start occupies
-    /// anyway.</para>
+    /// <para>Paired with <see cref="MigrateRetryBudget"/>, which is the real bound — see that constant
+    /// for why an attempt cap alone is not one. Twenty-five tries <see cref="MigrateRetryDelay"/> apart is
+    /// 24 waits of 5 s, so the two caps expire together on a failure that returns immediately, which is
+    /// the ordinary case; the attempt count exists because it is what the warning line reports and what an
+    /// operator counts in.</para>
     ///
     /// <para><b>Bounded rather than a supervisor loop, deliberately.</b> The repo holds both shapes.
     /// <c>DarlingManagedPostgres.EnsureDatabaseAsync</c> is bounded — 6 attempts, 2 s apart, classified,
@@ -162,6 +148,43 @@ internal static class StoreStartupFailureTriage
     /// against a store that is either not listening or busy replaying WAL.</para>
     /// </summary>
     internal static readonly TimeSpan MigrateRetryDelay = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Wall clock from the first attempt after which no further attempt is made, whatever
+    /// <see cref="MigrateAttempts"/> has left.
+    ///
+    /// <para><b>Why an attempt cap alone is not a bound, measured rather than assumed.</b> An attempt is
+    /// not instantaneous just because a refused connect is: a peer instance holding the migration advisory
+    /// lock makes <c>PgMigrations.MigrateAsync</c> BLOCK inside <c>pg_advisory_lock</c> for as long as
+    /// <c>MigrationLockWaitTimeoutSeconds</c> allows, which is 1500 s. Observed against a live store: a
+    /// second session took that lock and the service waited 38 s inside a SINGLE attempt, silently, and
+    /// never retried — correct behaviour, and exactly the shape that makes an attempt cap misleading.
+    /// Twenty-five attempts each free to block for 25 minutes is over ten hours of retrying, which is not
+    /// what "retry briefly, then say so" means and which would push the one definitive line most of a day
+    /// past the failure it describes. So this bounds the WALL CLOCK, <see cref="MigrateAttempts"/> bounds
+    /// the pauses, and whichever expires first ends the retrying.</para>
+    ///
+    /// <para><b>What each cap therefore covers.</b> A store that is not listening fails an attempt in
+    /// under a millisecond, so all 25 attempts fit inside this budget and the attempt count is what ends
+    /// it. A store that accepts the connection and then makes the attempt WAIT — a peer migrator, a rung
+    /// outrunning its own command timeout — spends the whole budget inside attempt one, so a wait that
+    /// was going to be waited out anyway is not multiplied by 25. Both paths land on the same terminal
+    /// line.</para>
+    ///
+    /// <para><b>Two minutes, derived.</b> BELOW: twice the 60 s this repo already allows a PostgreSQL
+    /// start (<c>DarlingManagedPostgres.PgCtlWaitSeconds</c>), against a measured 2.0 s for an unclean
+    /// kill of a 1.7 GB store carrying 701 MB of unreplayed WAL (26 transport failures, then 74
+    /// <c>57P03</c>s, then service) — so the ordinary blip is gone inside the first wait and the rest is
+    /// for the cold, large, contended restart. ABOVE: it stays finite because the terminal line is the
+    /// only diagnosis this failure produces and the process does NOT exit when it lands, so an unbounded
+    /// retry would turn a wrong host or port in <c>darling.json</c> — which presents as a retryable
+    /// <see cref="SocketException"/> forever — from one loud documented line into a service that reports
+    /// Running and never concludes anything. And it sits inside the 150 s
+    /// <c>DarlingWorker.ColdStartSpreadSeconds</c> the fleet's first sweep is already staggered across, so
+    /// even a fully spent budget delivers the first collection cycle within the span a normal cold start
+    /// occupies anyway.</para>
+    /// </summary>
+    internal static readonly TimeSpan MigrateRetryBudget = TimeSpan.FromSeconds(120);
 
     /// <summary>
     /// <c>SqlState</c>s that mean "not yet" rather than "no" — see the class remarks for what each one was
