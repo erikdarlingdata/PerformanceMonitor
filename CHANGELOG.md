@@ -1794,8 +1794,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stale `Monitor_LongQueries_*.trc` files cleaned up** by `config.data_retention` â€” the trace-file cleanup step previously left old `.trc` files behind on disk ([#951])
 - **Nullability guards** added to the remaining comparison overlay tasks that were producing CS86xx warnings
 
-[#828]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/828
-[#887]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/887
 [#916]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/916
 [#933]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/933
 [#937]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/937
@@ -3238,7 +3236,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#2874]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2874
 [#2876]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2876
 [#2797]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2797
-[#2860]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2860
 [#2490]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2490
 [#2898]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2898
 [#2890]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2890
