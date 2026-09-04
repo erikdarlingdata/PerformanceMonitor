@@ -243,7 +243,7 @@ internal static class CSharpSourceWalker
     }
 
     /// <summary>
-    /// Walks a literal's body from <paramml name="i"/> — which is the first character AFTER the opening
+    /// Walks a literal's body from <paramref name="i"/> — which is the first character AFTER the opening
     /// delimiter — marking any interpolation holes it contains as code. Returns the index just past the
     /// closing delimiter.
     /// </summary>
