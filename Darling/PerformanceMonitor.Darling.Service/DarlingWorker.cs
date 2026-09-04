@@ -1034,11 +1034,16 @@ public sealed class DarlingWorker : BackgroundService
                 && attempt < StoreStartupFailureTriage.MigrateAttempts
                 && StoreStartupFailureTriage.IsRetryable(ex))
             {
+                /* Every placeholder appears ONCE. A repeated name is not a duplicate here, it is an extra
+                   positional slot: LogValuesFormatter numbers placeholders by occurrence, so a template
+                   naming four things in five slots throws FormatException out of the logger, and out of
+                   this BackgroundService, and StopHost then takes the process down - a retry path that
+                   kills the service harder than the failure it was retrying. */
                 _logger.LogWarning(
                     "Cannot reach or migrate the Postgres store yet ({Message}) — attempt {Attempt} of " +
                     "{Total}, retrying in {Delay}s. A store that is restarting, failing over or still " +
-                    "coming up recovers on its own; if this reaches attempt {Total} the next line is " +
-                    "critical and collection does not start.",
+                    "coming up recovers on its own; after the last attempt this becomes a critical line " +
+                    "and collection does not start.",
                     ex.Message, attempt, StoreStartupFailureTriage.MigrateAttempts,
                     (int)StoreStartupFailureTriage.MigrateRetryDelay.TotalSeconds);
                 await Task.Delay(StoreStartupFailureTriage.MigrateRetryDelay, stoppingToken);

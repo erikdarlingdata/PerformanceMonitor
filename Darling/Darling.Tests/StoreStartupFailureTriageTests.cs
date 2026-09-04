@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -338,6 +339,44 @@ public class StoreStartupFailureTriageTests
         Assert.True(
             applier.IndexOf("continue;", StringComparison.Ordinal) < beginAt,
             "the already-applied skip must precede the transaction, which is what makes a retry resume rather than redo");
+    }
+
+    /// <summary>
+    /// The retry warning's message template names each thing ONCE.
+    ///
+    /// <para>Not style. <c>LogValuesFormatter</c> numbers placeholders by OCCURRENCE, not by name, so a
+    /// template that mentions <c>{Total}</c> twice needs five arguments for the four things it names and
+    /// <c>String.Format</c> throws <see cref="FormatException"/> on the fifth. That escapes the logger,
+    /// escapes this <c>BackgroundService</c>, and <c>BackgroundServiceExceptionBehavior.StopHost</c> then
+    /// stops the process - so the retry path would kill the service harder than the transient failure it
+    /// was added to survive, and only on the attempt that actually retries. This was a real defect in the
+    /// first cut of #2936, found by running the service against a store that was down and not by any
+    /// assertion, which is precisely why it is pinned.</para>
+    /// </summary>
+    [Fact]
+    public void TheRetryWarningNamesEachPlaceholderExactlyOnce()
+    {
+        var retryArm = ExtractMigrateRetryArm(ReadWorkerSource());
+
+        /* Read the template out of the arm: the concatenated string literals, minus the C# glue. */
+        var template = string.Concat(
+            Regex.Matches(retryArm, "\"(?<text>[^\"]*)\"").Select(m => m.Groups["text"].Value));
+
+        var placeholders = Regex.Matches(template, "\\{(?<name>[A-Za-z][A-Za-z0-9]*)\\}")
+            .Select(m => m.Groups["name"].Value)
+            .ToList();
+
+        Assert.NotEmpty(placeholders);
+        Assert.Equal(
+            new[] { "Message", "Attempt", "Total", "Delay" },
+            placeholders);
+
+        var repeated = placeholders.GroupBy(n => n, StringComparer.Ordinal)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToList();
+
+        Assert.Empty(repeated);
     }
 
     private static string ExtractMigrateRetryArm(string workerSource)
