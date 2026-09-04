@@ -10,9 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection.Metadata;
-using System.Reflection.Metadata.Ecma335;
-using System.Reflection.PortableExecutable;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -137,105 +134,20 @@ public sealed class ProbeDenominatorTests
     }
 
     /// <summary>
-    /// Scans the compiler-generated state machine types for the two fetches, counting calls by callee name.
-    /// Same shape as <see cref="FetchStoreConnectionBorrowTests"/>: an async method's body lives in its
-    /// state machine after compilation, not in the source method.
+    /// Counts calls by callee name inside the compiler-generated state machine types for the two fetches:
+    /// an async method's body lives in its state machine after compilation, not in the source method. The
+    /// IL walk itself lives in <see cref="IlCallSiteScanner"/> as of #2898 — this pin carried its own copy,
+    /// which tested every byte offset rather than decoding instructions and could not see a call to a
+    /// GENERIC callee at all.
     /// </summary>
     private static Dictionary<string, Dictionary<string, int>> ScanFetchStateMachines()
     {
         var assemblyPath = typeof(DarlingCollectorRunner).Assembly.Location;
         Assert.True(File.Exists(assemblyPath), $"Service assembly not found at '{assemblyPath}'.");
 
-        var wanted = new HashSet<string>(Controls, StringComparer.Ordinal);
-        foreach (var setter in RequiredSetter.Values)
-        {
-            wanted.Add(setter);
-        }
-
-        var results = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
-
-        using var stream = File.OpenRead(assemblyPath);
-        using var peReader = new PEReader(stream);
-        var metadata = peReader.GetMetadataReader();
-
-        /* A callee is reachable through a MemberReference (defined in another assembly — both the setters
-           and the controls are) or a MethodDefinition. Collect both so the scan does not depend on where
-           the callee happens to live. */
-        var tokenToName = new Dictionary<int, string>();
-
-        foreach (var handle in metadata.MemberReferences)
-        {
-            var name = metadata.GetString(metadata.GetMemberReference(handle).Name);
-            if (wanted.Contains(name))
-            {
-                tokenToName[MetadataTokens.GetToken(handle)] = name;
-            }
-        }
-
-        foreach (var handle in metadata.MethodDefinitions)
-        {
-            var name = metadata.GetString(metadata.GetMethodDefinition(handle).Name);
-            if (wanted.Contains(name))
-            {
-                tokenToName[MetadataTokens.GetToken(handle)] = name;
-            }
-        }
-
-        foreach (var typeHandle in metadata.TypeDefinitions)
-        {
-            var type = metadata.GetTypeDefinition(typeHandle);
-            var typeName = metadata.GetString(type.Name);
-
-            var machine = FetchStateMachines.FirstOrDefault(
-                m => typeName.StartsWith(m, StringComparison.Ordinal));
-            if (machine is null)
-            {
-                continue;
-            }
-
-            if (!results.TryGetValue(machine, out var counts))
-            {
-                counts = wanted.ToDictionary(n => n, _ => 0, StringComparer.Ordinal);
-                results[machine] = counts;
-            }
-
-            foreach (var methodHandle in type.GetMethods())
-            {
-                var method = metadata.GetMethodDefinition(methodHandle);
-                if (method.RelativeVirtualAddress == 0)
-                {
-                    continue;
-                }
-
-                var il = peReader.GetMethodBody(method.RelativeVirtualAddress).GetILBytes();
-                if (il is null)
-                {
-                    continue;
-                }
-
-                /* Every offset is tested and nothing is skipped, matching #2822's scanner. Here the
-                   assertion is "greater than zero" rather than "zero", so over-counting is the risk rather
-                   than under-counting — but the controls are counted identically and a spurious match on a
-                   four-byte operand cannot conjure the specific setter token this test names. Advancing
-                   past a match would risk stepping over a genuine call, which is the worse direction for
-                   the paired must-appear assertion. */
-                for (var i = 0; i + 4 < il.Length; i++)
-                {
-                    /* call (0x28) and callvirt (0x6F), each followed by a 4-byte metadata token. */
-                    if (il[i] != 0x28 && il[i] != 0x6F)
-                    {
-                        continue;
-                    }
-
-                    var token = BitConverter.ToInt32(il, i + 1);
-                    if (tokenToName.TryGetValue(token, out var name))
-                    {
-                        counts[name]++;
-                    }
-                }
-            }
-        }
-
-        return results;
+        return IlCallSiteScanner.CountCallsByStateMachine(
+            assemblyPath,
+            FetchStateMachines,
+            Controls.Concat(RequiredSetter.Values));
     }
 }
