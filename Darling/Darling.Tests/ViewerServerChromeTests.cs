@@ -61,7 +61,8 @@ public sealed class ViewerServerChromeTests
         var now = DateTime.UtcNow;
         var server = Server();
 
-        server.ApplyFreshness(now.AddMinutes(-30), now);
+        /* -31: exactly 30 minutes is the shared collection-stopped boundary and bands Stale (strict >, #2794). */
+        server.ApplyFreshness(now.AddMinutes(-31), now);
 
         Assert.False(server.IsOnline);
         Assert.Equal("Offline", server.DotStatus);

@@ -212,9 +212,11 @@ public sealed class ViewerServerSummaryDisplayTests
     [InlineData(120, ServerFreshness.Fresh)]    // exactly 2x cadence — still fresh
     [InlineData(121, ServerFreshness.Stale)]    // just past 2x cadence
     [InlineData(300, ServerFreshness.Stale)]    // 5 min — stale
-    [InlineData(900, ServerFreshness.Stale)]    // exactly 15 min — still stale
-    [InlineData(901, ServerFreshness.Offline)]  // just past 15 min
-    [InlineData(1200, ServerFreshness.Offline)] // 20 min — offline
+    [InlineData(900, ServerFreshness.Stale)]    // 15 min — the OLD Offline boundary, now mid-band (#2794)
+    [InlineData(1158, ServerFreshness.Stale)]   // 19m18s — the worst measured legitimate sweep stretch (#2794)
+    [InlineData(1800, ServerFreshness.Stale)]   // exactly 30 min — still stale (strict >)
+    [InlineData(1801, ServerFreshness.Offline)] // just past the shared collection-stopped window
+    [InlineData(3600, ServerFreshness.Offline)] // an hour dark — offline
     public void ClassifyFreshness_BandsByAge(int ageSeconds, ServerFreshness expected)
     {
         var lastCollection = Now.AddSeconds(-ageSeconds);
@@ -246,7 +248,7 @@ public sealed class ViewerServerSummaryDisplayTests
     [Fact]
     public void ApplyFreshness_Offline_ShowsOverlay()
     {
-        var offlineByAge = new ServerSummaryItem { LastCollectionTime = Now.AddMinutes(-20) };
+        var offlineByAge = new ServerSummaryItem { LastCollectionTime = Now.AddMinutes(-31) };
         offlineByAge.ApplyFreshness(Now);
         Assert.False(offlineByAge.IsOnline);
         Assert.True(offlineByAge.IsOffline);

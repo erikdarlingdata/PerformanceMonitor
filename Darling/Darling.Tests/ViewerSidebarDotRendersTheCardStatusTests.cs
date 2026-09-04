@@ -75,7 +75,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
         {
             Now,                      // Fresh
             Now.AddMinutes(-5),       // Stale
-            Now.AddMinutes(-30),      // Offline
+            Now.AddMinutes(-31),      // Offline — just past the shared 30-min collection-stopped window (#2794)
             null,                     // NeverCollected — the one that disagreed
         };
 
@@ -116,7 +116,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
     {
         Assert.Equal("Online", Dot(Now).DotStatus);
         Assert.Equal("Warning", Dot(Now.AddMinutes(-5)).DotStatus);
-        Assert.Equal("Offline", Dot(Now.AddMinutes(-30)).DotStatus);
+        Assert.Equal("Offline", Dot(Now.AddMinutes(-31)).DotStatus);
         Assert.Equal("Awaiting first collection", Dot(null).DotStatus);
         Assert.Equal("Unknown", new DarlingServer(1, "SQL2022", "Prod", true, 16).DotStatus);
     }

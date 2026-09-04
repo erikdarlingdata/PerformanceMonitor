@@ -204,7 +204,7 @@ GROUP BY server_id";
     /// re-scanning the server's ENTIRE collection archive (millions of rows) on every fleet-overview call just
     /// to find a timestamp from the last few minutes — the exact "materialize a bound, don't scan the whole
     /// history" mistake fixed elsewhere today (pg_statement_stats #2691, pg_wait_stats #2695). The window is
-    /// 48 hours, not the 15-minute OfflineThreshold this feeds: a server genuinely offline for HOURS must still
+    /// 48 hours, not the OfflineThreshold this feeds: a server genuinely offline for HOURS must still
     /// report its true last-seen time (age computed correctly, still bands Offline) rather than falling out of
     /// the result entirely and being treated as having no history at all.</summary>
     public const string FleetLastCollectionSql = @"
