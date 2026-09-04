@@ -282,8 +282,14 @@ ON CONFLICT (server_id) DO UPDATE SET
                whenever this group is written - a NULL beside a 0 count says 'nothing ever arrived', and a
                NULL beside a NULL count says the row predates this rung. 0 is left free to mean what it
                honestly means: row 1 arrived instantly. */
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue ? drain.Value.RowsRead : (object)DBNull.Value });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue ? drain.Value.BytesRead : (object)DBNull.Value });
+            /* Every figure guarded on >= 0, not just the last-read one (#2864 review). The budget can fire
+               INSIDE ExecuteReaderAsync, before the counting reader is constructed at all - the abandon arm
+               then returns ServerPhasesMeasured: true with these still at their -1 default, because only
+               the open was stamped. Unguarded, that wrote a literal -1 into a bigint column and broke this
+               rung's own documented invariant: that a stored count is always a real non-negative number
+               and -1 is a value no real count can take. An in-memory sentinel must not survive the write. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue && drain.Value.RowsRead >= 0 ? drain.Value.RowsRead : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue && drain.Value.BytesRead >= 0 ? drain.Value.BytesRead : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain.HasValue && drain.Value.LastReadMs >= 0 ? (int)drain.Value.LastReadMs : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain?.TargetSessionId is int spid ? spid : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = sweepPeerMaxMs is int peer ? peer : (object)DBNull.Value });

@@ -4721,7 +4721,10 @@ LIMIT 1", connection);
 
                 if (effective.FrequencyMinutes == 0)
                 {
-                    await RunOneAsync(server, runner, name, cancellationToken);
+                    /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
+                       never resets it, so folding it in would mix a previous body's bookkeeping
+                       into these rows - the cross-body contamination the reset exists to prevent. */
+                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
                 }
                 else
                 {
@@ -4898,13 +4901,17 @@ LIMIT 1", connection);
                    sys.dm_db_tuning_recommendations is re-read whole on every successful pass regardless —
                    a skipped tick simply re-reads the same (or since-refreshed) live set next time, the
                    same "defers, does not drop" property #1960 gives query_store's watermark. */
+                /* #2864 review: snapshot the peer mark HERE, at dispatch, and hand it to the run. Reading it
+                   at completion is correct only for the sequential arm; a detached run finishes 100-230s
+                   later, by which time the 15s sweep has reset and rebuilt the mark from unrelated ticks. */
+                var peerMaxAtDispatchMs = PeerMaxOrNull(server);
                 if (IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name))
                 {
-                    _ = RunDetachedAsync(server, runner, name, cancellationToken);
+                    _ = RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
                 }
                 else
                 {
-                    await RunOneAsync(server, runner, name, cancellationToken);
+                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
                 }
             }
         }
@@ -4980,7 +4987,8 @@ LIMIT 1", connection);
                     continue;
                 }
 
-                totalRows += await RunOneAsync(server, runner, name, cancellationToken);
+                /* null for the same reason as the on-load loop: an operator snapshot is not a body. */
+                totalRows += await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
                 collectorsRun++;
             }
 
@@ -5621,7 +5629,15 @@ LIMIT 1";
     /// (0 on skip/permissions/error) so an on-demand snapshot can tally them; the scheduled/on-load callers
     /// simply discard the count.
     /// </summary>
-    private async Task<int> RunOneAsync(ServerLoopState server, DarlingCollectorRunner runner, string collectorName, CancellationToken cancellationToken)
+    /// <param name="peerMaxAtDispatchMs">
+    /// The sweep body's peer high-water mark AS AT DISPATCH (#2864 review), or null when this call is not
+    /// part of a scheduled body. Passed in rather than re-read from <c>server.SweepPeerMaxMs</c> at
+    /// completion because <c>query_store</c> and <c>plan_correction</c> are dispatched FIRE-AND-FORGET:
+    /// their runs outlive the body by 100-230s while the 15s sweep resets and rebuilds the mark several
+    /// times over, so a value read at completion describes some unrelated later tick. Those two are among
+    /// the heavies this diagnostic exists to explain, so reading it late is wrong exactly where it matters.
+    /// </param>
+    private async Task<int> RunOneAsync(ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken)
     {
         var runtime = server.Runtime;
         if (runtime is null || !s_dispatch.TryGetValue(collectorName, out var run))
@@ -5714,7 +5730,7 @@ LIMIT 1";
 
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, status, result.Rows, result.SqlMs, result.StorageMs, result.Note,
-                result.Fanout, result.ServerPhases, result.Drain, PeerMaxOrNull(server), _logger, cancellationToken);
+                result.Fanout, result.ServerPhases, result.Drain, peerMaxAtDispatchMs, _logger, cancellationToken);
 
             /* #2864 item 3: fold THIS run into the body's peer high-water mark, AFTER its own row is
                written so a collector is never its own peer. The mark answers the question that took
@@ -5948,11 +5964,11 @@ LIMIT 1";
     /// containment every other fire-and-track body in this file gets.
     /// </summary>
     private async Task RunDetachedAsync(
-        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, CancellationToken cancellationToken)
+        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken)
     {
         try
         {
-            await RunOneAsync(server, runner, collectorName, cancellationToken);
+            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken);
         }
         catch (OperationCanceledException)
         {

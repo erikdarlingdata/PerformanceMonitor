@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
@@ -195,6 +196,84 @@ public class CollectionLogDrainForensicsStoreTests
         Assert.Equal(0, drain.RowsRead);
         Assert.Equal(-1, drain.LastReadMs);
         Assert.Equal(77, drain.TargetSessionId);
+    }
+
+    /// <summary>
+    /// The in-memory -1 sentinel must never reach the store as a literal (#2864 review).
+    ///
+    /// <para>The reachable case is not exotic: the wall-clock budget can fire INSIDE
+    /// <c>ExecuteReaderAsync</c>, before the counting reader is constructed at all. The abandon arm then
+    /// returns with the phases MEASURED (the open was stamped from its own finally) but the counts still at
+    /// their -1 default. Unguarded, that writes a literal -1 into a bigint column and breaks this rung's own
+    /// documented invariant - that a stored count is always a real non-negative number, and -1 is a value no
+    /// real count can take. Every figure is guarded, not just the last-read one.</para>
+    /// </summary>
+    [Fact]
+    public void TheUnmeasuredSentinelIsNeverWrittenAsALiteral()
+    {
+        /* Exactly the shape the abandon-during-open path produces. */
+        var openStall = new CollectorRunResult(
+            0, 120051, 0, Abandoned: true, ServerPhasesMeasured: true,
+            ServerOpenMs: 120051, ServerDrainMs: 0);
+
+        var drain = openStall.Drain!.Value;
+        Assert.Equal(-1, drain.RowsRead);
+        Assert.Equal(-1, drain.BytesRead);
+        Assert.Equal(-1, drain.LastReadMs);
+
+        /* Each of the three is guarded independently at the write, so none can leak. */
+        var writer = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingObservability.cs");
+        foreach (var guard in new[]
+                 {
+                     "drain.Value.RowsRead >= 0", "drain.Value.BytesRead >= 0", "drain.Value.LastReadMs >= 0",
+                 })
+        {
+            Assert.Contains(guard, writer, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A string read through the indexer counts once, not zero times (#2864 review). "A collector cannot
+    /// forget to count" is this decorator's whole claim, and forwarding the indexer straight to the inner
+    /// reader would have made it quietly false for the first collector that used the idiomatic syntax.
+    /// </summary>
+    [Fact]
+    public async Task TheIndexerCountsTheSameAsTheTypedGetter()
+    {
+        var byOrdinal = new DrainCountingDataReader(new FakeRowReader(["abcd"]), Stopwatch.StartNew());
+        await byOrdinal.ReadAsync(CancellationToken.None);
+        _ = byOrdinal[0];
+        Assert.Equal(8, byOrdinal.PayloadBytes);
+
+        var byName = new DrainCountingDataReader(new FakeRowReader(["abcd"]), Stopwatch.StartNew());
+        await byName.ReadAsync(CancellationToken.None);
+        _ = byName["value"];
+        Assert.Equal(8, byName.PayloadBytes);
+    }
+
+    /// <summary>
+    /// The peer mark is captured at DISPATCH and handed to the run, never re-read at completion.
+    ///
+    /// <para><c>query_store</c> and <c>plan_correction</c> are dispatched fire-and-forget and run for
+    /// 100-230s, while the 15s sweep resets and rebuilds the mark several times over. Reading it at
+    /// completion attributes those rows to an unrelated later tick - and those two are among the very
+    /// heavies this diagnostic exists to explain, so the late read is wrong exactly where it matters most.</para>
+    /// </summary>
+    [Fact]
+    public void ThePeerMarkIsCapturedAtDispatchNotAtCompletion()
+    {
+        var worker = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
+
+        Assert.Contains("var peerMaxAtDispatchMs = PeerMaxOrNull(server);", worker, StringComparison.Ordinal);
+        Assert.Contains("RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken)", worker, StringComparison.Ordinal);
+
+        /* The write uses the captured parameter. Re-reading live server state here is the defect. */
+        Assert.Contains("result.Drain, peerMaxAtDispatchMs, _logger", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("result.Drain, PeerMaxOrNull(server)", worker, StringComparison.Ordinal);
+
+        /* The two callers that are not a scheduled body pass null rather than folding a previous body's
+           bookkeeping into their rows. */
+        Assert.Equal(2, Regex.Matches(worker, @"peerMaxAtDispatchMs: null").Count);
     }
 
     private static string ReadSource(string relativePath)

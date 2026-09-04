@@ -148,8 +148,12 @@ public sealed class DrainCountingDataReader : DbDataReader
     /* Everything below is straight forwarding. Present so the wrapper cannot silently fall back to
        DbDataReader's default implementations, which route through GetValue and would double-count a string
        column read via a typed getter. */
-    public override object this[int ordinal] => _inner[ordinal];
-    public override object this[string name] => _inner[name];
+    /* Routed through THIS type's GetValue rather than the inner reader's indexer (#2864 review), so a
+       string read via reader[ordinal] counts exactly once instead of not at all. No collector uses the
+       indexer today, but 'a collector cannot forget to count' is this type's whole claim, and it would
+       have been quietly false for the first one that reached for the idiomatic syntax. */
+    public override object this[int ordinal] => GetValue(ordinal);
+    public override object this[string name] => GetValue(GetOrdinal(name));
     public override int Depth => _inner.Depth;
     public override int FieldCount => _inner.FieldCount;
     public override bool HasRows => _inner.HasRows;
