@@ -4904,7 +4904,7 @@ LIMIT 1", connection);
                    surfacing as an unobserved task exception. */
                 /* #2717: plan_correction gets the identical treatment for the identical reason. Its own
                    SQL is already correctly seek-based (#2687) and averages ~1 second, but on a server
-                   whose Query Store carries the same leaflogix-class distinct-plan-population signature
+                   whose Query Store carries the same workload-class distinct-plan-population signature
                    already root-caused for query_store on multi-03/OMEGA, it can spike to 20+ seconds — the
                    same bimodal shape, just a smaller worst case. Detached the same way, through the
                    generic DetachedCollectorGate (#2717) rather than query_store's own gate, which has an
