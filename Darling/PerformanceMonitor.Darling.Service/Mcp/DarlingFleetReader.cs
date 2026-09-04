@@ -225,7 +225,13 @@ SELECT
     server_id,
     collector_name,
     COUNT(*) AS total_runs,
-    SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+    -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+    -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+    -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+    -- the shared predicate is for: NULL under this NOT would have dropped it.
+    SUM(CASE WHEN status = 'SUCCESS'
+              AND NOT (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned')
+             THEN 1 ELSE 0 END) AS success_count,
     SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
     MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
     SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
@@ -236,7 +242,17 @@ SELECT
     -- HEALTHY while every other surface called it WARNING -- and it would COMPILE, because the
     -- default is silent. That is the #2779/#2784 failure shape: one surface fixed, its sibling
     -- quietly left on the old reading.
-    SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
+    --
+    -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+    -- window can still hold cycles written before #2803 gave abandonment its own status:
+    -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+    -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+    -- filter correct against current writes and silently wrong against older ones, failing in
+    -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+    -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+    -- for query_store), so equality against one rendered sentence matches one collector.
+    SUM(CASE WHEN (status = 'ABANDONED' OR (rows_collected = 0 AND COALESCE(error_message, '') LIKE 'wall-clock budget (%s) reached; cycle abandoned'))
+             THEN 1 ELSE 0 END) AS abandoned_count
 FROM v_collection_log
 WHERE collection_time >= $1
 GROUP BY server_id, collector_name";

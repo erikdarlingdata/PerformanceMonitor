@@ -301,6 +301,47 @@ public static class EnumeratedCollectorDriver
         "wall-clock budget ({0}s) reached; cycle abandoned";
 
     /// <summary>
+    /// <see cref="WholeCycleBudgetNoteFormat"/> as a SQL <c>LIKE</c> pattern, the budget hole replaced by
+    /// <c>%</c> so ONE pattern matches every budget. Pinned equal to that format with <c>{0}</c> substituted,
+    /// so re-wording the note cannot leave the reads matching a sentence nothing writes.
+    ///
+    /// <para>The budget is interpolated and the shipped values differ - <c>procedure_stats</c>,
+    /// <c>query_stats</c> and <c>plan_correction</c> carry 120 s while <c>query_store</c> carries the 600 s
+    /// <c>QueryStoreCollector.PerDatabaseWallClockBudget</c> - so equality against any one rendered sentence
+    /// matches one collector and silently misses the rest.</para>
+    /// </summary>
+    public const string WholeCycleBudgetNoteSqlPattern = "wall-clock budget (%s) reached; cycle abandoned";
+
+    /// <summary>
+    /// How a read recognises a whole-cycle #2673 abandonment from the ROW rather than from its status:
+    /// nothing stored, and the abandonment's own note. Both facts are true of every abandonment ever
+    /// written, which is what <see cref="AbandonedStatus"/> is not.
+    ///
+    /// <para><c>collection_log</c> is an append-only hypertable, so the rows written before #2803 gave
+    /// abandonment its own status cannot be rewritten: they carry <c>status = 'SUCCESS'</c> beside
+    /// <c>rows_collected = 0</c> and this note (#2926). A count keyed on the status alone reads them as zero
+    /// abandonments AND as successes, so any window straddling that boundary under-reports - silently, and
+    /// in the direction that looks healthy.</para>
+    ///
+    /// <para><c>COALESCE</c> rather than a bare <c>LIKE</c>: <c>NULL LIKE</c> is NULL, and this predicate is
+    /// also used under a <c>NOT</c>, where a NULL would drop an ordinary empty run out of the success count
+    /// instead of leaving it there.</para>
+    /// </summary>
+    public const string AbandonedByNotePredicateSql =
+        "(rows_collected = 0 AND COALESCE(error_message, '') LIKE '" + WholeCycleBudgetNoteSqlPattern + "')";
+
+    /// <summary>
+    /// The era-invariant abandonment key the five Collection-Health reads count on (#2926): this status, or
+    /// <see cref="AbandonedByNotePredicateSql"/> for the rows that predate it.
+    ///
+    /// <para>SQL text rather than a shared query, because the five reads are <c>const</c> strings in three
+    /// projects against two engines. Each embeds this sentence verbatim and a pin asserts it is still there,
+    /// so a sixth read cannot quietly go back to status-only.</para>
+    /// </summary>
+    public const string AbandonedRunPredicateSql =
+        "(status = '" + AbandonedStatus + "' OR " + AbandonedByNotePredicateSql + ")";
+
+    /// <summary>
     /// The statuses the freshness reads count as a collection having happened —
     /// <c>DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync</c>'s <c>last_success</c> and
     /// <c>recent_success</c>, and the health reads' <c>last_success_time</c>. Named here so the invariant

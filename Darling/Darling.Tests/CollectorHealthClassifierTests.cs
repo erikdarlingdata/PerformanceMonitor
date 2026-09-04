@@ -182,6 +182,22 @@ public sealed class CollectorHealthClassifierTests
 
         Assert.Contains("status = 'ABANDONED'", sql, StringComparison.Ordinal);
         Assert.Contains("AS abandoned_count", sql, StringComparison.Ordinal);
+
+        /* #2926, and why the status alone is not the key: collection_log is append-only, so a window can
+           still hold cycles abandoned BEFORE #2803 gave abandonment its own status - SUCCESS on disk,
+           nothing stored, the budget note. Counted by status alone this read 0 for them AND counted them
+           as successes, so the collector banded HEALTHY while losing cycles. Asserted over all four reads
+           by name for the same reason the count itself is: a surface left behind reports the window clean
+           while its siblings report WARNING, and it does so while compiling. */
+        Assert.Contains(EnumeratedCollectorDriver.AbandonedRunPredicateSql, sql, StringComparison.Ordinal);
+        Assert.Contains("AND NOT " + EnumeratedCollectorDriver.AbandonedByNotePredicateSql, sql, StringComparison.Ordinal);
+
+        /* The status-only form is GONE, not merely joined by an OR somewhere else in the string. The
+           assertion below it is the POSITIVE CONTROL for this negative: the identical Contains form over
+           the sibling bucket every one of these reads demonstrably carries, so a DoesNotContain that
+           passed by matching nothing at all cannot hide here. */
+        Assert.DoesNotContain("SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
     }
 
     [Theory]

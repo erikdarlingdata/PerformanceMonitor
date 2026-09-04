@@ -137,6 +137,43 @@ public sealed class CollectorHealthClassifierTests
     }
 
     /// <summary>
+    /// #2926, Lite's half of the era-invariance the four Darling banding reads are pinned for in
+    /// <c>Darling.Tests/CollectorHealthClassifierTests</c>. The abandonment count must be keyed on the
+    /// ROW - nothing stored, plus the budget note - and not on <c>ABANDONED</c> alone, because
+    /// <c>collection_log</c> is append-only and a window can still hold cycles abandoned before #2803
+    /// gave abandonment its own status. Those carry <c>status = 'SUCCESS'</c>, so a status-only count read
+    /// them as zero abandonments AND as successes: the collector banded HEALTHY while losing cycles.
+    ///
+    /// <para>By REFERENCE to the constant, not by grepping the file: this repo's SQL carries discursive
+    /// <c>--</c> commentary that quotes column names and predicates, and a source scan cannot tell the
+    /// query from the prose beside it.</para>
+    /// </summary>
+    [Fact]
+    public void TheCollectionHealthRead_CountsAbandonmentByTheRow_NotByTheStatusAlone()
+    {
+        var sql = LocalDataService.CollectionHealthSql;
+
+        Assert.Contains("AS abandoned_count", sql, StringComparison.Ordinal);
+        Assert.Contains(EnumeratedCollectorDriver.AbandonedRunPredicateSql, sql, StringComparison.Ordinal);
+
+        /* And the same rows leave the success bucket, so the Success and Abandoned columns that sit side
+           by side in the Collection Health grid cannot both claim one run. */
+        Assert.Contains("AND NOT " + EnumeratedCollectorDriver.AbandonedByNotePredicateSql, sql, StringComparison.Ordinal);
+        Assert.Contains("AS success_count", sql, StringComparison.Ordinal);
+
+        /* The status-only form is gone. The line under it is this negative's POSITIVE CONTROL - the same
+           Contains form over the sibling bucket this read demonstrably carries - so a DoesNotContain that
+           passed by matching nothing cannot hide here. */
+        Assert.DoesNotContain("SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
+
+        /* The predicate reads rows_collected, and this query's aggregates sit outside a subquery that
+           ENUMERATES its columns - so the column has to be projected through it or the read fails at the
+           store and nowhere earlier. */
+        Assert.Contains("rows_collected,", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The field shape this band exists for: a collector whose gate flipped off for a target (agent_status
     /// and running_jobs on an RDS SQL Server instance where SQL Agent job data is not reachable) simply
     /// stops being invoked. Its last historical success sits well inside the health window and ages past
