@@ -4024,23 +4024,30 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// was) a several-rung upgrade can outlast the waiter while every individual statement stayed inside its
     /// own limit, so the two budgets are named separately and move independently.
     ///
-    /// <para><b>Lower bound — the total the lock can legitimately be held for.</b> Of the 108 rungs in
-    /// <see cref="Scripts"/>, exactly FOUR touch pre-existing data: V22 (index built over every existing chunk
+    /// <para><b>Lower bound — the total the lock can legitimately be held for.</b> Of the 109 rungs in
+    /// <see cref="Scripts"/> (V1-V110, V45 permanently absent), SIX touch data an earlier rung created, and
+    /// FOUR of those are big enough to spend any of this budget: V22 (index built over every existing chunk
     /// of the populated <c>index_object_stats</c> hypertable), V23 (<c>create_hypertable</c> with
     /// <c>migrate_data =&gt; true</c>, rewriting <c>collection_log</c>'s rows into chunks), V39 (two partial
     /// indexes over the populated <c>query_stats</c> and <c>procedure_stats</c> hypertables) and V104 (index
-    /// over the populated <c>pg_deadlocks</c>). Every other rung creates the table it then indexes, or is a
-    /// metadata-only <c>ADD COLUMN</c> / <c>ALTER TABLE ... SET SCHEMA</c> / <c>DROP NOT NULL</c> / view
-    /// refresh — the whole 108-rung ladder measured 0.301 s end to end on a fresh PostgreSQL 17.11 /
-    /// TimescaleDB 2.29.2 store, advisory lock and version stamps included. Each of the four is ONE command,
-    /// so <see cref="MigrationCommandTimeoutSeconds"/> already caps the data-moving part of a full
-    /// V21-to-current upgrade at four times that bound; the fifth multiple here is margin, sized at one
-    /// statement bound because that is the granularity this ladder grows by — one new data-moving rung.
-    /// Seeded reference points on that same local store, warm and on local NVMe (a cold busy store being why
-    /// the statement bound is 300 s rather than 30): V22 1.29 s over 907 MB / 90 chunks, V23 9.37 s over a
-    /// 608 MB heap, V39 1.44 s over 1.26 GB. The live 42-server store holds 2.72 GB, 0.69 GB and 24.5 GB in
-    /// those same tables, so the real figures are larger and colder — which is the point of taking the floor
-    /// from the per-statement bound rather than from these timings.</para>
+    /// over the populated <c>pg_deadlocks</c>). The other two are costed at zero rather than overlooked —
+    /// both are genuine DML against pre-existing rows, on targets that cannot carry a cost: V62 adds a CHECK
+    /// constraint to <c>config.config_service</c>, which validates every existing row of a SINGLE-ROW
+    /// control-plane table, and V77 deletes two watermark keys from <c>collect.collector_state</c>, which
+    /// holds a few rows per server per collector rather than a hypertable's worth. Every other rung creates
+    /// the table it then indexes, or is a metadata-only <c>ADD COLUMN</c> /
+    /// <c>ALTER TABLE ... SET SCHEMA</c> / <c>DROP NOT NULL</c> / view refresh — the ladder measured
+    /// 0.301 s end to end at 108 rungs on a fresh PostgreSQL 17.11 / TimescaleDB 2.29.2 store, advisory lock
+    /// and version stamps included. The applier gives each rung's WHOLE SQL a single
+    /// <see cref="MigrationCommandTimeoutSeconds"/>, so that bound is per-RUNG and V39's two indexes cost one
+    /// multiple rather than two: four rungs is four times the bound for the data-moving part of a full
+    /// V21-to-current upgrade, and the fifth multiple here is margin, sized at one rung bound because that is
+    /// the granularity this ladder grows by — one new data-moving rung. Seeded reference points on that same
+    /// local store, warm and on local NVMe (a cold busy store being why the rung bound is 300 s rather than
+    /// 30): V22 1.29 s over 907 MB / 90 chunks, V23 9.37 s over a 608 MB heap, V39 1.44 s over 1.26 GB. The
+    /// live 42-server store holds 2.72 GB, 0.69 GB and 24.5 GB in those same tables, so the real figures are
+    /// larger and colder — which is the point of taking the floor from the per-rung bound rather than from
+    /// these timings.</para>
     ///
     /// <para><b>Upper bound — there is none in the code, which is a finding rather than an omission.</b>
     /// <c>MigrateAsync</c> has exactly one production caller, <c>DarlingWorker.RunCollectionLoopAsync</c>, and
@@ -4056,9 +4063,15 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// cheap direction, so this errs long — but stays FINITE, so a genuinely wedged holder still produces a
     /// readable deadline instead of the silent hang #2874 exists to stop.</para>
     ///
-    /// <para>A multiple rather than a literal so the two budgets cannot drift apart if the statement bound
-    /// moves. This NARROWS the mid-wait death rather than closing it: a fifth data-moving rung, or one rung
-    /// that genuinely needs longer than its own bound, still outlasts the wait.</para>
+    /// <para>A multiple rather than a literal so the two budgets cannot drift apart if the rung bound moves.
+    /// This NARROWS the mid-wait death rather than closing it, and #2894 records the two ways it still dies:
+    /// a fifth FLOOR-SETTING rung, or one rung that genuinely needs longer than its own bound. The first is
+    /// now pinned rather than trusted — <c>MigrationDataMovingRungCensusPins</c> scans every rung's shipped
+    /// SQL for data-moving shapes and fails when that set stops matching the census above, so a new one
+    /// arrives carrying this derivation in a failure message instead of arriving silently. It resolves each
+    /// statement's TARGET rather than counting keywords, because an index on a table the same rung creates is
+    /// free and 130 of this ladder's 134 <c>CREATE INDEX</c> statements are that shape. The second way stays
+    /// unpinned and unclosed: nothing here bounds a rung that overruns its own budget.</para>
     /// </summary>
     private const int MigrationLockWaitTimeoutSeconds = 5 * MigrationCommandTimeoutSeconds;
 
