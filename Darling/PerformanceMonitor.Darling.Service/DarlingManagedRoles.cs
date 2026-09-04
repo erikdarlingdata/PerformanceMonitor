@@ -223,7 +223,7 @@ public static class DarlingManagedRoles
         var composeTimeoutSeconds = await ReadComposeStatementTimeoutAsync(connection, cancellationToken);
 
         await using var command = new NpgsqlCommand(
-            BuildProvisioningSql(adminPassword, viewerPassword, mcpPassword, composeTimeoutSeconds), connection);
+            BuildProvisioningSql(adminPassword, viewerPassword, mcpPassword, composeTimeoutSeconds), connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         await command.ExecuteNonQueryAsync(cancellationToken);
 
         logger.LogInformation(
@@ -427,7 +427,7 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
         try
         {
             await using var command = new NpgsqlCommand(
-                "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1", connection);
+                "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var value = await command.ExecuteScalarAsync(cancellationToken);
             return value is int seconds ? seconds : 15;
         }
