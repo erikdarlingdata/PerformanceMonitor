@@ -19,7 +19,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// <para>Tests for <see cref="IlCallSiteScanner"/> itself (#2898) — the instrument four reachability pins
+/// <para>Tests for <see cref="IlCallSiteScanner"/> itself (#2898) — the instrument five reachability pins
 /// now depend on. A scanner that reports fewer call sites than exist makes every one of those pins pass
 /// vacuously, so the scanner needs its own witnesses, and they have to fail for the reasons that actually
 /// broke the idiom rather than for a reason nobody would hit.</para>
@@ -83,7 +83,7 @@ public sealed class IlCallSiteScannerTests
         Assert.Equal(GenuineOffset, decoded[0].Offset);
         Assert.Equal(ContrivedToken, decoded[0].Token);
 
-        /* The form two of the four pins shipped: it loses the genuine call entirely and substitutes a
+        /* The form two of the five pins shipped: it loses the genuine call entirely and substitutes a
            phantom, so a "must be called from a handler" assertion would be answering about a byte inside an
            unrelated operand. A false negative, and that is the dangerous direction for these pins. */
         var skipping = LegacyByteScan(il, ContrivedToken, advancePastMatch: true);
@@ -91,7 +91,7 @@ public sealed class IlCallSiteScannerTests
         Assert.DoesNotContain(GenuineOffset, skipping);
         Assert.Contains(PhantomOffset, skipping);
 
-        /* The form the other two shipped, and #2890's sibling pin: a superset. It finds the genuine call, so
+        /* The form the other three shipped: a superset. It finds the genuine call, so
            it is safe for a must-appear assertion, but it also reports the phantom — which is why it cannot
            be used for a must-NOT-appear one, and why decoding is better than either. */
         var everyOffset = LegacyByteScan(il, ContrivedToken, advancePastMatch: false);
@@ -235,7 +235,7 @@ public sealed class IlCallSiteScannerTests
 
     /// <summary>
     /// <para>MethodSpec resolution, pinned against the real assembly. <see cref="GenericCallee"/> is generic,
-    /// so every call to it is emitted against a MethodSpec token; the MemberRef+MethodDef map that the four
+    /// so every call to it is emitted against a MethodSpec token; the MemberRef+MethodDef map that the five
     /// original scanners built cannot see a single one.</para>
     ///
     /// <para>Asserted as a comparison rather than as a count, so it states the thing that matters: dropping
@@ -299,7 +299,7 @@ public sealed class IlCallSiteScannerTests
     }
 
     /// <summary>
-    /// Counts call sites for one name using the MemberRef+MethodDef map only — the map the four original
+    /// Counts call sites for one name using the MemberRef+MethodDef map only — the map the five original
     /// scanners built. Exists so the MethodSpec assertion above can compare against it instead of asserting
     /// a bare number that would pass whether or not the loop was there.
     /// </summary>

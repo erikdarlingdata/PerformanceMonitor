@@ -20,7 +20,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// <para>Finds call sites in a built assembly's IL by NAME of the callee, reporting for each one whether it
-/// sits inside an exception-handler region. Four reachability pins were each carrying their own copy of this
+/// sits inside an exception-handler region. Five reachability pins were each carrying their own copy of this
 /// walk (#2898); this is the one implementation they now share.</para>
 ///
 /// <para><b>Why these pins read IL at all.</b> Reachability from a handler is not a value, so no arithmetic
@@ -29,10 +29,10 @@ namespace Darling.Tests;
 /// assembly once reported a shipped change as absent on both the box and the artifact, because it found only
 /// strings at even byte offsets and its positive controls did not share that failure mode.</para>
 ///
-/// <para><b>Why this decodes instructions instead of scanning for opcode-shaped bytes.</b> The four original
+/// <para><b>Why this decodes instructions instead of scanning for opcode-shaped bytes.</b> The five original
 /// copies tested every byte offset for <c>0x28</c>/<c>0x6F</c> and read the next four as a metadata token.
 /// That is not a decoder: a byte inside some other instruction's operand can look like a call opcode. Two of
-/// the four then advanced the cursor by four on a match, which can step over a genuine call instruction's own
+/// the five then advanced the cursor by four on a match, which can step over a genuine call instruction's own
 /// token — a false NEGATIVE, and that is the dangerous direction for a "must be reachable" pin, because a
 /// stamp that stopped being called reads as still called. Measured on the service assembly at the time this
 /// was written: 13,007 method bodies, 70,775 real call sites, 415 byte offsets that look like a call and are
@@ -47,7 +47,7 @@ namespace Darling.Tests;
 /// <para><b>MethodSpec is the third token form, and the trap for anyone extending a pin.</b> A call to a
 /// GENERIC method is emitted against a <c>MethodSpec</c> token (table <c>0x2B</c>) that points at the
 /// underlying <c>MethodDef</c>/<c>MemberRef</c>, so collecting only those two tables reports a generic callee
-/// as never called. It cost #2890's pin its first red — <c>ServerWatermarkIsDiscarded</c> is generic in
+/// as never called. It cost the #2890 pin its first red — <c>ServerWatermarkIsDiscarded</c> is generic in
 /// <c>TRow</c> and was called on every cycle. On the service assembly 4,356 real call sites carry a
 /// MethodSpec token and 51 distinct callee names are reachable ONLY that way, including service-owned generics
 /// like <c>WithGeminiCompatibleTools</c>, <c>SetCount</c>, <c>CollectAsync</c> and <c>WriteBatchAsync</c>.
@@ -55,10 +55,16 @@ namespace Darling.Tests;
 /// </summary>
 internal static class IlCallSiteScanner
 {
-    /// <summary>One resolved call site: who contains it, what it calls, and whether it can run while unwinding.</summary>
+    /// <summary>
+    /// One resolved call site: who contains it, what it calls, and whether it can run while unwinding.
+    /// <para><c>MethodToken</c> is the containing body's MethodDefinition token, and is the only safe way to
+    /// group call sites BY BODY: two overloads share a declaring type and a name, so grouping on those would
+    /// merge them and report a call in one overload as co-occurring with a call in another.</para>
+    /// </summary>
     internal readonly record struct TrackedCall(
         string DeclaringType,
         string MethodName,
+        int MethodToken,
         string CalleeName,
         int Offset,
         bool InExceptionHandler);
@@ -276,6 +282,7 @@ internal static class IlCallSiteScanner
                     found.Add(new TrackedCall(
                         typeName,
                         methodName,
+                        MetadataTokens.GetToken(methodHandle),
                         calleeName,
                         call.Offset,
                         InAnyHandler(regions, call.Offset)));
