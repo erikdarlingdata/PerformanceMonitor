@@ -403,6 +403,20 @@ internal static class CSharpSourceWalker
             return false;
         }
 
+        if (verbatim)
+        {
+            /* A raw string literal cannot carry the `@` prefix, so a quote RUN here is not a delimiter:
+               `@"""` is a verbatim string whose first content character is an escaped quote. Real code, in
+               `Lite.Tests/CrossAppPresetValuePinTests.cs`: `@"\[""" + Regex.Escape(name) + @"""\]..."`.
+               Reading that run as a three-quote raw delimiter swallows the wrong span and desynchronises
+               the rest of the file, which is how this was found — the repo-wide balance sweep left two
+               files unbalanced, both of them this shape. */
+            frame = new Frame(LiteralKind.Verbatim, dollars, 1);
+            bodyStart = j + 1;
+
+            return true;
+        }
+
         var quotes = Run(text, j, '"');
 
         if (quotes >= 3)
@@ -424,7 +438,7 @@ internal static class CSharpSourceWalker
             return true;
         }
 
-        frame = new Frame(verbatim ? LiteralKind.Verbatim : LiteralKind.Regular, dollars, 1);
+        frame = new Frame(LiteralKind.Regular, dollars, 1);
         bodyStart = j + 1;
 
         return true;

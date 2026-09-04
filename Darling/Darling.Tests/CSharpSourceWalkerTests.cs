@@ -261,6 +261,37 @@ public sealed class CSharpSourceWalkerTests
     }
 
     /// <summary>
+    /// <para><c>@"""</c> is a verbatim string whose first content character is an ESCAPED quote, not a
+    /// three-quote raw delimiter — a raw string literal cannot carry the <c>@</c> prefix. The fixture is the
+    /// shape that found this: <c>Lite.Tests/CrossAppPresetValuePinTests.cs</c> builds a regex as
+    /// <c>@"\[""" + Regex.Escape(name) + @"""\]..."</c>, and reading that run as a raw delimiter swallows
+    /// the wrong span and desynchronises everything after it.</para>
+    ///
+    /// <para>Found by widening the balance sweep from the 269 files the pins read to all 2,087 in the repo,
+    /// which left exactly two unbalanced and both of them this shape. It is pinned here rather than by
+    /// widening that sweep permanently, because no pin reads those files and a corpus assertion over code
+    /// nobody scans is a maintenance bill rather than a guard.</para>
+    /// </summary>
+    [Fact]
+    public void AVerbatimStringsQuoteRunIsAnEscape_NotARawDelimiter()
+    {
+        var fixture = Lines(
+            """"        var open = Regex.Match(source, @"\[""" + Escape(name) + @"""\]");"""",
+            """        var after = Reached();""");
+
+        var walked = CSharpSourceWalker.StripCommentsAndStrings(fixture);
+
+        /* Both concatenation operands are literals; the code between and after them is not. */
+        Assert.Contains("Escape(name)", walked, StringComparison.Ordinal);
+        Assert.Contains("Reached()", walked, StringComparison.Ordinal);
+        AssertBlanked(fixture, walked, "Match(source, @");
+
+        /* And the structural consequence, which is what a mis-read delimiter actually costs. */
+        Assert.Equal(0, Balance(walked, '(', ')'));
+        Assert.Equal(0, Balance(walked, '{', '}'));
+    }
+
+    /// <summary>
     /// <para>A <c>char</c> literal holding a quote. This is the one gap in #2913 that was NOT latent:
     /// <c>value.Contains('"')</c> is a real line in <c>ViewerServerTab.ChartContextMenu.cs</c>, inside the
     /// directory both viewer pins glob recursively, and the legacy walk read that quote as opening a string
