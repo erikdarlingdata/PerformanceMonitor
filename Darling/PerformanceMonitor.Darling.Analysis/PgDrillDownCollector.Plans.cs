@@ -51,7 +51,7 @@ LIMIT 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(PlanHandleLookupSql, connection);
+            using var cmd = new NpgsqlCommand(PlanHandleLookupSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(queryHash);
 
@@ -149,7 +149,7 @@ LIMIT 10";
                the parse, even though PG holds no lock. */
             await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
-                using var cmd = new NpgsqlCommand(PlanAdvisoryXmlSql, connection);
+                using var cmd = new NpgsqlCommand(PlanAdvisoryXmlSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
