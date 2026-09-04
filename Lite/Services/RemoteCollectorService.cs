@@ -1284,6 +1284,38 @@ WHERE server_id = $3";
     /// <summary>
     /// Gets the most recent value of a timestamp column from DuckDB for incremental collection.
     /// Returns null on first run or if the query fails (caller uses a fallback window).
+    ///
+    /// <para><b>This read is deliberately UNBOUNDED, unlike its per-database twin
+    /// <see cref="GetLastCollectedTimeForDatabaseAsync"/> and unlike Darling's server-scoped
+    /// equivalent.</b> That asymmetry looks like the oversight #2344 left on the Postgres side and
+    /// #2795 later fixed there, and it was filed as such (#2800). It is not: measured on DuckDB, the
+    /// bound does not pay here and in the common single-server shape it actively costs.</para>
+    ///
+    /// <para>Measured on DuckDB 1.5.5 (the version Lite ships) against this table's SHIPPED generated
+    /// DDL, 50M rows / 4.7 GB — far past any realistic Lite store — with the connection already open so
+    /// the figure is query cost, not connect cost:</para>
+    ///
+    /// <list type="bullet">
+    /// <item><b>One monitored server</b> (the common Lite deployment, where <c>server_id</c> selects
+    /// everything): unbounded <b>0.34 ms</b>, bounded <b>0.56 ms</b>. The bound is a 65% LOSS — DuckDB
+    /// answers the unfiltered <c>MAX</c> from column zonemap metadata, and adding a
+    /// <c>collection_time</c> predicate forces real evaluation instead.</item>
+    /// <item><b>Five monitored servers</b>: unbounded 8.26 ms, bounded 0.84 ms — a real 9.8x, but it
+    /// saves ~7 ms once per five-minute query_store cycle.</item>
+    /// </list>
+    ///
+    /// <para>The per-database twin's bound IS earned and stays: 8.40 ms to 0.79 ms with one server and
+    /// 10.42 ms to 0.93 ms with five — roughly 10x in BOTH shapes, because <c>database_name</c> is not
+    /// in <c>idx_query_store_time(server_id, collection_time)</c>, so that <c>MAX</c> genuinely scans
+    /// and genuinely prunes. The two reads have different cost structures in a columnar engine; in
+    /// Postgres both scanned every chunk, which is why the shapes match there and diverge here.</para>
+    ///
+    /// <para><b>And the failure #2795 actually fixed cannot occur here.</b> Its mechanism was Npgsql's
+    /// undocumented 30 s default <c>CommandTimeout</c> cancelling a 40-50 s read, the cancellation being
+    /// swallowed, and the resulting null reading as a first run — silently downgrading the collector to
+    /// its fallback window. <c>DuckDBCommand.CommandTimeout</c> defaults to <b>0</b>, meaning no limit,
+    /// so there is no ceiling to exceed and nothing to cancel. Confirm that default still holds before
+    /// concluding from this comment; it is what the whole argument rests on.</para>
     /// </summary>
     protected async Task<DateTime?> GetLastCollectedTimeAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken)
