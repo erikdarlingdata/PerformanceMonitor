@@ -206,7 +206,11 @@ public sealed class MigrationLockWaitContentionTests
         var bodySucceeded = false;
         try
         {
-            await ExecuteAsync(holder, "DELETE FROM darling_schema_version WHERE version = " + topVersion.ToString(CultureInfo.InvariantCulture), TestContext.Current.CancellationToken);
+            await ExecuteAsync(
+                holder,
+                "DELETE FROM darling_schema_version WHERE version = $1",
+                TestContext.Current.CancellationToken,
+                topVersion);
 
             /* Read what the store now reports rather than assuming top-1: the ladder is not dense (V45 is
                permanently absent), so the version below the top is a fact to look up, not to compute. */
@@ -244,10 +248,11 @@ public sealed class MigrationLockWaitContentionTests
                 await ReleaseAsync(holder, CancellationToken.None);
                 await ExecuteAsync(
                     holder,
-                    "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ("
-                    + topVersion.ToString(CultureInfo.InvariantCulture) + ", '" + topName!.Replace("'", "''", StringComparison.Ordinal)
-                    + "', now() AT TIME ZONE 'UTC') ON CONFLICT (version) DO NOTHING",
-                    CancellationToken.None);
+                    "INSERT INTO darling_schema_version (version, name, applied_at) "
+                    + "VALUES ($1, $2, now() AT TIME ZONE 'UTC') ON CONFLICT (version) DO NOTHING",
+                    CancellationToken.None,
+                    topVersion,
+                    topName!);
             });
         }
     }
@@ -316,9 +321,20 @@ public sealed class MigrationLockWaitContentionTests
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+    /// <summary>
+    /// Binds rather than concatenates. The staging statements interpolate a version number and a rung
+    /// name, both internal, but hand-rolled quote doubling in a test is a pattern the next test copies —
+    /// and the rest of this class already parameterizes.
+    /// </summary>
+    private static async Task ExecuteAsync(
+        NpgsqlConnection connection, string sql, CancellationToken cancellationToken, params object[] parameters)
     {
         using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 30 };
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.AddWithValue(parameter);
+        }
+
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
