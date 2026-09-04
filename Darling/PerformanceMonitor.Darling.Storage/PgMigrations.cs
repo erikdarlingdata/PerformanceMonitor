@@ -4017,12 +4017,27 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     private const int MigrationCommandTimeoutSeconds = 300;
 
     /// <summary>
-    /// Lock-wait budget (seconds) for the <c>pg_advisory_lock</c> ACQUIRE. A different quantity from
+    /// Lock-wait budget (seconds) for acquiring <see cref="MigrationLockKey"/>. A different quantity from
     /// <see cref="MigrationCommandTimeoutSeconds"/> above, which bounds ONE statement: the lock is taken once
     /// and held while <see cref="MigrateLockedAsync"/> applies EVERY pending rung in the same session, so what
     /// a sibling waits for here is a whole multi-rung session. Set to the statement bound (as this site first
     /// was) a several-rung upgrade can outlast the waiter while every individual statement stayed inside its
     /// own limit, so the two budgets are named separately and move independently.
+    ///
+    /// <para><b>Spent by polling, not by blocking.</b> <see cref="TryAcquireMigrationLockAsync"/> retries
+    /// <c>pg_try_advisory_lock</c> on a <see cref="MigrationLockPollIntervalSeconds"/> cadence until this
+    /// budget is gone, rather than parking one <c>pg_advisory_lock</c> behind an Npgsql
+    /// <c>CommandTimeout</c>. Not because the blocking form overran — measured on PostgreSQL 17.11 it
+    /// expires on time, since a backend asleep on a lock reaches an interrupt check and honours query
+    /// cancel (both <c>lock_timeout</c> and <c>statement_timeout</c> abort a blocked
+    /// <c>pg_advisory_lock</c> there too). It is because the blocking form cannot say what it waited for:
+    /// Npgsql surfaces the expiry as <c>NpgsqlException("Exception while reading from stream")</c> wrapping
+    /// <c>TimeoutException("Timeout during reading attempt")</c>, and the one production caller logs
+    /// <c>ex.Message</c> alone — so a 25-minute wait on a sibling migrator reached the operator as a
+    /// sentence about a stream, which is exactly the #2874 misdiagnosis shape. Polling also makes the wait
+    /// visible WHILE it happens rather than only after it fails, and makes the sleep cancellable by the
+    /// stopping token directly instead of through a cancel-request round trip. Each attempt is a statement
+    /// that cannot block, so nothing about this budget depends on a cancel being delivered at all.</para>
     ///
     /// <para><b>Lower bound — the total the lock can legitimately be held for.</b> Of the 109 rungs in
     /// <see cref="Scripts"/> (V1-V110, V45 permanently absent), SIX touch data an earlier rung created, and
@@ -4063,23 +4078,99 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// cheap direction, so this errs long — but stays FINITE, so a genuinely wedged holder still produces a
     /// readable deadline instead of the silent hang #2874 exists to stop.</para>
     ///
+    /// <para><b>What expiry does, and why it is not one answer.</b> The lock is needed to APPLY rungs, not
+    /// to decide there are none: the applier commits each rung's DDL and its version stamp in one
+    /// transaction, so a stamp of N is proof that rung N and everything below it committed. So on expiry
+    /// <see cref="TryAcquireMigrationLockAsync"/> reads the stamp table once and splits. Store already at
+    /// <see cref="StorageVersion.SchemaVersion"/>: nothing would be applied, the lock was only ever needed
+    /// to establish that, and the call returns 0 applied with a warning naming the holder-hunting query.
+    /// Store BELOW it: there are rungs to apply, they cannot be applied safely without the lock, and a
+    /// <see cref="TimeoutException"/> carrying both versions and that same query is the honest answer. The
+    /// split matters because the case that actually strands an instance is not a slow migrator but a dead
+    /// one — a session advisory lock outlives the client whenever the server never notices the peer is
+    /// gone, and then the store is perfectly current and every restart used to die at this budget for want
+    /// of a lock it had nothing to do with. Never proceeding without a POSITIVE version match is what keeps
+    /// this from being "give up and collect anyway".</para>
+    ///
+    /// <para><b>What still bounds a rung that overruns its own budget: nothing available here, measured
+    /// rather than assumed.</b> <see cref="MigrationCommandTimeoutSeconds"/> is client-side — it sends a
+    /// cancel request, and a backend in a phase that does not reach an interrupt check keeps going, so the
+    /// lower bound above is a floor on LEGITIMATE holds and not a ceiling on real ones. Both server-side
+    /// alternatives were tried on PostgreSQL 17.11 and neither has the right shape. <c>statement_timeout</c>
+    /// is per STATEMENT, not per transaction — three one-second statements all survive a two-second setting
+    /// — so it would bound V39's two <c>CREATE INDEX</c>es at one budget EACH, making the ladder's floor
+    /// five multiples instead of four and spending this constant's entire margin to buy a bound that still
+    /// is not per-rung. <c>transaction_timeout</c> has exactly the right unit, since each rung is one
+    /// transaction, but it is PostgreSQL 17+ against readers here that gate as low as 13, and it ends the
+    /// session with FATAL rather than failing the statement. So the holder stays unbounded, and this budget
+    /// is deliberately NOT sized to cover an unbounded holder — the waiter is instead made independent of
+    /// whether it was covered, which is the part that was reachable.</para>
+    ///
     /// <para>A multiple rather than a literal so the two budgets cannot drift apart if the rung bound moves.
-    /// This NARROWS the mid-wait death rather than closing it, and #2894 records the two ways it still dies:
-    /// a fifth FLOOR-SETTING rung, or one rung that genuinely needs longer than its own bound. The first is
-    /// now pinned rather than trusted — <c>MigrationDataMovingRungCensusPins</c> scans every rung's shipped
-    /// SQL for data-moving shapes and fails when that set stops matching the census above, so a new one
-    /// arrives carrying this derivation in a failure message instead of arriving silently. It resolves each
-    /// statement's TARGET rather than counting keywords, because an index on a table the same rung creates is
-    /// free and 130 of this ladder's 134 <c>CREATE INDEX</c> statements are that shape. The second way stays
-    /// unpinned and unclosed: nothing here bounds a rung that overruns its own budget.</para>
+    /// #2894 recorded two ways the wait still dies, and both are now narrowed rather than closed. A fifth
+    /// FLOOR-SETTING rung is pinned rather than trusted — <c>MigrationDataMovingRungCensusPins</c> scans
+    /// every rung's shipped SQL for data-moving shapes and fails when that set stops matching the census
+    /// above, so a new one arrives carrying this derivation in a failure message instead of arriving
+    /// silently. It resolves each statement's TARGET rather than counting keywords, because an index on a
+    /// table the same rung creates is free and 130 of this ladder's 134 <c>CREATE INDEX</c> statements are
+    /// that shape. A rung needing longer than its own bound is still not bounded, per the paragraph above;
+    /// what changed is that its victim no longer dies undiagnosed, and no longer dies at all when it had
+    /// nothing to apply. The refinement deliberately NOT built is extending this budget whenever the stamp
+    /// table is seen to advance, which would make a slow-but-progressing holder unable to strand a waiter
+    /// at all: it costs a catalog probe and a read per poll on the store being migrated, to buy a case that
+    /// needs a single rung to exceed five minutes on a ladder measured at 0.301 s.</para>
     /// </summary>
     private const int MigrationLockWaitTimeoutSeconds = 5 * MigrationCommandTimeoutSeconds;
+
+    /// <summary>
+    /// Gap (seconds) between <c>pg_try_advisory_lock</c> attempts while a sibling migrator holds the lock.
+    ///
+    /// <para><b>Upper side — it is the delay added to a wait that would otherwise be over.</b> Whatever the
+    /// holder is doing, this instance learns it finished up to one interval late, so the interval has to be
+    /// small against the thing being waited for. The whole 109-rung ladder measures 0.301 s on a fresh
+    /// store, so the ordinary contended case — a sibling bringing up a new store, or applying nothing — is
+    /// already gone by the first retry, and one second is the coarsest value that keeps the notice latency
+    /// the same order as the work itself.</para>
+    ///
+    /// <para><b>Lower side — poll traffic against a store that is concurrently rewriting a hypertable.</b>
+    /// Each attempt is one round trip running a function that reads a single lock-manager hash entry.
+    /// One second spends at most <see cref="MigrationLockWaitTimeoutSeconds"/> attempts over the whole
+    /// budget, which is nothing beside V23 moving a multi-gigabyte heap into chunks; going sub-second would
+    /// spend more on scheduling and round trips than the answer is worth, and the answer cannot change
+    /// faster than the holder can commit a rung.</para>
+    /// </summary>
+    private const int MigrationLockPollIntervalSeconds = 1;
+
+    /// <summary>
+    /// How much elapsed wait passes between "still waiting" log lines. Separate from
+    /// <see cref="MigrationLockPollIntervalSeconds"/> on purpose: how often to ASK is a question about
+    /// notice latency, how often to SAY is a question about what a human can read.
+    ///
+    /// <para><b>Lower side — a legitimate maximum wait must not become a log flood.</b> The lower bound on
+    /// the budget above is minutes of real data-moving work, and a line per poll would emit one per second
+    /// for all of it, which is indistinguishable in a log from a spin. At 30 s even a wait that runs the
+    /// full budget out emits tens of lines, each carrying elapsed and remaining.</para>
+    ///
+    /// <para><b>Upper side — it must be under the shortest wait worth mentioning.</b> Ordinary contention
+    /// resolves in well under this, so the common case stays silent and adds no new startup noise; the
+    /// first line only appears once a wait has outlasted every measured single-rung cost on a live-sized
+    /// store by a wide margin, at which point it is genuinely news. Going much higher would leave the
+    /// operator watching nothing during the interval where the decision to restart the service gets
+    /// made.</para>
+    /// </summary>
+    private const int MigrationLockWaitLogIntervalSeconds = 30;
 
     /// <summary>
     /// Applies every migration newer than the store's current version, each in its own
     /// transaction, stamping darling_schema_version as it goes. Idempotent — a fully migrated
     /// store is a no-op — and safe under concurrent callers (advisory-locked). The connection
     /// must be open.
+    ///
+    /// <para>Returns the number applied. A rung is NEVER applied without the lock, but returning 0 does
+    /// not by itself mean the lock was held: when a sibling holds it for the whole
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> and the store already carries this build's version,
+    /// this returns 0 rather than failing, because there was nothing the lock was needed for. A store
+    /// below this build's version in that situation throws <see cref="TimeoutException"/> instead.</para>
     /// </summary>
     public static Task<int> MigrateAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
         => MigrateAsync(connection, logger: null, cancellationToken);
@@ -4101,10 +4192,14 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             throw new ArgumentNullException(nameof(connection));
         }
 
-        using (var acquireLock = new NpgsqlCommand("SELECT pg_advisory_lock($1)", connection) { CommandTimeout = MigrationLockWaitTimeoutSeconds })
+        if (!await TryAcquireMigrationLockAsync(connection, logger, MigrationLockWaitTimeoutSeconds, cancellationToken))
         {
-            acquireLock.Parameters.AddWithValue(MigrationLockKey);
-            await acquireLock.ExecuteNonQueryAsync(cancellationToken);
+            /* The budget went and the lock is still someone else's, but the store already carries the
+               version this build knows — so this call has no rung to apply and wanted the lock only to
+               establish that. Nothing is applied, nothing is stamped, and the store-establishing half
+               below never needed the lock in the first place. */
+            await TrySetDatabaseSearchPathAsync(connection, logger, cancellationToken);
+            return 0;
         }
 
         int applied;
@@ -4130,6 +4225,150 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
            database-default search_path for all future connections. Idempotent, best-effort. */
         await TrySetDatabaseSearchPathAsync(connection, logger, cancellationToken);
         return applied;
+    }
+
+    /// <summary>
+    /// Takes <see cref="MigrationLockKey"/> by retrying <c>pg_try_advisory_lock</c> instead of blocking in
+    /// <c>pg_advisory_lock</c>, spending at most <see cref="MigrationLockWaitTimeoutSeconds"/> and saying so
+    /// every <see cref="MigrationLockWaitLogIntervalSeconds"/> while it does. See that constant for why the
+    /// budget is polled rather than handed to a <c>CommandTimeout</c>, and for the derivation of its size.
+    ///
+    /// <para>TRUE means the lock is held and the caller may apply rungs. FALSE means the budget expired
+    /// AND the store already reports <see cref="StorageVersion.SchemaVersion"/>, so there is nothing to
+    /// apply and no reason to fail — the caller must apply nothing on that answer. A budget that expires
+    /// against a store BELOW this build's version throws instead, because those rungs genuinely cannot be
+    /// applied without the lock.</para>
+    /// </summary>
+    private static async Task<bool> TryAcquireMigrationLockAsync(
+        NpgsqlConnection connection, ILogger? logger, int waitBudgetSeconds, CancellationToken cancellationToken)
+    {
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        var attempts = 0;
+        var lastReportedSecond = 0L;
+
+        while (true)
+        {
+            bool acquired;
+            using (var attempt = new NpgsqlCommand("SELECT pg_try_advisory_lock($1)", connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
+            {
+                attempt.Parameters.AddWithValue(MigrationLockKey);
+                acquired = await attempt.ExecuteScalarAsync(cancellationToken) is true;
+            }
+
+            attempts++;
+
+            if (acquired)
+            {
+                if (attempts > 1)
+                {
+                    logger?.LogInformation(
+                        "Migration advisory lock acquired after waiting {Seconds}s ({Attempts} attempts) — " +
+                        "another migrator was holding it and has finished.",
+                        (long)waited.Elapsed.TotalSeconds, attempts);
+                }
+
+                return true;
+            }
+
+            if (waited.Elapsed.TotalSeconds >= waitBudgetSeconds)
+            {
+                break;
+            }
+
+            var elapsedSeconds = (long)waited.Elapsed.TotalSeconds;
+            if (elapsedSeconds - lastReportedSecond >= MigrationLockWaitLogIntervalSeconds)
+            {
+                lastReportedSecond = elapsedSeconds;
+                logger?.LogWarning(
+                    "Still waiting for the migration advisory lock: {Elapsed}s elapsed of {Budget}s, " +
+                    "{Attempts} attempts. Another connection is migrating this store, or holds the lock " +
+                    "without releasing it. Find it with: SELECT a.pid, a.state, a.query_start, a.query " +
+                    "FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'advisory';",
+                    elapsedSeconds, waitBudgetSeconds, attempts);
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(MigrationLockPollIntervalSeconds), cancellationToken);
+        }
+
+        /* Budget spent. Whether that is fatal depends entirely on whether this call had anything to do,
+           which the stamp table answers — see MigrationLockWaitTimeoutSeconds for why a stamp of N proves
+           every rung up to N committed, and so why reading it here is not a guess. */
+        var storeVersion = await ReadStampedSchemaVersionAsync(connection, cancellationToken);
+        var totalWaited = (long)waited.Elapsed.TotalSeconds;
+
+        if (storeVersion >= StorageVersion.SchemaVersion)
+        {
+            logger?.LogWarning(
+                "Gave up on the migration advisory lock after {Elapsed}s ({Attempts} attempts), but this " +
+                "store is already at schema v{StoreVersion} and this build needs v{BuildVersion}, so there " +
+                "was nothing to apply — continuing without migrating. Something is holding the lock and not " +
+                "releasing it, commonly an orphaned backend from an instance that died without closing its " +
+                "connection; find it with: SELECT a.pid, a.state, a.query_start, a.query FROM pg_locks l " +
+                "JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'advisory';",
+                totalWaited, attempts, storeVersion, StorageVersion.SchemaVersion);
+            return false;
+        }
+
+        throw new TimeoutException(
+            "Timed out after " + totalWaited.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + "s (" + attempts.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + " attempts) waiting for the migration advisory lock. This store is at schema v"
+            + storeVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + " and this build needs v"
+            + StorageVersion.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + ", so there are migrations to apply and they cannot be applied while another connection holds "
+            + "the lock. Either a second service instance is migrating the same store, or a connection is "
+            + "holding the lock without releasing it. Find the holder with: SELECT a.pid, a.state, "
+            + "a.query_start, a.query FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE "
+            + "l.locktype = 'advisory';");
+    }
+
+    /// <summary>
+    /// Test seam: <see cref="TryAcquireMigrationLockAsync"/> with the wait budget supplied, so real
+    /// advisory-lock contention can be exercised in seconds instead of the
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> the shipped path deliberately allows. The SAME code
+    /// path — the budget is the only thing a test is allowed to shorten, so the poll, the expiry split and
+    /// the messages under test are the ones that ship.
+    /// </summary>
+    internal static Task<bool> TryAcquireMigrationLockForTestsAsync(
+        NpgsqlConnection connection, ILogger? logger, int waitBudgetSeconds, CancellationToken cancellationToken)
+        => TryAcquireMigrationLockAsync(connection, logger, waitBudgetSeconds, cancellationToken);
+
+    /// <summary>
+    /// Test seam: the advisory lock key, so a contention test contends on the REAL one rather than a
+    /// restated literal that could drift away from it.
+    /// </summary>
+    internal static long MigrationLockKeyForTests => MigrationLockKey;
+
+    /// <summary>
+    /// The store's highest applied schema version, or 0 when the stamp table does not exist yet. Read on
+    /// the lock-wait expiry path only, so the extra round trips cost nothing that matters.
+    ///
+    /// <para>All three statements are static text. The <c>SET search_path</c> is the same one
+    /// <see cref="MigrateLockedAsync"/> issues as its first act — legal even when those schemas do not
+    /// exist yet, and it is what lets the bare name resolve either spelling, since the stamp table lives in
+    /// <c>public</c> before V8 and in <c>collect</c> after it. <c>to_regclass</c> then answers "does it
+    /// exist" with NULL instead of an error, so a fresh store whose holder has not committed V1 yet is an
+    /// ordinary 0 rather than a failed statement used as control flow.</para>
+    /// </summary>
+    private static async Task<int> ReadStampedSchemaVersionAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
+        {
+            await setPath.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        using (var probe = new NpgsqlCommand("SELECT to_regclass('darling_schema_version') IS NOT NULL", connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
+        {
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return 0;
+            }
+        }
+
+        using var read = new NpgsqlCommand("SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection) { CommandTimeout = MigrationCommandTimeoutSeconds };
+        return Convert.ToInt32(await read.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static async Task<int> MigrateLockedAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
