@@ -397,6 +397,18 @@ public sealed class QueryStoreServerGateTests
             drifted!,
             StringComparison.Ordinal);
 
+        /* An identifier that merely ENDS in "using" is not a lease scope. Pinned because the failure
+           direction here is a guard that fires on innocent code, which is how a source pin gets deleted
+           rather than fixed — and because the shape is invisible without the lookbehind. */
+        var innocent = string.Join("\n",
+            "                var gate = _queryStoreGates.GetOrAdd(runtime.ServerId, static _ => new QueryStoreServerGate()).TryAcquire();",
+            "                var housing = Housing(runtime);",
+            "                var result = await step.RunAsync(",
+            "                    () => backfill.RunServerSliceAsync(runtime, stoppingToken),",
+            "                    holdUntilStepEnds: gate);");
+
+        Assert.Null(FindLeaseScopedToTheSlice(innocent));
+
         /* And the scanner reports a missing anchor rather than silently passing — the other way a source
            pin rots into a no-op. Each of the three anchors, so none of them can go missing quietly. */
         Assert.Contains("anchor", FindLeaseScopedToTheSlice("nothing relevant here")!, StringComparison.Ordinal);
@@ -410,8 +422,11 @@ public sealed class QueryStoreServerGateTests
 
     /* `using var x = ...` and `using (...)`, the only two forms that could scope the lease. Matched as
        code rather than as the bare word, so prose in the surrounding comments — which now discusses the
-       `using` this pin forbids — cannot trip it. */
-    private static readonly Regex LeaseScope = new(@"using\s+var|using\s*\(", RegexOptions.Compiled);
+       `using` this pin forbids — cannot trip it. The lookbehind is what keeps it from matching the TAIL of
+       an identifier: without it `Housing(` carries the substring `using(` and would be reported as a lease
+       scope, which is how a source pin earns its reputation for crying wolf and gets switched off. */
+    private static readonly Regex LeaseScope = new(
+        @"(?<![A-Za-z0-9_])using(?:\s+var\b|\s*\()", RegexOptions.Compiled);
 
     /// <summary>
     /// Returns a description of a <c>using</c> scope covering the backfill slice, or <c>null</c> when the
