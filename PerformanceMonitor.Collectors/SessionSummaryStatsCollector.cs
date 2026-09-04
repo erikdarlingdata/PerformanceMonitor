@@ -72,17 +72,6 @@ public sealed class SessionSummaryStatsCollector : CollectorDefinitionBase<Sessi
        for the two top_*_connections) so the positional reader gets clean int32s — mirroring the
        CONVERT(integer, COUNT_BIG(*)) the plan_cache_stats port added. Values stored are identical to
        the Dashboard table (all counts integer NOT NULL; the four top_* columns nullable). */
-    /* SYSDATETIME() below is deliberately LOCAL, not SYSUTCDATETIME(): des.last_request_end_time is
-       itself the instance's local wall clock, so both sides of the 30-minute idle comparison share a
-       frame and it is correct. Switching it to UTC would shift that threshold by the deployment's UTC
-       offset - four hours in us-east-2 - and silently reclassify idle sessions. Nothing here is STORED;
-       only the boolean it produces is. Contrast CpuUtilizationCollector and
-       MemoryPressureEventsCollector, where SYSDATETIME() was the base of a STORED sample_time and was
-       wrong for exactly the reason this one is right. CollectorTimestampFrameTests holds this file on its
-       allowlist with that reason.
-
-       Kept OUT of the query text on purpose: Query_IsTheVerbatimParityContract pins this SQL
-       byte-for-byte, and a comment inside the string is shipped to the server on every call. */
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 

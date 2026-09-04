@@ -83,9 +83,9 @@ public sealed class CpuUtilizationCollectorDefinitionTests
         var plan = CpuUtilizationCollector.Instance.BuildQuery(
             CollectorTestContext.Make(s_deltas, isAzureSqlDb: false));
 
-        Assert.Contains("DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSUTCDATETIME())", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSDATETIME())", plan.Text, StringComparison.Ordinal);
         Assert.Contains(
-            "DATEADD(\n        MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),\n        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSUTCDATETIME())),",
+            "DATEADD(\n        MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),\n        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSDATETIME())),",
             plan.Text.Replace("\r\n", "\n"),
             StringComparison.Ordinal);
     }
