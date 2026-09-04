@@ -65,6 +65,7 @@ internal static class DarlingJobReader
     {
         var rows = new List<RunningJobRow>();
         await using var command = postgres.CreateCommand(RunningJobsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

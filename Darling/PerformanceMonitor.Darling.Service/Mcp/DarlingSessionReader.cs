@@ -84,6 +84,7 @@ internal static class DarlingSessionReader
     {
         var rows = new List<SessionStatRow>();
         await using var command = postgres.CreateCommand(LatestSessionStatsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -149,6 +150,7 @@ internal static class DarlingSessionReader
     {
         var rows = new List<ActiveQueryRow>();
         await using var command = postgres.CreateCommand(ActiveQueriesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -211,6 +213,7 @@ internal static class DarlingSessionReader
     {
         var rows = new List<WaitingTaskRow>();
         await using var command = postgres.CreateCommand(WaitingTasksSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

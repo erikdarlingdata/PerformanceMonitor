@@ -598,6 +598,7 @@ GROUP BY server_id, collector_name";
     {
         var rows = new List<FleetServerRow>();
         await using var command = postgres.CreateCommand(FleetServersSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -617,6 +618,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, List<FleetTag>>();
         await using var command = postgres.CreateCommand(FleetTagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -642,6 +644,7 @@ GROUP BY server_id, collector_name";
     {
         var forest = new List<FleetTagNode>();
         await using var command = postgres.CreateCommand(FleetTagForestSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -662,6 +665,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, CpuRow>();
         await using var command = postgres.CreateCommand(FleetCpuSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -677,6 +681,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, MemoryRow>();
         await using var command = postgres.CreateCommand(FleetMemorySql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -692,6 +697,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, MemoryPressureRow>();
         await using var command = postgres.CreateCommand(FleetMemoryPressureSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -709,6 +715,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, ThreadsRow>();
         await using var command = postgres.CreateCommand(FleetThreadsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -727,6 +734,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, BlockingRow>();
         await using var command = postgres.CreateCommand(FleetBlockingSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -747,6 +755,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, DeadlockRow>();
         await using var command = postgres.CreateCommand(FleetDeadlockSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -764,6 +773,7 @@ GROUP BY server_id, collector_name";
     {
         var map = new Dictionary<int, DateTime>();
         await using var command = postgres.CreateCommand(FleetLastCollectionSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, DateTime.SpecifyKind(now.AddHours(-48), DateTimeKind.Unspecified));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -784,6 +794,7 @@ GROUP BY server_id, collector_name";
     {
         var counts = new Dictionary<int, CollectorCounts>();
         await using var command = postgres.CreateCommand(FleetCollectionHealthSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

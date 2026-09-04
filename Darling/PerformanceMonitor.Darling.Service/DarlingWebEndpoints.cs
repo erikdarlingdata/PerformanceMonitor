@@ -572,6 +572,7 @@ public static class DarlingWebEndpoints
     private static async Task<JsonArray> RunComposedQueryAsync(NpgsqlDataSource postgres, ComposeCompiled compiled, System.Threading.CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(compiled.Sql);
+        command.CommandTimeout = McpCommandDeadlines.ComposedQuerySeconds;
         foreach (var parameter in compiled.Parameters)
         {
             command.Parameters.Add(parameter);
