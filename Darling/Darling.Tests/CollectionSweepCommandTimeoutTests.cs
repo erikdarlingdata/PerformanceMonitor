@@ -57,6 +57,16 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// reason in the class comment, and each one is reachable from <c>ProcessServerSweepAsync</c> on the
     /// sweep's own cadence.
     ///
+    /// <para><b>The site that looked like another regime and was not.</b>
+    /// <c>DarlingObservability.WriteAnalysisStateAsync</c> was the seventeenth site and it is IN scope,
+    /// after review caught it: it looks like the analysis pass's state write and is not one. The pass's
+    /// budget is <c>passCts.CancelAfter(s_analysisTimeout)</c>, whose token is threaded ONLY into
+    /// <c>analysisService.AnalyzeAsync</c> — every <c>WriteAnalysisStateAsync</c> call takes the plain
+    /// <c>stoppingToken</c> instead, and one of them (<c>DarlingWorker.cs:1877</c>, the PostgreSQL-target
+    /// tombstone) is called straight from <c>ProcessServerSweepAsync</c> with no pass around it at all.
+    /// Being lexically inside a budgeted method is not the same as being under its budget, and that is
+    /// the distinction this group's member scoping exists to make rather than to blur.</para>
+    ///
     /// <para><b>What is deliberately absent, and why each is a different budget.</b>
     /// <c>DarlingWorker.ReadLatestCpuAsync</c> is reached from <c>EvaluateAlertsAsync</c> and belongs to
     /// #2882's alert pass (10 s, bounded by a 30 s sweep interval) — it is a site that pin's file-scoped
@@ -81,11 +91,12 @@ public sealed class CollectionSweepCommandTimeoutTests
         ("DarlingWorker.cs", "ReadCollectorWatermarksAsync"),
         ("DarlingObservability.cs", "UpsertServerAsync"),
         ("DarlingObservability.cs", "LogCollectionAsync"),
+        ("DarlingObservability.cs", "WriteAnalysisStateAsync"),
         ("Targets/RdsCpuIngestor.cs", "GetWatermarkAsync"),
     };
 
     /// <summary>The sweep's command sites, counted so a member that stops creating commands fails loudly.</summary>
-    private const int ExpectedSweepCommandSites = 12;
+    private const int ExpectedSweepCommandSites = 13;
 
     /// <summary>The four COPY writers, counted for the same reason.</summary>
     private const int ExpectedCopyWriterSites = 4;

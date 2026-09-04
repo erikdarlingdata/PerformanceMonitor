@@ -465,6 +465,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(WriteAnalysisStateSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(insufficientData);
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)message ?? DBNull.Value });
