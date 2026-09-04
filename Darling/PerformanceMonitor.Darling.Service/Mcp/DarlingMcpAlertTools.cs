@@ -365,6 +365,7 @@ public sealed class DarlingMcpAlertTools
                bound parameter. The single-row config_version self-bump is left to the config-table trigger. */
             var setClause = string.Join(", ", updates.Select((u, i) => $"{u.Column} = ${i + 1}"));
             await using var command = postgres.CreateCommand($"UPDATE config_alert_settings SET {setClause} WHERE id = 1");
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             foreach (var (_, param) in updates)
             {
                 command.Parameters.Add(param);

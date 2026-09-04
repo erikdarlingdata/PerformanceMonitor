@@ -113,6 +113,7 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time D
     {
         var rows = new List<StoreMetricRow>();
         await using var command = postgres.CreateCommand(StoreMetricsLatestSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -141,6 +142,7 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time D
     {
         var rows = new List<StoreMetricDailyPoint>();
         await using var command = postgres.CreateCommand(StoreMetricsDailySql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

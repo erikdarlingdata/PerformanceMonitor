@@ -160,6 +160,7 @@ internal static class DarlingTrendReader
     {
         var items = new List<MemoryTrendPoint>();
         await using var command = postgres.CreateCommand(MemoryTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -212,6 +213,7 @@ internal static class DarlingTrendReader
     {
         var items = new List<PerfmonTrendPoint>();
         await using var command = postgres.CreateCommand(PerfmonTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddText(command, counterName);
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
@@ -248,6 +250,7 @@ internal static class DarlingTrendReader
     {
         var items = new List<string>();
         await using var command = postgres.CreateCommand(DistinctPerfmonCountersSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -304,6 +307,7 @@ internal static class DarlingTrendReader
     {
         var items = new List<FileIoLatencyTrendPoint>();
         await using var command = postgres.CreateCommand(FileIoLatencyTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -520,6 +524,7 @@ internal static class DarlingTrendReader
         }
 
         await using var command = postgres.CreateCommand(QueryStoreDurationTrendRollupSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddTimestamp(command, route.RawStartUtc);
         return await ReadDurationPointsAsync(command, cancellationToken);
@@ -536,6 +541,7 @@ internal static class DarlingTrendReader
         CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         return await ReadDurationPointsAsync(command, cancellationToken);
     }
@@ -665,6 +671,7 @@ internal static class DarlingTrendReader
     {
         var items = new List<QueryHistoryPoint>();
         await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddText(command, databaseName);
         DarlingMcpReadParameters.AddText(command, queryHash);
@@ -786,6 +793,7 @@ internal static class DarlingTrendReader
         NpgsqlDataSource postgres, string sql, int serverId, CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
