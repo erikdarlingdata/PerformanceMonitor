@@ -22,6 +22,27 @@ namespace Darling.Tests;
     So the guard is DERIVED, not a list: it matches the SHAPE of an instance name anywhere in
     tracked source, case-insensitively, and allows only slugs that are obviously invented.
     A new fixture file is covered the day it is added, without anyone remembering to enlist it.
+
+    TWO shapes are reachable that way -- a full hostname, and a short name plus its ordinal.
+    Two more are NOT, and the sweeps below deliberately do not attempt them:
+
+      - A bare short name in prose: "measured on OMEGA". There is no shape to match, because
+        the token is just a word. Matching capitalised prose tokens instead ("on <ALLCAPS>")
+        returns 606 hits across 102 words on this tree, and they are all either an acronym
+        (SQL, DMV, CPU, RDS) or this codebase's own emphasis caps (EVERY, BOTH, ENTIRE, ONLY).
+        The allowlist would have to be the English language.
+
+      - A real value in an identity-bearing fixture field -- a display_name, a ServerName.
+        Also no shape: this tree assigns 251 distinct free-form descriptive names to those
+        properties (ServerName = "blocking-stats-read"), which is GOOD test naming and worth
+        keeping, and a short name hides among them indistinguishably from srv, host or shared.
+
+    Hashing a denylist of the real names rescues neither case. A three-letter name has 17,576
+    candidates, so a hash committed here is recoverable by brute force in microseconds --
+    publishing the hash publishes the name -- and moving the salt to a CI secret would make the
+    guard silently no-op on every fork and outside contribution, which is exactly the "green for
+    the wrong reason" failure the scanned-count assert exists to catch. So those two categories
+    stay a review matter, and what is left below is a tripwire rather than a proof.
 */
 public sealed class FleetIdentifierScrubTests
 {
@@ -43,6 +64,38 @@ public sealed class FleetIdentifierScrubTests
     */
     private static readonly Regex InstanceName = new(
         @"(?:prod|stage|staging|dev|qa|uat)-[a-z]+-[a-z0-9]+-(?<slug>[a-z0-9]+)-[0-9]+\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /* Generic role words that legitimately carry an ordinal. Measured off the tree, not
+       guessed: these are every non-slug word that precedes a zero-padded ordinal anywhere in
+       it, and not one of them could be a customer -- each names a role (box, srv, web, target,
+       bench), a product (sql, aurora), an environment (prod, dev, local), or a test state
+       (gone). Deliberately SEPARATE from SyntheticSlugs: a word added here must not quietly
+       widen the slug position of the full-hostname sweep, which is the stricter of the two. */
+    private static readonly HashSet<string> OrdinalRoleWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "prod", "dev", "local", "sql", "aurora", "srv", "box", "web", "target", "bench", "gone",
+    };
+
+    /*
+        A server gets named by its short name and ordinal too -- omega-01, not
+        prod-sql-use1-omega-01 -- and InstanceName cannot see that form: it requires the
+        service prefix and both middle segments. Both real identifiers that survived #2490
+        and #2900 to be caught by hand in #2903 were exactly this shape.
+
+        The ZERO PADDING is what makes the shape checkable at all. Prose writes a measurement
+        as top-25, sev-10, pre-18, phase-2, and never pads one to two digits; a fleet pads
+        every ordinal. Demanding a padded ordinal rather than any number at all collapses the
+        false-positive vocabulary from 114 words (985 occurrences) to 11 (103),
+        and demanding a purely alphabetic word drops the escape-sequence and version debris
+        with it (n2026-08 out of a literal "\n2026-08", krb5-2, w1f-2).
+
+        Accepted blind spot: this reaches -00 through -09 only, so a name whose first published
+        box is -10 or higher slips past. A fleet's first box is -01, and every real identifier
+        this guard has had to catch so far has been -01.
+    */
+    private static readonly Regex ShortNameOrdinal = new(
+        @"\b(?<slug>[a-z]{3,})-0[0-9]\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     [Fact]
@@ -78,6 +131,43 @@ public sealed class FleetIdentifierScrubTests
             "This repository is public. These instance names use a slug that is not on the "
           + "synthetic list, so they may name a real tenant. Rename them, or add the slug to "
           + "SyntheticSlugs if it is genuinely invented:"
+          + Environment.NewLine + string.Join(Environment.NewLine, offenders));
+    }
+
+    [Fact]
+    public void NoTrackedSourceFileNamesAServerByShortNameAndOrdinal()
+    {
+        var offenders = new List<string>();
+        var scanned = 0;
+        var root = RepoRoot();
+
+        foreach (var file in TrackedSourceFiles())
+        {
+            scanned++;
+            var text = File.ReadAllText(file);
+            foreach (Match m in ShortNameOrdinal.Matches(text))
+            {
+                var slug = m.Groups["slug"].Value;
+                if (SyntheticSlugs.Contains(slug) || OrdinalRoleWords.Contains(slug))
+                {
+                    continue;
+                }
+
+                var line = text.Take(m.Index).Count(c => c == '\n') + 1;
+                var relative = Path.GetRelativePath(root, file);
+                offenders.Add($"{relative}:{line}  {m.Value}  (short name '{slug}')");
+            }
+        }
+
+        /* Same reason as above: a sweep that stops reaching the tree passes vacuously. */
+        Assert.True(scanned > 200, $"only scanned {scanned} files -- the sweep lost the tree");
+
+        Assert.True(
+            offenders.Count == 0,
+            "This repository is public. These read as a server's short name followed by its "
+          + "ordinal, so they may name a real tenant even though they are not full hostnames. "
+          + "Rename the short name to a synthetic slug, or -- if the word names a role rather "
+          + "than a server -- add it to OrdinalRoleWords:"
           + Environment.NewLine + string.Join(Environment.NewLine, offenders));
     }
 
