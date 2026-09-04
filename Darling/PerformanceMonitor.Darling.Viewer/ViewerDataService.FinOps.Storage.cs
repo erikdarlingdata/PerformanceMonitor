@@ -59,6 +59,7 @@ ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DatabaseSizeLatestSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
         var items = new List<DatabaseSizeRow>();
@@ -103,6 +104,7 @@ LIMIT $2";
     public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DatabaseSizeSummarySql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
 
@@ -163,6 +165,7 @@ ORDER BY ds.total_size_mb DESC";
         var cutoff = DateTime.UtcNow.AddDays(-daysBack);
 
         await using var command = _dataSource.CreateCommand(IdleDatabasesSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
 
@@ -228,6 +231,7 @@ FROM latest l CROSS JOIN peak p";
         var cutoff = DateTime.UtcNow.AddHours(-24);
 
         await using var command = _dataSource.CreateCommand(TempdbSummarySql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
 
@@ -320,6 +324,7 @@ ORDER BY growth_30d_mb DESC";
         var cutoff30d = now.AddDays(-30);
 
         await using var command = _dataSource.CreateCommand(StorageGrowthSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff7d, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff30d, DateTimeKind.Unspecified) });
@@ -432,6 +437,7 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
 
         await using (var command = _dataSource.CreateCommand(ObjectGrowthSummarySql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
@@ -461,6 +467,7 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
 
         await using (var command = _dataSource.CreateCommand(ObjectGrowthSeriesSql))
         {
+            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
@@ -516,6 +523,7 @@ ORDER BY index_id";
     public async Task<List<IndexUsageRow>> GetObjectIndexDetailAsync(int serverId, string databaseName, string schemaName, string tableName, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ObjectIndexDetailSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName });

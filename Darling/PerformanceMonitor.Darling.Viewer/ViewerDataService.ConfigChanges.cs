@@ -171,6 +171,7 @@ public sealed partial class ViewerDataService
     {
         var rows = new List<ConfigChangeDiff.ServerConfigSnapshot>();
         await using var command = _dataSource.CreateCommand(ServerConfigChangesSnapshotsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddServerIdAndWindowEnd(command, serverId, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -192,6 +193,7 @@ public sealed partial class ViewerDataService
     {
         var rows = new List<ConfigChangeDiff.DatabaseConfigSnapshot>();
         await using var command = _dataSource.CreateCommand(DatabaseConfigChangesSnapshotsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddServerIdAndWindowEnd(command, serverId, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -218,6 +220,7 @@ public sealed partial class ViewerDataService
     {
         var rows = new List<ConfigChangeDiff.TraceFlagSnapshot>();
         await using var command = _dataSource.CreateCommand(TraceFlagChangesSnapshotsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         AddServerIdAndWindowEnd(command, serverId, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

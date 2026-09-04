@@ -113,6 +113,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
     {
         var rows = new List<AgTopologyReplicaRow>();
         await using var command = _dataSource.CreateCommand(AgReplicaStatesSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -142,6 +143,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
     {
         var rows = new List<AgTopologyDatabaseRow>();
         await using var command = _dataSource.CreateCommand(AgDatabaseReplicaStatesSql);
+        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

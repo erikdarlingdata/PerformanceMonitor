@@ -80,6 +80,7 @@ RETURNING command_id";
         }
 
         await using var command = _dataSource.CreateCommand(CommandEnqueueSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CommandPlaneSeconds;
         AddNullableText(command, requestedBy);                                              // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = commandType });  // $2
         command.Parameters.Add(new NpgsqlParameter                                          // $3
@@ -104,6 +105,7 @@ RETURNING command_id";
     public async Task<CommandResult?> ReadCommandResultAsync(long commandId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(CommandPollSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CommandPlaneSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = commandId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -192,6 +194,7 @@ RETURNING command_id";
     public async Task DeleteCommandAsync(long commandId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(CommandDeleteSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CommandPlaneSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = commandId });
         await ExecuteWriteAsync(command, cancellationToken);
     }
