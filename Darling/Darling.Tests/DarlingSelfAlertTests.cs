@@ -2493,6 +2493,38 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     }
 
     [Fact]
+    public void RetentionHoldReadSql_IsScopedToThisProductsOwnRetentionPolicies()
+    {
+        /* Review catch, and it is a CORRECTNESS pin rather than a tidiness one. This reading feeds an alert
+           that asserts the rollup-coverage gate is the cause and tells the reader NOT to arm the policy by
+           hand. For a retention policy this product never created - one an operator paused deliberately on
+           their own hypertable in the same instance - that attribution is false and the advice is wrong.
+           The mutating siblings scope the same way; verified red by removing the predicate, which let a
+           third-party paused policy through. */
+        Assert.Contains("j.proc_name = 'policy_retention'", TimescaleSupport.RetentionHoldReadSql, StringComparison.Ordinal);
+        Assert.Contains("j.hypertable_schema = 'collect'", TimescaleSupport.RetentionHoldReadSql, StringComparison.Ordinal);
+
+        /* The span must be normalized, not read raw: chunks.range_start is declared timestamptz even for the
+           naive-timestamp partitioning column every collector table uses. Proven session-independent under
+           UTC, UTC+14 and UTC-7. */
+        Assert.Contains("AT TIME ZONE 'UTC'", TimescaleSupport.RetentionHoldReadSql, StringComparison.Ordinal);
+
+        /* Catalog metadata only - never a scan of a multi-hundred-GB hypertable. */
+        Assert.Contains("timescaledb_information.chunks", TimescaleSupport.RetentionHoldReadSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RetentionHoldRead_UsesASteadyStateDeadlineNotTheBulkSetupBudget()
+    {
+        /* Review catch. SetupTimeoutSeconds (300s) is documented for one-time BULK SETUP; this read runs
+           hourly, sequentially in a sweep tick shared with three sibling checks, so reusing that budget
+           would let one stalled catalog read stall the tick for five minutes - the exact shape #2810 and
+           #2871 removed from the analysis pass in this same release. */
+        Assert.Equal(30, TimescaleSupport.JobCatalogReadTimeoutSeconds);
+        Assert.True(TimescaleSupport.JobCatalogReadTimeoutSeconds < 300);  /* the SetupTimeoutSeconds bulk-setup budget */
+    }
+
+    [Fact]
     public void RetentionHoldReading_RatioIsNullRatherThanZeroWhenUnmeasurable()
     {
         /* A ratio over an unmeasurable denominator is not a number. Returning 0 would read as "perfectly

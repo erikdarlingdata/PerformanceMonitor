@@ -2996,6 +2996,57 @@ WHERE js.last_run_status = 'Success'";
     }
 
     /// <summary>
+    /// The steady-state deadline for the hourly job-catalog reads (#2813 review). Deliberately NOT
+    /// <see cref="SetupTimeoutSeconds"/>: that 300s budget is documented for one-time BULK SETUP — the
+    /// migrate session's first <c>migrate_data</c>, hypertable conversion — and reusing it here would let a
+    /// single stalled catalog read block the whole hourly self-alert sweep tick (disk pressure, compression
+    /// health, job cadence and this check run sequentially in it) for five minutes. That is exactly the
+    /// failure shape #2810 and #2871 removed from the analysis pass, and it would be perverse to
+    /// reintroduce it in the same release.
+    ///
+    /// <para>Bounded both ways. BELOW: this is a pure catalog round trip over
+    /// <c>timescaledb_information.jobs</c> and <c>chunks</c> with no hypertable scan — it returned in well
+    /// under a second on all three production stores. ABOVE: it shares an hourly tick with three sibling
+    /// checks, so its ceiling must be a small fraction of that hour rather than a fraction of a setup pass.
+    /// 30s is the value its direct sibling <see cref="ReadJobCadenceReadingsAsync"/> gets from Npgsql's
+    /// default — stated explicitly here so it is a DECISION rather than an inherited number nobody chose,
+    /// which is the whole lesson of #2810.</para>
+    /// </summary>
+    public const int JobCatalogReadTimeoutSeconds = 30;
+
+    /// <summary>The #2813 retention-hold catalog read, public so its two load-bearing predicates —
+    /// <c>proc_name = 'policy_retention'</c> and the <c>collect</c> schema scope — are pinned in CI rather
+    /// than only in a throwaway harness. Scoping matters for CORRECTNESS, not tidiness: the alert this
+    /// feeds asserts the rollup-coverage gate is the cause and tells the reader not to arm the policy by
+    /// hand, which would be wrong advice about a retention policy this product never created (review
+    /// catch). The mutating siblings ConvergeRetentionHorizonSql / SetRetentionScheduleSql scope the same
+    /// way.</summary>
+    public const string RetentionHoldReadSql = @"
+SELECT
+    j.job_id,
+    coalesce(j.hypertable_name, ''),
+    j.scheduled,
+    coalesce(j.config->>'drop_after', ''),
+    c.chunk_count,
+    EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - (c.oldest_range_start AT TIME ZONE 'UTC')))::bigint,
+    CASE
+        WHEN (j.config->>'drop_after') IS NULL THEN NULL
+        ELSE EXTRACT(EPOCH FROM (j.config->>'drop_after')::interval)::bigint
+    END
+FROM timescaledb_information.jobs AS j
+LEFT JOIN LATERAL (
+    SELECT
+        min(ch.range_start) AS oldest_range_start,
+        count(*)::bigint AS chunk_count
+    FROM timescaledb_information.chunks AS ch
+    WHERE ch.hypertable_schema = j.hypertable_schema
+      AND ch.hypertable_name   = j.hypertable_name
+) AS c ON true
+WHERE j.proc_name = 'policy_retention'
+  AND j.hypertable_schema = 'collect'";
+
+
+    /// <summary>
     /// Every retention policy's ARMED state against the consequence of it being held (#2813) — the readings
     /// the Retention Held self-alert judges, and the live block <c>get_store_metrics</c> reports.
     ///
@@ -3033,33 +3084,12 @@ WHERE js.last_run_status = 'Success'";
             throw new ArgumentNullException(nameof(connection));
         }
 
-        const string sql = @"
-SELECT
-    j.job_id,
-    coalesce(j.hypertable_name, ''),
-    j.scheduled,
-    coalesce(j.config->>'drop_after', ''),
-    c.chunk_count,
-    EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - (c.oldest_range_start AT TIME ZONE 'UTC')))::bigint,
-    CASE
-        WHEN (j.config->>'drop_after') IS NULL THEN NULL
-        ELSE EXTRACT(EPOCH FROM (j.config->>'drop_after')::interval)::bigint
-    END
-FROM timescaledb_information.jobs AS j
-LEFT JOIN LATERAL (
-    SELECT
-        min(ch.range_start) AS oldest_range_start,
-        count(*)::bigint AS chunk_count
-    FROM timescaledb_information.chunks AS ch
-    WHERE ch.hypertable_schema = j.hypertable_schema
-      AND ch.hypertable_name   = j.hypertable_name
-) AS c ON true
-WHERE j.proc_name = 'policy_retention'";
+
 
         var readings = new List<RetentionHoldReading>();
         try
         {
-            using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            using var command = new NpgsqlCommand(RetentionHoldReadSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
