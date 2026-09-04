@@ -316,6 +316,98 @@ public sealed class CollectorContext
     /// </summary>
     public int? TargetSessionId { get; set; }
 
+    /* #2855: the AZURE PER-DATABASE split — a THIRD decomposition, not a rename of either one above, and the
+       prefix is the whole reason it is separate. This branch opens a connection PER DATABASE, which neither
+       other path does: the enumerated path reuses one target connection across every item, and the
+       server-scoped path opens one for the whole server. So `connect:` is a phase here and nowhere else, and
+       on Azure SQL DB it is a real recurring cost — a fresh login per database, per cycle.
+
+       Why not reuse PerItem*: the enumerated log site gates on PerItemPhasesMeasured and prints an item
+       name it takes from the enumeration, so sharing those fields would make an Azure run print as an
+       enumerated one. That is exactly the collision ServerScopeOpenMs's own comment records as the reason
+       the server-scoped path got its own prefix instead of reusing PerItemOpenMs; this follows that
+       precedent rather than re-litigating it.
+
+       NOT persisted, deliberately. The server-scoped split is 1:1 with a collection_log row, so V108 could
+       store it in columns; this one is N:1 — many databases per run — and how to shape that is an open
+       decision tracked as #2860. This is emit-and-log only, and the schema is untouched at V109. */
+
+    /// <summary>
+    /// Milliseconds <c>OpenDatabaseConnectionAsync</c> took for the database just read (#2855) — the phase
+    /// that exists only on this path. Its own term rather than part of the open, because the two have
+    /// different fixes and different owners: a slow connect is login, TLS handshake and Azure gateway
+    /// redirect, which pooling and connection reuse address, while a slow
+    /// <see cref="PerDatabaseOpenMs"/> is server-side work before the first row, which they do not touch.
+    ///
+    /// <para>Zero when the host does not measure it (Lite today), so a zero must never be read as
+    /// "instant" — see <see cref="PerDatabasePhasesMeasured"/>, which is what separates those.</para>
+    /// </summary>
+    public long PerDatabaseConnectMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the per-database <c>ExecuteReaderAsync</c> took (#2855) — the same contract as
+    /// <see cref="PerItemOpenMs"/> and <see cref="ServerScopeOpenMs"/> on their own paths: the reader
+    /// returns only when the first rowset is available, so this spans every preceding non-rowset statement
+    /// plus time-to-first-row, and no client-side byte budget can shorten it.
+    /// </summary>
+    public long PerDatabaseOpenMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the per-database <c>ReadAsync</c> took (#2855) — row streaming, which the read loop and
+    /// the byte budget do govern. Measured on its own stopwatch rather than inferred as the residual, the
+    /// <see cref="ServerScopeDrainMs"/> discipline: if drain were the residual it would silently absorb
+    /// query building, command construction and the trailing probe-failure rowset, and then a large residual
+    /// would say nothing about our own code.
+    /// </summary>
+    public long PerDatabaseDrainMs { get; set; }
+
+    /// <summary>
+    /// True once the host has measured this database's phases (#2855) — the per-database twin of
+    /// <see cref="PerItemPhasesMeasured"/> and <c>ServerPhasesMeasured</c>, set from the same
+    /// <c>finally</c> that stamps <see cref="PerDatabaseConnectMs"/> so a faulting connect still declares
+    /// itself measured and still reports what it burned.
+    ///
+    /// <para>A flag rather than a <c>SomeMs &gt; 0</c> test, for the #2854 reason those two carry: a
+    /// genuinely instant phase and a host that measured nothing both read as zero, and gating on the value
+    /// suppresses the split for the first — the case most worth reading, because a connect that cost nothing
+    /// is what makes the rest of the line interpretable. A host that measures nothing leaves this false and
+    /// prints nothing, which is the honest answer; a host that measures a pooled connect prints
+    /// <c>connect:0ms</c>, which is a measurement.</para>
+    /// </summary>
+    public bool PerDatabasePhasesMeasured { get; set; }
+
+    /// <summary>
+    /// The part of the database's blended <c>sql:</c> total that is none of the three phases: command
+    /// construction, the trailing probe-failure rowset the payload contract may carry, and the TEARDOWN of
+    /// the reader, command and connection — the last of which is named because it is not incidental here.
+    /// One connection per database means one close per database, and the host's stopwatch is still running
+    /// when it happens. The watermark read and <c>BuildQuery</c> are NOT in it: on this path they run before
+    /// the stopwatch starts, so they are outside the parent as well as outside the phases.
+    ///
+    /// <para>Lives here rather than at the log site so the subtraction has one definition and a test can pin
+    /// the shipped arithmetic instead of a copy, the <see cref="DrainMsFrom"/> discipline. Clamped at zero:
+    /// three separate stopwatches can overshoot the parent by a millisecond or two, and that must print as
+    /// zero rather than as a negative term that makes the whole line look broken.</para>
+    /// </summary>
+    public long PerDatabaseOtherMsFrom(long databaseSqlMs) =>
+        Math.Max(0, databaseSqlMs - PerDatabaseConnectMs - PerDatabaseOpenMs - PerDatabaseDrainMs);
+
+    /// <summary>
+    /// The database's split as one value, or NULL when this host did not measure it (#2855) — the
+    /// expression the log site gates on, so "no split" and "no line" are the same decision made once.
+    ///
+    /// <para>Gated on <see cref="PerDatabasePhasesMeasured"/> and never on a figure being non-zero, and
+    /// returned as ONE value rather than four loose numbers for the <c>ServerPhases</c>/<c>FanoutCost</c>
+    /// reason: a caller that can take three of the four terms can print a decomposition that does not add
+    /// up. Because the residual is defined against the parent, the parent is a parameter rather than
+    /// another field — there is no stored copy that can drift from the total it completes.</para>
+    /// </summary>
+    public PerDatabasePhaseSplit? PerDatabasePhasesFrom(long databaseSqlMs) =>
+        PerDatabasePhasesMeasured
+            ? new PerDatabasePhaseSplit(
+                PerDatabaseConnectMs, PerDatabaseOpenMs, PerDatabaseDrainMs, PerDatabaseOtherMsFrom(databaseSqlMs))
+            : null;
+
     /// <summary>
     /// Milliseconds the item's watermark refresh took (#2164), set by the host when it runs one. This is NOT
     /// server think-time or streaming — for query_store it is a STORE read (and on the catch-up/adaptive
@@ -475,3 +567,22 @@ public sealed class CollectorContext
     /// </summary>
     public bool CatchupClampApplied { get; set; }
 }
+
+/// <summary>
+/// One database's phase split on the Azure per-database path (#2855): the connect, the open, the drain, and
+/// the residual against that database's blended <c>sql:</c> total. Produced only by
+/// <see cref="CollectorContext.PerDatabasePhasesFrom"/>, which returns null when the host measured nothing,
+/// so a log site cannot print half a split or print one for a path that emits none.
+///
+/// <para><b>Log-only, and that is a decision rather than an omission.</b> Its server-scoped sibling
+/// <c>ServerPhaseCost</c> is persisted, because that split is 1:1 with a <c>collection_log</c> row. This one
+/// is N:1 — a run visits every database on the server — so it has no row to land on. #2860 already holds that
+/// question open for the per-database FETCH split, and whatever it settles governs this one too: the obstacle
+/// is the cardinality, not which phases are being stored. Nothing here reaches the store, and the schema
+/// stays at V109 until it is decided.</para>
+///
+/// <para><paramref name="OtherMs"/> is carried rather than left to the caller so the four printed terms sum
+/// to the parent by construction. A large value is itself the finding: it would mean the cost sits between
+/// the phases, in our own code, rather than in the target.</para>
+/// </summary>
+public readonly record struct PerDatabasePhaseSplit(long ConnectMs, long OpenMs, long DrainMs, long OtherMs);
