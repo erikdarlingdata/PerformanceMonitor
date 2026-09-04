@@ -9,6 +9,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 
 namespace PerformanceMonitor.Ui;
@@ -20,48 +21,104 @@ namespace PerformanceMonitor.Ui;
 /// 0x800401D0) whenever another process momentarily holds the clipboard - a clipboard manager (Ditto,
 /// ClipboardFusion, Windows Clipboard History), Office, a browser, or an RDP / locked-desktop session. That
 /// is a routine transient condition, so a bare call takes the whole app down for no good reason (#2833).
-/// This wraps the read in a short bounded retry and returns <c>false</c> on persistent failure instead of
-/// throwing, letting callers show a graceful notice (button paths) or simply no-op (Ctrl+V paths).
+/// This wraps the read in a short bounded retry and returns failure on persistent inability to open instead
+/// of throwing, letting callers show a graceful notice (button paths) or simply no-op (Ctrl+V paths).
+///
+/// Two variants share one guarded read-attempt helper: the synchronous <see cref="TryRead"/> (for any
+/// non-async caller) sleeps the calling thread between attempts, while <see cref="TryReadAsync"/> awaits
+/// <see cref="Task.Delay(int)"/> for the same backoff so a UI-thread caller keeps its WPF message pump
+/// responsive on the rare failure path instead of freezing for up to the worst-case retry span (#2837).
 /// </summary>
 public static class ClipboardText
 {
+    // CLIPBRD_E_CANT_OPEN is transient: another process holds the clipboard for a few milliseconds. Retry a
+    // handful of times, ~25 ms apart, before giving up - a worst-case ~175 ms span only on the rare failure
+    // path, versus the crash we are replacing. TryRead spends that span in Thread.Sleep (fine for a non-UI
+    // caller); TryReadAsync spends it awaiting Task.Delay so the UI message pump keeps running (#2837).
+    private const int MaxAttempts = 8;
+    private const int RetryDelayMs = 25;
+
     /// <summary>
-    /// Attempts to read the clipboard's text, retrying briefly if the clipboard cannot be opened.
+    /// Synchronously attempts to read the clipboard's text, retrying briefly if the clipboard cannot be opened.
     /// Returns <c>true</c> with the clipboard text - which may still be empty or whitespace, so callers keep
     /// their own "no text" handling - when the read succeeds; returns <c>false</c> with an empty string when
     /// the clipboard could not be opened after the bounded retries. Only the clipboard-open failure family
     /// (<see cref="COMException"/> / <see cref="ExternalException"/>) is swallowed; any other exception
-    /// propagates.
+    /// propagates. Blocks the calling thread with <see cref="Thread.Sleep(int)"/> between attempts, so a
+    /// UI-thread caller should prefer <see cref="TryReadAsync"/>. This is the synchronous entry point, kept
+    /// for any non-async / non-UI-thread caller.
     /// </summary>
     public static bool TryRead(out string text)
     {
-        // CLIPBRD_E_CANT_OPEN is transient: another process holds the clipboard for a few milliseconds. Retry
-        // a handful of times, ~25 ms apart, before giving up - a worst-case ~175 ms pause only on the rare
-        // failure path, versus the crash we are replacing.
-        const int maxAttempts = 8;
-        const int retryDelayMs = 25;
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
-            try
+            if (TryReadOnce(out text))
             {
-                text = Clipboard.GetText();
                 return true;
             }
-            catch (ExternalException)
-            {
-                // COMException (the CLIPBRD_E_CANT_OPEN we care about) derives from ExternalException, so this
-                // one catch covers both. Give up after the final attempt instead of letting it crash the app.
-                if (attempt == maxAttempts)
-                {
-                    break;
-                }
 
-                Thread.Sleep(retryDelayMs);
+            if (attempt < MaxAttempts)
+            {
+                Thread.Sleep(RetryDelayMs);
             }
         }
 
         text = string.Empty;
         return false;
+    }
+
+    /// <summary>
+    /// Async sibling of <see cref="TryRead"/> for UI-thread callers: the identical bounded-retry read, but the
+    /// backoff between attempts <c>await</c>s <see cref="Task.Delay(int)"/> instead of blocking the thread with
+    /// <see cref="Thread.Sleep(int)"/>, so the WPF message pump stays responsive on the rare
+    /// clipboard-can't-open path (#2837). Returns <c>Ok = true</c> with the clipboard text - which may still be
+    /// empty or whitespace, so callers keep their own "no text" handling - on success; <c>Ok = false</c> with
+    /// an empty string when the clipboard could not be opened after the bounded retries. Only the
+    /// clipboard-open failure family (<see cref="COMException"/> / <see cref="ExternalException"/>) is
+    /// swallowed; any other exception propagates. A read that succeeds on the first attempt completes
+    /// synchronously (awaiting an already-completed task does not yield), but the retry path DOES yield -- so
+    /// a key handler that must suppress the gesture sets <c>e.Handled</c> BEFORE awaiting this, claiming it
+    /// during event dispatch; setting it after would let the key finish routing unsuppressed on retry (#2837).
+    /// </summary>
+    public static async Task<(bool Ok, string Text)> TryReadAsync()
+    {
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            if (TryReadOnce(out var text))
+            {
+                return (true, text);
+            }
+
+            if (attempt < MaxAttempts)
+            {
+                // No ConfigureAwait(false): the next attempt calls Clipboard.GetText(), which must run on the
+                // STA UI thread, so we deliberately resume on the captured (UI) SynchronizationContext.
+                await Task.Delay(RetryDelayMs);
+            }
+        }
+
+        return (false, string.Empty);
+    }
+
+    /// <summary>
+    /// One guarded <see cref="Clipboard.GetText()"/> attempt, shared by <see cref="TryRead"/> and
+    /// <see cref="TryReadAsync"/>: returns <c>true</c> with the text on success, or <c>false</c> with an empty
+    /// string when the clipboard-open failure family (<see cref="COMException"/> / <see cref="ExternalException"/>)
+    /// is thrown - a transient <c>CLIPBRD_E_CANT_OPEN</c> the caller retries. Any other exception propagates.
+    /// </summary>
+    private static bool TryReadOnce(out string text)
+    {
+        try
+        {
+            text = Clipboard.GetText();
+            return true;
+        }
+        catch (ExternalException)
+        {
+            // COMException (the CLIPBRD_E_CANT_OPEN we care about) derives from ExternalException, so this one
+            // catch covers both.
+            text = string.Empty;
+            return false;
+        }
     }
 }

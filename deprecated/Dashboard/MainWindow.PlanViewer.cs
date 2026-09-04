@@ -281,9 +281,10 @@ namespace PerformanceMonitorDashboard
                 }
             };
 
-            pasteBtn.Click += (_, _) =>
+            pasteBtn.Click += async (_, _) =>
             {
-                if (!ClipboardText.TryRead(out var xml))
+                var (ok, xml) = await ClipboardText.TryReadAsync();
+                if (!ok)
                 {
                     MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
                         "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -440,15 +441,18 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void MainWindowPlanViewer_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        private async void MainWindowPlanViewer_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (e.Key == System.Windows.Input.Key.V &&
                 System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control &&
                 e.OriginalSource is not System.Windows.Controls.TextBox)
             {
-                if (ClipboardText.TryRead(out var xml) && !string.IsNullOrWhiteSpace(xml))
+                // Claim the paste gesture during event routing, before the async read yields on the retry
+                // path (#2837): setting e.Handled after the await would leave the key event unsuppressed.
+                e.Handled = true;
+                var (ok, xml) = await ClipboardText.TryReadAsync();
+                if (ok && !string.IsNullOrWhiteSpace(xml))
                 {
-                    e.Handled = true;
                     LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
                 }
             }
