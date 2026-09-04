@@ -469,6 +469,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
     {
         var rows = new List<ReplicaRow>();
         await using var command = postgres.CreateCommand(ReplicaStatesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddServerFilter(command, serverIdFilter);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -498,6 +499,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
     {
         var rows = new List<DatabaseRow>();
         await using var command = postgres.CreateCommand(DatabaseReplicaStatesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddServerFilter(command, serverIdFilter);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

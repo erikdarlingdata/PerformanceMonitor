@@ -77,6 +77,25 @@ public partial class DatabaseStateOverridesWindow : Window
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await LoadAsync();
 
+    /// <summary>
+    /// Loads the selected server's database states into the grid.
+    ///
+    /// <para><b>The scope is captured before the read and verified after it</b> (#2924). One grid, one
+    /// dropdown and one <see cref="_rows"/> model carry every server's answer, and
+    /// <see cref="ServerCombo_SelectionChanged"/> starts a load without a single-flight guard — so two
+    /// combo changes inside one store read leave two loads in flight and the last to COMPLETE painting,
+    /// which need not be the last one requested.</para>
+    ///
+    /// <para>Verifying rather than replaying, because the combo change is itself the re-read: the handler
+    /// has already started a load for the new server, so a mismatching answer is stale by definition and
+    /// its replacement is in flight. Dropping leaves the newest load — the only one whose scope can still
+    /// match when it lands — to paint.</para>
+    ///
+    /// <para><see cref="_rows"/> is the reason this is not only cosmetic. It is the model
+    /// <see cref="Save_Click"/> writes from, while that method resolves <see cref="SelectedServerId"/>
+    /// fresh: rows belonging to one server, edited under another server's selection, would be saved
+    /// against the server the combo names.</para>
+    /// </summary>
     private async System.Threading.Tasks.Task LoadAsync()
     {
         if (SelectedServerId is not int serverId)
@@ -87,6 +106,14 @@ public partial class DatabaseStateOverridesWindow : Window
         try
         {
             var rows = await _dataService.GetDatabaseStateExpectationsAsync(serverId);
+
+            /* The combo moved while the read was in flight, so this answer is for a server the operator has
+               left. Drop it ahead of every paint below, _rows included. */
+            if (SelectedServerId != serverId)
+            {
+                return;
+            }
+
             _rows = rows.Select(r => new EditRow
             {
                 DatabaseName = r.DatabaseName,
@@ -119,6 +146,13 @@ public partial class DatabaseStateOverridesWindow : Window
         }
         catch (Exception ex)
         {
+            /* The same scope test the success path makes, for the same reason: a failure reading the
+               departed server's states must not blank the grid the operator is now looking at. */
+            if (SelectedServerId != serverId)
+            {
+                return;
+            }
+
             StatesGrid.ItemsSource = null;
             StatusText.Text = $"Could not load database states: {ex.Message}";
         }
