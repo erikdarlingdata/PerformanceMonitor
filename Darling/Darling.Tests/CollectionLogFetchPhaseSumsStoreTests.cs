@@ -7,13 +7,8 @@
  */
 
 using System;
-using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -48,7 +43,7 @@ namespace Darling.Tests;
 /// </summary>
 public class CollectionLogFetchPhaseSumsStoreTests
 {
-    private const int RungVersion = 110;
+    internal const int RungVersion = 110;
 
     [Fact]
     public void TheRungIsRegisteredAtTheTopOfADenseLadder()
@@ -410,61 +405,9 @@ public class CollectionLogFetchPhaseSumsStoreTests
         Assert.Equal(109, (int)method.Invoke(null, allButMine)!);
     }
 
-    /// <summary>
-    /// The live half: the rung applies to a store built by the product's own applier, is IDEMPOTENT when
-    /// applied a second time, and lands the ten columns as nullable integers on BOTH the base table and the
-    /// passthrough view every read goes through.
-    ///
-    /// <para>The view assertion is the one that would catch the mistake that actually recurs on this table:
-    /// Postgres freezes a view's <c>SELECT *</c> list at CREATE, so an upgraded store whose rung forgot the
-    /// refresh has the columns on the table and NOT on the view - working perfectly on a fresh store and
-    /// invisibly broken on every existing one.</para>
-    /// </summary>
-    [Fact]
-    public async Task TheRungIsIdempotent_AndLandsOnBothTheTableAndTheView_AgainstLivePostgres()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the V110 live migration test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-
-        /* The product's own applier, not hand-run DDL - the whole point is that this is the path a real
-           store takes. Idempotent by contract, so calling it on an already-current store is a no-op and
-           calling it twice must stay one. */
-        await PgMigrations.MigrateAsync(connection, ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-
-        Assert.Equal(StorageVersion.SchemaVersion, await ScalarIntAsync(
-            connection, "SELECT COALESCE(MAX(version), 0) FROM collect.darling_schema_version", ct));
-
-        /* Exactly one ladder row for this rung after two passes. A rung applied twice would show two. */
-        Assert.Equal(1, await ScalarIntAsync(
-            connection, $"SELECT count(*) FROM collect.darling_schema_version WHERE version = {RungVersion}", ct));
-
-        foreach (var relation in new[] { "collection_log", "v_collection_log" })
-        {
-            var found = await ColumnTypesAsync(connection, relation, ct);
-
-            foreach (var column in ExpectedColumns)
-            {
-                Assert.True(found.TryGetValue(column, out var type),
-                    $"collect.{relation} is missing {column} after MigrateAsync. On the VIEW this is the "
-                    + "frozen-SELECT-* failure: Postgres fixes a view's column list at CREATE, so a rung "
-                    + "without the CREATE OR REPLACE refresh leaves an upgraded store's reads blind to "
-                    + "columns that are present on the table.");
-
-                Assert.Equal("integer", type.DataType);
-                Assert.True(type.IsNullable,
-                    $"{column} must be nullable: NULL is how a row says it performed no deferred fetch, "
-                    + "which is a different fact from a fetch that cost nothing.");
-            }
-        }
-    }
-
-    private static readonly string[] ExpectedColumns =
+    /* internal so the live sibling asserts against the SAME list rather than a second copy that
+       could drift from this one - the whole point of splitting is serialization, not divergence. */
+    internal static readonly string[] ExpectedColumns =
     [
         "plan_fetch_probe_ms", "plan_fetch_target_ms", "plan_fetch_write_ms",
         "plan_fetch_ids_attempted", "plan_fetch_probe_ids",
@@ -501,33 +444,6 @@ public class CollectionLogFetchPhaseSumsStoreTests
             PerItemTextIdsAttempted = textIds,
             PerItemTextProbeIds = textProbeIds,
         };
-
-    private static async Task<int> ScalarIntAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand(sql, connection);
-        return Convert.ToInt32(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
-    }
-
-    private static async Task<Dictionary<string, (string DataType, bool IsNullable)>> ColumnTypesAsync(
-        NpgsqlConnection connection, string relation, CancellationToken ct)
-    {
-        var found = new Dictionary<string, (string, bool)>(StringComparer.Ordinal);
-        await using var command = new NpgsqlCommand(
-            """
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_schema = 'collect' AND table_name = $1
-            """, connection);
-        command.Parameters.Add(new NpgsqlParameter { Value = relation });
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
-        {
-            found[reader.GetString(0)] = (reader.GetString(1),
-                string.Equals(reader.GetString(2), "YES", StringComparison.Ordinal));
-        }
-
-        return found;
-    }
 
     /// <summary>Reads a repo source file by walking up from the test binary to the repo root.</summary>
     private static string ReadSource(string relativePath)
