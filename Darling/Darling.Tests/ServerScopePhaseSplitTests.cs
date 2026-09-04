@@ -286,16 +286,21 @@ public sealed class ServerScopePhaseSplitTests
     {
         /* Three phases here, not two, and the third is the point: the connect is a real per-cycle cost on
            Azure SQL DB because this branch logs in once per database. Pin the SHIPPED expressions — the
-           residual method and the gate the log site calls — rather than a copy of the arithmetic. */
+           residual method and the gate the log site calls — rather than a copy of the arithmetic.
+
+           The figures are INVENTED, and deliberately not borrowed from any of the measurements quoted in
+           this file's header: nothing has yet measured this branch against a live Azure SQL DB target, and a
+           fixture that echoed a real number from another path would read as if something had. */
         var context = PerDatabaseContext();
         context.PerDatabasePhasesMeasured = true;
-        context.PerDatabaseConnectMs = 1_451;
-        context.PerDatabaseOpenMs = 247;
-        context.PerDatabaseDrainMs = 36;
+        context.PerDatabaseConnectMs = 1_200;
+        context.PerDatabaseOpenMs = 400;
+        context.PerDatabaseDrainMs = 150;
 
-        /* 1,800 total: 1,451 connect + 247 open + 36 drain leaves 66 in command construction and the
-           trailing probe-failure rowset. */
-        Assert.Equal(66, context.PerDatabaseOtherMsFrom(1_800));
+        /* 1,800 total: 1,200 connect + 400 open + 150 drain leaves 50 in command construction, the trailing
+           probe-failure rowset, and the teardown of the reader, command and connection — which on this path
+           is one close per database and sits inside the parent stopwatch. */
+        Assert.Equal(50, context.PerDatabaseOtherMsFrom(1_800));
 
         var split = Assert.NotNull(context.PerDatabasePhasesFrom(1_800));
         Assert.Equal(
@@ -347,12 +352,12 @@ public sealed class ServerScopePhaseSplitTests
         var pooled = PerDatabaseContext();
         pooled.PerDatabasePhasesMeasured = true;
         pooled.PerDatabaseConnectMs = 0;
-        pooled.PerDatabaseOpenMs = 3_900;
-        pooled.PerDatabaseDrainMs = 700;
+        pooled.PerDatabaseOpenMs = 1_600;
+        pooled.PerDatabaseDrainMs = 150;
 
-        var split = Assert.NotNull(pooled.PerDatabasePhasesFrom(4_644));
+        var split = Assert.NotNull(pooled.PerDatabasePhasesFrom(1_800));
         Assert.Equal(0, split.ConnectMs);
-        Assert.Equal(44, split.OtherMs);
+        Assert.Equal(50, split.OtherMs);
 
         /* And a database where every phase legitimately measured zero still declares itself measured, with
            zeros that mean what they say rather than an absent line. */
@@ -378,7 +383,7 @@ public sealed class ServerScopePhaseSplitTests
 
         var perDatabase = PerDatabaseContext();
         perDatabase.PerDatabasePhasesMeasured = true;
-        perDatabase.PerDatabaseConnectMs = 1_451;
+        perDatabase.PerDatabaseConnectMs = 1_200;
 
         Assert.NotNull(perDatabase.PerDatabasePhasesFrom(1_800));
         Assert.False(perDatabase.PerItemPhasesMeasured);

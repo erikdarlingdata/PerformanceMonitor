@@ -377,12 +377,17 @@ public sealed class CollectorContext
     public bool PerDatabasePhasesMeasured { get; set; }
 
     /// <summary>
-    /// The part of the database's blended <c>sql:</c> total that is none of the three phases — command
-    /// construction, and the trailing probe-failure rowset the payload contract may carry. Lives here rather
-    /// than at the log site so the subtraction has one definition and a test can pin the shipped arithmetic
-    /// instead of a copy, the <see cref="DrainMsFrom"/> discipline. Clamped at zero: three separate
-    /// stopwatches can overshoot the parent by a millisecond or two, and that must print as zero rather than
-    /// as a negative term that makes the whole line look broken.
+    /// The part of the database's blended <c>sql:</c> total that is none of the three phases: command
+    /// construction, the trailing probe-failure rowset the payload contract may carry, and the TEARDOWN of
+    /// the reader, command and connection — the last of which is named because it is not incidental here.
+    /// One connection per database means one close per database, and the host's stopwatch is still running
+    /// when it happens. The watermark read and <c>BuildQuery</c> are NOT in it: on this path they run before
+    /// the stopwatch starts, so they are outside the parent as well as outside the phases.
+    ///
+    /// <para>Lives here rather than at the log site so the subtraction has one definition and a test can pin
+    /// the shipped arithmetic instead of a copy, the <see cref="DrainMsFrom"/> discipline. Clamped at zero:
+    /// three separate stopwatches can overshoot the parent by a millisecond or two, and that must print as
+    /// zero rather than as a negative term that makes the whole line look broken.</para>
     /// </summary>
     public long PerDatabaseOtherMsFrom(long databaseSqlMs) =>
         Math.Max(0, databaseSqlMs - PerDatabaseConnectMs - PerDatabaseOpenMs - PerDatabaseDrainMs);
