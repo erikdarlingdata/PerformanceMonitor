@@ -77,8 +77,11 @@ internal sealed class DarlingSelfAlertEvaluator
        stopped — matches the Dashboard's CollectionStaleThresholdMinutes (NocHealth.cs). The frequent
        Darling collectors run every ~1 minute, so 30 minutes of no success is unambiguously dead; the
        connection-lost alert covers the fast path for an unreachable server, and the consecutive-failure
-       check below covers the fast path for a server that is connected but erroring every collector. */
-    internal static readonly TimeSpan StaleWindow = TimeSpan.FromMinutes(30);
+       check below covers the fast path for a server that is connected but erroring every collector.
+       Derived from the shared default so the display's Offline band and this alert describe the SAME
+       condition (#2794) — CollectionStoppedThresholdAgreementTests pins the agreement. */
+    internal static readonly TimeSpan StaleWindow =
+        TimeSpan.FromMinutes(ServerHealthThresholds.CollectionStoppedMinutesDefault);
 
     /* The last N logged runs all failing (no SUCCESS/SKIPPED among them) fires "Collection Stopped"
        faster than the staleness backstop when a connected server's collectors are erroring on every

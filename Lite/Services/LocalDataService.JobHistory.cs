@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -281,8 +282,10 @@ public class AgentStatusRow
     public bool EverSeenRunning { get; set; }
 
     /// <summary>A reading older than this is not presented as current. Mirrors the headless service's
-    /// <c>StaleWindow</c>, so both surfaces refuse to judge on the same age of data.</summary>
-    public static readonly TimeSpan StaleWindow = TimeSpan.FromMinutes(30);
+    /// <c>StaleWindow</c>, so both surfaces refuse to judge on the same age of data — now literally, via
+    /// the shared constant rather than a numerically-equal copy (#2794).</summary>
+    public static readonly TimeSpan StaleWindow =
+        TimeSpan.FromMinutes(ServerHealthThresholds.CollectionStoppedMinutesDefault);
 
     /// <summary>True when the newest snapshot is too old to describe the server right now — collection stopped,
     /// the server went away, or the collector is failing. A stale reading must never render as a current state.</summary>

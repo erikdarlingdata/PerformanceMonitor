@@ -358,7 +358,7 @@ public static class DarlingPgSessionStatesReader
     /// produces ZERO rows for a cycle, which is correct and must not be confused with "the collector stopped
     /// running". Bounding "most recent" to a real window (rather than an unqualified <c>MAX(collection_time)</c>
     /// that could resolve to a capture from hours ago) is what keeps an honest empty from silently going stale.
-    /// 15 minutes, matching the fleet's own <c>OfflineThreshold</c> staleness convention
+    /// The fleet's own <c>OfflineThreshold</c> staleness convention
     /// (<see cref="PerformanceMonitor.Common.ServerHealthBands"/>) rather than a tight multiple of the
     /// collector's 1-minute configured cadence — this fleet's delivered sweep cadence has been measured
     /// running well behind its configured interval under load, and a recency bound tighter than the fleet's
