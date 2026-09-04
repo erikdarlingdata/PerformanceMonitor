@@ -50,4 +50,8 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           BASE_REF: ${{ github.base_ref }}
+          # Anchors the API read to the commit this event is about, so a stale post-push
+          # view of the pull request cannot produce a verdict about the previous head.
+          # A SHA, passed by environment and never checked out or executed.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: .github/scripts/check-commit-identity.sh

@@ -79,8 +79,10 @@ FILTER='
 PER_PAGE=100
 MAX_PAGES=10
 page=1
+pages_read=0
 read_count=0
 violations=''
+seen_shas=''
 
 while [ "$page" -le "$MAX_PAGES" ]; do
   # No retry and no soft-fail on an API error: under set -e a failed call ends the script red.
@@ -94,7 +96,9 @@ while [ "$page" -le "$MAX_PAGES" ]; do
   n=$(printf '%s' "$page_json" | jq 'length')
   [ "$n" -eq 0 ] && break
 
+  pages_read=$((pages_read + 1))
   read_count=$((read_count + n))
+  seen_shas=${seen_shas:+$seen_shas$'\n'}$(printf '%s' "$page_json" | jq -r '.[].sha')
   page_violations=$(printf '%s' "$page_json" | jq -r --argjson allow "$allow_json" "$FILTER")
   if [ -n "$page_violations" ]; then
     violations=${violations:+$violations$'\n'}$page_violations
@@ -103,8 +107,6 @@ while [ "$page" -le "$MAX_PAGES" ]; do
   [ "$n" -lt "$PER_PAGE" ] && break
   page=$((page + 1))
 done
-
-pages_read=$page
 
 # Coverage assertion. /pulls/{n}/commits caps at 250 regardless of paging, and this repo really
 # does have pull requests above that line (several in the 300-900 range), so the cap is NOT
@@ -120,6 +122,25 @@ if [ "$read_count" -lt "$declared" ]; then
     "pull request, or verify by hand with:" \
     "git log --format='%h %ae %ce' origin/${BASE_REF:-dev}..HEAD"
   exit 1
+fi
+
+# Anchor what was read to the commit this event is actually about. `declared` and the commit list
+# come from two endpoints in the same family, so a stale post-push view could leave them AGREEING
+# with each other while both describe the PREVIOUS head -- and the coverage assertion above only
+# compares them to each other, so it cannot see that. Requiring the event's head SHA to appear in
+# what was actually read is the independent check, and it fails closed: if the API has not caught
+# up, the anchor is missing and this goes red, which a re-run clears. Skipped when HEAD_SHA is not
+# supplied (running this by hand against an arbitrary pull request), because there is no event to
+# anchor to then. Review catch on the pull request that added this check.
+if [ -n "${HEAD_SHA:-}" ]; then
+  head_short=$(printf '%s' "$HEAD_SHA" | cut -c1-8)
+  if ! printf '%s\n' "$seen_shas" | grep -qxF "$HEAD_SHA"; then
+    echo "::error::Commit identity read ${read_count} commit(s), none of which is this event's head" \
+      "commit (${head_short}). The API is most likely still serving a pre-push view of this pull" \
+      "request, which would make any verdict here describe the wrong commits, so none is reported." \
+      "Re-run this job."
+    exit 1
+  fi
 fi
 
 if [ -n "$violations" ]; then
@@ -153,7 +174,7 @@ REMEDY
   exit 1
 fi
 
-echo "Commit identity OK: ${read_count} commit(s) over ${pages_read} page(s), author and committer both allowlisted on every one."
+echo "Commit identity OK: ${read_count} commit(s) over ${pages_read} page(s)${HEAD_SHA:+, anchored on the event head commit}, author and committer both allowlisted on every one."
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   echo "- Commit identity: ${read_count} commit(s) checked, author and committer allowlisted on every one." >> "$GITHUB_STEP_SUMMARY"
 fi
