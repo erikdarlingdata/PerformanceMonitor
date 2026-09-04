@@ -76,8 +76,9 @@ public static class ClipboardText
     /// an empty string when the clipboard could not be opened after the bounded retries. Only the
     /// clipboard-open failure family (<see cref="COMException"/> / <see cref="ExternalException"/>) is
     /// swallowed; any other exception propagates. A read that succeeds on the first attempt completes
-    /// synchronously (awaiting an already-completed task does not yield), so a caller that sets
-    /// <c>e.Handled</c> after the await still does so within the event dispatch on the common path.
+    /// synchronously (awaiting an already-completed task does not yield), but the retry path DOES yield -- so
+    /// a key handler that must suppress the gesture sets <c>e.Handled</c> BEFORE awaiting this, claiming it
+    /// during event dispatch; setting it after would let the key finish routing unsuppressed on retry (#2837).
     /// </summary>
     public static async Task<(bool Ok, string Text)> TryReadAsync()
     {
