@@ -18,7 +18,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Every command in <c>PerformanceMonitor.Darling.Storage</c> must carry an EXPLICIT deadline
-/// (#2874). Sixty-nine of the project's 124 command sites ran on Npgsql's undocumented 30 s
+/// (#2874). Seventy of the project's 124 command sites ran on Npgsql's undocumented 30 s
 /// default — a value nobody chose, and the defect class behind three production failures
 /// (#2810, #2871, #2796): exceeding the ceiling fails in a way that looks like a legitimate result.
 ///
@@ -44,7 +44,7 @@ public sealed class StorageCommandTimeoutTests
     /// <summary>
     /// Both ways a command is constructed in this codebase — <c>new NpgsqlCommand(</c> and
     /// <c>.CreateCommand(</c>. The second is the shape #2874's original census missed entirely
-    /// (367 of its 371 sites were untimed), and 49 of this project's 69 were that shape.
+    /// (367 of its 371 sites were untimed), and 50 of this project's 70 were that shape.
     /// </summary>
     private static readonly Regex s_commandCtor = new(
         @"new NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
