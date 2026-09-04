@@ -138,6 +138,7 @@ internal static class DarlingObjectStatsReader
     {
         var rows = new List<ObjectSizeGrowthRow>();
         await using var command = postgres.CreateCommand(ObjectSizeGrowthSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, cutoff7dUtc);
         DarlingMcpReadParameters.AddTimestamp(command, cutoff30dUtc);
@@ -234,6 +235,7 @@ internal static class DarlingObjectStatsReader
     {
         var rows = new List<IndexUsageRow>();
         await using var command = postgres.CreateCommand(IndexUsageSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
         DarlingMcpReadParameters.AddInt(command, top);
@@ -268,6 +270,7 @@ internal static class DarlingObjectStatsReader
         NpgsqlDataSource postgres, int serverId, string? databaseName = null, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(IndexUsageMatchCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
 
@@ -325,6 +328,7 @@ internal static class DarlingObjectStatsReader
     {
         var rows = new List<IndexLockingRow>();
         await using var command = postgres.CreateCommand(IndexLockingSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -381,6 +385,7 @@ internal static class DarlingObjectStatsReader
     {
         var rows = new List<DatabaseSizeRow>();
         await using var command = postgres.CreateCommand(DatabaseSizeLatestSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

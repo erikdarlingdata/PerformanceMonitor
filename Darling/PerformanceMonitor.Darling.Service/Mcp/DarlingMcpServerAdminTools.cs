@@ -217,6 +217,7 @@ public sealed class DarlingMcpServerAdminTools
             }
 
             await using var command = postgres.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = $1");
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
             var affected = await command.ExecuteNonQueryAsync();
 
@@ -545,6 +546,7 @@ ON CONFLICT (server_id) DO NOTHING";
     {
         var keys = new List<string>();
         await using var command = postgres.CreateCommand(ExistingServersSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -566,6 +568,7 @@ ON CONFLICT (server_id) DO NOTHING";
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
         await using var command = postgres.CreateCommand(InsertServerSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerIdHelper.GetDeterministicHashCode(entry.StorageKey) }); // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Name });                                            // $2
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Host });                                            // $3

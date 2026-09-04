@@ -254,6 +254,7 @@ internal static class DarlingQueryHeatmapReader
     {
         var rows = new List<HeatmapCellRow>();
         await using var command = postgres.CreateCommand(BuildQueryHeatmapSql(metric));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter
         {
@@ -283,6 +284,7 @@ internal static class DarlingQueryHeatmapReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(HeatmapCoverageSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))

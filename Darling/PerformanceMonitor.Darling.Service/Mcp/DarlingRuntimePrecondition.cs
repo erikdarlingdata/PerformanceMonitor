@@ -205,6 +205,7 @@ ORDER BY database_name";
         CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(LatestCollectorOutcomeSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddText(command, collectorName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -227,6 +228,7 @@ ORDER BY database_name";
         CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(CollectorEverRanSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddText(command, collectorName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -254,6 +256,7 @@ ORDER BY database_name";
         DateTime? observedUtc = null;
 
         await using var command = postgres.CreateCommand(LatestQueryStoreStatesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddNullableText(command, string.IsNullOrWhiteSpace(databaseName) ? null : databaseName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

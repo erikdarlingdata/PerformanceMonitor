@@ -98,6 +98,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
 
         await using (var command = postgres.CreateCommand(ServerSummaryCpuSql))
         {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -108,6 +109,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
 
         await using (var command = postgres.CreateCommand(ServerSummaryMemorySql))
         {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -118,6 +120,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
 
         await using (var command = postgres.CreateCommand(ServerSummaryBlockingSql))
         {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddTimestamp(command, windowStart);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -132,6 +135,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
 
         await using (var command = postgres.CreateCommand(ServerSummaryDeadlockSql))
         {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddTimestamp(command, windowStart);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -143,6 +147,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
 
         await using (var command = postgres.CreateCommand(ServerSummaryLastCollectionSql))
         {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is not null && result != DBNull.Value)
@@ -213,6 +218,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
 
         var results = new List<DailySummaryReadRow>();
         await using var command = postgres.CreateCommand(DailySummarySql.RangeSqlFor(tier));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, fromDate.Date);
         DarlingMcpReadParameters.AddTimestamp(command, toDate.Date);
