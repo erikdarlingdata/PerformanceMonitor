@@ -44,7 +44,10 @@ namespace Darling.Tests;
 /// anyway, because declining to close a shape a census demonstrably cannot see is this issue's own
 /// mistake in miniature — and closing it is what lets
 /// <see cref="EverySweepBodyCommand_IsBuiltAgainstTheStore_NotAMonitoredTarget"/> see that site at all if
-/// an edit ever moves it inside a sweep member.</para>
+/// an edit ever moves it inside a sweep member. The inventory is not closed by this: a target-typed
+/// <c>new(...)</c> carries no type name at the construction at all, so no regex here can reach it, and
+/// <see cref="ExpectedSweepCommandSites"/> records what was measured about that rather than assuming it
+/// away.</para>
 ///
 /// <para><b>Store and target are separate regimes, and this pin now says which one every site is.</b>
 /// <c>.Storage</c> and <c>.Viewer</c> never needed that distinction — those projects only ever talk to
@@ -107,16 +110,16 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// <c>runtime.ConnectionString</c>: a monitored PostgreSQL target. Its 60 s is not a bespoke bound
     /// either. <c>MonitoredServerConnection.BuildConnectionString</c> puts <c>CommandTimeout = 60</c> on
     /// every monitored-PostgreSQL connection string, and Npgsql initialises a command's deadline from its
-    /// connection's, so the site RESTATES the target-wide value it would have inherited. Nor is it a lone
-    /// literal: <c>CommandTimeout = 60</c> appears 26 times in this project — 23 target commands in
-    /// <c>DarlingXeSessions</c>, both of <c>MonitoredServerConnection</c>'s connection-string builders,
-    /// and this site. The target commands that do NOT take 60 took a different number for a reason of
-    /// their own (<c>DarlingServerConnector</c>'s probes, at 15 s and 30 s), which is what a per-site
-    /// target bound looks like here when one is actually warranted.
-    /// Enlisting it would replace that with a 10 s store bound: a 6x tightening of a read whose cost is the
-    /// monitored server's, argued from latency measured on the store. Giving it a target-side constant of
-    /// its own would invent a one-member regime while the number's actual home is the connection-string
-    /// builder. It is left exactly as it is, and
+    /// connection's, so the site RESTATES the target-wide value it would have inherited. Enlisting it here
+    /// would replace that with a 10 s store bound: a 6x tightening of a read whose cost is the monitored
+    /// server's, argued from latency measured on the store. Giving it a target-side constant of its own
+    /// would invent a one-member regime while the number's actual home is the connection-string builder —
+    /// and it is not a lone literal in any case. <c>CommandTimeout = 60</c> appears 26 times in this
+    /// project: 23 target commands in <c>DarlingXeSessions</c>, both of
+    /// <c>MonitoredServerConnection</c>'s connection-string builders, and this site. The target commands
+    /// that do NOT take 60 took a different number for a reason of their own
+    /// (<c>DarlingServerConnector</c>'s probes, at 15 s and 30 s), which is what a per-site target bound
+    /// looks like here when one is genuinely warranted. It is left exactly as it is, and
     /// <see cref="EverySweepBodyCommand_IsBuiltAgainstTheStore_NotAMonitoredTarget"/> is what stops it — or
     /// anything shaped like it — from arriving in this budget by adjacency.</para>
     /// </summary>
@@ -137,7 +140,9 @@ public sealed class CollectionSweepCommandTimeoutTests
     };
 
     /// <summary>
-    /// The sweep's command sites, counted so a member that stops creating commands fails loudly.
+    /// The sweep's command sites — constructions matching the shapes <see cref="s_commandCtor"/> can SEE,
+    /// which is narrower than "constructions" and is written that way on purpose — counted so a member that
+    /// stops creating commands fails loudly.
     ///
     /// <para>RE-DERIVED rather than adjusted when <see cref="s_commandCtor"/> grew the qualified shape.
     /// Each of the twelve members was re-scanned under the old pattern and the new one and every member
@@ -145,6 +150,18 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// widening exists for is not inside any of them. Ten sites are
     /// <c>new NpgsqlCommand(sql, connection)</c> on a connection borrowed from the store pool; three are
     /// <c>_postgres.CreateCommand(</c> on the data source itself.</para>
+    ///
+    /// <para><b>What this number cannot include, MEASURED rather than assumed.</b> A target-typed
+    /// <c>new(...)</c> puts the type in the member's RETURN TYPE rather than at the construction, so no
+    /// regex anchored at the construction site can reach it — #2943 reports the shape and calls it
+    /// unguardable that way, which is the right call and not something a count can paper over. So it was
+    /// measured: target-typed <c>new(</c> occurs ZERO times inside these twelve member bodies, and none of
+    /// the 39 <c>=&gt; new(</c> sites elsewhere in <c>.Service</c> returns a command, a connection or an
+    /// importer. A measured zero is what lets a census be trusted; an assumed one is how a census ratifies
+    /// a site it never saw. The three expression-bodied members in this project that DO return a command
+    /// are the collector runner's and the two target providers' factories, and they take their deadline as
+    /// a THREADED PARAMETER — a stronger bound than a constant — on the target path rather than this
+    /// budget.</para>
     /// </summary>
     private const int ExpectedSweepCommandSites = 13;
 
