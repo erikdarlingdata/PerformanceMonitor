@@ -5188,6 +5188,7 @@ LIMIT 1", connection);
         await using (var lookup = _postgres!.CreateCommand(
             "SELECT query_text FROM collect.pg_statement_text WHERE server_id = $1 AND queryid = $2"))
         {
+            lookup.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
             lookup.Parameters.AddWithValue(serverId);
             lookup.Parameters.AddWithValue(queryId);
             statementText = (await lookup.ExecuteScalarAsync(cancellationToken)) as string;
@@ -5457,6 +5458,7 @@ LIMIT 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(ResolveActualPlanSql(request.Source), connection);
+            command.CommandTimeout = ServiceCommandDeadlines.ActualPlanResolveSeconds;
             BindActualPlanResolveParameters(command, serverId, request);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))

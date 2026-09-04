@@ -75,4 +75,148 @@ public static class ServiceCommandDeadlines
     /// below by a 1,744.9 ms forced-plan read, neither of which appears anywhere above.</para>
     /// </summary>
     public const int CollectionSweepSeconds = 10;
+
+    /// <summary>
+    /// The store&lt;-&gt;service COMMAND plane's own bookkeeping — the stale-command reaper, the atomic
+    /// claim, the desired-state store write a claimed command dispatches, the terminal result report,
+    /// and the <c>pg_statement_text</c> lookup <c>test_hypothetical_index</c> resolves its statement
+    /// from.
+    ///
+    /// <para><b>The regime.</b> Nothing encloses these: <c>RunCommandLoopAsync</c> runs on the plain
+    /// stopping token with no <c>CancelAfter</c> anywhere, and nothing re-runs a command — measured
+    /// against the shipped SQL, the reaper marks an abandoned row terminal <c>failed</c> and never
+    /// re-queues it to <c>pending</c>, so a second instance cannot claim work still in flight. What
+    /// the loop holds is its own SERIAL thread: <c>DarlingCommandExecutor.ReclaimStaleCommandsSql</c>'s command runs
+    /// FIRST on every tick, before the drain, so a stalled reaper is added tick period for the whole
+    /// plane.</para>
+    ///
+    /// <para><b>ABOVE the measured worst case, by three orders of magnitude and deliberately.</b>
+    /// Every statement here is a single row on a keyed, non-hypertable relation:
+    /// <c>config.config_command</c> by its identity PK, <c>config.config_service</c> by
+    /// <c>id = 1</c>, <c>config.config_monitored_servers</c> by <c>server_id</c>, and
+    /// <c>collect.pg_statement_text</c> by its <c>(server_id, queryid)</c> PK. #2901 measured the
+    /// viewer end of this same plane — the same table, the same shape — at <b>3.9 ms cold and 0.1 ms
+    /// warm</b>. The headroom is spent on the report write specifically, which is what ENDS the claim
+    /// lease: a report that gives up leaves the row <c>in_progress</c>, and the reaper then reports a
+    /// command that SUCCEEDED as reclaimed-failed five minutes later. Store connection acquisition
+    /// (673-893 ms, #2819) is NOT in this floor — <c>CommandTimeout</c> bounds statement execution,
+    /// not <c>OpenConnectionAsync</c>, which the connection string's own <c>Timeout</c> governs.</para>
+    ///
+    /// <para><b>BELOW the cadence the plane exists to guarantee.</b>
+    /// <c>DarlingWorker.s_commandPollInterval</c> is 5 s, chosen so "an operator command is picked up
+    /// within ~5s". The loop is single-threaded, so one stalled statement is added tick period: at 5 s
+    /// the worst tick is 10 s, at Npgsql's inherited 30 s it is 35 s — seven times the cadence. And the
+    /// executor's four statements chain inside the wait the viewer STATES:
+    /// <c>ViewerDataService.DefaultCommandTimeout</c> is 45 s for pause/resume, which 4 x 5 = 20 s fits
+    /// and 4 x 30 = 120 s does not. This is the third derivation in this sweep to land on 5, and none
+    /// of them copied another: the viewer's came from a 400 ms poll interval, this one from a 5 s
+    /// server-side tick and a 45 s stated wait.</para>
+    ///
+    /// <para><b>It NARROWS the lease overrun rather than closing it</b>, following #2888's lock wait
+    /// and #2901's own command plane. <c>DarlingCommandExecutor.StaleCommandTimeout</c> is five
+    /// minutes with no heartbeat, and what a command spends is dominated by work this deadline does not
+    /// bound — a full collector sweep for <c>snapshot_now</c>, a fleet-wide retention purge for
+    /// <c>purge_now</c>, 120 s of re-execution for <c>execute_actual_plan</c>. So the lease is not the
+    /// instrument this constant moves; it is the instrument that MISREPORTS when the report write
+    /// fails, and the report failing fast is strictly better than it failing slow.</para>
+    /// </summary>
+    public const int CommandPlaneSeconds = 5;
+
+    /// <summary>
+    /// The <c>execute_actual_plan</c> store resolve — <c>DarlingWorker.RunExecuteActualPlanAsync</c>'s
+    /// one read, which turns the command's identifier-only payload into the query text, estimated plan
+    /// and isolation level it re-executes.
+    ///
+    /// <para><b>Its own regime, because its FLOOR is larger than the whole of
+    /// <see cref="CommandPlaneSeconds"/>.</b> It receives the same token as the plane's bookkeeping and
+    /// nothing re-runs it either, but none of the three resolvers carries a predicate on
+    /// <c>collection_time</c> — the partitioning column — so each is a <c>LIMIT 1</c> over every chunk
+    /// in retention, and the <c>query_store_stats</c> resolver sorts rows carrying
+    /// <c>query_plan_text</c> before taking one. On the larger production store that table is
+    /// <b>62.5 GB across 19 chunks</b> (#2795), and the store's own PostgreSQL log for a single day
+    /// records reads of it cancelled at Npgsql's 30 s default 2,092 and 631 times. So the default is
+    /// demonstrably beneath this table's cold cost, and giving this site the plane's 5 s would fail a
+    /// button that works today — the "a wrong bound is worse than no bound" case #2874 opens with.</para>
+    ///
+    /// <para><b>Derived from what is left of the command's budget, not chosen.</b> The resolve is not
+    /// the last thing the command does: <c>ActualPlanCaptureTimeoutSeconds</c> (120) bounds the
+    /// re-execution that follows it inside the same claim, and the viewer waits
+    /// <c>ViewerDataService.ImperativeCommandTimeout</c> (180 s). 180 - 120 leaves 60 s for everything
+    /// else, of which the claim costs up to one 5 s poll tick and the report up to
+    /// <see cref="CommandPlaneSeconds"/>; 45 s is the remainder. Landing inside it is what makes a
+    /// timeout surface as a legible "store error" outcome rather than as a viewer poll miss — the same
+    /// pair of bounds <c>ActiveQueriesFetchTimeoutSeconds</c>'s own comment derives from.</para>
+    ///
+    /// <para><b>Not measured, and said rather than implied.</b> There is no cold timing of this
+    /// specific read: the 62.5 GB / 19-chunk figure and the two cancellation counts are #2795's, taken
+    /// on a store this session had no credentials for, and the reads it measured were unbounded
+    /// AGGREGATES while this one seeks
+    /// <c>idx_query_store_stats_server_db_query_plan_time</c>'s leading three columns. The measurement
+    /// bounds this read's cost from above rather than establishing it.</para>
+    /// </summary>
+    public const int ActualPlanResolveSeconds = 45;
+
+    /// <summary>
+    /// The Query Store backfill worker's two store reads — the candidate-database scan and the
+    /// derived-ceiling <c>MIN(last_execution_time)</c>.
+    ///
+    /// <para><b>The enclosing budget does not bound them, and that is measured rather than read.</b>
+    /// <c>DarlingWorker.BackfillSliceDeadline</c> is 300 s, but <c>AbandonableStep</c> ABANDONS: it
+    /// races the work against a <c>Task.Delay</c> and returns <c>Abandoned</c> without signalling
+    /// anything. Against a live store, a 20 s statement with <c>CommandTimeout = 0</c> under a 3 s
+    /// deadline returned <c>Abandoned</c> at 3.0 s while <c>pg_stat_activity</c> still showed that
+    /// backend <c>state = 'active'</c> running it; the same statement with <c>CommandTimeout = 5</c>
+    /// faulted at 5.0 s with the backend gone. <b>The command deadline is the only thing that kills the
+    /// statement.</b> And with the shipped shape — no deadline, 300 s budget — a 40 s statement faulted
+    /// at <b>30.0 s</b> with <c>Exception while reading from stream</c>: the 300 s was never reached,
+    /// and the value that decided was the undocumented one.</para>
+    ///
+    /// <para><b>ABOVE the worst case, which for this regime means ABOVE Npgsql's default.</b> Both
+    /// reads are unbounded across retention on <c>query_store_stats</c>, and both are in #2795's
+    /// production cancellation census: the candidate scan's own form <b>631 times in one day</b>, and
+    /// the <c>MIN</c>'s shape-twin <c>MAX</c> <b>2,092 times</b>, measured at <b>40,743-50,560 ms
+    /// cold</b> and 9,279 ms warm on the 62.5 GB / 19-chunk table. The candidate scan's
+    /// <c>collection_time &gt; now() - CandidateWindow</c> predicate is INERT: <c>CandidateWindow</c>
+    /// is 7 days while <c>TimescaleSupport.RawRetentionSpan</c> is 4, so no chunk that exists is ever
+    /// excluded — which is why a nominally bounded read is in that census at all. And the <c>MIN</c>
+    /// cannot be bounded the way #2344 and #2795 bounded their <c>MAX</c> siblings: it exists to find
+    /// the OLDEST stored row, so a <c>collection_time</c> floor would hide exactly what it looks for.
+    /// 120 s clears the twin's 50.6 s cold worst with 2.4x headroom. Both failures are swallowed at
+    /// <c>LogDebug</c> and return "no candidates" / "skip this database", which reads as no backfill
+    /// work — the silent-degradation shape of #2795 and #2796, one loop over.</para>
+    ///
+    /// <para><b>BELOW the point where the loop walks away from a live statement.</b> Strictly under the
+    /// 300 s <c>BackfillSliceDeadline</c>, so the statement dies before the step abandons it and the
+    /// <c>Abandoned</c> outcome is unreachable for these two reads; an abandoned read would keep
+    /// burning a pooled store connection while the step's in-flight guard quarantines that server's
+    /// backfill until the task truly ends. Also under <c>s_queryStoreBackfillInterval</c> (300 s), so a
+    /// read alone can never consume a whole tick.</para>
+    /// </summary>
+    public const int QueryStoreBackfillReadSeconds = 120;
+
+    /// <summary>
+    /// The control-plane reload beacon — <c>StoreConfigProvider.ReadConfigVersionAsync</c>'s
+    /// <c>SELECT config_version FROM config_service WHERE id = 1</c>.
+    ///
+    /// <para><b>Claimed here rather than with the startup group, on this project's own
+    /// classification rule</b>: which token does the site receive, and what re-runs it. This one takes
+    /// the plain stopping token and is re-run by the collection sweep <b>every 15 s, for the life of
+    /// the process</b>. The other twelve sites in its file are seeding and reconcile reads that run
+    /// ONCE per process start and belong with startup. A file boundary is not a regime boundary, which
+    /// is the lesson #2928 recorded in both directions.</para>
+    ///
+    /// <para><b>ABOVE the measured worst case</b>, which is the same 3.9 ms cold #2901 measured for a
+    /// single-row <c>config.*</c> read; <c>config_service</c> holds exactly one row.</para>
+    ///
+    /// <para><b>BELOW the tick, and tighter than <see cref="CommandPlaneSeconds"/> because the
+    /// asymmetry is more lopsided.</b> The read is awaited at the TOP of the sweep loop on the serial
+    /// loop thread, ahead of the fire-and-track launch of every server, so a stall is fleet-wide
+    /// collection latency rather than one server's: at Npgsql's inherited 30 s a single stall makes the
+    /// 15 s <c>s_sweepInterval</c> period 45 s for the whole fleet at once. And it fails OPEN — the
+    /// catch takes everything, warns, returns null and keeps the live config — so an exceeded deadline
+    /// costs at most one 15 s tick of delay in applying a config change, against 42 servers' collection
+    /// for an overrun. 3 s is 750x the measured floor and a fifth of the tick, so even a full overshoot
+    /// leaves the sweep inside two ticks.</para>
+    /// </summary>
+    public const int ConfigReloadBeaconSeconds = 3;
 }

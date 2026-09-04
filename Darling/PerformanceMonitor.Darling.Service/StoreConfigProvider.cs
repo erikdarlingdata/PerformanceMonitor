@@ -61,6 +61,7 @@ public sealed class StoreConfigProvider
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand("SELECT config_version FROM config_service WHERE id = 1", connection);
+            command.CommandTimeout = ServiceCommandDeadlines.ConfigReloadBeaconSeconds;
             var result = await command.ExecuteScalarAsync(cancellationToken);
             return result is null or DBNull ? null : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
         }
