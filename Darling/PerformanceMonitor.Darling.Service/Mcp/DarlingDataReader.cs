@@ -1198,11 +1198,17 @@ internal static class DarlingDataReader
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
     /// the SAME ordinals, which is the parity that matters here — both MCP surfaces read positionally.</para>
     /// </summary>
-    public const string CollectionHealthSql = """
+    public const string CollectionHealthSql = $"""
         SELECT
             collector_name,
             COUNT(*) AS total_runs,
-            SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+            -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+            -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+            -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+            -- the shared predicate is for: NULL under this NOT would have dropped it.
+            SUM(CASE WHEN status = 'SUCCESS'
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                     THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
             -- #2460: the mean above describes a collector whose runs all cost about the same, and
@@ -1290,7 +1296,17 @@ internal static class DarlingDataReader
             -- silently re-map every column after it in whichever surface was not edited in the same
             -- breath. An ABANDONED run was previously counted by total_runs and by nothing else, so it
             -- grew the failure-rate denominator while contributing nothing to the numerator.
-            SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END) AS abandoned_count
+            --
+            -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+            -- window can still hold cycles written before #2803 gave abandonment its own status:
+            -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+            -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+            -- filter correct against current writes and silently wrong against older ones, failing in
+            -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+            -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+            -- for query_store), so equality against one rendered sentence matches one collector.
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                     THEN 1 ELSE 0 END) AS abandoned_count
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1306,6 +1322,10 @@ internal static class DarlingDataReader
                 duration_ms,
                 status,
                 error_message,
+                -- #2926: the abandonment predicate above reads it. Projected here for the same reason
+                -- #2472's three columns are: this subquery ENUMERATES its columns, so an aggregate
+                -- outside naming one it does not carry fails at the STORE and nowhere earlier.
+                rows_collected,
                 -- #2472: projected here because this subquery enumerates its columns rather than
                 -- SELECT *-ing them, so an aggregate outside that names a column the inner query does
                 -- not carry fails at the STORE and nowhere earlier — no compiler, no text assertion and
