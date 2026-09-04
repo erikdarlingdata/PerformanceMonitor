@@ -70,7 +70,7 @@ public partial class ViewerServerTab
 
         if (planXml != null)
         {
-            OpenPlanTab(planXml, label, stats.QueryText); /* HidePlanLoading runs inside OpenPlanTab */
+            _ = OpenPlanTab(planXml, label, stats.QueryText); /* HidePlanLoading runs inside OpenPlanTab */
         }
         else
         {
@@ -138,7 +138,7 @@ public partial class ViewerServerTab
 
         if (planXml != null)
         {
-            OpenPlanTab(planXml, label, queryText); /* HidePlanLoading runs inside OpenPlanTab */
+            _ = OpenPlanTab(planXml, label, queryText); /* HidePlanLoading runs inside OpenPlanTab */
         }
         else
         {

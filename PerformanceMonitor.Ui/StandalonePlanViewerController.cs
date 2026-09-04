@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -43,6 +44,15 @@ public sealed class StandalonePlanViewerController
        add is queued at a time while only the "+" tab is present, so a burst of generation-time SelectionChanged
        notifications cannot pile up multiple inserts. Cleared by Reset() so re-opening the surface re-arms it. */
     private bool _addTabInsertDeferred;
+
+    /* Re-entrancy latch shared by this controller's two paste entry points -- the "Paste XML" button and the
+       Ctrl+V HandleKeyDown (#2870). #2837 moved the clipboard-can't-open retry off Thread.Sleep onto an awaited
+       Task.Delay, which keeps the UI pump responsive but also yields the thread for the ~175 ms retry window;
+       the old Thread.Sleep had incidentally serialized input, so a HELD Ctrl+V (OS key-repeat) could put several
+       reads in flight at once and each success would LoadPlan another "Pasted Plan" tab. While a paste is running
+       here, a further paste trigger is dropped (its key is still claimed via e.Handled). NOT cleared by Reset():
+       the awaited read completes and the finally clears the flag independently of the tab-control lifecycle. */
+    private bool _pasteInProgress;
 
     public StandalonePlanViewerController(TabControl planTabControl)
     {
@@ -246,7 +256,8 @@ public sealed class StandalonePlanViewerController
                 {
                     var xml = System.IO.File.ReadAllText(fileName);
                     var targetTab = isFirst ? subTab : AddNewEmptyPlanSubTab();
-                    LoadPlanIntoSubTab(targetTab, xml, System.IO.Path.GetFileName(fileName));
+                    // Fire-and-forget (open-file, not paste): discard the Task (CS4014 is an error here).
+                    _ = LoadPlanIntoSubTab(targetTab, xml, System.IO.Path.GetFileName(fileName));
                 }
                 catch (Exception ex)
                 {
@@ -259,20 +270,29 @@ public sealed class StandalonePlanViewerController
 
         pasteBtn.Click += async (_, _) =>
         {
-            var (ok, xml) = await ClipboardText.TryReadAsync();
-            if (!ok)
+            // Re-entrancy guard (#2870): share the controller's paste latch with the Ctrl+V handler so a rapid
+            // double-invoke of the button cannot double-load (a paste is a paste, whichever entry point fires).
+            if (_pasteInProgress) return;
+            _pasteInProgress = true;
+            try
             {
-                MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
-                    "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                var (ok, xml) = await ClipboardText.TryReadAsync();
+                if (!ok)
+                {
+                    MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
+                        "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (!string.IsNullOrWhiteSpace(xml))
+                {
+                    // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                    await LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
+                    return;
+                }
+                MessageBox.Show("The clipboard does not contain any text.", "Paste Plan XML",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
             }
-            if (!string.IsNullOrWhiteSpace(xml))
-            {
-                LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
-                return;
-            }
-            MessageBox.Show("The clipboard does not contain any text.", "Paste Plan XML",
-                MessageBoxButton.OK, MessageBoxImage.Information);
+            finally { _pasteInProgress = false; }
         };
 
         // Insert before "+" tab
@@ -295,9 +315,12 @@ public sealed class StandalonePlanViewerController
     }
 
     /// <summary>
-    /// Loads plan XML into an existing sub-tab (replacing whatever was there before).
+    /// Loads plan XML into an existing sub-tab (replacing whatever was there before). Returns a <see cref="Task"/>
+    /// (not <c>async void</c>) so the paste entry points can <c>await</c> it inside their <c>_pasteInProgress</c>
+    /// guard: the real parse runs off-thread in <c>LoadPlan</c>, so the guard has to span the load, not just the
+    /// clipboard read (#2870). Fire-and-forget callers (open-file, drag-drop, FinOps view-plan) discard the Task.
     /// </summary>
-    public async void LoadPlanIntoSubTab(TabItem subTab, string planXml, string label, string? queryText = null)
+    public async Task LoadPlanIntoSubTab(TabItem subTab, string planXml, string label, string? queryText = null)
     {
         if (subTab.Content is not Grid subTabContent) return;
         if (subTabContent.Children.Count < 2) return;
@@ -406,7 +429,8 @@ public sealed class StandalonePlanViewerController
             try
             {
                 var xml = System.IO.File.ReadAllText(planFiles[i]);
-                LoadPlanIntoSubTab(newTab, xml, System.IO.Path.GetFileName(planFiles[i]));
+                // Fire-and-forget (drag-drop, not paste): discard the Task (CS4014 is an error here).
+                _ = LoadPlanIntoSubTab(newTab, xml, System.IO.Path.GetFileName(planFiles[i]));
             }
             catch (Exception ex)
             {
@@ -418,7 +442,9 @@ public sealed class StandalonePlanViewerController
 
     /// <summary>Key-down handler (forwarded from the host's XAML wire): Ctrl+V pastes plan XML into the active
     /// tab. <c>async void</c> because it is a fire-and-forget key handler that awaits the async clipboard read
-    /// so the message pump stays responsive on the rare clipboard-can't-open retry path (#2837).</summary>
+    /// so the message pump stays responsive on the rare clipboard-can't-open retry path (#2837). It also awaits
+    /// the load, so the <c>_pasteInProgress</c> guard spans read + parse + tab-create, not just the read
+    /// (#2870).</summary>
     public async void HandleKeyDown(KeyEventArgs e)
     {
         if (e.Key == Key.V &&
@@ -428,11 +454,21 @@ public sealed class StandalonePlanViewerController
             // Claim the paste gesture during event routing, before the async read yields on the retry path
             // (#2837): setting e.Handled after the await would let the key event finish routing unsuppressed.
             e.Handled = true;
-            var (ok, xml) = await ClipboardText.TryReadAsync();
-            if (ok && !string.IsNullOrWhiteSpace(xml))
+            // Re-entrancy guard (#2870): the async retry window yields the UI thread, so a HELD Ctrl+V
+            // (OS key-repeat) could otherwise put several reads in flight at once and each would LoadPlan a
+            // tab. Drop repeats while a paste runs; the key stays claimed above so it can't fall through.
+            if (_pasteInProgress) return;
+            _pasteInProgress = true;
+            try
             {
-                LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
+                var (ok, xml) = await ClipboardText.TryReadAsync();
+                if (ok && !string.IsNullOrWhiteSpace(xml))
+                {
+                    // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                    await LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
+                }
             }
+            finally { _pasteInProgress = false; }
         }
     }
 
@@ -441,7 +477,8 @@ public sealed class StandalonePlanViewerController
         try
         {
             var xml = System.IO.File.ReadAllText(path);
-            LoadPlanIntoActivePlanSubTab(xml, System.IO.Path.GetFileName(path));
+            // Fire-and-forget (drag-drop, not paste): discard the Task (CS4014 is an error here).
+            _ = LoadPlanIntoActivePlanSubTab(xml, System.IO.Path.GetFileName(path));
         }
         catch (Exception ex)
         {
@@ -450,11 +487,11 @@ public sealed class StandalonePlanViewerController
         }
     }
 
-    private void LoadPlanIntoActivePlanSubTab(string planXml, string label)
+    private async Task LoadPlanIntoActivePlanSubTab(string planXml, string label)
     {
         var activeSubTab = GetActivePlanSubTab();
         if (activeSubTab != null)
-            LoadPlanIntoSubTab(activeSubTab, planXml, label);
+            await LoadPlanIntoSubTab(activeSubTab, planXml, label);
     }
 
     /// <summary>

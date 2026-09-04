@@ -44,6 +44,12 @@ public partial class ServerTab : UserControl
     private readonly DispatcherTimer _refreshTimer;
     private bool _refreshPendingWhileHidden;
     private bool _isRefreshing;
+    /* Re-entrancy latch for the Ctrl+V plan-paste handler (#2870). #2837's async clipboard retry keeps the UI
+       pump responsive but yields the thread for the ~175 ms can't-open retry window; the old Thread.Sleep had
+       incidentally serialized input, so a HELD Ctrl+V (OS key-repeat) could put several reads in flight at once
+       and open several "Pasted Plan" tabs. While a paste is running the repeat is dropped (its key is still
+       claimed via e.Handled). */
+    private bool _pasteInProgress;
     // Guards the visible-tab auto-refresh during an Active Queries drill-down:
     // SelectActiveQueriesForDrillDown() sets this before flipping to Queries → Active Queries so
     // MainTabControl_SelectionChanged skips its refresh and doesn't clobber the filtered snapshot
@@ -448,12 +454,22 @@ public partial class ServerTab : UserControl
             // Claim the paste gesture during event routing, before the async read yields on the retry path
             // (#2837): setting e.Handled after the await would leave the key event unsuppressed.
             e.Handled = true;
-            var (ok, xml) = await ClipboardText.TryReadAsync();
-            if (ok && !string.IsNullOrWhiteSpace(xml))
+            // Re-entrancy guard (#2870): the async retry window yields the UI thread, so a HELD Ctrl+V
+            // (OS key-repeat) could otherwise put several reads in flight at once and open several tabs.
+            // Drop repeats while a paste runs; the key stays claimed above so it can't fall through.
+            if (_pasteInProgress) return;
+            _pasteInProgress = true;
+            try
             {
-                OpenPlanTab(xml, "Pasted Plan");
-                PlanViewerTabItem.IsSelected = true;
+                var (ok, xml) = await ClipboardText.TryReadAsync();
+                if (ok && !string.IsNullOrWhiteSpace(xml))
+                {
+                    // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                    await OpenPlanTab(xml, "Pasted Plan");
+                    PlanViewerTabItem.IsSelected = true;
+                }
             }
+            finally { _pasteInProgress = false; }
         }
     }
 
