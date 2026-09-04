@@ -183,7 +183,7 @@ public static class ServiceCommandDeadlines
     /// launch: the control-plane reload body — <c>StoreConfigProvider.LoadViewAsync</c>'s five config
     /// reads, <c>DarlingObservability.SyncServerEnabledStatesAsync</c>'s two registry statements and the
     /// managed-role <c>statement_timeout</c> re-assert — plus the store-size read behind the disk-pressure
-    /// check.
+    /// check and the daily retention sweep's own run-record.
     ///
     /// <para><b>The regime, by the token test.</b> Every one of these is awaited directly inside
     /// <c>DarlingWorker</c>'s <c>while (!stoppingToken.IsCancellationRequested)</c> body, on the plain
@@ -208,11 +208,13 @@ public static class ServiceCommandDeadlines
     /// <c>ALTER ROLE</c> re-assert is one statement out of the 63-statement provisioning batch that
     /// measured 79 ms in total, so it is in the same class.</para>
     ///
-    /// <para><b>BELOW the point where a stalled chain reports as a hang.</b> The nine run SEQUENTIALLY on
-    /// one thread, so the bound that matters is the chain's, not one command's: 9 x 5 s = 45 s stays
-    /// inside <c>DarlingWorker.SweepWatchdogSeconds</c> (60 s), while 9 x the inherited 30 s default is
-    /// 270 s and would put a merely-slow reload four and a half minutes past it. That is the same
-    /// chain-length reasoning #2928 applied to the sweep body, on a different chain.</para>
+    /// <para><b>BELOW the point where a stalled chain reports as a hang.</b> The ten run SEQUENTIALLY on
+    /// one thread, so the bound that matters is the chain's, not one command's: 10 x 5 s = 50 s stays
+    /// inside <c>DarlingWorker.SweepWatchdogSeconds</c> (60 s), while 10 x the inherited 30 s default is
+    /// 300 s and would put a merely-slow reload five minutes past it. That is the same chain-length
+    /// reasoning #2928 applied to the sweep body, on a different chain. Ten is the count on the worst
+    /// tick rather than a bound on the longest single path: a tick where the reload beacon fires AND the
+    /// 24 h purge comes due runs the reload body's nine and the purge's run-record back to back.</para>
     ///
     /// <para><b>Why it is LOOSER than the reload beacon's own bound and must stay so.</b>
     /// <c>ReadConfigVersionAsync</c> runs on EVERY 15 s tick and is a single-row lookup, so it is the

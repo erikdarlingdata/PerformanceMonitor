@@ -375,7 +375,7 @@ ON CONFLICT (server_id) DO UPDATE SET
             var elapsed = durationMs > int.MaxValue ? int.MaxValue : (int)durationMs;
 
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(InsertCollectionLogSql, connection);
+            using var command = new NpgsqlCommand(InsertCollectionLogSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());                                    // log_id
             command.Parameters.AddWithValue(FleetServerId);                                                   // server_id (sentinel)
             command.Parameters.AddWithValue(FleetServerName);                                                 // server_name

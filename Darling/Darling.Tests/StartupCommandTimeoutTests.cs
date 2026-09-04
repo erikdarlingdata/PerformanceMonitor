@@ -28,8 +28,8 @@ namespace Darling.Tests;
 /// <see cref="ServiceCommandDeadlines.BootstrapSeconds"/> covers the twenty-six un-retried bootstrap
 /// sites; <see cref="ServiceCommandDeadlines.BootstrapConnectProbeSeconds"/> the two inside the
 /// bootstrap's six-attempt first-connection retry, where the deadline MULTIPLIES; and
-/// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> the nine on the collection loop's serial
-/// thread, where nine sequential commands have to fit inside one watchdog window.</para>
+/// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> the ten on the collection loop's serial
+/// thread, where ten sequential commands have to fit inside one watchdog window.</para>
 ///
 /// <para><b>This is the regime whose value goes UP, and the pin has to defend that as much as the
 /// number.</b> Two of the four failure handlers on this path are <c>LogCritical</c> followed by
@@ -98,7 +98,9 @@ public sealed class StartupCommandTimeoutTests
     /// <para><c>DarlingWorker.ReadStoreSizeBytesAsync</c> runs on the same serial loop thread on the
     /// 5-minute <c>s_diskCheckInterval</c> and fails to null at Debug. <c>ReadLatestCpuAsync</c> belongs
     /// to #2882's alert pass (10 s), a site that pin's file-scoped list missed.
-    /// <c>DarlingObservability.LogRetentionRunAsync</c> is the daily purge's own row.
+    /// <c>DarlingObservability.LogRetentionRunAsync</c> WAS the last unowned site in these two files —
+    /// group E's audit listed it as residue — and the token test puts it in the serial-loop regime rather
+    /// than leaving it for a sixth group, so it is in the table above rather than here.
     /// <c>RunTestHypotheticalIndexAsync</c> / <c>RunExecuteActualPlanAsync</c> and
     /// <c>DarlingCommandExecutor</c> are the command plane, with a 5-minute claim lease and no
     /// heartbeat.</para>
@@ -127,7 +129,7 @@ public sealed class StartupCommandTimeoutTests
         ("StoreConfigProvider.cs", "SeedMonitoredServersAsync", 1, 0, 0, 0),
 
         /* The serial collection-loop thread: the control-plane reload body plus the disk-check store-size
-           read. Seven of these nine ALSO run once on the bootstrap path above, and take this constant
+           read. Seven of these ten ALSO run once on the bootstrap path above, and take this constant
            rather than BootstrapSeconds because a dual-caller site has to take the tighter of its two
            bounds. */
         ("StoreConfigProvider.cs", "ReadServiceRowAsync", 0, 0, 1, 0),
@@ -138,6 +140,16 @@ public sealed class StartupCommandTimeoutTests
         ("DarlingObservability.cs", "SyncServerEnabledStatesAsync", 0, 0, 2, 0),
         ("DarlingManagedRoles.cs", "ReassertComposeStatementTimeoutAsync", 0, 0, 1, 0),
         ("DarlingWorker.cs", "ReadStoreSizeBytesAsync", 0, 0, 1, 0),
+
+        /* The daily retention sweep's own run-record. Same thread, same token, same fail-open posture:
+           DarlingRetention.PurgeAsync is AWAITED inline at DarlingWorker.cs:1635 on the plain stopping
+           token, so the purge holds the serial loop for its whole duration and the audit row rides that
+           hold. It is a single-row INSERT into the same collect.collection_log #2928 bounded from the
+           sweep body, and it belongs to THIS regime rather than that one because it holds no sweep
+           permit — the per-server bodies are already fired-and-tracked by the time the purge runs. What a
+           blown deadline costs is one day's audit row, silently (Debug, no-op), retried on the next 24 h
+           tick. */
+        ("DarlingObservability.cs", "LogRetentionRunAsync", 0, 0, 1, 0),
     };
 
     /// <summary>The group's own totals, so a member that stops creating commands fails loudly.</summary>
@@ -145,7 +157,7 @@ public sealed class StartupCommandTimeoutTests
 
     private const int ExpectedConnectProbeSites = 2;
 
-    private const int ExpectedSerialLoopSites = 9;
+    private const int ExpectedSerialLoopSites = 10;
 
     /// <summary>
     /// Members whose command sites must NOT carry either bootstrap deadline — the exclusions above,
@@ -156,7 +168,6 @@ public sealed class StartupCommandTimeoutTests
     private static readonly (string File, string Member)[] s_excludedMembers =
     {
         ("StoreConfigProvider.cs", "ReadConfigVersionAsync"),
-        ("DarlingObservability.cs", "LogRetentionRunAsync"),
         ("DarlingWorker.cs", "ReadLatestCpuAsync"),
         ("DarlingWorker.cs", "RunTestHypotheticalIndexAsync"),
         ("DarlingWorker.cs", "RunExecuteActualPlanAsync"),
@@ -410,7 +421,7 @@ public sealed class StartupCommandTimeoutTests
 
     /// <summary>
     /// The serial-loop bound — see <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/>. The
-    /// interesting assertion is the CHAIN one: these nine run sequentially on one thread, so what has to
+    /// interesting assertion is the CHAIN one: these ten run sequentially on one thread, so what has to
     /// stay bounded is their sum, not any single deadline. Pinned RELATIONALLY against
     /// <c>DarlingWorker.SweepWatchdogSeconds</c> and against the site count, so adding a tenth site to
     /// this regime forces the value to be re-derived rather than silently stretching the chain.
@@ -433,6 +444,9 @@ public sealed class StartupCommandTimeoutTests
             $"serial-loop deadline {seconds}s is at or above Npgsql's inherited 30s default, so it buys "
             + "nothing on a thread that blocks the whole fleet's cycle while it runs");
 
+        /* The multiplier is the SITE count rather than the longest single path, and that is exact rather
+           than merely conservative: a tick on which the reload beacon fires AND the 24 h purge comes due
+           runs the reload body's nine and the purge's run-record back to back on the same thread. */
         Assert.True(
             ExpectedSerialLoopSites * seconds < DarlingWorker.SweepWatchdogSeconds,
             $"{ExpectedSerialLoopSites} sequential commands at {seconds}s is "
@@ -443,7 +457,7 @@ public sealed class StartupCommandTimeoutTests
         Assert.True(
             seconds < ServiceCommandDeadlines.BootstrapSeconds,
             $"serial-loop deadline {seconds}s is not tighter than the bootstrap's "
-            + $"{ServiceCommandDeadlines.BootstrapSeconds}s. Seven of these nine sites ALSO run once on "
+            + $"{ServiceCommandDeadlines.BootstrapSeconds}s. Seven of these ten sites ALSO run once on "
             + "the bootstrap path, and a dual-caller site must take the tighter of its two bounds — if "
             + "this is not the tighter one, those seven are on the wrong constant");
     }
