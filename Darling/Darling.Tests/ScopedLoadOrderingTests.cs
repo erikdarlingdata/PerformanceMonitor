@@ -432,10 +432,53 @@ public sealed class ScopedLoadOrderingTests
         }
     }
 
+    /// <summary>
+    /// No paint at a table site may be written as <c>Surface.Property = await ...</c>.
+    ///
+    /// <para>Such an assignment lands the instant its OWN read completes, so no check above it can guard
+    /// it and a check below it is guarding nothing. It is also the one paint shape the ordering fact above
+    /// cannot fully see: that fact measures the gap from the nearest check to where the paint STARTS, and
+    /// here the <c>await</c> sits to the RIGHT of the <c>=</c>, so the first such assignment in a run of
+    /// them reads as guarded when it is not. Forbidding the shape is stronger than reasoning about it —
+    /// read into a local, check, then paint. <c>LoadUtilizationAsync</c> had four of these in a row sharing
+    /// one check placed after the last of them, which is what review on this change found.</para>
+    /// </summary>
+    [Fact]
+    public void NoPaint_IsWrittenAsAnAwaitedAssignment()
+    {
+        AssertEverySiteIsStillHere();
+
+        foreach (var site in s_sites)
+        {
+            var body = LoadBody(site);
+
+            /* Positive control for the negative below: the paint half of the needle — the same surface and
+               property alternation — does match in this body, so an empty offender list is a fact about the
+               `= await` and not about the regex matching nothing. */
+            Assert.True(
+                Paints(site, body).Count >= 1,
+                $"no paint found in {site.File}:{site.Method}, so this assertion would hold vacuously");
+
+            var awaited = Regex.Matches(body, PaintTarget + @"\s*=\s*await\b")
+                .Select(x => Line(body, x.Index))
+                .ToList();
+
+            Assert.True(
+                awaited.Count == 0,
+                $"{site.File}:{site.Method} paints straight out of an await, which lands the moment that "
+                + "read completes and cannot be guarded by any check — read into a local, check, then paint; "
+                + $"at body line(s) {string.Join(", ", awaited)}");
+        }
+    }
+
     // ── Site mechanics ────────────────────────────────────────────────────────────────────────
 
     private static void AssertEverySiteIsStillHere() =>
         Assert.True(s_sites.Length == 27, $"{s_sites.Length} site(s) in the table; this pin covers 27");
+
+    /// <summary>A XAML-generated control and one of the UI properties a load paints into.</summary>
+    private const string PaintTarget =
+        @"\b[A-Z]\w*\s*\.\s*(?:ItemsSource|Text|Visibility|Content|IsEnabled|SelectedIndex|SelectedItem)";
 
     private static Regex Claim(Site site) =>
         new(@"_loads\s*\.\s*Claim\s*\(\s*nameof\s*\(\s*" + Regex.Escape(site.Method) + @"\s*\)\s*\)");
@@ -473,8 +516,7 @@ public sealed class ScopedLoadOrderingTests
 
         return Regex.Matches(
                 body,
-                @"\b[A-Z]\w*\s*\.\s*(?:ItemsSource|Text|Visibility|Content|IsEnabled|SelectedIndex|SelectedItem)"
-                + @"\s*=(?!=)|\.\s*UpdateData\s*\(|\bApplyViewModel\s*\(")
+                PaintTarget + @"\s*=(?!=)|\.\s*UpdateData\s*\(|\bApplyViewModel\s*\(")
             .Where(m => !chrome.Any(c => m.Value.Replace(" ", "", StringComparison.Ordinal)
                 .StartsWith(c, StringComparison.Ordinal)))
             .Select(m => m.Index)
