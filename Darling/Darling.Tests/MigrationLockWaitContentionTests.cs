@@ -164,7 +164,9 @@ public sealed class MigrationLockWaitContentionTests
 
         /* Make the store look mid-ladder by removing the top stamp, so the expiry path sees rungs still to
            apply. Restored in the finally: the rung itself was applied and stays applied, and re-stamping
-           is what a real re-run would do. */
+           is what a real re-run would do. Naive UTC via AT TIME ZONE, matching how the applier stamps
+           and every other `timestamp` column here: `now()::timestamp` would truncate in the session's
+           TimeZone GUC, which nothing pins to UTC. */
         var topVersion = StorageVersion.SchemaVersion;
 
         /* The setup needs the store to sit exactly where this build sits, so that removing one stamp
@@ -224,7 +226,7 @@ public sealed class MigrationLockWaitContentionTests
                 holder,
                 "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ("
                 + topVersion.ToString(CultureInfo.InvariantCulture) + ", '" + topName!.Replace("'", "''", StringComparison.Ordinal)
-                + "', now()::timestamp) ON CONFLICT (version) DO NOTHING",
+                + "', now() AT TIME ZONE 'UTC') ON CONFLICT (version) DO NOTHING",
                 CancellationToken.None);
         }
     }
