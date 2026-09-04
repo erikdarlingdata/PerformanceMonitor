@@ -249,6 +249,41 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>Prefixes the fleet-level cadence alert serverKey so it never parses as a server_id.</summary>
     private const string JobCadenceKeyPrefix = "storejob:";
 
+    /* Retention Held edge state (#2813). FLEET-level, MULTI-keyed by retention job_id, STANDING like the
+       cadence condition: active flag + cooldown re-fire while the gate keeps a policy paused past its
+       horizon, one "Retention Hold Cleared" resolution when it arms or comes back under. */
+    private readonly ConcurrentDictionary<string, bool> _activeRetentionHold = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastRetentionHoldAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #2813 alert metric name — Warning and Critical share it (severity carries the tier), so
+    /// the deliverer's per-metric cooldown and the resolution correlate cleanly.</summary>
+    internal const string RetentionHoldMetric = "Retention Held";
+
+    /// <summary>Prefixes the fleet-level retention-hold alert serverKey so it never parses as a server_id.</summary>
+    private const string RetentionHoldKeyPrefix = "retentionhold:";
+
+    /// <summary>
+    /// #2813 WARNING tier: how many times its own configured horizon a HELD tier must be holding before the
+    /// hold has cost enough to say so.
+    ///
+    /// <para>Bounded on BOTH sides rather than picked. <b>Below</b>, retention drops whole CHUNKS, so a
+    /// 4-day policy with 1-day chunks legitimately holds ~5 days (1.25x) while working perfectly; 2.0x sits
+    /// clear of that floor with margin, so normal chunk granularity can never reach it. <b>Above</b>, the
+    /// production incident this comes from sat at 4.5x (18 days under a 4-day policy) after 16 days — 2.0x
+    /// on that tier is ~8 days, so the alert arrives about a week in, while the cost is still recoverable
+    /// and long before the 16 days it actually went unnoticed.</para>
+    ///
+    /// <para>A compile-time constant rather than a store-backed knob like its #2136 sibling
+    /// (<c>config_alert_settings</c>, V57) only because that would need a migration rung this change is
+    /// deliberately not taking. It belongs in the control plane the next time a rung is going in anyway.</para>
+    /// </summary>
+    internal const double RetentionHoldWarnRatio = 2.0;
+
+    /// <summary>#2813 CRITICAL tier: double the warning ratio. A tier at four times its intended depth is
+    /// no longer drifting, it is the dominant and still-compounding contributor to store size — the
+    /// motivating incident (4.5x) reads CRITICAL, which is the point.</summary>
+    internal const double RetentionHoldCriticalRatio = 4.0;
+
     /// <summary>#2136: the Warning tier's percent-of-cadence threshold, read live through the same
     /// by-reference settings seam as the AG thresholds (the clamp lives on DarlingAlertSettings).
     /// The Critical tier is FIXED at 100: a job outrunning its own cadence compounds refresh lag.</summary>
@@ -1643,6 +1678,155 @@ internal sealed class DarlingSelfAlertEvaluator
                     $"Monitor Store: {label} is back under {warnPercent}% of its schedule interval"), cancellationToken);
             }
         }
+    }
+
+    /// <summary>
+    /// The isolating entry point for the #2813 Retention Held check — rides the worker's hourly
+    /// compression-job health sweep (same connection, same Timescale gate) like its #2136 sibling. Same
+    /// failure isolation as <see cref="EvaluateStoreJobCadenceAsync"/>; cancellation still propagates.
+    /// </summary>
+    public async Task EvaluateRetentionHoldsAsync(
+        IReadOnlyList<RetentionHoldReading> policies, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyRetentionHoldsAsync(policies, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Retention-held self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Retention Held condition (#2813): a retention policy the #1680/#1877 coverage
+    /// gate has PAUSED, whose tier has as a result grown past its own configured horizon by
+    /// <see cref="RetentionHoldWarnRatio"/> or more.
+    ///
+    /// <para><b>Both halves are required, and that is the whole design.</b> Paused alone is normal —
+    /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync"/> deliberately creates every policy paused
+    /// (there is no window in which TimescaleDB would not run a new policy's first check immediately), so
+    /// alerting on the flag would fire on every fresh store at every start. Over-horizon alone is normal
+    /// too: retention drops whole CHUNKS, so a 4-day policy with 1-day chunks legitimately holds ~5 days.
+    /// It is the CONJUNCTION that is unambiguous — the gate is holding this policy AND the tier has already
+    /// grown well past what it was meant to keep.</para>
+    ///
+    /// <para><b>Why a ratio and not a hold duration.</b> Nothing records when a policy was paused, so the
+    /// duration is not knowable without persisting state. The ratio measures the same thing from the
+    /// consequence end and is strictly more useful: it is the number an operator checks by hand, it is what
+    /// makes the cost legible, and it self-scales with the horizon so one threshold serves a 4-day raw tier
+    /// and a 35-day baseline tier alike.</para>
+    ///
+    /// <para>Tiers: WARNING at <see cref="RetentionHoldWarnRatio"/>, CRITICAL at
+    /// <see cref="RetentionHoldCriticalRatio"/> — the production incident that motivated this sat at 4.5x
+    /// (18 days held under a 4-day policy for 16 days) and would have read CRITICAL. A STANDING condition
+    /// like Store Job Over Cadence: fire once on breach, re-fire only on the alert cooldown while it
+    /// persists, one "Retention Hold Cleared" resolution when the policy arms or the tier comes back under
+    /// the warning ratio. A policy with no chunks, no measurable horizon, or an unreadable span has no
+    /// ratio and is skipped without touching its standing state — no signal, the agent-status discipline.
+    /// Gated on the master alerts switch. Internal so it pins directly with a recording deliverer and a
+    /// controllable clock.</para>
+    ///
+    /// <para><b>This check never acts.</b> It cannot arm a policy, and deliberately so: arming a held
+    /// policy drops the only copy of history no rollup has materialized, which is exactly what the gate
+    /// exists to prevent. The release is a backfill, which is an operator decision; this makes the need for
+    /// one visible instead of silent.</para>
+    /// </summary>
+    internal async Task ApplyRetentionHoldsAsync(
+        IReadOnlyList<RetentionHoldReading> policies, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+
+        foreach (var policy in policies)
+        {
+            var key = policy.JobId.ToString(CultureInfo.InvariantCulture);
+
+            /* No ratio = no signal. An armed policy is the healthy case; a policy with no chunks, no
+               horizon, or an unreadable span is unmeasured, not innocent — either way it must not touch
+               the standing state, or an unreadable probe would silently "resolve" a real hold. */
+            if (policy.OverHorizonRatio is not double ratio)
+            {
+                if (policy.Armed)
+                {
+                    await ClearRetentionHoldAsync(key, policy, cancellationToken);
+                }
+
+                continue;
+            }
+
+            var label = string.IsNullOrEmpty(policy.HypertableName)
+                ? $"retention job {key}"
+                : $"{policy.HypertableName} retention [{key}]";
+
+            if (!policy.Armed && ratio >= RetentionHoldWarnRatio)
+            {
+                _activeRetentionHold[key] = true;
+                if (CooldownElapsed(_lastRetentionHoldAlert, key, now))
+                {
+                    _lastRetentionHoldAlert[key] = now;
+                    bool critical = ratio >= RetentionHoldCriticalRatio;
+                    double spanDays = (policy.SpanSeconds ?? 0) / 86400.0;
+                    await FireAsync(
+                        RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
+                        $"{ratio:F1}x its {policy.DropAfter} horizon", $"{RetentionHoldWarnRatio:F1}x",
+                        detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
+                            $"holds {spanDays:F1} days across {policy.ChunkCount} chunk(s) against a configured " +
+                            $"{policy.DropAfter} horizon ({ratio:F1}x). " +
+                            (critical
+                                ? "The tier is now several times its intended depth and still growing, so this " +
+                                  "is the dominant and still-compounding contributor to store size. "
+                                : "The gate is working as designed - it will not let retention drop history a " +
+                                  "rollup has never materialized - but the hold has lasted long enough to cost " +
+                                  "real disk. ") +
+                            "The policy arms ITSELF once its consumer covers everything raw holds; what is " +
+                            "missing is the backfill, which is the --backfill-rollups operator action. Do NOT " +
+                            "arm the policy by hand: the history it holds exists nowhere else, so arming drops " +
+                            "the only copy, which is precisely what the gate prevents. Check the service log at " +
+                            "startup for the 'HELD PAUSED' line naming which consumer is short.",
+                        severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                        shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
+                        numericCurrentValue: Math.Round(ratio, 2),
+                        numericThresholdValue: critical ? RetentionHoldCriticalRatio : RetentionHoldWarnRatio,
+                        cancellationToken);
+                }
+            }
+            else
+            {
+                await ClearRetentionHoldAsync(key, policy, cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>Drops one retention hold's standing state and records the resolution, but only if it was
+    /// actually standing — so a store where nothing is held writes no resolution rows at all.</summary>
+    private async Task ClearRetentionHoldAsync(
+        string key, RetentionHoldReading policy, CancellationToken cancellationToken)
+    {
+        if (!_activeRetentionHold.TryRemove(key, out var was) || !was)
+        {
+            return;
+        }
+
+        var label = string.IsNullOrEmpty(policy.HypertableName)
+            ? $"retention job {key}"
+            : $"{policy.HypertableName} retention [{key}]";
+        var why = policy.Armed
+            ? "is armed again - its consumer now covers everything the tier holds"
+            : $"is back under {RetentionHoldWarnRatio:F1}x its {policy.DropAfter} horizon";
+
+        await RecordResolutionAsync(new AlertResolution(
+            RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
+            "Retention Hold Cleared",
+            $"Monitor Store: {label} {why}"), cancellationToken);
     }
 
     /// <summary>
