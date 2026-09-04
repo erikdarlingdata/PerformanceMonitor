@@ -320,10 +320,21 @@ public class StoreStartupFailureTriageTests
         Assert.True(stampAt > applyAt, "the stamp must be written after the rung, inside the same transaction");
         Assert.True(commitAt > stampAt, "the commit must come after BOTH the rung and its stamp");
 
-        /* The stamp command has to be bound to that same transaction object, not just sit between the
-           begin and the commit — an unbound command runs in its own implicit transaction and commits
-           even when the rung rolled back. */
-        Assert.Contains("connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds }", applier, StringComparison.Ordinal);
+        /* Both commands have to be bound to that same transaction OBJECT, not merely sit between the
+           begin and the commit — an NpgsqlCommand constructed without it runs in its own implicit
+           transaction and commits even when the rung around it rolled back, which would stamp a rung
+           that did not apply and make every later retry skip it forever. Asserted per command rather
+           than as one substring anywhere in the slice: the rung-apply command carries the same
+           `connection, transaction` tail, so a single Contains is satisfied by the apply alone and
+           reports clean when the STAMP is the one that lost its binding. */
+        Assert.Contains(
+            "new NpgsqlCommand(migration.Sql, connection, transaction)",
+            applier,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "VALUES ($1, $2, $3)\", connection, transaction)",
+            applier,
+            StringComparison.Ordinal);
         Assert.True(
             applier.IndexOf("continue;", StringComparison.Ordinal) < beginAt,
             "the already-applied skip must precede the transaction, which is what makes a retry resume rather than redo");
