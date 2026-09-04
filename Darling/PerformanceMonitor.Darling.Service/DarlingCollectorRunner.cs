@@ -927,7 +927,19 @@ public sealed class DarlingCollectorRunner
                        Its OWN line rather than folded into anything, the #2811/#2851 rule: these lines are
                        parsed by tooling outside this repo, so "don't break the parser" outranks "one line to
                        grep". Nothing here is persisted — a per-database split is N:1 against collection_log
-                       and shaping that is the open decision in #2860. */
+                       and shaping that is the open decision in #2860.
+
+                       KNOWN LATENCY, stated rather than implied: this site is on the SUCCESS path, so a
+                       database whose connect times out stamps its phases and sets the flag (both from the
+                       finally above) and then reaches a catch arm that prints no split. Same standing as the
+                       enumerated path's #2854 note — the stamp is worth having regardless, because it is
+                       correct and it survives on the context into the catch, so emitting from the fault path
+                       is a later addition rather than a re-instrumentation. It is NOT done here because the
+                       parent this line decomposes is not available in the catch: sqlSlice is declared inside
+                       the try, and hoisting it above the watermark read and BuildQuery would silently widen
+                       dbSqlMs — which feeds sqlMs, the fan-out rollup and collection_log's sql_duration_ms.
+                       So the choices are a second stopwatch or a second line shape, and neither belongs in a
+                       change whose scope is the split itself. */
                     if (context.PerDatabasePhasesFrom(dbSqlMs) is { } dbPhases)
                     {
                         _logger?.LogInformation(

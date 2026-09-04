@@ -59,6 +59,13 @@ namespace Darling.Tests;
 /// <c>collection_log</c> — a run visits every database — where the server-scoped split V108 stores is 1:1,
 /// so there is no row for it to land on. That shape is the open decision in #2860, and nothing here writes
 /// to the store or moves the schema off V109.</para>
+///
+/// <para><b>What these pins do NOT cover.</b> The log site is on the success path, so a database whose
+/// connect times out stamps its phases, sets its flag, and then reaches a catch arm that prints no split.
+/// The stamps below are still pinned reachable from the handler — that is what makes the emission a later
+/// addition rather than a re-instrumentation — but no test here asserts a fault-path LINE, because there
+/// is not one to assert. The obstacle is that the parent the line decomposes is out of scope in the catch;
+/// see the runner's own note at the log site.</para>
 /// </summary>
 public sealed class ServerScopePhaseSplitTests
 {
