@@ -50,13 +50,23 @@ namespace Darling.Tests;
 /// (it only ever saw bodies that had already satisfied the release check) and it pointed a leaked guard at
 /// the stacking message, sending the reader to look for a guard that is sitting right there.</para>
 ///
-/// <para>Proven red before it was proven green, five ways, each mutation failing exactly one assertion with
+/// <para>Proven red before it was proven green, six ways, each mutation failing exactly one assertion with
 /// the message that names its own fix: dropping either new guard makes the walk descend past it and report
 /// the read one level down (<c>RefreshServerStatusAsync -&gt; ReadAndApplyServerStatusAsync</c> — the case a
 /// naive "does this method touch <c>_dataService</c>" check would have excused, since the fix moved that
 /// read into a helper); moving the <c>= false</c> reset out of its <c>finally</c> fails the release
 /// assertion; putting <c>RefreshServerStatusAsync</c> back on the Overview tick fails the double-fire
-/// assertion; and having a fleet timer pass <c>replayIfBusy</c> fails the replay assertion.</para>
+/// assertion; having a fleet timer pass <c>replayIfBusy</c> fails the replay assertion; and stripping
+/// <c>AvailabilityGroupsTab</c>'s <c>_loading</c> reports
+/// <c>RefreshAvailabilityGroupsAsync -&gt; RefreshAgAsync -&gt; LoadAsync</c>.</para>
+///
+/// <para><b>That last mutation is why the walk follows ANY invocation and not just the fan-out's two
+/// shapes.</b> It was added to confirm a claim this comment was already making — that the walk reaches a
+/// guard living one level down — and it did not fail. <c>RefreshAgAsync</c> is <c>=&gt; LoadAsync();</c>, a
+/// plain call in an expression body, matching neither <c>_ = X()</c> nor <c>await X()</c>, so the walk had
+/// been running out of edges there and calling the AG path safe WITHOUT ever reaching the <c>_loading</c>
+/// that makes it safe. The assertion was passing for the wrong reason, which is worth less than a failure,
+/// and only a mutation aimed at the claim rather than at the fix could tell the two apart.</para>
 /// </summary>
 public sealed class ViewerFleetTimerGuardTests
 {
@@ -71,6 +81,12 @@ public sealed class ViewerFleetTimerGuardTests
 
     private static readonly Regex s_awaited = new(
         @"await\s+(\w+)\s*\(",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>Any invocation, whatever syntax called it — see <see cref="CalledNames"/> for why the walk
+    /// needs this and not just the two fan-out shapes.</summary>
+    private static readonly Regex s_invocation = new(
+        @"\b(\w+)\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A store read: any member access on the viewer's data service.</summary>
@@ -183,7 +199,7 @@ public sealed class ViewerFleetTimerGuardTests
 
         var unconditional = refreshTick[..firstReturn.Index];
 
-        var both = CalledNames(unconditional).Intersect(CalledNames(overviewTick), StringComparer.Ordinal)
+        var both = FiredNames(unconditional).Intersect(FiredNames(overviewTick), StringComparer.Ordinal)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
@@ -386,7 +402,7 @@ public sealed class ViewerFleetTimerGuardTests
 
         foreach (var tick in s_fleetTimerTicks)
         {
-            foreach (var name in CalledNames(Body(methods, tick)))
+            foreach (var name in FiredNames(Body(methods, tick)))
             {
                 if (methods.ContainsKey(name))
                 {
@@ -398,9 +414,25 @@ public sealed class ViewerFleetTimerGuardTests
         return targets;
     }
 
-    /// <summary>Both call shapes that matter: fired unawaited, and awaited. A guard regression on either is
-    /// the same defect — the awaited one just needs a second tick rather than a second caller.</summary>
+    /// <summary>
+    /// Every name this body invokes. Deliberately ANY <c>Identifier(</c> rather than only the two shapes
+    /// the fan-out itself uses (<c>_ = X()</c> and <c>await X()</c>), because the walk has to follow
+    /// delegation and delegation is not written in either shape: <c>RefreshAgAsync</c> is
+    /// <c>=&gt; LoadAsync();</c>, a plain call in an expression body, and matching only the fan-out's two
+    /// shapes made the walk run out of edges there and call the AG path safe WITHOUT ever reaching the
+    /// <c>_loading</c> guard that actually makes it safe.
+    ///
+    /// <para>Over-matching is free here: keywords and framework calls are filtered out downstream by
+    /// having to resolve to a method this project declares, and a name that does resolve is worth walking
+    /// whichever syntax called it.</para>
+    /// </summary>
     private static IEnumerable<string> CalledNames(string body) =>
+        s_invocation.Matches(body).Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal);
+
+    /// <summary>Only the two shapes the fan-out itself uses, for deciding which methods a tick FIRES (as
+    /// opposed to which methods a body reaches). A tick's fan-out is exactly its unawaited and awaited
+    /// calls; the loop conditions and property reads around them are not fan-out.</summary>
+    private static IEnumerable<string> FiredNames(string body) =>
         s_fireAndForget.Matches(body).Select(m => m.Groups[1].Value)
             .Concat(s_awaited.Matches(body).Select(m => m.Groups[1].Value))
             .Distinct(StringComparer.Ordinal);
