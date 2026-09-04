@@ -160,6 +160,44 @@ internal static class CSharpSourceWalker
     }
 
     /// <summary>
+    /// <para>The brace-balanced block starting at <paramref name="open"/>, that brace included — or the
+    /// rest of <paramref name="text"/> when the braces never balance, so a caller gets a truncated body
+    /// rather than an exception on malformed input.</para>
+    ///
+    /// <para>It lives here because it is only correct over the output of
+    /// <see cref="StripCommentsAndStrings"/>: braces in prose and in literals are exactly what would
+    /// unbalance it, which is why blanking a hole's DELIMITERS is part of that method's contract. Two
+    /// viewer pins had grown their own copy by #2923 — behaviourally identical over 2,836,304 offsets of
+    /// the viewer project but already textually apart, one having fused the decrement into its condition,
+    /// which is how the five walk copies started too.</para>
+    /// </summary>
+    internal static string BraceBalanced(string text, int open)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        var depth = 0;
+
+        for (var i = open; i < text.Length; i++)
+        {
+            if (text[i] == '{')
+            {
+                depth++;
+            }
+            else if (text[i] == '}')
+            {
+                depth--;
+
+                if (depth == 0)
+                {
+                    return text[open..(i + 1)];
+                }
+            }
+        }
+
+        return text[open..];
+    }
+
+    /// <summary>
     /// Marks code from <paramref name="i"/> onwards. When <paramref name="hole"/> is supplied we are inside
     /// that literal's interpolation hole, and the scan RETURNS at the hole's closing brace run or at its
     /// top-level format-specifier colon without consuming either — the caller owns those delimiters.

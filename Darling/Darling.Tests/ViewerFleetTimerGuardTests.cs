@@ -495,7 +495,7 @@ public sealed class ViewerFleetTimerGuardTests
                 continue;
             }
 
-            yield return BraceBalanced(body, open);
+            yield return CSharpSourceWalker.BraceBalanced(body, open);
         }
     }
 
@@ -614,7 +614,7 @@ public sealed class ViewerFleetTimerGuardTests
 
         if (code[j] == '{')
         {
-            return BraceBalanced(code, j);
+            return CSharpSourceWalker.BraceBalanced(code, j);
         }
 
         if (code[j] == '=' && j + 1 < code.Length && code[j + 1] == '>')
@@ -625,30 +625,6 @@ public sealed class ViewerFleetTimerGuardTests
         }
 
         return null; /* `;` — an abstract/partial/interface declaration with no body here. */
-    }
-
-    private static string BraceBalanced(string code, int open)
-    {
-        var depth = 0;
-
-        for (var i = open; i < code.Length; i++)
-        {
-            if (code[i] == '{')
-            {
-                depth++;
-            }
-            else if (code[i] == '}')
-            {
-                depth--;
-
-                if (depth == 0)
-                {
-                    return code[open..(i + 1)];
-                }
-            }
-        }
-
-        return code[open..];
     }
 
     private static string Body(IReadOnlyDictionary<string, List<ViewerMethod>> methods, string name)
@@ -726,12 +702,13 @@ public sealed class ViewerFleetTimerGuardTests
     }
 
     /* The literal- and comment-aware walk this pin used to carry lives in CSharpSourceWalker as of
-       #2913. It was one of five private copies, and all five blanked an interpolated string's HOLES along
-       with the literal text around them, so a call written inside an interpolation was invisible to every
-       scan built on them — including this one, whose whole job is to follow call edges. This copy had
-       also drifted from the other four (its regular-string skip had grown a newline stop the others
-       lacked), which is the other half of the argument for having one. CSharpSourceWalkerTests carries
-       the witnesses. */
+       #2913, and its brace-matching as of #2923 — the walk's output is what makes brace-matching safe,
+       so the two belong in one place. It was one of five private copies, and all five blanked an
+       interpolated string's HOLES along with the literal text around them, so a call written inside an
+       interpolation was invisible to every scan built on them — including this one, whose whole job is
+       to follow call edges. This copy had also drifted from the other four (its regular-string skip had
+       grown a newline stop the others lacked), which is the other half of the argument for having one.
+       CSharpSourceWalkerTests carries the witnesses. */
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {
