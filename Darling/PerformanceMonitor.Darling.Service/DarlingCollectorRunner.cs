@@ -2320,6 +2320,27 @@ public sealed class DarlingCollectorRunner
         using (var importer = await pgConnection.BeginBinaryImportAsync(
             PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
         {
+            /* #2874: the COPY's own deadline — and a DIFFERENT property from every other site in this
+               regime. NpgsqlBinaryImporter.Timeout is a TimeSpan on the importer, not the int seconds of
+               NpgsqlCommand.CommandTimeout, and there is neither an NpgsqlCommand nor a CreateCommand here,
+               so no regex written for either command shape can see this site. Left unset it is initialised
+               from the connection's CommandTimeout, so this write — PgCollectorRowWriter.CopyCommandFor over
+               every collector, every server, every cycle — inherited the same undocumented 30 s default as
+               the rest of the regime while being invisible to every pin that closed them.
+
+               It takes the SAME constant because it is the same regime: no enclosing budget, one sweep permit
+               and one borrowed store connection held for the duration, retried on the collector's own cadence.
+
+               And it NARROWS rather than closes. Measured against Npgsql 10.0.3: this bounds StartRowAsync /
+               Write / CompleteAsync, but NOT the BeginBinaryImportAsync above it. Begin sends the COPY and
+               awaits CopyInResponse under the CONNECTION's CommandTimeout, which Npgsql exposes read-only and
+               BeginBinaryImportAsync has no overload for — so the start phase, which is where a lock wait
+               stalls, stays on 30 s. Both phases surface as "Exception while reading from stream", which is
+               why the distinction is invisible in a log. Deliberately not closed by putting CommandTimeout on
+               the shared data source's connection string: that would silently re-bound every site this sweep
+               has not reached yet. Tracked as a residual on #2874. */
+            importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
+
             writer.Importer = importer;
 
             foreach (var row in rows)
@@ -2555,6 +2576,7 @@ public sealed class DarlingCollectorRunner
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT state_key, state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2", connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(collectorName);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -3490,6 +3512,7 @@ INSERT INTO collector_state (server_id, collector_name, state_key, state_value, 
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (server_id, collector_name, state_key)
 DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at", connection);
+                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(collectorName);
                 command.Parameters.AddWithValue(entry.Key);
@@ -3551,6 +3574,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3", connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(collectorName);
             command.Parameters.AddWithValue(stateKey);
@@ -3685,6 +3709,7 @@ RETURNING s.state_key";
             foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
             {
                 using var command = new NpgsqlCommand(PruneOrphanedDatabaseStateKeysSql, connection);
+                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(owner);
                 command.Parameters.AddWithValue(prefix);
@@ -3743,6 +3768,7 @@ RETURNING s.state_key";
             foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
             {
                 using var command = new NpgsqlCommand(PruneForeignDatabaseStateKeysSql, connection);
+                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(owner);
                 command.Parameters.AddWithValue(prefix);
@@ -3892,6 +3918,7 @@ RETURNING s.state_key";
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT EXISTS(SELECT 1 FROM collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS')", connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(collectorName);
             var result = await command.ExecuteScalarAsync(cancellationToken);
