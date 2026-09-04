@@ -445,13 +445,34 @@ public sealed class ViewerCommandTimeoutTests
 
         Assert.True(Directory.Exists(dir), $"viewer project directory not found: {dir}");
 
-        var paths = Directory.EnumerateFiles(dir, "*.cs", SearchOption.TopDirectoryOnly)
+        /* RECURSIVE, unlike the .Storage pin's TopDirectoryOnly, minus the build outputs. The claim
+           is "every command THIS PROJECT creates", and a file added under a future subdirectory is
+           still this project's - the viewer already carries a Themes/ folder, so subdirectories are
+           not hypothetical here. bin/ and obj/ are excluded by path segment rather than by name
+           match, because that is where the generated .AssemblyInfo.cs and .g.cs land during a CI
+           build and they are not source. */
+        var paths = Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories)
+            .Where(p => !IsBuildOutput(dir, p))
             .OrderBy(p => p, System.StringComparer.Ordinal)
             .ToArray();
 
         Assert.True(paths.Length >= 150, $"the viewer sweep found only {paths.Length} files — the project has moved");
 
         return paths;
+    }
+
+    /// <summary>
+    /// True when a path sits under the project's <c>bin</c> or <c>obj</c> tree. Compared as PATH
+    /// SEGMENTS, so a source file that merely has "obj" in its name is not excluded.
+    /// </summary>
+    private static bool IsBuildOutput(string projectDir, string path)
+    {
+        var relative = Path.GetRelativePath(projectDir, path);
+        var segments = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        return segments.Any(s =>
+            string.Equals(s, "bin", System.StringComparison.OrdinalIgnoreCase)
+            || string.Equals(s, "obj", System.StringComparison.OrdinalIgnoreCase));
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
