@@ -1310,6 +1310,11 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
     /// while HELD comes back at 90 still held, and one demoted while ARMED comes back at 90 still armed with
     /// its <c>next_start</c> unmoved — converging a horizon must never trigger an immediate purge (#1680's
     /// never-expose-an-armed-window discipline, held through an update rather than only at creation).
+    ///
+    /// <para>The <c>next_start</c> half is asserted through <see cref="AssertConvergenceLeftNextStartAlone"/>
+    /// rather than as raw equality, because the policy under test is deliberately ARMED and an armed
+    /// TimescaleDB job is one its background scheduler may run at any moment — see that helper for the two
+    /// events being separated and for what the separation cannot see (#2937).</para>
     /// </summary>
     [Fact]
     public async Task EnsureRetentionPolicies_ConvergesAnOldHorizon_PreservingScheduledStateAndNextStart_AgainstDevPostgres()
@@ -1415,7 +1420,7 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             Assert.False(after.Held.Scheduled, "a HELD policy must stay held across a horizon convergence");
             Assert.Equal("90 days", after.Armed.DropAfter);
             Assert.True(after.Armed.Scheduled, "an ARMED policy must stay armed across a horizon convergence");
-            Assert.Equal(before.Armed.NextStart, after.Armed.NextStart);
+            AssertConvergenceLeftNextStartAlone(before.Armed, after.Armed, "the convergence sweep");
 
             /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing.
                Fresh logger — see the fixture-level #2818 comment above. */
@@ -1424,7 +1429,8 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             Assert.True(settled17 == RetentionPolicyCount,
                 $"the idempotent third sweep should count all {RetentionPolicyCount} policies, got {settled17}; {settledLog.Joined}");
             var settled = await PolicyStateAsync(connection, ArmedRelation, ct);
-            Assert.Equal(("90 days", true, after.Armed.NextStart), (settled.DropAfter, settled.Scheduled, settled.NextStart));
+            Assert.Equal(("90 days", true), (settled.DropAfter, settled.Scheduled));
+            AssertConvergenceLeftNextStartAlone(after.Armed, settled, "the idempotent third sweep");
             Assert.Equal("4 days", (await PolicyStateAsync(connection, HeldRelation, ct)).DropAfter);
 
             bodySucceeded = true;
@@ -1464,24 +1470,129 @@ AND   j.hypertable_name = '" + relation + "'", connection);
         await demote.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>One policy's observable state: the horizon it would drop at, whether it is armed, and when it
-    /// would next run.</summary>
-    private static async Task<(string DropAfter, bool Scheduled, DateTime? NextStart)> PolicyStateAsync(
+    /// <summary>One policy's observable state: the horizon it would drop at, whether it is armed, when it
+    /// would next run, and — since #2937 — the scheduler's own run bookkeeping for the same job, which is what
+    /// makes a <c>next_start</c> that moved attributable. See
+    /// <see cref="AssertConvergenceLeftNextStartAlone"/>.</summary>
+    private sealed record RetentionPolicyState(
+        string DropAfter,
+        bool Scheduled,
+        DateTime? NextStart,
+        long Runs,
+        DateTime? LastRunStartedAt,
+        string? JobStatus);
+
+    private static async Task<RetentionPolicyState> PolicyStateAsync(
         NpgsqlConnection connection, string relation, System.Threading.CancellationToken ct)
     {
+        /* Joined on job_id, NEVER on the hypertable name: timescaledb_information.jobs resolves a continuous
+           aggregate's policy to the USER VIEW (collect.procedure_stats_hourly, via
+           COALESCE(ca.user_view_schema, ...)), while job_stats reports the same job against the internal
+           materialization hypertable (_timescaledb_internal._materialized_hypertable_N). Measured on 2.29.2 -
+           filtering job_stats by this relation name matches nothing, which would read as "never run" and make
+           the gate below permanently blind. */
         using var read = new NpgsqlCommand(@"
-SELECT j.config->>'drop_after', j.scheduled, j.next_start
+SELECT j.config->>'drop_after', j.scheduled, j.next_start,
+       coalesce(s.total_runs, 0), s.last_run_started_at, s.job_status
 FROM timescaledb_information.jobs AS j
+LEFT JOIN timescaledb_information.job_stats AS s
+  ON s.job_id = j.job_id
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
-AND   j.hypertable_name = '" + relation + "'", connection);
+AND   j.hypertable_name = '" + relation + "'", connection) { CommandTimeout = PolicyReadTimeoutSeconds };
         using var reader = await read.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct), $"no policy_retention job found for collect.{relation}");
 
         /* next_start is NULL for a HELD job - a paused policy has no next run (the same sentinel family as
            job_stats' -infinity). */
-        return (reader.GetString(0), reader.GetBoolean(1),
-            await reader.IsDBNullAsync(2, ct) ? null : reader.GetDateTime(2));
+        return new RetentionPolicyState(
+            reader.GetString(0),
+            reader.GetBoolean(1),
+            await reader.IsDBNullAsync(2, ct) ? null : reader.GetDateTime(2),
+            reader.GetInt64(3),
+            await reader.IsDBNullAsync(4, ct) ? null : reader.GetDateTime(4),
+            await reader.IsDBNullAsync(5, ct) ? null : reader.GetString(5));
+    }
+
+    /// <summary>Catalog read against the live fixture, explicit rather than on Npgsql's undocumented 30-second
+    /// default (#2874).</summary>
+    private const int PolicyReadTimeoutSeconds = 30;
+
+    /// <summary>
+    /// The <c>next_start</c>-unmoved claim, stated so that TimescaleDB's background scheduler cannot decide it
+    /// either way (#2937). The policy under test is deliberately ARMED — that is the state #1680 cares about —
+    /// and an armed job is one the scheduler may run at any moment, after which <c>next_start</c> LEGITIMATELY
+    /// advances. Raw equality conflated that with the defect this test exists for, so it went red on healthy
+    /// behaviour at whatever rate the sweep overlapped the job's schedule; three earlier flakes in this family
+    /// (#1889, #2143, #2818) were all a live test racing the same scheduler.
+    ///
+    /// <para><b>The two events, and what separates them.</b> Measured on TimescaleDB 2.29.2 / PostgreSQL 17:
+    /// none of the sweep's own statements touch <c>next_start</c> — not <c>alter_job(config =&gt; ...)</c> (the
+    /// convergence), not <c>alter_job(scheduled =&gt; true)</c> on an already-armed job, not a hold followed by
+    /// a re-arm. A scheduler RUN is the only thing that moves it, and a run is independently visible in the
+    /// same catalog row: <c>total_runs</c> increments when the run STARTS, leaving <c>next_start</c> at the
+    /// <c>-infinity</c> in-progress sentinel with <c>job_status = 'Running'</c>, and completion sets
+    /// <c>next_start = last_successful_finish + schedule_interval</c> — ~24 hours out for a retention policy,
+    /// which is the exact value the CI failure reported.</para>
+    ///
+    /// <para>So <b>no run and <c>next_start</c> moved is a defect</b>, and stays a hard failure asserted as
+    /// the same equality it always was: that is the branch a convergence which re-arms or re-times the policy
+    /// lands in. A run HAVING happened is the scheduler's own entitlement, and what still has to hold there is
+    /// that the resulting value is one a run produces — the in-progress sentinel, or a next run strictly later
+    /// than the run that explains it — rather than an immediate-purge window.</para>
+    ///
+    /// <para><b>What this cannot see</b>, named rather than papered over: a sweep that both re-timed the policy
+    /// AND had a scheduler run land in the same window takes the second branch and passes, because the pre-run
+    /// value is gone by then and nothing in the catalog attributes a run to a cause. The strict branch is where
+    /// the claim lives; the tolerant branch only declines to blame the sweep for what the scheduler is
+    /// documented to do.</para>
+    /// </summary>
+    private static void AssertConvergenceLeftNextStartAlone(
+        RetentionPolicyState before, RetentionPolicyState after, string sweep)
+    {
+        /* The evidence travels WITH the assertion - a bare "values differ" on this line was untriageable, and
+           #2818 was filed about exactly that on this test. */
+        var evidence =
+            $"next_start {Stamp(before.NextStart)} -> {Stamp(after.NextStart)}, "
+            + $"total_runs {before.Runs} -> {after.Runs}, "
+            + $"last_run_started_at {Stamp(before.LastRunStartedAt)} -> {Stamp(after.LastRunStartedAt)}, "
+            + $"job_status {before.JobStatus ?? "(null)"} -> {after.JobStatus ?? "(null)"}";
+
+        if (after.Runs == before.Runs && !RunInFlight(before))
+        {
+            /* No run intervened, so the sweep is the ONLY thing that could have moved next_start. */
+            Assert.True(after.NextStart == before.NextStart,
+                $"{sweep} moved an ARMED policy's next_start with no scheduler run to account for it - "
+                + $"converging a horizon must never re-time or re-arm the job (#1680); {evidence}");
+            return;
+        }
+
+        /* Either a new run started (total_runs increments at run START, not at completion) or one that was
+           ALREADY in flight at the earlier observation has since finished - and a completion moves next_start
+           with the run count static, so it has to reach this branch too or it would read as a sweep. */
+        Assert.True(after.Scheduled, $"a scheduler run must not leave the policy held; {evidence}");
+
+        if (RunInFlight(after))
+        {
+            /* Still executing. next_start is the -infinity sentinel, which Npgsql surfaces as
+               DateTime.MinValue; pin that rather than accepting whatever is there. */
+            Assert.True(after.NextStart == DateTime.MinValue,
+                $"a run in progress must leave next_start at the -infinity in-progress sentinel; {evidence}");
+            return;
+        }
+
+        Assert.True(after.LastRunStartedAt is not null && after.NextStart > after.LastRunStartedAt,
+            $"{sweep} left an ARMED policy's next run at or before the run that supposedly explains it, "
+            + $"which is an immediate-purge window and not a scheduled one (#1680); {evidence}");
+
+        static string Stamp(DateTime? value) => value?.ToString("O", CultureInfo.InvariantCulture) ?? "(null)";
+
+        /* A run TimescaleDB has started and not finished. job_status is the view's own word for it; the
+           -infinity next_start is the same state read off the row, kept as a second tell because it is the
+           value the assertions above actually compare and Npgsql surfaces it as DateTime.MinValue. */
+        static bool RunInFlight(RetentionPolicyState state)
+            => string.Equals(state.JobStatus, "Running", StringComparison.Ordinal)
+            || state.NextStart == DateTime.MinValue;
     }
 
     /// <summary>The continuous aggregates present in <c>collect</c> right now, so the retention test can drop
