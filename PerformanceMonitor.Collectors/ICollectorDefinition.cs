@@ -104,31 +104,6 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     int? PerItemTextByteBudget { get; }
 
     /// <summary>
-    /// WALL-CLOCK ceiling for one per-database unit of work — the watermark refresh, the command, and the
-    /// whole drain (#2150). Null (the common case) = unbounded, exactly as before.
-    ///
-    /// <para><b>Why the command timeout is not this.</b> <c>CommandTimeout</c> bounds the wait for a network
-    /// read, and SqlClient RESETS it on every read that arrives — so a result set that trickles rows
-    /// continuously never trips it, however long it takes in total. A 100-minute read under a 30-second
-    /// timeout is the documented behaviour, not a bug, which is why the field report in #2150 shows six
-    /// per-database passes of up to 99.8 minutes against a 30-second timeout.</para>
-    ///
-    /// <para><b>What exceeding it means.</b> The item is abandoned and reported as a per-item FAILURE, and
-    /// the cycle continues to the next database — the same treatment an offline database gets. Nothing is
-    /// silently dropped: a collector with a watermark did not advance it, so the abandoned range is simply
-    /// re-read next cycle. For <c>query_store</c> that failure also feeds the #2111 consecutive-failure
-    /// count, so the window NARROWS on the next pass instead of retrying the same impossible width — a
-    /// bound that converges rather than one that just repeats.</para>
-    ///
-    /// <para>Host-enforced rather than definition-enforced, unlike the byte budget: only the host owns the
-    /// cancellation token and the loop, and the point is to bound the definition's own read.</para>
-    /// </summary>
-    /* Declared on the base ICollectorSchemaInfo since #2864, alongside AppliesTo and
-       YieldsOnLockTimeout and for the same reason: the catalog holds ICollectorSchemaInfo, so a
-       host holding only a collector NAME could not ask this question at all. Not restated here,
-       because two declarations of one contract are two things to drift. */
-
-    /// <summary>
     /// Builds the T-SQL (and any bound parameters) for this cycle. Constant for most collectors;
     /// target-aware definitions branch on <see cref="CollectorContext.Target"/> and
     /// <see cref="CollectorContext.Watermark"/>.

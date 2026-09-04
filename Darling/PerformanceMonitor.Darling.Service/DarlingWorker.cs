@@ -5605,11 +5605,6 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Runs one collector for a server and logs its outcome to collection_log. Returns the rows written
-    /// (0 on skip/permissions/error) so an on-demand snapshot can tally them; the scheduled/on-load callers
-    /// simply discard the count.
-    /// </summary>
-    /// <summary>
     /// This body's peer high-water mark for the collection_log write (#2864), or null before any
     /// non-budgeted collector has run in it.
     ///
@@ -5621,6 +5616,11 @@ LIMIT 1";
     private static int? PeerMaxOrNull(ServerLoopState server) =>
         server.SweepPeerMaxMs >= 0 ? server.SweepPeerMaxMs : null;
 
+    /// <summary>
+    /// Runs one collector for a server and logs its outcome to collection_log. Returns the rows written
+    /// (0 on skip/permissions/error) so an on-demand snapshot can tally them; the scheduled/on-load callers
+    /// simply discard the count.
+    /// </summary>
     private async Task<int> RunOneAsync(ServerLoopState server, DarlingCollectorRunner runner, string collectorName, CancellationToken cancellationToken)
     {
         var runtime = server.Runtime;

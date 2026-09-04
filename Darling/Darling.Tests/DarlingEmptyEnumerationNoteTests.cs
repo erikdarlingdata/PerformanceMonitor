@@ -103,7 +103,9 @@ public sealed class DarlingEmptyEnumerationNoteTests
         Assert.Contains(
             "return new CollectorRunResult( rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result, " +
             "ServerPhasesMeasured: serverPhasesMeasured, ServerOpenMs: context.ServerScopeOpenMs, " +
-            "ServerDrainMs: context.ServerScopeDrainMs, ServerWatermarkMs: serverWatermarkMs);",
+            "ServerDrainMs: context.ServerScopeDrainMs, ServerWatermarkMs: serverWatermarkMs, " +
+            "ServerRowsRead: context.ServerScopeRowsRead, ServerBytesRead: context.ServerScopeBytesRead, " +
+            "ServerLastReadMs: context.ServerScopeLastReadMs, TargetSessionId: context.TargetSessionId);",
             collapsed);
     }
 
