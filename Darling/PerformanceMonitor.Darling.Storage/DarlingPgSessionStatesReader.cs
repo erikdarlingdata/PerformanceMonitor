@@ -232,6 +232,7 @@ public static class DarlingPgSessionStatesReader
 
         var rows = new List<PgSessionStateRow>();
         await using var command = postgres.CreateCommand(PgSessionStatesSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified) at the BIND. Npgsql does not reject Kind=Utc - it infers timestamptz, and
            PostgreSQL then resolves the comparison against these NAIVE timestamp columns by converting them
@@ -416,6 +417,7 @@ public static class DarlingPgSessionStatesReader
 
         var rows = new List<LongRunningSessionRow>();
         await using var command = postgres.CreateCommand(CurrentLongRunningSessionsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdMs);
         /* SpecifyKind(Unspecified) at the BIND — see GetPgSessionStatesAsync's identical comment for why
@@ -446,6 +448,7 @@ public static class DarlingPgSessionStatesReader
         ArgumentNullException.ThrowIfNull(postgres);
 
         await using var command = postgres.CreateCommand(PgSessionStatesCaptureCountsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));

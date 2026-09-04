@@ -3927,7 +3927,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             throw new ArgumentNullException(nameof(connection));
         }
 
-        using (var acquireLock = new NpgsqlCommand("SELECT pg_advisory_lock($1)", connection))
+        using (var acquireLock = new NpgsqlCommand("SELECT pg_advisory_lock($1)", connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
         {
             acquireLock.Parameters.AddWithValue(MigrationLockKey);
             await acquireLock.ExecuteNonQueryAsync(cancellationToken);
@@ -3942,7 +3942,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         {
             try
             {
-                using var releaseLock = new NpgsqlCommand("SELECT pg_advisory_unlock($1)", connection);
+                using var releaseLock = new NpgsqlCommand("SELECT pg_advisory_unlock($1)", connection) { CommandTimeout = MigrationCommandTimeoutSeconds };
                 releaseLock.Parameters.AddWithValue(MigrationLockKey);
                 await releaseLock.ExecuteNonQueryAsync(CancellationToken.None);
             }
@@ -3967,18 +3967,18 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
            they simply resolve to public, exactly as before), so this is safe on every store version
            and independent of any connection-string Search Path. Session-scoped (outside the
            per-migration transactions), so a migration rollback never unsets it. */
-        using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection))
+        using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
         {
             await setPath.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var createVersionTable = new NpgsqlCommand(VersionTableSql, connection))
+        using (var createVersionTable = new NpgsqlCommand(VersionTableSql, connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
         {
             await createVersionTable.ExecuteNonQueryAsync(cancellationToken);
         }
 
         int currentVersion;
-        using (var readVersion = new NpgsqlCommand("SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection))
+        using (var readVersion = new NpgsqlCommand("SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
         {
             currentVersion = Convert.ToInt32(await readVersion.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
         }
@@ -3999,7 +3999,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             }
 
             using (var stamp = new NpgsqlCommand(
-                "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ($1, $2, $3)", connection, transaction))
+                "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ($1, $2, $3)", connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds })
             {
                 stamp.Parameters.AddWithValue(migration.Version);
                 stamp.Parameters.AddWithValue(migration.Name);
@@ -4048,7 +4048,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         try
         {
             using var command = new NpgsqlCommand(
-                $"ALTER DATABASE {quotedDatabase} SET search_path = {PgSchemaGenerator.SearchPath}", connection);
+                $"ALTER DATABASE {quotedDatabase} SET search_path = {PgSchemaGenerator.SearchPath}", connection) { CommandTimeout = MigrationCommandTimeoutSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

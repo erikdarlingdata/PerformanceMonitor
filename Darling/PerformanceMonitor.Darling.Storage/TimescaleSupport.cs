@@ -147,7 +147,7 @@ public static class TimescaleSupport
         }
 
         using var command = new NpgsqlCommand(
-            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", connection);
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", connection) { CommandTimeout = SetupTimeoutSeconds };
         return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
 
@@ -182,7 +182,7 @@ public static class TimescaleSupport
 
         try
         {
-            using var create = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS timescaledb", connection);
+            using var create = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS timescaledb", connection) { CommandTimeout = SetupTimeoutSeconds };
             await create.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -2337,6 +2337,7 @@ AND   j.hypertable_name = '{relation}'";
         }
 
         await using var command = dataSource.CreateCommand(RollupProbeSql);
+        command.CommandTimeout = JobCatalogReadTimeoutSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         await reader.ReadAsync(cancellationToken);
         return new RollupAvailability(
@@ -2472,6 +2473,7 @@ AND   j.hypertable_name = '{relation}'";
         }
 
         await using var command = dataSource.CreateCommand(RollupCoverageProbeSql(availability));
+        command.CommandTimeout = JobCatalogReadTimeoutSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -2914,7 +2916,7 @@ WHERE j.proc_name LIKE '%compression%'
         var stuck = new List<StuckCompressionJob>();
         try
         {
-            using var command = new NpgsqlCommand(StuckCompressionJobsSql, connection);
+            using var command = new NpgsqlCommand(StuckCompressionJobsSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -2976,7 +2978,7 @@ WHERE js.last_run_status = 'Success'";
         var readings = new List<StoreJobCadenceReading>();
         try
         {
-            using var command = new NpgsqlCommand(sql, connection);
+            using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -3173,7 +3175,7 @@ WHERE j.proc_name LIKE '%compression%'
         var activity = new List<CompressionActivity>();
         try
         {
-            using var command = new NpgsqlCommand(CompressionActivitySql, connection);
+            using var command = new NpgsqlCommand(CompressionActivitySql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -3265,7 +3267,7 @@ WHERE j.proc_name LIKE '%compression%'
 
         try
         {
-            using var command = new NpgsqlCommand(RearmJobSql, connection);
+            using var command = new NpgsqlCommand(RearmJobSql, connection) { CommandTimeout = SetupTimeoutSeconds };
             command.Parameters.AddWithValue(jobId);
             await command.ExecuteNonQueryAsync(cancellationToken);
             return true;

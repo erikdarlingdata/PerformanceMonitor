@@ -48,6 +48,7 @@ public static class DarlingPgCpuUtilizationReader
         ArgumentNullException.ThrowIfNull(postgres);
 
         await using var command = postgres.CreateCommand(LatestCpuSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Naive UTC at the bind, matching every other PG store comparison against the naive `timestamp`
            columns — see DarlingPgSessionStatesReader's identical comment for why Kind=Utc would silently
@@ -89,6 +90,7 @@ public static class DarlingPgCpuUtilizationReader
 
         var samples = new System.Collections.Generic.List<CpuSample>();
         await using var command = postgres.CreateCommand(HistorySql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
