@@ -126,10 +126,16 @@ public sealed class AnalysisPassCommandTimeoutTests
             + Environment.NewLine + string.Join(Environment.NewLine, missing));
 
         /* A floor rather than an equality, so adding a collector is not taxed; it still fails loudly
-           if the sweep is partially reverted, which is the regression that matters. */
+           if the sweep is partially reverted, which is the regression that matters.
+
+           73, not 71: widening s_commandCtor to the `.CreateCommand(` shape (#2874) made two sites
+           VISIBLE that always existed, so the true count moved without any command being added. A
+           floor left at the old number would have let both of them vanish again silently - which is
+           precisely what this assertion is for, and it is the reason a floor has to be re-measured
+           whenever the scan's reach changes rather than only when code is added. */
         Assert.True(
-            covered >= 71,
-            $"Expected at least the 71 analysis-pass command sites to set a timeout; found {covered}. "
+            covered >= 73,
+            $"Expected at least the 73 analysis-pass command sites to set a timeout; found {covered}. "
             + "A drop means sites were removed or the deadline was refactored out from under this pin.");
     }
 
@@ -182,10 +188,14 @@ public sealed class AnalysisPassCommandTimeoutTests
     ///
     /// <para><b>Scoped to this assembly, not repo-wide.</b> The same shape appears four more times in
     /// <c>Lite</c> - <c>DuckDbFactCollector.Waits.cs</c>, <c>DrillDownCollector.Blocking.cs</c> and two
-    /// in <c>LocalDataService.Blocking.cs</c> - but those build <c>DuckDBCommand</c>, which has no 30 s
-    /// default to inherit and may not honour <c>CommandTimeout</c> at all. Sweeping them would assert a
-    /// deadline that cannot be shown to bind anything, which is a pin that cannot fail; whether a DuckDB
-    /// command wants one is a separate question with its own measurement.</para>
+    /// in <c>LocalDataService.Blocking.cs</c> - but those build <c>DuckDBCommand</c>, and
+    /// <c>RemoteCollectorService.GetLastCollectedTimeAsync</c>'s doc comment already records why that is
+    /// a different question: <c>DuckDBCommand.CommandTimeout</c> defaults to <b>0, meaning no limit</b>,
+    /// so there is no inherited ceiling to exceed and nothing to cancel. There is no equivalent defect
+    /// there to fix, and sweeping those four would assert a bound that cannot be shown to bind anything -
+    /// a pin that cannot fail. Whether a DuckDB command wants a deadline at all is a separate question
+    /// with its own measurement, and that comment asks the next reader to re-confirm the 0 default
+    /// before relying on it.</para>
     ///
     /// <para>Comments and string literals are blanked first. <b>Stated precisely: that stripping is
     /// DEFENSIVE here, not load-bearing.</b> Three comments in this assembly name
