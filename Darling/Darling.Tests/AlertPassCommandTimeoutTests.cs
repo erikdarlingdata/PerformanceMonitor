@@ -360,6 +360,11 @@ public sealed class AlertPassCommandTimeoutTests
             + "    {\n"
             + "        using var timed = new Npgsql.NpgsqlCommand(Sql, conn) { CommandTimeout = 10 };\n"
             + "        var mapped = rows.Select(ExprBodiedAsync).ToList();\n"
+            + "        await Task.Run(async (x) => { await LocalHelper(x); });\n"
+            + "        async Task LocalHelper(int x)\n"
+            + "        {\n"
+            + "            using var nested = new NpgsqlCommand(Sql, conn) { CommandTimeout = 10 };\n"
+            + "        }\n"
             + "    }\n"
             + "    Task<int> ExprBodiedAsync(int id) => Run(new NpgsqlCommand(Sql, conn));\n"
             + "    async Task OtherRegimeAsync()\n"
@@ -375,14 +380,23 @@ public sealed class AlertPassCommandTimeoutTests
         Assert.DoesNotContain("NpgsqlCommand", members.Keys);
         Assert.DoesNotContain("if", members.Keys);
 
+        /* The nested matches: a local function and an async lambda, both inside DeeperAsync's body.
+           Neither may register as its own node, or the sweep scans their text twice - once through
+           DeeperAsync's span and once through their own - and the census inflates. */
+        Assert.DoesNotContain("LocalHelper", members.Keys);
+        Assert.DoesNotContain("async", members.Keys);
+
         var reachable = ReachableFrom(stripped, members, "RootAsync");
 
         Assert.Equal(
             new[] { "DeeperAsync", "ExprBodiedAsync", "ReachedAsync", "RootAsync" },
             reachable.OrderBy(m => m, System.StringComparer.Ordinal).ToArray());
 
-        /* The closure's own command census: two sites — the block-bodied timed one and the
-           expression-bodied UNTIMED one, which is reported rather than skipped. */
+        /* The closure's own command census: THREE sites — the block-bodied timed one, the timed one
+           inside the local function (reached through its enclosing member's span, counted ONCE), and the
+           expression-bodied UNTIMED one, which is reported rather than skipped. Without the
+           drop-nested-matches step this reads FOUR, because the local function's command is scanned
+           through both spans. */
         var offenders = new List<string>();
         var total = 0;
 
@@ -395,8 +409,8 @@ public sealed class AlertPassCommandTimeoutTests
             }
         }
 
-        Assert.Equal(2, total);
-        Assert.Equal(new[] { "ExprBodiedAsync:17" }, offenders.ToArray());
+        Assert.Equal(3, total);
+        Assert.Equal(new[] { "ExprBodiedAsync:22" }, offenders.ToArray());
 
         /* The negative control, and the reason the whole design holds: the excluded member really does
            carry a defect the scanner would report. So "no offenders" above is the SCOPE working, not
@@ -489,10 +503,22 @@ public sealed class AlertPassCommandTimeoutTests
     /// block-body test to pick one NAMED member's declaration out of its own call sites, so treating
     /// an expression-bodied match as "not a declaration" is right there. This one enumerates every
     /// declaration as a graph NODE, so a shape it cannot see is a hole in the graph.</para>
+    ///
+    /// <para><b>NESTED matches are dropped, and that is a correctness requirement rather than tidying.</b>
+    /// Accepting both body shapes means a construct written INSIDE another member's body can match too —
+    /// a local function, or an <c>async (x) =&gt; { ... }</c> lambda, whose span sits wholly within its
+    /// enclosing member's span. Keeping both would make the sweep scan that text TWICE, once through the
+    /// enclosing span and once through its own, inflating the census and duplicating any offender line;
+    /// review flagged it, and probing the real file found exactly one such match today (an async lambda
+    /// registering under the name <c>async</c>), reachable from nothing, so it was latent. Nothing is lost
+    /// by dropping them: a local function is scoped to its containing member, so it can have no caller the
+    /// enclosing span does not already cover, and its identifiers and its commands are both inside that
+    /// span already. A nested TYPE's methods are unaffected — a type declaration has no parameter list, so
+    /// it never matches here and its members stay top-level.</para>
     /// </summary>
     private static Dictionary<string, List<(int Start, int End)>> MemberBodies(string stripped)
     {
-        var members = new Dictionary<string, List<(int Start, int End)>>(System.StringComparer.Ordinal);
+        var found = new List<(string Name, int Start, int End)>();
 
         foreach (Match signature in s_memberSignature.Matches(stripped))
         {
@@ -510,12 +536,24 @@ public sealed class AlertPassCommandTimeoutTests
                 continue;
             }
 
+            found.Add((name, signature.Index, end));
+        }
+
+        var members = new Dictionary<string, List<(int Start, int End)>>(System.StringComparer.Ordinal);
+
+        foreach (var (name, start, end) in found)
+        {
+            if (found.Any(outer => outer.Start < start && end <= outer.End))
+            {
+                continue;
+            }
+
             if (!members.TryGetValue(name, out var spans))
             {
                 members[name] = spans = new List<(int Start, int End)>();
             }
 
-            spans.Add((signature.Index, end));
+            spans.Add((start, end));
         }
 
         return members;
