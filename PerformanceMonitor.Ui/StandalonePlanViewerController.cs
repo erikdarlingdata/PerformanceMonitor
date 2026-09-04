@@ -47,9 +47,21 @@ public sealed class StandalonePlanViewerController
     public StandalonePlanViewerController(TabControl planTabControl)
     {
         _planTabControl = planTabControl ?? throw new ArgumentNullException(nameof(planTabControl));
+
+        /* Subscribe exactly ONCE for the controller's lifetime (#2828). Reset() clears _initialized so a
+           reopen re-runs EnsureInitialized, but the controller instance and its injected TabControl both
+           persist across open/close cycles -- subscribing inside EnsureInitialized therefore re-added a
+           handler on every reopen, leaking N handlers over N cycles. Wiring here means the first
+           EnsureInitialized's Items.Add(addTab) fires this handler once while it is already live; that
+           defers-then-no-ops via the _addTabInsertDeferred one-shot latch (see HandleAddTabSelected/#2825). */
+        _planTabControl.SelectionChanged += (_, _) =>
+        {
+            if (_planTabControl.SelectedItem is TabItem { Tag: string t } && t == PlanAddTabId)
+                HandleAddTabSelected();
+        };
     }
 
-    /// <summary>Adds the trailing "+" tab and its selection handler exactly once.</summary>
+    /// <summary>Adds the trailing "+" tab exactly once. The selection handler is wired once in the constructor (#2828).</summary>
     public void EnsureInitialized()
     {
         if (_initialized) return;
@@ -71,12 +83,6 @@ public sealed class StandalonePlanViewerController
             Content = new Grid()
         };
         _planTabControl.Items.Add(addTab);
-
-        _planTabControl.SelectionChanged += (_, _) =>
-        {
-            if (_planTabControl.SelectedItem is TabItem { Tag: string t } && t == PlanAddTabId)
-                HandleAddTabSelected();
-        };
     }
 
     /// <summary>
