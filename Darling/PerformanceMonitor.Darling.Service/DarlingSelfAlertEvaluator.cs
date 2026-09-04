@@ -2023,7 +2023,7 @@ SELECT
      FROM (SELECT log_id FROM collection_log WHERE server_id = $1 ORDER BY log_id DESC LIMIT $2) r) AS recent_runs,
     (SELECT COUNT(*)
      FROM (SELECT status FROM collection_log WHERE server_id = $1 ORDER BY log_id DESC LIMIT $2) r
-     WHERE r.status IN ('SUCCESS', 'SKIPPED'))                                       AS recent_success", connection);
+     WHERE r.status IN ('SUCCESS', 'SKIPPED'))                                       AS recent_success", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(recentWindow);
 
@@ -2067,7 +2067,7 @@ FROM
 ) AS x
 WHERE x.n = 1
 AND   x.status = 'SESSION_MISSING'
-ORDER BY x.collector_name", connection);
+ORDER BY x.collector_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -2104,7 +2104,7 @@ SELECT EXISTS
     FROM agent_status
     WHERE server_id = $1
     AND   agent_running
-)", connection);
+)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
@@ -2125,7 +2125,7 @@ SELECT agent_running, collection_time
 FROM agent_status
 WHERE server_id = $1
 ORDER BY collection_time DESC
-LIMIT 1", connection);
+LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -2172,7 +2172,7 @@ SELECT ag_name, replica_server_name, role_desc, connected_state_desc, is_local, 
 FROM ag_replica_states
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM ag_replica_states WHERE server_id = $1)
-ORDER BY ag_name, replica_server_name", connection);
+ORDER BY ag_name, replica_server_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -2216,7 +2216,7 @@ SELECT ag_name, database_name, replica_server_name, secondary_lag_seconds, redo_
 FROM ag_database_replica_states
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM ag_database_replica_states WHERE server_id = $1)
-ORDER BY ag_name, database_name, replica_server_name", connection);
+ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
