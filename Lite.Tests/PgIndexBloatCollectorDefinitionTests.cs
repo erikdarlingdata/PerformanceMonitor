@@ -225,10 +225,24 @@ public class PgIndexBloatCollectorDefinitionTests
             new Regex(@"sum\(k\.index_bytes\)\s*FILTER\s*\(WHERE\s+k\.index_bytes\s*<\s*\d+\)"), Sql());
 
     /// <summary>
-    /// The running total is a running total — ordered largest-first and framed from the start of the
-    /// partition. An unframed window sum would return the WHOLE total on every row, so no row would ever
-    /// be under budget and nothing would be measured; a differently-ordered one would spend the budget
-    /// on small indexes and pass over the big ones, inverting the argument the ORDER BY exists to make.
+    /// The running total is a running total — ordered largest-first and framed by ROWS from the start of
+    /// the partition.
+    ///
+    /// <para><b>ROWS, not the default frame.</b> A window with an ORDER BY and no explicit frame gets
+    /// <c>RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</c>, which is also a running total but groups
+    /// PEERS: every row tying on the whole ORDER BY sees the tie's ENTIRE total, the first member
+    /// included. A tied pair is then all-or-nothing against the budget — measured with a spare index'
+    /// worth of headroom, or skipped together even though one of them would have fitted. ROWS charges
+    /// each row for itself, which is what spending a budget largest-first means.
+    ///
+    /// Ties are reachable, not theoretical: <c>index_name</c> is the tiebreaker and is unique per SCHEMA
+    /// rather than per database, so two schemas can hold equally-sized indexes of the same name. Measured
+    /// on PostgreSQL 17.11 with exactly that pair at 1,138,688 bytes each — ROWS gives 1,138,688 then
+    /// 2,277,376, while the default RANGE frame gives 2,277,376 on BOTH rows.</para>
+    ///
+    /// <para>Dropping the ORDER BY instead would make the sum the whole total on every row, so no row
+    /// would ever be under budget and nothing would be measured; reversing it would spend the budget on
+    /// small indexes and pass over the big ones, inverting the argument the ordering exists to make.</para>
     /// </summary>
     [Fact]
     public void TheByteBudget_AccumulatesLargestFirst()
