@@ -71,6 +71,19 @@ public sealed class McpReadCommandTimeoutTests
         @"new (?:Npgsql\.)?NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// The bare value regex, kept for the RAW-SPAN witnesses only.
+    ///
+    /// <para>It is no longer the production judgement — that is
+    /// <see cref="CommandDeadlineScanner.SetsAnExplicitDeadline"/>, which #2938 extracted and every pin in
+    /// #2874 now routes through. What is left needs a rule that can be pointed at an arbitrary SPAN rather
+    /// than at an offset into stripped source, because two fixtures here exist to demonstrate that a span
+    /// cut from RAW text reads a commented deadline as a real one:
+    /// <see cref="TheScanner_JudgesTheSiteItself_NotItsNeighbours"/>'s second assertion and
+    /// <see cref="AValueSpanCutFromRawText_ReadsACommentedDeadlineAsADeadline"/>. The scanner cannot express
+    /// that comparison — its contract is stripped source, which is the whole point of it — so replacing this
+    /// with a scanner call there would delete the demonstration rather than share it.</para>
+    /// </summary>
     private static readonly Regex s_setsTimeout = new(
         @"CommandTimeout\s*=",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -153,9 +166,16 @@ public sealed class McpReadCommandTimeoutTests
             {
                 total++;
 
-                var span = StatementSpan(text, ctor.Index);
-
-                if (!s_setsTimeout.IsMatch(span))
+                /* The SHARED judgement (#2938), whose contract is already-STRIPPED source plus an offset
+                   into it — exactly what `code` and `ctor.Index` are, so the strip this file argued for
+                   is what the scanner reads. It asks the question in two halves: an initializer is read
+                   from the CONSTRUCTION span, so an untimed command directly ahead of a timed one cannot
+                   borrow the FOLLOWING construction's initializer, and an assignment is qualified by the
+                   name the construction is bound to, so a sibling's `other.CommandTimeout = …` in the
+                   same two-statement window cannot certify a site that set nothing itself. Both are
+                   stricter than the bare value regex this used to apply, and neither moves a verdict on
+                   today's tree — all 126 sites are certified by the name-qualified assignment half. */
+                if (!CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
                 {
                     var line = text.Take(ctor.Index).Count(c => c == '\n') + 1;
                     offenders.Add($"{Path.GetFileName(path)}:{line}");
@@ -450,6 +470,14 @@ public sealed class McpReadCommandTimeoutTests
     /// cases are this surface's real shapes: the block form, where the deadline lands INSIDE the
     /// <c>using</c> body because the declaration is not a statement that can be followed, and the
     /// <c>OpenConnectionAsync</c> form.
+    ///
+    /// <para><b>Two assertions, two different rules, on purpose.</b> The first runs the PRODUCTION
+    /// judgement — <see cref="CommandDeadlineScanner"/>, the same call the scan above makes — so these rows
+    /// pin what the census actually does rather than a rule that once resembled it. The second deliberately
+    /// keeps the bare <see cref="s_setsTimeout"/> over a RAW span, because its claim is about the SPAN and
+    /// not about the judgement: every untimed row must read untimed over raw text too, so the one divergence
+    /// this pin depends on stays confined to the commented case. Routing that half through the scanner would
+    /// make it agree with the first assertion by construction and witness nothing.</para>
     /// </summary>
     [Theory]
     [InlineData(
@@ -491,10 +519,15 @@ public sealed class McpReadCommandTimeoutTests
         false)]
     public void TheScanner_JudgesTheSiteItself_NotItsNeighbours(string source, bool expectedTimed)
     {
-        var ctor = s_commandCtor.Match(CSharpSourceWalker.StripCommentsAndStrings(source));
+        var stripped = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var ctor = s_commandCtor.Match(stripped);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(StatementSpan(source, ctor.Index)));
+        /* The PRODUCTION judgement, so these rows keep describing what the scan above actually does.
+           All six verdicts are unchanged by the move: rows 1, 4 and 5 are certified by the
+           name-qualified assignment half, rows 2 and 6 fail both halves, and row 3's borrowable
+           neighbour was already out of the two-statement window. */
+        Assert.Equal(expectedTimed, CommandDeadlineScanner.SetsAnExplicitDeadline(stripped, ctor.Index));
 
         /* Every UNTIMED fixture read the way a raw span reads it, so the divergence this pin depends on
            stays confined to the commented case and cannot quietly widen. */
