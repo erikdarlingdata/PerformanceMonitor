@@ -157,8 +157,9 @@ namespace PerformanceMonitor.Darling.Service;
 internal static class StartupFailureTriage
 {
     /// <summary>
-    /// How many times the collection loop's first store interaction may be tried before a failure
-    /// <see cref="IsRetryable"/> accepts becomes terminal anyway.
+    /// How many times any ONE of the three triaged startup steps may be tried before a failure
+    /// <see cref="IsRetryable"/> accepts becomes terminal anyway. Shared by all three, each of which keeps
+    /// its own stopwatch, so the count is per site and not a budget they draw down together.
     ///
     /// <para>Paired with <see cref="RetryBudget"/>, which is the real bound — see that constant
     /// for why an attempt cap alone is not one. Twenty-five tries <see cref="RetryDelay"/> apart is
@@ -260,7 +261,9 @@ internal static class StartupFailureTriage
     };
 
     /// <summary>
-    /// Whether the collection loop's first store interaction should be tried again after this failure.
+    /// Whether the triaged startup step that raised this should be tried again. One predicate for all
+    /// three sites — see the class remarks for why, and for the single typed carve-out that is the only
+    /// place they differ.
     /// FALSE for anything not positively recognised, including every <see cref="PostgresException"/> whose
     /// <c>SqlState</c> is not in <see cref="s_retryableSqlStates"/> — see the class remarks for why the
     /// unclassifiable case is terminal rather than retried.
