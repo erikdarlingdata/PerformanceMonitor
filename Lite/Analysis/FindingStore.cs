@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -471,8 +472,12 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
     /// does not exist. Matches the Darling twin's PgFindingStore exactly.</para>
+    ///
+    /// <para>The default is the shared horizon (<see cref="AnalysisRetentionDefaults.FindingsRetentionDays"/>),
+    /// not a literal: this is the bottom of the chain the scheduler drives, so a literal here could
+    /// silently disagree with the window the caller above it purges on.</para>
     /// </summary>
-    public async Task CleanupOldFindingsAsync(int retentionDays = 30)
+    public async Task CleanupOldFindingsAsync(int retentionDays = AnalysisRetentionDefaults.FindingsRetentionDays)
     {
         /* Read lock around a DELETE: deliberate, see the class note (#2455). The rows it removes are
            older than the retention cutoff and an insert batch only ever writes rows stamped now, so

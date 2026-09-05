@@ -366,13 +366,14 @@ public class CollectionBackgroundService : BackgroundService
     }
 
     /// <summary>
-    /// Purges analysis findings past the 30-day retention window on a daily cadence.
+    /// Purges analysis findings past the shared retention horizon on a daily cadence.
     /// FindingStore has always declared CleanupOldFindingsAsync, but nothing scheduled it,
     /// so analysis_findings grew until a size-triggered ArchiveAllAndResetAsync incidentally
     /// wiped the WHOLE DuckDB (losing ALL findings, not just aged ones — analysis_findings is
     /// not in ArchiveService.ArchivableTables, so routine archival never touched it). This
-    /// applies the same rolling 30-day retention the other editions intend (Darling's daily
-    /// purge rides the same horizon). Gated on _duckDb — the dependency the cleanup needs —
+    /// reads that horizon from the one place it is named (<see cref="AnalysisRetentionDefaults"/>)
+    /// instead of a literal per site: the same rolling window the other editions intend, and the
+    /// one Darling's daily purge rides. Gated on _duckDb — the dependency the cleanup needs —
     /// so it is independent of the parquet RetentionService. Never throws: logs and degrades
     /// like the archival/retention ticks above.
     /// </summary>
@@ -385,7 +386,8 @@ public class CollectionBackgroundService : BackgroundService
 
         try
         {
-            await new AnalysisService(_duckDb).CleanupAsync(retentionDays: 30);
+            await new AnalysisService(_duckDb).CleanupAsync(
+                retentionDays: AnalysisRetentionDefaults.FindingsRetentionDays);
             _lastFindingsCleanupTime = DateTime.UtcNow;
         }
         catch (Exception ex)
