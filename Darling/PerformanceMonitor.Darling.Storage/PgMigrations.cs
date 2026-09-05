@@ -2641,10 +2641,13 @@ CREATE INDEX IF NOT EXISTS idx_collector_cost_lookup
     /// generated schema and would silently not have it. Putting it in its own rung gives BOTH populations
     /// the index, which is what was actually wanted.</para>
     ///
-    /// <para><b>Why the index earns its place.</b> The collector re-reads an OVERLAPPING tail of the server
-    /// log every cycle, deliberately, so a report cut in half at one edge is whole in the next. Every read
-    /// therefore groups or filters on <c>deadlock_hash</c> to answer once per deadlock rather than once per
-    /// sighting, and the detail read looks a report up by hash directly.</para>
+    /// <para><b>Why the index earns its place.</b> The <c>pg_read_file</c> route re-reads an OVERLAPPING
+    /// tail of the server log every cycle, deliberately, so a report cut in half at one edge is whole in
+    /// the next and one deadlock lands many times. Every read therefore groups or filters on
+    /// <c>deadlock_hash</c> to answer once per deadlock rather than once per sighting, and the detail read
+    /// looks a report up by hash directly. The consume-once RDS route repeats less often and for other
+    /// reasons (#3008, #3009), which changes how many sightings a row has rather than what the reads
+    /// do.</para>
     ///
     /// <para><b>Not UNIQUE.</b> Two servers legitimately produce identical graph text — the same query pair
     /// deadlocking with the same process ids on two hosts is not impossible — and a unique constraint would
@@ -2660,10 +2663,13 @@ CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_identity
     /// We collected the COUNT (<c>pg_stat_database.deadlocks</c>) and nothing else: a number that goes up.
     /// This is which sessions, holding what, running what SQL.
     ///
-    /// <para><b>The identity column is the point.</b> Both transports read a bounded TAIL of the log on a
-    /// schedule and the window OVERLAPS deliberately — a report cut in half at the edge of one read is whole
-    /// in the next — so without <c>deadlock_hash</c> the same deadlock is stored once per cycle for as long
-    /// as it stays inside the window. The hash is over the graph text rather than over
+    /// <para><b>The identity column is the point.</b> The <c>pg_read_file</c> transport reads a bounded
+    /// TAIL of the log on a schedule and the window OVERLAPS deliberately, so without
+    /// <c>deadlock_hash</c> the same deadlock is stored once per cycle for as long as it stays inside the
+    /// window. The RDS log-API transport is consume-once and does not overlap — its repeats come from a
+    /// restart discarding the in-process marker, or from #3008 leaving it in place after a write that did
+    /// not land — and a report cut at one of its chunk boundaries is NOT whole in the next read (#3009).
+    /// The hash is over the graph text rather than over
     /// (timestamp, victim_pid): two reports in the same millisecond with the same victim pid are
     /// vanishingly unlikely, but the graph is what actually distinguishes them, and hashing the thing
     /// itself needs no argument about how unlikely a collision is.</para>

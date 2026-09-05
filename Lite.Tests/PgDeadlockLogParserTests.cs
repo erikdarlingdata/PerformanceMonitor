@@ -294,8 +294,9 @@ public sealed class PgDeadlockLogParserTests
     }
 
     /// <summary>
-    /// The hash is identity across the overlapping reads the collector makes on purpose: the same report is
-    /// seen every cycle while it stays in the log tail, and must be stored once. Two DIFFERENT deadlocks
+    /// The hash is identity across repeated reads: on the <c>pg_read_file</c> route the same report is
+    /// seen every cycle while it stays in the log tail, and on the consume-once RDS route it comes back
+    /// after a restart or a write that did not land. Either way it is stored once. Two DIFFERENT deadlocks
     /// must not collide — verified on the rig, where a repeat of the same query pair produced a different
     /// hash because the process IDs differed.
     /// </summary>
@@ -316,8 +317,13 @@ public sealed class PgDeadlockLogParserTests
 
     /// <summary>
     /// A block with no wait edge is not a deadlock report, and a half-read one is ordinary rather than a
-    /// fault: both transports read a bounded window, so a report cut at the edge is whole on the next
-    /// overlapping pass. Skipped, never thrown.
+    /// fault: both transports read a bounded window, so a report cut at the edge happens on either.
+    /// Skipped, never thrown.
+    ///
+    /// <para>Recovered on only one of them. The <c>pg_read_file</c> route re-reads an overlapping tail, so
+    /// the cut report is whole on the next pass; the RDS log-API route is consume-once, so it is not for
+    /// the life of its resume marker (#3009). The two pins below carry what the skip costs there, and they
+    /// are separate tests because the two cut positions fail in opposite directions.</para>
     /// </summary>
     [Fact]
     public void SkipsWhatItCannotParse_RatherThanThrowing()
@@ -329,6 +335,108 @@ public sealed class PgDeadlockLogParserTests
         var truncated = RealBlock[..RealBlock.IndexOf("blocked by process", StringComparison.Ordinal)];
         Assert.Empty(PgDeadlockLogParser.Extract(truncated));
     }
+
+    /// <summary>
+    /// #3009, first shape: a chunk boundary landing BEFORE <c>DETAIL:</c> loses the report whole.
+    ///
+    /// <para>The <c>ERROR:  deadlock detected</c> line is present and complete, and nothing comes out —
+    /// the pattern requires the DETAIL group, so there is no partial match to salvage. On the
+    /// <c>pg_read_file</c> route the next overlapping read carries the report whole and this costs
+    /// nothing. On the RDS route the resume marker has already advanced past those bytes, so nothing
+    /// re-requests them while that marker lives, and the deadlock is gone in the shape that reads as a
+    /// server which had none.</para>
+    ///
+    /// <para>Asserted with the uncut slab beside it rather than alone: an <c>Assert.Empty</c> on a fixture
+    /// that never parsed in the first place would pass for the wrong reason, and that is the failure mode
+    /// this whole pin exists to describe.</para>
+    /// </summary>
+    [Fact]
+    public void AChunkCutBeforeTheDetailLineLosesTheReportWhole()
+    {
+        var cutBeforeDetail = RealBlock[..RealBlock.IndexOf("DETAIL:", StringComparison.Ordinal)];
+
+        /* The cut kept the whole ERROR line, so the slab really does hold the start of a deadlock
+           report — the loss below is the cut and not an absent fixture. */
+        Assert.Contains("ERROR:  deadlock detected\n", cutBeforeDetail, StringComparison.Ordinal);
+        Assert.DoesNotContain("DETAIL:", cutBeforeDetail, StringComparison.Ordinal);
+        Assert.Single(PgDeadlockLogParser.Extract(RealBlock));
+
+        Assert.Empty(PgDeadlockLogParser.Extract(cutBeforeDetail));
+    }
+
+    /// <summary>
+    /// #3009, second shape and the dangerous one: a chunk boundary landing INSIDE the DETAIL block still
+    /// parses, and stores a row that under-reports the deadlock.
+    ///
+    /// <para>Cut immediately after the first wait edge, which is where a boundary lands most cheaply — the
+    /// line is complete and newline-terminated, so the pattern's <c>(?:\t[^\n]*\n)*</c> continuation
+    /// group is satisfied by taking none of them. The block MATCHES, <c>FromBlock</c> finds an edge, and a
+    /// row lands naming one of the two locked resources and neither participant's SQL. Absence would at
+    /// least be absence; this is a stored deadlock that is quietly smaller than the one that happened.</para>
+    ///
+    /// <para><b>Why no consistency check on the row can catch it.</b> <c>ParticipantCount</c> is counted
+    /// from the same edges <c>GraphText</c> carries, so a fragment lowers both together and the two never
+    /// disagree — which is why comparing them, as the issue first proposed, measures nothing. The signal
+    /// that survives is the CYCLE: a whole report writes one edge per participant, so a participant count
+    /// exceeding the edge count cannot come from a deadlock PostgreSQL actually reported. This pin
+    /// asserts that arithmetic on both slabs so the two cases are told apart by shape rather than by
+    /// magnitude.</para>
+    /// </summary>
+    [Fact]
+    public void AChunkCutMidDetailStoresAnUnderReportingRow_RatherThanNothing()
+    {
+        const string FirstEdgeEnd = "blocked by process 1556.\n";
+
+        var cutMidDetail = RealBlock[..(RealBlock.IndexOf(FirstEdgeEnd, StringComparison.Ordinal)
+            + FirstEdgeEnd.Length)];
+
+        var whole = Assert.Single(PgDeadlockLogParser.Extract(RealBlock));
+
+        /* IT PARSED. Everything after this describes a row that reached the store. */
+        var partial = Assert.Single(PgDeadlockLogParser.Extract(cutMidDetail));
+
+        /* Indistinguishable from the whole report on the columns a reader would look at first. */
+        Assert.Equal(whole.OccurredAtUtc, partial.OccurredAtUtc);
+        Assert.Equal(whole.VictimPid, partial.VictimPid);
+        Assert.Equal(whole.ParticipantCount, partial.ParticipantCount);
+        Assert.Equal(whole.LockModes, partial.LockModes);
+
+        /* And under-reporting on the ones carrying the evidence. */
+        Assert.Equal("transaction 808, transaction 809", whole.Resources);
+        Assert.Equal("transaction 809", partial.Resources);
+        Assert.NotNull(whole.VictimStatement);
+        Assert.Null(partial.VictimStatement);
+        Assert.Equal(2, PgDeadlockLogParser.ParseStatements(whole.GraphText).Count);
+        Assert.Empty(PgDeadlockLogParser.ParseStatements(partial.GraphText));
+
+        /* The cycle arithmetic, which is the only thing in the row that gives the fragment away. */
+        var wholeEdges = s_edgeCount.Matches(whole.GraphText).Count;
+        var partialEdges = s_edgeCount.Matches(partial.GraphText).Count;
+
+        /* A whole report writes one edge per participant. */
+        Assert.Equal(whole.ParticipantCount, wholeEdges);
+        Assert.Equal(2, wholeEdges);
+
+        /* A fragment cannot: participants come from the pids NAMED in the edges, so one edge yields two
+           participants and the cycle it claims is short an edge. This inequality is the detection, and
+           the magnitudes are pinned beside it so a change to either side has to be deliberate. */
+        Assert.True(
+            partial.ParticipantCount > partialEdges,
+            $"a fragment must carry more participants than edges; got {partial.ParticipantCount} "
+            + $"participant(s) and {partialEdges} edge(s)");
+        Assert.Equal(2, partial.ParticipantCount);
+        Assert.Equal(1, partialEdges);
+
+        /* Nothing merges the fragment with the whole report either, so a later complete read stores a
+           SECOND row beside this one rather than correcting it. */
+        Assert.NotEqual(whole.DeadlockHash, partial.DeadlockHash);
+    }
+
+    /* One wait edge, matched the way the parser's own s_edge ends one. A whole report carries one per
+       participant, so this is what makes "participants exceed edges" an arithmetic that a genuine report
+       cannot satisfy. */
+    private static readonly System.Text.RegularExpressions.Regex s_edgeCount =
+        new(@"; blocked by process \d+\.");
 
     /// <summary>
     /// The collector declares what it writes. A mismatch here is the #2622 class of defect: the runtime

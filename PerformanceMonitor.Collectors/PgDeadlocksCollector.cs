@@ -21,17 +21,27 @@ namespace PerformanceMonitor.Collectors;
 /// report carries the full wait graph, every participant's complete statement text, and the relation and
 /// tuple the conflict landed on.</para>
 ///
-/// <para><b>Nothing has to be configured on the target</b>, which is what makes this different from plan
+/// <para><b>Nothing has to be ENABLED on the target</b>, which is what makes this different from plan
 /// capture. <c>auto_explain</c> needs a preload and a restart — on a managed fleet that is a
-/// parameter-group change and a reboot — while a deadlock report is unconditional: there is no setting that
-/// suppresses it, and <c>log_lock_waits</c> governs ordinary lock waits rather than this. The only
-/// precondition is being able to READ the log, which <see cref="PgPlanCaptureCollector"/> already
-/// established and <c>pg_plan_capture_readiness</c> already reports on.</para>
+/// parameter-group change and a reboot — while a deadlock report is written at default settings, and
+/// <c>log_lock_waits</c> governs ordinary lock waits rather than this.</para>
+///
+/// <para><b>Two preconditions, though, not one.</b> The log has to be READABLE, which
+/// <see cref="PgPlanCaptureCollector"/> already established and <c>pg_plan_capture_readiness</c> already
+/// reports on. It also has to be verbose enough to carry the report: <c>log_error_verbosity = terse</c>
+/// drops the DETAIL field, which is the entire graph, leaving the <c>ERROR</c> line and nothing for the
+/// parser to match. A perfectly readable log at terse verbosity yields zero rows and reads as a server
+/// that does not deadlock (#3030).</para>
 ///
 /// <para>Reads the same bounded tail of the same file as plan capture, by the same two routes: this
-/// definition where there is a filesystem, and the RDS log API at a managed target, chosen at dispatch. The
-/// window OVERLAPS between cycles on purpose — a report cut in half at the edge of one read is whole in the
-/// next — which is why every row carries a hash of its graph and the store dedupes on it.</para>
+/// definition where there is a filesystem, and the RDS log API at a managed target, chosen at dispatch.
+/// Every row carries a hash of its graph and the store dedupes on it, because both routes hand the same
+/// report over more than once — but NOT by the same mechanism, and the difference decides what a
+/// truncated report costs. This definition's window OVERLAPS between cycles on purpose, so a report cut
+/// in half at the edge of one read is whole in the next. The RDS route is consume-once: its resume marker
+/// advances past everything a successful cycle CONSUMED, not merely what that cycle stored, so a report
+/// cut at one of its chunk boundaries is not completed while the marker lives, and its own repeats come
+/// from a restart discarding that in-process marker or from a write that did not land (#3008, #3009).</para>
 /// </summary>
 public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDeadlocksCollector.Row>
 {
@@ -128,8 +138,9 @@ LIMIT 500";
            one whose application saw an error - which is usually the only end anybody notices. */
         new CollectorColumn("victim_pid", CollectorColumnType.Integer),
         new CollectorColumn("participant_count", CollectorColumnType.Integer),
-        /* Identity across overlapping reads. The tail is re-read every cycle, so without this the same
-           deadlock is stored once per cycle for as long as it stays inside the window. */
+        /* Identity across repeated reads. This route re-reads the tail every cycle, so without this the
+           same deadlock is stored once per cycle for as long as it stays inside the window; the RDS route
+           repeats for its own reasons rather than by overlapping (see the class remarks). */
         new CollectorColumn("deadlock_hash", CollectorColumnType.Varchar),
         new CollectorColumn("lock_modes", CollectorColumnType.Varchar),
         new CollectorColumn("resources", CollectorColumnType.Varchar),
