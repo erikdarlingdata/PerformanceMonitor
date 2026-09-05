@@ -249,6 +249,39 @@ WHERE capture_time < $1";
             }
         }
 
+        if (ShouldWriteHeartbeat(captured.Count, candidates.Count))
+        {
+            /* THE HEARTBEAT, and it is the whole reason collect.store_log_captures is a table.
+               An hour in which no file in the ring had a complete new line - a quiet self-hosted store with
+               log_checkpoints off and no warnings - would otherwise write NO row at all, and the read would
+               then see fewer captures than the cadence produces and say the sweep skipped a tick. That is a
+               false outage on a healthy store, which is the cry-wolf failure this whole shape is arranged
+               against. So a tick that found nothing still records that it RAN and found nothing.
+
+               Deliberately NOT written when the directory listing itself came back empty: that is not a
+               quiet hour, it is a server with no logging collector writing files for pg_ls_logdir() to
+               list, and get_store_log's not_collected arm names exactly that. Recording a heartbeat there
+               would turn a real permanent gap into a series of successful empty reads. */
+            var newest = candidates[^1];
+            long pending = 0;
+            foreach (var candidate in candidates)
+            {
+                var resume = StoreLogSlab.ResolveResume(candidate.StoredOffset, candidate.StoredLastSize, candidate.SizeBytes);
+                pending += Math.Max(0, candidate.SizeBytes - resume.Offset);
+            }
+
+            var heartbeat = new FileCapture(
+                LogFile: newest.LogFile,
+                Offset: 0,
+                BytesRead: 0,
+                BytesPending: pending,
+                OffsetReset: false,
+                Census: StoreLogClassifier.Classify(null));
+
+            await WriteHeartbeatAsync(connection, captureTime, heartbeat, cancellationToken);
+            captured.Add(heartbeat);
+        }
+
         await PurgeAsync(connection, captureTime.AddDays(-RetentionDays), cancellationToken);
 
         if (captured.Count > 0)
@@ -266,6 +299,23 @@ WHERE capture_time < $1";
 
         return captured;
     }
+
+    /// <summary>
+    /// Whether a tick that consumed nothing still records that it RAN — pure, so the decision is assertable
+    /// without a store.
+    ///
+    /// <para>TRUE when the log directory held files but none of them had a complete new line: a quiet
+    /// self-hosted store with <c>log_checkpoints</c> off and no warnings that hour. Without the row, the
+    /// read sees fewer captures than the cadence produces and reports a skipped tick — a false outage on a
+    /// healthy store, and the cry-wolf failure this whole shape is arranged against.</para>
+    ///
+    /// <para>FALSE when the directory listing itself came back empty, and that asymmetry is the point: that
+    /// is not a quiet hour, it is a server with no logging collector writing files for
+    /// <c>pg_ls_logdir()</c> to list, which <c>get_store_log</c> reports as <c>not_collected</c> and names.
+    /// A heartbeat there would turn a real permanent gap into a series of successful empty reads.</para>
+    /// </summary>
+    public static bool ShouldWriteHeartbeat(int consumedFiles, int candidateFiles) =>
+        consumedFiles == 0 && candidateFiles > 0;
 
     /// <summary>One row of <see cref="LogDirectoryListSql"/>.</summary>
     private readonly record struct Candidate(string LogFile, long SizeBytes, long? StoredOffset, long? StoredLastSize);
@@ -366,6 +416,29 @@ WHERE capture_time < $1";
         }
 
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The capture row alone, with no census rows and no marker move — a tick that ran and found nothing.
+    /// Separate from <see cref="WriteAsync"/> precisely because it must NOT advance a marker: there is
+    /// nothing consumed to account for, and a marker moved on an empty read is a marker that skipped bytes.
+    /// </summary>
+    private static async Task WriteHeartbeatAsync(
+        NpgsqlConnection connection,
+        DateTime captureTime,
+        FileCapture capture,
+        CancellationToken cancellationToken)
+    {
+        await using var row = new NpgsqlCommand(CaptureInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+        row.Parameters.AddWithValue(captureTime);
+        row.Parameters.AddWithValue(capture.LogFile);
+        row.Parameters.AddWithValue((long)capture.BytesRead);
+        row.Parameters.AddWithValue(capture.BytesPending);
+        row.Parameters.AddWithValue(capture.Census.LinesRead);
+        row.Parameters.AddWithValue(capture.Census.EntriesRead);
+        row.Parameters.AddWithValue(capture.OffsetReset);
+        row.Parameters.AddWithValue(capture.Census.GroupsDropped);
+        await row.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task PurgeAsync(NpgsqlConnection connection, DateTime cutoff, CancellationToken cancellationToken)

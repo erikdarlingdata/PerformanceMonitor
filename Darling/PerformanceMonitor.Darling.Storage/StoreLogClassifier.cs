@@ -714,7 +714,8 @@ public static class StoreLogClassifier
 
             at += from;
             var after = at + name.Length;
-            if (line[after..].StartsWith(":  ", StringComparison.Ordinal))
+            if (line[after..].StartsWith(":  ", StringComparison.Ordinal)
+                && !ContinuesAnUpperCaseToken(line, at))
             {
                 return at;
             }
@@ -723,6 +724,43 @@ public static class StoreLogClassifier
         }
 
         return -1;
+    }
+
+    /// <summary>
+    /// Whether the field name found at <paramref name="at"/> is really the tail of a longer ALL-CAPS token —
+    /// <c>PG_CATALOG:  </c> ends in <c>LOG:  </c>, and the earliest-match rule would otherwise read that as a
+    /// <c>LOG</c> entry whose message begins mid-line.
+    ///
+    /// <para>Reachable because the scan searches the WHOLE line, prefix included, which is exactly what makes
+    /// the classifier indifferent to <c>log_line_prefix</c>: an all-caps token ending in a field name and
+    /// followed by colon-two-spaces can be rendered by <c>%a</c> (application_name is arbitrary client text)
+    /// or <c>%u</c> / <c>%d</c> ahead of the real severity. The cost is not a missed line, it is a
+    /// MANUFACTURED one: the real entry's severity is replaced by the spurious token's and its message
+    /// starts mid-line, so an ERROR the reader needed becomes a <c>routine</c> row.</para>
+    ///
+    /// <para><b>Upper case and underscore ONLY, which is the whole design of this check.</b> A digit before
+    /// the name must stay legal: <c>%Q</c> writes the query id with no separator, so the real field genuinely
+    /// arrives as <c>…322048460535975151ERROR:  </c> — refusing a digit there would reintroduce #3030's
+    /// defect from the other direction, which is the failure worth designing against. Lower case stays legal
+    /// too, so a prefix ending in <c>%c</c>'s lower-case hex session id keeps working. Every field name is
+    /// entirely upper-case ASCII, so a token that a field name can hide inside is one written in the
+    /// characters all-caps identifiers use, and those are the only two this refuses.</para>
+    ///
+    /// <para>The stated limit: a prefix that concatenates an upper-case-ending field directly onto the
+    /// severity with no separator at all (an application_name of <c>MYAPP</c> under
+    /// <c>log_line_prefix = '%a'</c>) has its real field refused here. No measured prefix does that — every
+    /// one puts a space, a colon or a digit there — and a missed line under a prefix nobody writes is a
+    /// better trade than a manufactured line under one somebody can.</para>
+    /// </summary>
+    private static bool ContinuesAnUpperCaseToken(ReadOnlySpan<char> line, int at)
+    {
+        if (at == 0)
+        {
+            return false;
+        }
+
+        var before = line[at - 1];
+        return before == '_' || (before >= 'A' && before <= 'Z');
     }
 
     private static string Cap(string value, int max) =>

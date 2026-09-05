@@ -413,6 +413,52 @@ public class StoreLogSelfMonitoringStoreTests
             DarlingStoreLogReader.ComputeAbsentClasses([]).Select(a => a.EventClass).ToArray());
     }
 
+    /// <summary>
+    /// A tick that consumed nothing still writes its capture row, and a tick with no log files at all does
+    /// not.
+    ///
+    /// <para>The first half is the defect this exists to prevent: an hour in which no file in the ring had a
+    /// complete new line - a quiet store with <c>log_checkpoints</c> off and no warnings - would otherwise
+    /// write no row, and the read would then see fewer captures than the cadence produces and report a
+    /// skipped tick. A false outage on a healthy store is the cry-wolf failure the counted-floor design
+    /// exists to avoid, arriving through the denominator instead of through the classes.</para>
+    ///
+    /// <para>The second half is the asymmetry, and it is not an oversight: no files means no logging
+    /// collector, which is a real permanent gap that <c>get_store_log</c> reports as
+    /// <c>not_collected</c>. A heartbeat there would turn it into a series of successful empty reads.</para>
+    /// </summary>
+    [Fact]
+    public void AQuietTickStillRecordsThatItRan_AndAnEmptyLogDirectoryDoesNot()
+    {
+        Assert.True(StoreLogSweep.ShouldWriteHeartbeat(consumedFiles: 0, candidateFiles: 3));
+        Assert.False(StoreLogSweep.ShouldWriteHeartbeat(consumedFiles: 0, candidateFiles: 0));
+
+        /* And a tick that DID consume something needs no heartbeat - it already wrote a row per file. */
+        Assert.False(StoreLogSweep.ShouldWriteHeartbeat(consumedFiles: 1, candidateFiles: 3));
+        Assert.False(StoreLogSweep.ShouldWriteHeartbeat(consumedFiles: 3, candidateFiles: 3));
+
+        /* The heartbeat writes the capture row and NOTHING else. A marker advanced on a read that consumed
+           no bytes is a marker that skipped bytes, so the write path is deliberately separate from the one
+           that moves it. Read over stripped code, so the prose above the method cannot satisfy this. */
+        var code = StripBlockComments(ReadSource("Darling/PerformanceMonitor.Darling.Storage/StoreLogSweep.cs"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        var start = code.IndexOf("private static async Task WriteHeartbeatAsync", StringComparison.Ordinal);
+        Assert.True(start > 0, "WriteHeartbeatAsync is gone — the quiet tick records nothing again");
+
+        var body = code[start..];
+        var end = body.IndexOf("\n    private ", StringComparison.Ordinal);
+        if (end > 0)
+        {
+            body = body[..end];
+        }
+
+        Assert.Contains("CaptureInsertSql", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("MarkerUpsertSql", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("EventInsertSql", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("BeginTransactionAsync", body, StringComparison.Ordinal);
+    }
+
     /// <summary>Both retention DELETEs run on ONE cutoff, so a window can never hold events without the
     /// captures that qualify them.</summary>
     [Fact]

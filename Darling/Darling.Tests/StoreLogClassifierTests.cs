@@ -289,6 +289,44 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
+    /// An all-caps token ending in a field name, ahead of the real field, does not become the entry.
+    ///
+    /// <para>The scan searches the WHOLE line, prefix included — that is what makes the classifier
+    /// indifferent to <c>log_line_prefix</c> — so <c>PG_CATALOG:  </c> in front of the real severity
+    /// contains <c>LOG:  </c> at an earlier index than <c>ERROR:  </c>, and the earliest-match rule reads
+    /// it as a <c>LOG</c> entry whose message begins mid-line. The cost is not a missed line, it is a
+    /// MANUFACTURED one: the cancel becomes a <c>routine</c> row and the ERROR the reader needed is gone.
+    /// Reachable because <c>%a</c> renders arbitrary client text (application_name) ahead of the severity.</para>
+    ///
+    /// <para>And the control that makes the boundary check safe rather than merely strict: the <c>%Q</c>
+    /// rendering puts a DIGIT immediately before the severity, so a boundary rule that refused any
+    /// non-separator there would reintroduce #3030's defect from the other direction. Both are asserted
+    /// here, in one test, because the fix and the thing it must not break are one decision.</para>
+    /// </summary>
+    [Fact]
+    public void AnAllCapsTokenEndingInAFieldNameIsNotTheField()
+    {
+        var census = StoreLogClassifier.Classify(
+            "2026-09-05 14:03:02.551 UTC [5288] PG_CATALOG:  ERROR:  canceling statement due to user request\n");
+
+        var group = Assert.Single(census.Groups);
+        Assert.Equal("user_request_cancel", group.EventClass);
+        Assert.Equal("ERROR", group.Severity);
+
+        /* The control: a DIGIT before the severity is the %Q rendering and must still match. */
+        var withQueryId = StoreLogClassifier.Classify(
+            QueryIdPrefix + "ERROR:  canceling statement due to user request\n");
+
+        Assert.Equal("user_request_cancel", Assert.Single(withQueryId.Groups).EventClass);
+
+        /* And a LOWER-case letter before it, which is what a prefix ending in %c's hex session id renders. */
+        var withSessionId = StoreLogClassifier.Classify(
+            "2026-09-05 14:03:02.551 UTC 68bb1f2a.14b0ERROR:  canceling statement due to user request\n");
+
+        Assert.Equal("user_request_cancel", Assert.Single(withSessionId.Groups).EventClass);
+    }
+
+    /// <summary>
     /// The same five messages under four different <c>log_line_prefix</c> renderings classify identically.
     ///
     /// <para>This is the #3030 lesson made structural. That defect was a parser written against one prefix
