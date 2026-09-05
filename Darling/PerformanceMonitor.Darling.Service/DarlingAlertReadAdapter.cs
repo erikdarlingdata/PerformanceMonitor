@@ -1047,6 +1047,10 @@ ORDER BY l.database_name";
         return items;
     }
 
+    /// <summary>How far back <see cref="ForcePlanFailuresSql"/> looks for a plan's two most recent
+    /// collections. Bound as a parameter rather than written into the SQL — see that query's remarks.</summary>
+    internal static readonly TimeSpan ForcePlanFailureWindow = TimeSpan.FromHours(2);
+
     /// <summary>
     /// Forced plans whose failure counter ROSE between the two most recent collections that carried the
     /// plan (#2157). $1 server_id.
@@ -1062,19 +1066,15 @@ ORDER BY l.database_name";
     /// <c>timestamp without time zone</c> holding naive UTC and <c>now()</c> is <c>timestamptz</c>, so the
     /// mixed comparison makes PostgreSQL convert the naive side at the store SESSION's TimeZone — which
     /// initdb takes from the host OS, and which BuildConfAppend does not pin. Measured on
-    /// timescaledb:latest-pg17 seeded one row per 52s, a one-hour window returned 66 rows under
-    /// <c>TimeZone='UTC'</c> and 343 under <c>'America/New_York'</c>: the same predicate silently spanning
-    /// five hours. East of UTC it narrows instead and can return nothing, which for THIS read means the
-    /// forced-plan-failure alert never fires. The bound is the service clock's, which is also the clock that
+    /// timescaledb:latest-pg17 seeded one row per 52s, a one-hour window returned 70 rows under
+    /// <c>TimeZone='UTC'</c> and 347 under <c>'America/New_York'</c>: the same predicate silently spanning
+    /// five hours. East of UTC it narrows instead: at <c>'Pacific/Kiritimati'</c> this read returns NOTHING,
+    /// so the forced-plan-failure alert never fires there at all. The bound is the service clock's, which is also the clock that
     /// stamped <c>collection_time</c>, so the two cannot disagree about what "two hours ago" means.</para>
     ///
     /// <para>The <c>&gt;</c> comparison is what makes this a delta read: equal counters are silence, and a
     /// LOWER counter (unforce/re-force reset) is silence too rather than a negative delta.</para>
     /// </summary>
-    /// <summary>How far back <see cref="ForcePlanFailuresSql"/> looks for a plan's two most recent
-    /// collections. Bound as a parameter rather than written into the SQL — see that query's remarks.</summary>
-    internal static readonly TimeSpan ForcePlanFailureWindow = TimeSpan.FromHours(2);
-
     public const string ForcePlanFailuresSql = @"
 WITH per_collection AS (
     SELECT

@@ -492,6 +492,16 @@ public sealed class StoreSqlClockDisciplineTests
            break inside a DDL literal. Left in, it would match every SQL literal that casts anything. */
         names.Remove("timestamp");
 
+        /* sample_time is EXCLUDED, and not because it is safe. It is the one name in the store whose frame
+           depends on the table: cpu_utilization_stats.sample_time is deliberately the MONITORED SERVER's
+           local wall clock (#1262 de-skews it per batch, Lite windows it through GetTimeRangeServerLocal),
+           while memory_pressure_events.sample_time must be UTC. CollectorTimestampFrameTests pins both,
+           per column, against the read path each protects — and its own remarks record that its first cut
+           was a store-wide "all naive timestamps are UTC" rule that would have forbidden the CPU
+           collector's intentional local clock. This scan keys on column NAMES, so it cannot tell those two
+           apart and must not claim to; that column's frame is that pin's business, not this one's. */
+        names.Remove("sample_time");
+
         return names;
     }
 
