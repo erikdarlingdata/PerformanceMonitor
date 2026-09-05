@@ -201,6 +201,26 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV8 = "# Managed by PerformanceMonitor Darling (v8 hardware sizing) -- do not remove this block";
 
     /// <summary>
+    /// DEFENCE IN DEPTH for the naive-UTC/timestamptz split, not the fix for it. Every timestamp column in
+    /// the store is <c>timestamp without time zone</c> holding naive UTC, but initdb takes
+    /// <c>timezone</c> from the host OS — so a managed store on a Windows box in New York runs its sessions
+    /// at <c>America/New_York</c>, and anything that compares a naive column against <c>now()</c> has the
+    /// naive side converted at that zone. Pinning the session zone to UTC makes that conversion the identity
+    /// it was always assumed to be, and makes <c>timestamptz::text</c> (TimescaleDB's catalog views, psql
+    /// output) render on the same clock as the collected data instead of four hours off it.
+    ///
+    /// <para>It does NOT replace binding those bounds as parameters: it reaches MANAGED stores only, and a
+    /// bring-your-own store keeps whatever zone its owner built it with. <c>StoreSqlClockDisciplineTests</c>
+    /// is what actually holds the predicates; this is the belt behind it.</para>
+    ///
+    /// <para><c>timezone</c> is a SIGHUP-context setting and this append runs before pg_ctl start, so it
+    /// takes effect on the very start that writes it — the log-rotation story, not the shared_buffers one.
+    /// Existing clusters gain it by the marker being absent, which is what carries this to the stores
+    /// already in the field rather than only to a fresh initdb.</para>
+    /// </summary>
+    public const string ConfMarkerV9 = "# Managed by PerformanceMonitor Darling (v9 session time zone) -- do not remove this block";
+
+    /// <summary>
     /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
     /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
     /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
@@ -757,6 +777,22 @@ public sealed class DarlingManagedPostgres
         builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
         builder.Append("timescaledb.max_background_workers = ").Append(workers.MaxBackgroundWorkers).Append('\n');
         builder.Append("max_worker_processes = ").Append(workers.MaxWorkerProcesses).Append('\n');
+        return builder.ToString();
+    }
+
+    /* ===================== v9 session time zone ===================== */
+
+    /// <summary>
+    /// The v9 block: pin the cluster's session <c>timezone</c> to UTC. See <see cref="ConfMarkerV9"/> for
+    /// why, and for what this deliberately does not cover. Appended last and carrying no fingerprint line,
+    /// so the v8 staleness check's invariant about what it reads is untouched.
+    /// </summary>
+    public static string BuildTimeZoneConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV9).Append('\n');
+        builder.Append("timezone = 'UTC'\n");
         return builder.ToString();
     }
 
@@ -1323,6 +1359,17 @@ public sealed class DarlingManagedPostgres
             _logger.LogInformation(
                 "Appended v8 hardware sizing to postgresql.conf (host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers and work_mem deliberately NOT re-derived, see #2845)",
                 v8QuantizedRam / (1024L * 1024L), hypertableCount, v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses);
+        }
+
+        /* Checked independently of v1-v8, and placed AFTER v8 on purpose: v8 keys on the last fingerprint
+           line in the text it read at the top of this method, so a block appended before it must not carry
+           one. This block carries only `timezone`, but sitting last means the ordering cannot be broken by
+           editing it. Effective on this start (SIGHUP-context, appended before pg_ctl start). */
+        if (!conf.Contains(ConfMarkerV9, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildTimeZoneConfAppend());
+            _logger.LogInformation(
+                "Appended v9 session time zone to postgresql.conf (timezone = 'UTC'): the store's timestamp columns hold naive UTC, so a host-derived session zone would shift any comparison against now() and render timestamptz output on a different clock than the collected data.");
         }
     }
 

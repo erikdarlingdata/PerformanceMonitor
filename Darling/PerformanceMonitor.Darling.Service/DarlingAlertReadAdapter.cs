@@ -1057,9 +1057,24 @@ ORDER BY l.database_name";
     /// the hypertable scan; a plan not collected within it is by definition not failing right now, and
     /// Query Store's own flush cadence (900s) means an active plan appears several times inside it.</para>
     ///
+    /// <para>The window's lower bound is BOUND as <c>$2</c> from <see cref="NaiveUtcNow"/>, never spelled
+    /// <c>now() - interval '2 hours'</c> in the SQL. <c>collection_time</c> is
+    /// <c>timestamp without time zone</c> holding naive UTC and <c>now()</c> is <c>timestamptz</c>, so the
+    /// mixed comparison makes PostgreSQL convert the naive side at the store SESSION's TimeZone — which
+    /// initdb takes from the host OS, and which BuildConfAppend does not pin. Measured on
+    /// timescaledb:latest-pg17 seeded one row per 52s, a one-hour window returned 66 rows under
+    /// <c>TimeZone='UTC'</c> and 343 under <c>'America/New_York'</c>: the same predicate silently spanning
+    /// five hours. East of UTC it narrows instead and can return nothing, which for THIS read means the
+    /// forced-plan-failure alert never fires. The bound is the service clock's, which is also the clock that
+    /// stamped <c>collection_time</c>, so the two cannot disagree about what "two hours ago" means.</para>
+    ///
     /// <para>The <c>&gt;</c> comparison is what makes this a delta read: equal counters are silence, and a
     /// LOWER counter (unforce/re-force reset) is silence too rather than a negative delta.</para>
     /// </summary>
+    /// <summary>How far back <see cref="ForcePlanFailuresSql"/> looks for a plan's two most recent
+    /// collections. Bound as a parameter rather than written into the SQL — see that query's remarks.</summary>
+    internal static readonly TimeSpan ForcePlanFailureWindow = TimeSpan.FromHours(2);
+
     public const string ForcePlanFailuresSql = @"
 WITH per_collection AS (
     SELECT
@@ -1073,7 +1088,7 @@ WITH per_collection AS (
         MAX(COALESCE(qs.last_force_failure_reason, '')) AS reason
     FROM query_store_stats AS qs
     WHERE qs.server_id = $1
-    AND   qs.collection_time > now() - interval '2 hours'
+    AND   qs.collection_time > $2
     GROUP BY qs.database_name, qs.query_id, qs.plan_id, qs.collection_time
 ),
 ranked AS (
@@ -1110,6 +1125,7 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(ForcePlanFailuresSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(NaiveUtcNow() - ForcePlanFailureWindow);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
