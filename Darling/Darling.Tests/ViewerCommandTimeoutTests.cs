@@ -104,9 +104,17 @@ public sealed class ViewerCommandTimeoutTests
     /// A task STARTED into a local without being awaited there — <c>var t = SomethingAsync();</c>. Two of
     /// these with no <c>await</c> between them is the same fan-out as <c>Task.WhenAll(t1, t2)</c>, written
     /// with the awaits one per line instead of joined.
+    ///
+    /// <para><b>A bare <c>_</c> is excluded from the name, so this shape and
+    /// <see cref="s_fireAndForget"/> stay disjoint.</b> <c>var _ = SomeAsync();</c> would otherwise satisfy
+    /// both — <c>_</c> is a legal name here, and the discard scan matches the same characters — and one
+    /// physical call would be counted into two different fan-out tallies, pairing against an unrelated
+    /// deferred start on one side and an unrelated discard on the other. It belongs to the DISCARD shape:
+    /// nothing holds the task, which is what a discard is. No site in this project spells it that way
+    /// today. Pinned by <see cref="TheDiscardAndDeferredShapes_StayDisjoint"/>. Found in review.</para>
     /// </summary>
     private static readonly Regex s_deferredRead = new(
-        @"(^|[^A-Za-z0-9_])(?:var|Task(?:\s*<[^;={}]*>)?)\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*[A-Za-z_][A-Za-z0-9_\.]*Async\s*\(",
+        @"(^|[^A-Za-z0-9_])(?:var|Task(?:\s*<[^;={}]*>)?)\s+(?!_\s*=)[A-Za-z_][A-Za-z0-9_]*\s*=\s*[A-Za-z_][A-Za-z0-9_\.]*Async\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>An <c>await</c> as a keyword, not as part of a longer identifier.</summary>
@@ -116,12 +124,31 @@ public sealed class ViewerCommandTimeoutTests
 
     /// <summary>
     /// A member declaration with a body — accessibility, optional modifiers, return type, name, parameter
-    /// list, open brace. The unit fan-outs are paired within: see
+    /// list, an optional generic constraint clause, open brace. The unit fan-outs are paired within: see
     /// <see cref="EveryViewerFanOut_DeclaresItsWidth"/> for why the enclosing BLOCK is the wrong unit.
+    ///
+    /// <para><b>A generic method needs BOTH halves, and the constraint clause is only the visible one.</b>
+    /// Its type parameters sit between the NAME and the parameter list, and its constraints sit between the
+    /// parameter list and the BODY, so a tail of <c>\)\s*\{</c> against a bare name drops the member
+    /// entirely. Three are shaped that way today — <c>ViewerSettingsFile.Load&lt;T&gt;</c> and
+    /// <c>Save&lt;T&gt;</c>, and <c>SettingsWindow.TryReadSectionAsync&lt;T&gt;</c>. None holds a fan-out
+    /// marker, so the walk stayed green while seeing less than it claimed; the first one to grow a marker
+    /// would have tripped the unattributed assertion rather than being reported as an offender, which is a
+    /// confusing red rather than the useful one.</para>
+    ///
+    /// <para><b>The type-parameter group excludes <c>=</c> and newlines, which is load-bearing.</b> Allowing
+    /// them let it run from a field's declared type through <c>= new Dictionary&lt;...&gt;(comparer)</c> to
+    /// the collection initializer's brace, reading <c>CollectorSchedulePresets.Presets</c> — a field — as a
+    /// method whose body is the initializer. A phantom body is worse than a missing one here: <see
+    /// cref="Owner"/> takes the OUTERMOST match, so one could swallow a real member's markers and attribute
+    /// them to something that can never declare a width. Measured while widening this pattern, not
+    /// hypothesised. Pinned by <see cref="TheMemberWalk_SeesAGenericMethodWithAConstraintClause"/>.
+    /// Found in review.</para>
     /// </summary>
     private static readonly Regex s_memberSignature = new(
         @"(?:private|public|protected|internal)(?:\s+(?:static|async|override|virtual|sealed|new|partial|unsafe|extern))*"
-        + @"\s+[A-Za-z_][A-Za-z0-9_<>,\.\[\]\?\s]*?\s(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{",
+        + @"\s+[A-Za-z_][A-Za-z0-9_<>,\.\[\]\?\s]*?\s(?<name>[A-Za-z_][A-Za-z0-9_]*)"
+        + @"\s*(?:<[^;{}()=\n]*>)?\s*\([^;{}]*\)\s*(?:where\s[^{};]*)?\{",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -557,7 +584,7 @@ public sealed class ViewerCommandTimeoutTests
            stopped matching (every fan-out then sits in no member and the sweep asserts over nothing); the
            fan-out floor catches the sweep reading an empty or wrong directory; the attribution floor
            catches a member walk that reads the project but drops the members the fan-outs are in. 21
-           fan-outs across 1,231 member bodies in 191 files when this landed. */
+           fan-outs across 1,234 member bodies in 191 files when this landed. */
         Assert.True(members >= 900, $"the member walk found only {members} member bodies — it is not reading the project");
 
         Assert.True(fanOuts >= 15, $"the fan-out census matched only {fanOuts} fan-out(s) — the sweep is not reading the project");
@@ -658,6 +685,101 @@ public sealed class ViewerCommandTimeoutTests
         var isFanOut = joins.Length > 0 || discards.Length >= 2 || ConcurrentRun(code, deferred) >= 2;
 
         Assert.Equal(expectedFanOut, isFanOut);
+    }
+
+    /// <summary>
+    /// The member walk sees a generic method: type parameters after the name, constraints before the body.
+    /// A member the walk cannot see cannot be required to declare a width, which is #3019's failure
+    /// reproduced inside the fix for it.
+    ///
+    /// <para><b>The constraint is spelled WITHOUT parentheses on purpose.</b> <c>where T : class, new()</c>
+    /// contains a <c>)</c>, and the parameter-list group is greedy, so it absorbs the whole clause and the
+    /// fixture then matches even with constraint support removed — it passes for the wrong reason. The real
+    /// <c>SettingsWindow.TryReadSectionAsync&lt;T&gt;</c> is <c>where T : class</c>, paren-free, which is
+    /// the shape that actually needs the clause admitted. The <c>new()</c> spelling is pinned separately
+    /// below so both live layouts are covered. Found by a mutation that stayed green.</para>
+    /// </summary>
+    [Theory]
+    /* Paren-free constraint — SettingsWindow.TryReadSectionAsync<T>. Sensitive to the constraint clause. */
+    [InlineData("private static async Task<T?> TryReadSectionAsync<T>(Func<Task<T?>> read) where T : class\n", "TryReadSectionAsync")]
+    /* Constraint on its own line, with new() — ViewerSettingsFile.Load<T> and Save<T>. */
+    [InlineData("internal static SettingsObjectRead<T> Load<T>(string filePath, JsonSerializerOptions options)\n    where T : class, new()\n", "Load")]
+    /* No constraint, type parameters only. */
+    [InlineData("private static Task<T> PassThroughAsync<T>(Task<T> inner)\n", "PassThroughAsync")]
+    public void TheMemberWalk_SeesAGenericMethod(string signature, string expectedName)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            signature
+            + "{\n"
+            + "    var firstTask = _dataService.GetOneAsync();\n"
+            + "    var secondTask = _dataService.GetTwoAsync();\n"
+            + "    return await firstTask ?? await secondTask;\n"
+            + "}\n");
+
+        var bodies = MemberBodies(code);
+
+        Assert.True(bodies.Count == 1, $"the generic signature parsed to {bodies.Count} member bodies, not 1");
+        Assert.Equal(expectedName, bodies[0].Name);
+
+        /* And the fan-out inside it is attributed to that member rather than landing nowhere. */
+        var deferred = s_deferredRead.Matches(code).Select(m => (m.Index, End: m.Index + m.Length)).ToArray();
+
+        Assert.True(deferred.Length == 2, $"{deferred.Length} deferred read(s) parsed out of the fixture, not 2");
+        Assert.All(deferred, d => Assert.NotNull(Owner(bodies, d.Index)));
+        Assert.True(ConcurrentRun(code, deferred) >= 2, "the generic method's deferred pair did not read as a fan-out");
+    }
+
+    /// <summary>
+    /// A FIELD whose initializer is a collection initializer is not a member body. The type-parameter group
+    /// excludes <c>=</c> and newlines to keep it that way: allowing them ran the pattern from the field's
+    /// declared type, through <c>= new Dictionary&lt;...&gt;(comparer)</c>, to the initializer's brace.
+    ///
+    /// <para>A phantom body is worse than a missing one. <see cref="Owner"/> takes the OUTERMOST match, so
+    /// one spanning an initializer could swallow a real member's markers and attribute them to something
+    /// that can never declare a width — a fan-out reported at a line where no edit makes the build pass.
+    /// This is <c>CollectorSchedulePresets.Presets</c>'s real shape.</para>
+    /// </summary>
+    [Fact]
+    public void TheMemberWalk_DoesNotReadAFieldInitializerAsAMember()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            "public static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, int>> Presets =\n"
+            + "    new Dictionary<string, IReadOnlyDictionary<string, int>>(StringComparer.OrdinalIgnoreCase)\n"
+            + "    {\n"
+            + "        [\"Aggressive\"] = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)\n"
+            + "        {\n"
+            + "            [\"wait_stats\"] = 1,\n"
+            + "        },\n"
+            + "    };\n");
+
+        var bodies = MemberBodies(code);
+
+        Assert.True(
+            bodies.Count == 0,
+            "a field's collection initializer parsed as "
+            + $"{bodies.Count} member body(ies) ({string.Join(", ", bodies.Select(b => b.Name))}); Owner takes the "
+            + "outermost body, so a phantom one here would claim a real member's fan-out markers");
+    }
+
+    /// <summary>
+    /// The discard and deferred shapes never both claim one call. <c>var _ = SomeAsync();</c> is a DISCARD —
+    /// nothing holds the task — and counting it twice would let one physical call inflate two separate
+    /// fan-out tallies.
+    /// </summary>
+    [Fact]
+    public void TheDiscardAndDeferredShapes_StayDisjoint()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings("var _ = RefreshServerStatusAsync();\n");
+
+        Assert.True(s_fireAndForget.Matches(code).Count == 1, "the discard shape did not claim `var _ = SomeAsync();`");
+        Assert.True(s_deferredRead.Matches(code).Count == 0, "the deferred shape also claimed `var _ = SomeAsync();`, so one call is double-booked");
+
+        /* The ordinary deferred spelling still reads as deferred and NOT as a discard, so the exclusion
+           above narrowed the right one. */
+        var named = CSharpSourceWalker.StripCommentsAndStrings("var statusTask = RefreshServerStatusAsync();\n");
+
+        Assert.True(s_deferredRead.Matches(named).Count == 1, "the deferred shape stopped matching a named task start");
+        Assert.True(s_fireAndForget.Matches(named).Count == 0, "the discard shape claimed a named task start");
     }
 
     /// <summary>
