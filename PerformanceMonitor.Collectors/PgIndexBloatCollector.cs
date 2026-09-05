@@ -79,6 +79,23 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// <c>collection_log.sql_duration_ms</c>. That number did not exist when this was chosen - the
     /// ERROR arm recorded a literal zero for every one of the eleven failures - and recording it
     /// (#2997) is what turns the next raise into a measurement instead of another guess.</para>
+    ///
+    /// <para><b>It must never drop BELOW <see cref="MeasureCeilingBytes"/>, and that it currently
+    /// equals it is a floor rather than a coincidence.</b> The two bounds are independent in what they
+    /// measure - one index versus the statement - but a cycle budget under the per-index ceiling opens a
+    /// band between them in which an index can never be measured at all: it is under the ceiling, so it
+    /// is a legitimate candidate and gets no "too large" reason, yet it alone exceeds the whole cycle,
+    /// so it is over budget on its own first row every single run. It would be labelled
+    /// <c>not measured this cycle</c> forever, which is precisely the "deferred" reading that this
+    /// collector refuses to let stand for "never". Equal is the tightest value with no such band, and
+    /// <c>TheCycleBudget_IsNeverBelowThePerIndexCeiling</c> pins it.</para>
+    ///
+    /// <para><b>Accepted consequence.</b> At equality a single index just under the ceiling consumes
+    /// almost the whole cycle - on the target this was built for the largest sub-ceiling index is
+    /// 19.68 GB, so that run measures essentially that one index. That is the right answer for a
+    /// largest-first budget (it is the most reclaimable index on the instance) and every other index
+    /// still returns a row carrying its size and its reason, but it does mean coverage of the tail
+    /// depends on the measured set rotating, which it does not yet.</para>
     /// </summary>
     public const long CycleMeasureBudgetBytes = 20L * 1024 * 1024 * 1024;
 

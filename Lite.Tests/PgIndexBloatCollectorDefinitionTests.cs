@@ -270,4 +270,29 @@ public class PgIndexBloatCollectorDefinitionTests
             PgIndexBloatCollector.MeasureCeilingBytes,
             long.Parse(ceilingFilter.Groups[1].Value, CultureInfo.InvariantCulture));
     }
+
+    /// <summary>
+    /// The cycle byte budget may never sit BELOW the per-index ceiling.
+    ///
+    /// <para>The two bounds are independent in what they measure — one index versus the whole statement —
+    /// and their doc comments each argue their number on its own terms, which makes it look as though any
+    /// pair of values would do. It would not. A cycle budget under the ceiling opens a band between the
+    /// two in which an index can never be measured at all: it is under the ceiling, so it is a legitimate
+    /// candidate and earns no "too large" reason, yet it alone exceeds the entire cycle, so it is over
+    /// budget on its own first row on every run forever. It would carry
+    /// <c>not measured this cycle (work budget)</c> in perpetuity — a reason whose whole claim is that the
+    /// index is DEFERRED, attached to one that is permanently skipped. That is the exact confusion between
+    /// "unmeasured" and "healthy" that <c>skipped_reason</c> exists to prevent, reintroduced one level up.</para>
+    ///
+    /// <para>Pinned as an inequality rather than as equality: raising the cycle budget above the ceiling is
+    /// a legitimate tuning move once a SUCCESS row supplies a real duration, and this must not stand in the
+    /// way of it. Only the floor is load-bearing.</para>
+    /// </summary>
+    [Fact]
+    public void TheCycleBudget_IsNeverBelowThePerIndexCeiling()
+        => Assert.True(
+            PgIndexBloatCollector.CycleMeasureBudgetBytes >= PgIndexBloatCollector.MeasureCeilingBytes,
+            $"the cycle budget ({PgIndexBloatCollector.CycleMeasureBudgetBytes}) is below the per-index "
+            + $"ceiling ({PgIndexBloatCollector.MeasureCeilingBytes}), so any index between the two can "
+            + "never be measured while still being reported as merely deferred");
 }
