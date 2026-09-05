@@ -309,16 +309,17 @@ public sealed class LiveCleanupConversionRatchetTests
     ///
     /// <para>The enumeration was <c>TopDirectoryOnly</c> while its sibling guard over this same project was
     /// <c>AllDirectories</c> with a written rationale for it. Latent, because the project is flat — which is
-    /// what makes it worth a pin rather than a flag flip: the vacuity floor added with #3032 fails when the
-    /// population reaches zero, and a population missing exactly one subdirectory is not zero. Nothing about
-    /// a green run distinguishes "no offenders" from "never looked there".</para>
+    /// what makes it worth a pin rather than a flag flip: the vacuity floor added with #3014's fix fails
+    /// when the population reaches zero, and a population missing exactly one subdirectory is not zero.
+    /// Nothing about a green run distinguishes "no offenders" from "never looked there".</para>
     ///
     /// <para>Every expectation is COUNTED from <see cref="PlantedTree"/> rather than written as a literal,
     /// so a case added to that table cannot pass against a stale number, and the offenders are compared as
-    /// a SET of relative paths — which is what makes this one pin fail three different ways: drop the
-    /// recursion and the nested file leaves the population and the offender set empties; drop the build-output
-    /// filter and two generated files join both; report the bare file name again and the paths stop
-    /// matching.</para>
+    /// a SET of relative paths rather than by count. Between them the three assertions separate three
+    /// regressions: losing the recursion or the build-output filter moves the FILE count, in opposite
+    /// directions; reading a nested file without reaching inside it moves the BLOCK count with the file
+    /// count intact; and reporting the bare file name again leaves both counts right and only the PATHS
+    /// wrong.</para>
     ///
     /// <para>The root is planted under a directory literally named <c>bin</c>, so the exclusion is proven to
     /// be judged relative to the scanned directory. Judged on the absolute path it would classify the whole
@@ -430,11 +431,21 @@ public sealed class LiveCleanupConversionRatchetTests
     /// over-broad exclusion fails toward a MISSED offender, so nothing would have said so. Both halves are
     /// asserted per token: without the excluded half, narrowing to the point of matching nothing would pass
     /// the near-miss half on its own.</para>
+    ///
+    /// <para>The fixtures are checked against the token BEFORE either sweep runs. A near miss that carries
+    /// no part of the token, or an excluded case that does not carry the token at all, is reported correctly
+    /// for reasons unrelated to the token — this test would then pass on any narrowing whatsoever, including
+    /// one that matched nothing, while reading as though it had exercised the token.</para>
     /// </summary>
     [Theory]
     [MemberData(nameof(NonStoreTeardownCases))]
-    public void ANonStoreTeardownIsExcludedAndItsNearMissIsNot(string token, string excluded, string nearMiss)
+    public void ANonStoreTeardownIsExcludedAndItsNearMissIsNot(
+        string token, string stem, string excluded, string nearMiss)
     {
+        Assert.Contains(token, excluded, StringComparison.Ordinal);
+        Assert.Contains(stem, nearMiss, StringComparison.Ordinal);
+        Assert.DoesNotContain(token, nearMiss, StringComparison.Ordinal);
+
         var excludedSweep = ScanOne(LiveClass(Teardown(excluded)));
 
         Assert.Equal(1, excludedSweep.Blocks);
@@ -447,9 +458,10 @@ public sealed class LiveCleanupConversionRatchetTests
 
         Assert.Equal(1, nearMissSweep.Blocks);
         Assert.True(nearMissSweep.Offenders.Count == 1,
-            $"'{nearMiss}' merely CONTAINS '{token}' and tears down store state, so it must be reported. "
-            + "It was not, which means the token is matching a substring rather than a call — an exclusion "
-            + "wide enough to silence an unconverted teardown, in the direction nothing complains about.");
+            $"'{nearMiss}' carries '{stem}' but not the call '{token}', and it tears down store state, so "
+            + "it must be reported. It was not, which means the token is matching a bare stem rather than a "
+            + "call — an exclusion wide enough to silence an unconverted teardown, in the direction nothing "
+            + "complains about.");
     }
 
     /// <summary>
@@ -666,25 +678,32 @@ public sealed class LiveCleanupConversionRatchetTests
     ];
 
     /// <summary>
-    /// Per token: the call it exists to exclude, and a near miss that merely contains it and must still be
-    /// reported. Read as the coverage set by <see cref="EveryNonStoreTeardownTokenIsPinned"/>, so this table
-    /// and <see cref="NonStoreTeardownTokens"/> cannot drift apart.
+    /// Per token: the bare STEM a looser spelling of it would have matched, the call it exists to exclude,
+    /// and a near miss that carries the stem without the call and must still be reported. Read as the
+    /// coverage set by <see cref="EveryNonStoreTeardownTokenIsPinned"/>, so this table and
+    /// <see cref="NonStoreTeardownTokens"/> cannot drift apart.
+    ///
+    /// <para>The stem is what makes a near miss NEAR. A string that carries no part of the token is a plain
+    /// unconverted teardown, correctly reported for reasons that have nothing to do with the token, and it
+    /// would say nothing about the narrowing while looking as though it did — so
+    /// <see cref="ANonStoreTeardownIsExcludedAndItsNearMissIsNot"/> asserts the relationship rather than
+    /// describing it.</para>
     /// </summary>
-    private static readonly (string Token, string Excluded, string NearMiss)[] NonStoreTeardownPins =
+    private static readonly (string Token, string Stem, string Excluded, string NearMiss)[] NonStoreTeardownPins =
     [
-        ("File.", "File.Delete(configPath);", "var configFile = Drop();"),
-        ("Directory.", "Directory.Delete(spillDirectory, recursive: true);", "var directoryUsed = Drop();"),
-        (".Kill(", "process.Kill(entireProcessTree: true);", "var wasKilled = Drop();"),
+        ("File.", "File", "File.Delete(configPath);", "var configFile = Drop();"),
+        ("Directory.", "Directory", "Directory.Delete(spill, recursive: true);", "var spillDirectory = Drop();"),
+        (".Kill(", "Kill", "process.Kill(entireProcessTree: true);", "var wasKilled = Drop();"),
     ];
 
     /// <summary>The same table as xUnit data, so the theory and the coverage pin read one source.</summary>
-    public static TheoryData<string, string, string> NonStoreTeardownCases()
+    public static TheoryData<string, string, string, string> NonStoreTeardownCases()
     {
-        var cases = new TheoryData<string, string, string>();
+        var cases = new TheoryData<string, string, string, string>();
 
         foreach (var pin in NonStoreTeardownPins)
         {
-            cases.Add(pin.Token, pin.Excluded, pin.NearMiss);
+            cases.Add(pin.Token, pin.Stem, pin.Excluded, pin.NearMiss);
         }
 
         return cases;
