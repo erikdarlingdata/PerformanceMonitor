@@ -329,13 +329,14 @@ public class CollectionLogDrainForensicsStoreTests
            rationale is that a ratio needs a denominator from ordinary rows, not only from failures. */
         Assert.DoesNotContain("sweepPeerMaxMs: null", worker, StringComparison.Ordinal);
 
-        /* drain STAYS null on those arms: nothing was drained, so there is nothing to describe. */
-        Assert.Equal(7, Regex.Matches(worker, @"drain: null").Count);
+        /* drain STAYS null on those arms: nothing was drained, so there is nothing to describe.
+           8 since #2993 added a PERMISSIONS arm for a target whose log_timezone is not UTC. */
+        Assert.Equal(8, Regex.Matches(worker, @"drain: null").Count);
 
         /* And V110's fetch sums stay null on the same seven arms and for the same reason: no item completed,
            so no fetch was performed. Counted rather than merely present, so an arm that starts passing a
            real value - which would mean attributing another run's fetch to a failure row - is a red. */
-        Assert.Equal(7, Regex.Matches(worker, @"fetchPhases: null").Count);
+        Assert.Equal(8, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     /// <summary>

@@ -148,7 +148,10 @@ LIMIT 500";
             /* Ordinals track the query's four columns: stamp, zone, victim pid, DETAIL. The zone is
                ordinal 1 and reaching the parser is what makes the stamp's meaning checked rather than
                assumed; a non-zero-offset one throws out of here, and the worker records the refusal
-               against log_timezone instead of storing a shifted occurred_at. */
+               against log_timezone instead of storing a shifted occurred_at. The throw abandons rows
+               already read in this batch, which is the trade PgDeadlockLogParser.Extract's remarks argue
+               for: a partial history from a target declared unreadable is worse for the reader than a
+               refusal that says one thing. */
             var parsed = PgDeadlockLogParser.FromBlock(
                 reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
                 reader.IsDBNull(1) ? string.Empty : reader.GetString(1),

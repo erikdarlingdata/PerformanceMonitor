@@ -349,6 +349,40 @@ public sealed class PgDeadlockLogParserTests
         Assert.Equal("EST", ex.ObservedZone);
     }
 
+    /// <summary>
+    /// A window holding a non-UTC block and a readable UTC one refuses the WHOLE read, siblings included.
+    ///
+    /// <para>Raised in review on the PR rather than predicted: the throw is per block and unwinds
+    /// <c>Extract</c>'s loop, so a straddled window loses deadlocks that were perfectly storable. It is
+    /// the accepted trade and this pins it as a DECISION rather than leaving it an accident - storing the
+    /// UTC half would leave a partial history from a target just declared unreadable, with nothing in the
+    /// data marking what is missing, and a reader could not then tell a quiet server from a
+    /// half-collected one. The straddle only arises while a <c>log_timezone</c> change crosses the tail,
+    /// and the transports read the newest file only, so a rotation clears it.</para>
+    /// </summary>
+    [Fact]
+    public void AStraddledWindowRefusesTheWholeRead_NotJustTheOffendingBlock()
+    {
+        /* Ordered so the readable block comes FIRST: if the loop returned what it had instead of
+           unwinding, this would come back with one deadlock and no exception. */
+        var straddled = WithLogZone("UTC")
+            + RealBlock.Replace(" UTC [", " EST [", StringComparison.Ordinal)
+                       .Replace("1549", "1827", StringComparison.Ordinal)
+                       .Replace("1556", "1830", StringComparison.Ordinal);
+
+        Assert.Equal(2, s_blockCount.Matches(straddled).Count);
+
+        var ex = Assert.Throws<PgLogTimezoneUnsupportedException>(
+            () => PgDeadlockLogParser.Extract(straddled));
+
+        Assert.Equal("EST", ex.ObservedZone);
+    }
+
+    /* The fixture's own positive control: without it a straddled slab that had somehow stopped holding
+       two recognisable blocks would satisfy the refusal above for the wrong reason. */
+    private static readonly System.Text.RegularExpressions.Regex s_blockCount =
+        new(@"ERROR:  deadlock detected");
+
     private static CollectorContext MakeContext() => new()
     {
         ServerId = 42,
