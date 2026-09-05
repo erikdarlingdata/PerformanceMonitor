@@ -448,12 +448,53 @@ function groupControl() {
   return el("label", { class: "group-control" }, [cb, el("span", { text: "Group by tag" })]);
 }
 
+/*
+ * #3017: the deadlock total's denominator, as a VISIBLE sub-line rather than a tooltip.
+ *
+ * total_deadlocks comes out of v_deadlocks, which is the SQL Server extended-event capture and nothing else,
+ * so it is structurally zero on a PostgreSQL fleet — permanently, whatever those clusters do. Zero is also
+ * exactly what a genuinely quiet SQL Server fleet reports, and the tile could not tell an operator which one
+ * they were looking at. The API answers that (deadlock_coverage), and this renders it.
+ *
+ * ALWAYS shown when the API reports coverage, including at full coverage, for two reasons. A line that
+ * appeared only on partial coverage would make its ABSENCE the load-bearing signal, which an operator has to
+ * already know the rule to read — and worse, it would leave "zero, whole fleet measured" and "zero, from a
+ * build that reports no coverage at all" looking identical, which is the same defect one step out. Present
+ * unconditionally, absence means exactly one thing: this response made no coverage claim.
+ *
+ * Returns null (no sub-line) for a response with no coverage object or an empty fleet — nothing to qualify.
+ */
+function deadlockCoverageSub(coverage) {
+  if (!coverage || typeof coverage.servers_total !== "number" || coverage.servers_total <= 0) return null;
+
+  const total = coverage.servers_total;
+  const read = typeof coverage.servers_read === "number" ? coverage.servers_read : 0;
+  const noun = total === 1 ? "server" : "servers";
+
+  return read >= total
+    ? { text: "read all " + fmtInt(total) + " " + noun, partial: false }
+    : { text: "read " + fmtInt(read) + " of " + fmtInt(total) + " " + noun, partial: true };
+}
+
 function rollup(d) {
-  const tile = (num, lbl, cls) =>
-    el("div", { class: "tile " + (cls || "") }, [
+  const tile = (num, lbl, cls, sub, title) =>
+    el("div", { class: "tile " + (cls || ""), title: title || null }, [
       el("div", { class: "num", text: fmtInt(num) }),
       el("div", { class: "lbl", text: lbl }),
+      /* The sub-line's colour tracks COVERAGE, not the tile's number severity: "read all 12 servers" under a
+         red count is good news about a bad number and must not be painted as part of the alarm. */
+      sub ? el("div", { class: sub.partial ? "sub partial" : "sub", text: sub.text }) : null,
     ]);
+
+  const coverage = d.deadlock_coverage;
+  const deadlockSub = deadlockCoverageSub(coverage);
+
+  /* A partly-covered fleet reporting zero deadlocks is not an all-clear, so it stops rendering as one. It is
+     not a confirmed incident either — warning is the "interrogate this number" class without claiming a
+     deadlock happened. A real deadlock keeps critical whatever the coverage: a measured incident outranks an
+     incomplete denominator, and the sub-line under it already says the count may be short. */
+  const deadlockClass = d.total_deadlocks > 0 ? "critical" : deadlockSub && deadlockSub.partial ? "warning" : "";
+
   /* Two fixed groups (server-band counts | event counts) split by a divider; a non-zero blocking / deadlock
      total takes a severity color. */
   return el("div", { class: "rollup" }, [
@@ -467,7 +508,16 @@ function rollup(d) {
     el("div", { class: "rollup-divider" }),
     el("div", { class: "rollup-group" }, [
       tile(d.total_blocking_events, "Blocking (recent)", d.total_blocking_events > 0 ? "warning" : ""),
-      tile(d.total_deadlocks, "Deadlocks (recent)", d.total_deadlocks > 0 ? "critical" : ""),
+      /* The API's own note rides along as the tile's title — the causes and the two windows, in the words the
+         service already renders for get_fleet_overview, so the hover is DETAIL on a signal that is already
+         visible rather than the only place the signal exists. */
+      tile(
+        d.total_deadlocks,
+        "Deadlocks (recent)",
+        deadlockClass,
+        deadlockSub,
+        coverage ? coverage.note : null,
+      ),
     ]),
   ]);
 }

@@ -567,6 +567,43 @@ namespace PerformanceMonitor.Common
         public const string Warning = "WARNING";
         public const string Healthy = "HEALTHY";
 
+        /// <summary>
+        /// The bands in which the collector read NOTHING over the whole window — so a surface reporting a
+        /// total assembled from that collector's rows covers none of the window for a server sitting in one
+        /// of them. Named as a set rather than compared band-by-band at each call site so a band added later
+        /// gets one decision here instead of N independent omissions, each of which fails silently by
+        /// counting an unread server as read.
+        ///
+        /// <para><b>NO_PERMISSIONS and STOPPED are the two the field produces.</b> NO_PERMISSIONS is every
+        /// attempt refused. STOPPED is this classifier's own "attempted nothing at all — no success, no
+        /// error, nothing" past the FAILING cutoff, which an extended outage or a stalled loop reaches while
+        /// the server is still enabled.</para>
+        ///
+        /// <para><b>NEVER_RUN is in the set on MEANING, not on reachability.</b> It is <c>totalRuns == 0</c>,
+        /// which a <c>GROUP BY</c> over a run log cannot currently produce — no rows, no group — so today a
+        /// caller aggregating that way never sees it. That is a property of the QUERY, not of the band: a
+        /// later outer join against the collector catalog or the server registry (the natural way to make a
+        /// never-invoked collector visible at all) makes it reachable, and leaving it out would then count
+        /// the most completely unread server of all as covered. It cannot mean anything but "nothing was
+        /// read", so it belongs here whether or not a caller can reach it.</para>
+        ///
+        /// <para><b>FAILING, STALE and WARNING are deliberately NOT in the set.</b> Those collectors did
+        /// read on some cycles and their rows ARE in the total; excluding them would shrink the denominator
+        /// and read as a smaller fleet, which is a new wrong number in place of the old one rather than a
+        /// fix. HEALTHY is obviously not in it.</para>
+        /// </summary>
+        public static readonly IReadOnlySet<string> NothingReadBands =
+            new HashSet<string>(StringComparer.Ordinal) { NeverRun, NoPermissions, Stopped };
+
+        /// <summary>
+        /// True when <paramref name="band"/> is one of <see cref="NothingReadBands"/> — the collector read
+        /// nothing in the window, so nothing of its is in any total built from its rows. A null or unknown
+        /// band answers FALSE: absence of a band is not a claim that nothing was read, and a caller with no
+        /// band at all has to decide that case for itself rather than have this predicate decide it silently.
+        /// </summary>
+        public static bool ReadNothing(string? band) =>
+            band is not null && NothingReadBands.Contains(band);
+
         /// <summary>A collector with runs whose error rate exceeds this percent bands WARNING (when not STALE/FAILING).</summary>
         public const double WarningFailureRatePercent = 20.0;
 

@@ -50,10 +50,13 @@ public sealed class RdsPlanIngestor
         _logger = logger;
     }
 
-    /// <param name="host">The target's connection host. A non-RDS host is skipped silently — that target
-    /// uses the <c>pg_read_file</c> route instead, and there is nothing to report.</param>
-    /// <returns>Rows stored, or zero when this target is not RDS or had nothing new.</returns>
-    public async Task<int> IngestAsync(
+    /// <param name="host">The target's connection host. A non-RDS host means this transport does not apply
+    /// to that target — it uses the <c>pg_read_file</c> route instead — and the outcome says so rather than
+    /// reporting an empty log (#3017).</param>
+    /// <returns>Rows stored and whether the log was reached at all. Reaching it and finding nothing is a
+    /// real statement about the log; not reaching it is not, and
+    /// <see cref="RdsIngestOutcome.SourceReached"/> is what keeps the runner from making one.</returns>
+    public async Task<RdsIngestOutcome> IngestAsync(
         int serverId,
         string storageName,
         string host,
@@ -88,7 +91,10 @@ public sealed class RdsPlanIngestor
 
         if (chunk is null)
         {
-            return 0;
+            /* #3017: NOT_REACHED, not zero rows — the same distinction, and the same single cause, as
+               RdsDeadlockIngestor. ReadNewestAsync answers null only when RdsEndpoint.TryParse declined the
+               host, which means no AWS call was made and nothing is known about the log. */
+            return RdsIngestOutcome.NotReached;
         }
 
         var written = await StoreAsync(serverId, storageName, chunk.Value.Text, cancellationToken);
@@ -102,7 +108,7 @@ public sealed class RdsPlanIngestor
            the store already has. The loss it replaces was unbounded and silent. */
         _logs.CommitResume(chunk.Value.Resume);
 
-        return written;
+        return RdsIngestOutcome.Read(written);
     }
 
     /// <summary>

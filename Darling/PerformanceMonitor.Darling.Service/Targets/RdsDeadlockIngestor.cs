@@ -48,15 +48,18 @@ public sealed class RdsDeadlockIngestor
         _logger = logger;
     }
 
-    /// <param name="host">The target's connection host. A non-RDS host is skipped silently — that target
-    /// uses the <c>pg_read_file</c> route instead, and there is nothing to report.</param>
-    /// <returns>Rows stored, or zero when this target is not RDS or had nothing new.</returns>
+    /// <param name="host">The target's connection host. A non-RDS host means this transport does not apply
+    /// to that target — it uses the <c>pg_read_file</c> route instead — and the outcome says so rather than
+    /// reporting an empty log (#3017).</param>
+    /// <returns>Rows stored and whether the log was reached at all. Reaching it and finding nothing is a
+    /// real statement about the log; not reaching it is not, and
+    /// <see cref="RdsIngestOutcome.SourceReached"/> is what keeps the runner from making one.</returns>
     /// <exception cref="PgLogTimezoneUnsupportedException">The log is stamped in a non-UTC zone, so its
     /// timestamps are local and nothing in it can be stored (#2993). Propagated for the same reason
     /// <see cref="RdsLogUnavailableException"/> is: the runner classifies it and names the setting, where
     /// swallowing it would return zero rows and be recorded as a log that was read and held no
     /// deadlocks.</exception>
-    public async Task<int> IngestAsync(
+    public async Task<RdsIngestOutcome> IngestAsync(
         int serverId,
         string storageName,
         string host,
@@ -84,7 +87,12 @@ public sealed class RdsDeadlockIngestor
 
         if (chunk is null)
         {
-            return 0;
+            /* #3017: NOT_REACHED, not zero rows. ReadNewestAsync answers null for exactly one reason — the
+               host is not an RDS or Aurora endpoint, so RdsEndpoint.TryParse declined and no AWS call was
+               made. Every other outcome either throws or hands back a chunk. Returning a bare 0 here made
+               this indistinguishable from a log that was opened and held nothing, and the runner stamped the
+               cycle with a sentence claiming the second. */
+            return RdsIngestOutcome.NotReached;
         }
 
         var written = await StoreAsync(serverId, storageName, chunk.Value.Text, cancellationToken);
@@ -99,7 +107,7 @@ public sealed class RdsDeadlockIngestor
            every deadlock in it was gone with no error naming the loss. */
         _logs.CommitResume(chunk.Value.Resume);
 
-        return written;
+        return RdsIngestOutcome.Read(written);
     }
 
     /// <summary>

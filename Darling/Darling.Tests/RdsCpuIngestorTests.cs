@@ -41,19 +41,33 @@ public class RdsCpuIngestorTests
 
     /// <summary>Self-hosted PostgreSQL has no CPU route at all — a non-RDS host is this transport's ordinary
     /// answer, not an error, matching <see cref="RdsLogSource.ReadNewestAsync"/>'s identical null-return for
-    /// the same case.</summary>
+    /// the same case.
+    ///
+    /// <para><b>And the outcome says the source was NOT REACHED, not merely that it stored nothing</b>
+    /// (#3017). This is the case that made the defect reachable with no fleet and no permission claim:
+    /// <c>pg_cpu_utilization</c> dispatches unconditionally, so every cycle of every self-hosted PostgreSQL
+    /// target arrives here, and a bare zero let the runner stamp it "no new Performance Insights CPU samples
+    /// this cycle" — a claim about a window PI was never asked about. The <c>awsCalled</c> assertion is what
+    /// makes that concrete: nothing was queried, so nothing can be reported about it.</para></summary>
     [Fact]
-    public async Task ANonRdsHostReturnsZero()
+    public async Task ANonRdsHost_ReportsTheSourceUnreached_WithNoAwsCall()
     {
         var awsCalled = false;
         var ingestor = new RdsCpuIngestor(
             UnusedDataSource(),
             rdsClientFactory: _ => { awsCalled = true; return null!; });
 
-        var rows = await ingestor.IngestAsync(1, "srv", "db.internal.example.com");
+        var outcome = await ingestor.IngestAsync(1, "srv", "db.internal.example.com");
 
-        Assert.Equal(0, rows);
+        Assert.False(outcome.SourceReached);
+        Assert.Equal(0, outcome.Rows);
+        Assert.Equal(RdsIngestOutcome.NotReached, outcome);
         Assert.False(awsCalled, "a non-RDS host must never reach an AWS client factory");
+
+        /* The distinction, stated as the inequality the runner branches on: a read that found nothing is a
+           DIFFERENT value from a source that was never asked, so no rendering can conflate them again by
+           looking only at the count. */
+        Assert.NotEqual(RdsIngestOutcome.Read(0), outcome);
     }
 
     /// <summary>Reader and custom endpoints round-robin across replicas, so the instance behind one is not
