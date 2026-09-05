@@ -206,7 +206,7 @@ public sealed class ViewerScopedPaintGuardTests
 
                 Assert.True(open >= 0, $"a scope verify in {site.Method} has no block body");
 
-                var consequence = BraceBalanced(body, open);
+                var consequence = CSharpSourceWalker.BraceBalanced(body, open);
 
                 Assert.Matches(new Regex(@"\breturn\s*;"), consequence);
 
@@ -387,7 +387,7 @@ public sealed class ViewerScopedPaintGuardTests
 
         if (stripped[i] == '{')
         {
-            return BraceBalanced(stripped, i);
+            return CSharpSourceWalker.BraceBalanced(stripped, i);
         }
 
         Assert.True(
@@ -411,38 +411,14 @@ public sealed class ViewerScopedPaintGuardTests
         return i;
     }
 
-    /// <summary>
-    /// The brace-balanced span opening at <paramref name="open"/>. Brace MATCHING only — the literal- and
-    /// comment-aware walk that makes counting braces safe at all is <see cref="CSharpSourceWalker"/>'s, and
-    /// every caller here reads through <see cref="Stripped"/>, so a brace inside a string or a comment is
-    /// blanked before this sees it. #2913 consolidated that walk out of five copies; this is not a sixth.
-    /// </summary>
-    private static string BraceBalanced(string code, int open)
-    {
-        var depth = 0;
-
-        for (var i = open; i < code.Length; i++)
-        {
-            if (code[i] == '{')
-            {
-                depth++;
-            }
-            else if (code[i] == '}')
-            {
-                depth--;
-
-                if (depth == 0)
-                {
-                    return code[open..(i + 1)];
-                }
-            }
-        }
-
-        return code[open..];
-    }
-
     private static readonly Dictionary<string, string> s_stripped = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Every source this pin reads arrives through here, with comments and string literals blanked. Brace
+    /// matching over the result is <see cref="CSharpSourceWalker.BraceBalanced"/>'s — this file keeps no walk
+    /// of its own — and the blanking is the precondition that makes it correct: a brace in prose or in a
+    /// literal is gone before the walk can count it.
+    /// </summary>
     private static string Stripped(string path)
     {
         if (s_stripped.TryGetValue(path, out var cached))
