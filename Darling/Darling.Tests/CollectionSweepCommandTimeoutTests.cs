@@ -237,13 +237,21 @@ public sealed class CollectionSweepCommandTimeoutTests
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// The member borrowing a connection from the store pool. Asked per MEMBER rather than per file —
-    /// which the member scoping makes possible and the reference pin could not do — so a store open
-    /// elsewhere in the same file cannot vouch for a target command here. That is not hypothetical:
-    /// <c>DarlingWorker</c> holds both kinds.
+    /// A binding of <c>connection</c> that borrows from the STORE pool. Applied to the NEAREST preceding
+    /// binding rather than to the whole member — see <see cref="BorrowsStoreConnectionAt"/> — because a
+    /// member-wide answer is one granularity too coarse to be safe.
     /// </summary>
     private static readonly Regex s_storeConnectionOpen = new(
         @"(?<![A-Za-z0-9_])connection\s*=\s*await\s+_?postgres!?\s*\.OpenConnectionAsync\s*\(",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// ANY binding of the name <c>connection</c>, store or not, so the nearest preceding one can be found
+    /// and asked which it is. Word-boundaried at the front for the usual reason —
+    /// <c>targetConnection = </c> is a different variable.
+    /// </summary>
+    private static readonly Regex s_connectionBinding = new(
+        @"(?<![A-Za-z0-9_])connection\s*=\s*[^;]*;",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>The fourth shape. No <c>NpgsqlCommand</c>, no <c>CreateCommand</c>, so nothing above sees it.</summary>
@@ -342,11 +350,10 @@ public sealed class CollectionSweepCommandTimeoutTests
             var path = SourcePath(file);
             var body = MemberBody(File.ReadAllText(path), member, path);
             var code = CSharpSourceWalker.StripCommentsAndStrings(body);
-            var borrowsFromStore = s_storeConnectionOpen.IsMatch(code);
 
             foreach (Match ctor in s_commandCtor.Matches(code))
             {
-                if (IsStoreCommand(code, ctor, borrowsFromStore))
+                if (IsStoreCommand(code, ctor))
                 {
                     store++;
                     continue;
@@ -655,6 +662,13 @@ public sealed class CollectionSweepCommandTimeoutTests
         "        await using var connection = new NpgsqlConnection(runtime.ConnectionString);\n"
         + "        await using var command = new Npgsql.NpgsqlCommand(Sql, connection);\n",
         false)]
+    [InlineData(
+        "        await using var connection = await _postgres.OpenConnectionAsync(ct);\n"
+        + "        using var first = new NpgsqlCommand(Sql, connection);\n"
+        + "        await using var connection2 = new NpgsqlConnection(runtime.ConnectionString);\n"
+        + "        connection = connection2;\n"
+        + "        using var second = new NpgsqlCommand(Sql, connection);\n",
+        false)]
     [InlineData("        using var command = sourcepostgres.CreateCommand(Sql);\n", false)]
     [InlineData("        using var command = targetPostgres.CreateCommand(Sql);\n", false)]
     [InlineData("        using var a = postgres.CreateCommand(X); using var b = target.CreateCommand(Y);\n", false)]
@@ -665,9 +679,7 @@ public sealed class CollectionSweepCommandTimeoutTests
 
         Assert.True(matches.Count > 0, "the fixture did not contain a command construction");
 
-        Assert.Equal(
-            expectedStore,
-            IsStoreCommand(code, matches[^1], s_storeConnectionOpen.IsMatch(code)));
+        Assert.Equal(expectedStore, IsStoreCommand(code, matches[^1]));
     }
 
     /// <summary>
@@ -683,7 +695,7 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// output, which is what makes the argument shape safe to match with a plain regex: the embedded SQL
     /// contributes no comma, parenthesis or semicolon of its own.</para>
     /// </summary>
-    private static bool IsStoreCommand(string code, Match ctor, bool borrowsFromStore)
+    private static bool IsStoreCommand(string code, Match ctor)
     {
         var behind = code[(code.LastIndexOf('\n', ctor.Index) + 1)..(ctor.Index + ctor.Length)];
 
@@ -692,9 +704,31 @@ public sealed class CollectionSweepCommandTimeoutTests
             return true;
         }
 
-        return borrowsFromStore
+        return BorrowsStoreConnectionAt(code, ctor.Index)
             && s_storeConnectionArgument.IsMatch(
                 CSharpSourceWalker.StatementSpanFrom(code, ctor.Index, statements: 1));
+    }
+
+    /// <summary>
+    /// Whether the <c>connection</c> in scope at <paramref name="at"/> was borrowed from the STORE pool,
+    /// decided by the NEAREST PRECEDING binding of that name rather than by any binding in the member.
+    ///
+    /// <para><b>Member-wide was one granularity too coarse</b>, and review caught it. A member that
+    /// borrows from the store pool in one block and opens a monitored target into the same name in
+    /// another would have had the store's open vouch for the target command — the exact store-versus-target
+    /// misclassification this pin exists to prevent, one level finer than the member scoping that closed
+    /// it across files. No member does that today, so it was latent rather than live; a guard against
+    /// false accepts should not carry a known false-accept path regardless.</para>
+    ///
+    /// <para>No preceding binding at all answers NO, so a <c>connection</c> that arrives as a PARAMETER
+    /// fails asking for a decision instead of being assumed. That is the direction to err in, and it is
+    /// why this returns a bool rather than throwing.</para>
+    /// </summary>
+    private static bool BorrowsStoreConnectionAt(string code, int at)
+    {
+        var bindings = s_connectionBinding.Matches(code[..at]);
+
+        return bindings.Count > 0 && s_storeConnectionOpen.IsMatch(bindings[^1].Value);
     }
 
     /// <summary>
