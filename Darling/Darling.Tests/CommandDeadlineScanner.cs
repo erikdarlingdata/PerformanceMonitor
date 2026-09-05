@@ -12,13 +12,19 @@ using System.Text.RegularExpressions;
 namespace Darling.Tests;
 
 /// <summary>
-/// <para>Decides whether the command constructed at a given offset had its deadline chosen on purpose (#2874).
-/// Five command-timeout pins ask that question - <c>.Storage</c>, <c>.Viewer</c>, <c>.Analysis</c>,
-/// <c>PgFactCollector</c> and the alert pass - and they used to ask it five identical ways. This is the one
-/// implementation they share, the same treatment <see cref="CSharpSourceWalker"/> gave the five copies of the
-/// source walk in #2913 and <c>IlCallSiteScanner</c> gave the five copies of the IL walk in #2898. The walk
-/// copies had already drifted by the time they were consolidated, and only one of them carried the hardening
-/// the others needed; a judgement duplicated five ways would drift the same way.</para>
+/// <para>Decides whether the command constructed at a given offset had its deadline chosen on purpose
+/// (#2874). Every <c>*CommandTimeoutTests</c> pin that asks that question asks it here; each used to carry
+/// its own identical copy of the rule. This is the one implementation they share, the same treatment
+/// <see cref="CSharpSourceWalker"/> gave the five copies of the source walk in #2913 and
+/// <c>IlCallSiteScanner</c> gave the five copies of the IL walk in #2898. Those copies had already drifted
+/// by the time they were consolidated, and only one of them carried the hardening the others needed; a
+/// judgement duplicated once per pin would drift the same way.</para>
+///
+/// <para><b>Which pins ask it here, and which deliberately do not, is asserted rather than listed.</b>
+/// <see cref="CommandDeadlineScannerAdoptionTests"/> re-derives the adopting set from the tree and declares
+/// the abstainers beside it, so a pin that quietly stops calling this - and a new pin that arrives with its
+/// own private copy of the rule - both fail the build. It is the authoritative roster, and it carries the
+/// reason a roster in prose is not: a list here would have nothing checking it.</para>
 ///
 /// <para><b>The question is asked in two halves, because there are two places a deadline can legitimately be
 /// written and each has a different neighbour problem.</b> An initializer belongs to the construction it is
@@ -77,8 +83,9 @@ internal static class CommandDeadlineScanner
     /// and <c>sibling.CommandTimeout = 10;</c> spends both counted statements on the sibling, and the outer
     /// command reads as timed. Every fixture in this family used to exercise that sibling through an object
     /// INITIALIZER, which has no leading dot and so never reached this regex - while the assignment spelling
-    /// it missed is the dominant one, 112 of the MCP surface's 119 sites. Found in review, not by the
-    /// fixtures.</para>
+    /// it missed is the dominant one on the read surfaces these pins scan. That surface's census lives on
+    /// <see cref="McpReadCommandTimeoutTests"/>, not here, for the same reason the adopter roster does. Found
+    /// in review, not by the fixtures.</para>
     /// </summary>
     private static Regex Assigns(string bound) => new(
         @"(?<![A-Za-z0-9_])" + Regex.Escape(bound) + @"\s*[!?]?\s*\.\s*CommandTimeout\s*=",
