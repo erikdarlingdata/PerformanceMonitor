@@ -75,6 +75,11 @@ public sealed class DarlingWebHostService : BackgroundService
 {
     private readonly ILogger<DarlingWebHostService> _logger;
     private readonly WebRuntimeState _state;
+
+    /// <summary>#2953: the collector's startup verdict, published by the worker and reported by
+    /// <c>/api/ping</c>. Held rather than resolved per request so the route stays a field read — the whole
+    /// point of that endpoint is that it answers without depending on anything that can be down.</summary>
+    private readonly CollectorRuntimeState _collectorState;
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
 
@@ -104,10 +109,11 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(12);
     private const int SigningKeyBytes = 32;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state)
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState)
     {
         _logger = logger;
         _state = state;
+        _collectorState = collectorState;
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort) so a
@@ -875,7 +881,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 });
             }
 
-            DarlingWebEndpoints.MapAll(_app, postgres);
+            DarlingWebEndpoints.MapAll(_app, postgres, _collectorState);
             _app.UseDefaultFiles();
             _app.UseStaticFiles();
 
