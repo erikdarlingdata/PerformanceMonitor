@@ -2860,6 +2860,15 @@ const COLLECTOR_COLUMNS = [
   { key: "failure_rate_pct", label: "Failure %", format: "num1" },
   { key: "avg_duration_ms", label: "Avg Dur", format: "ms" },
   { key: "p95_duration_ms", label: "p95 Dur", format: "ms" },
+  /* #3017: what the spend BOUGHT, in the columns right after what it cost. Every column to the left of
+     these describes cost and none said whether any of it bought anything; the rows figure lived on
+     get_collector_cost, a different read over a different (hourly, fleet-wide) series. Rows beside Runs
+     w/ Rows because a rows total with no run count behind it cannot tell a collector that is productive
+     occasionally from one productive throughout — get_pg_blocking already reports its captures the same
+     way. Deliberately NOT a Status input: zero rows is the correct resting state for an event collector
+     on a quiet target, and a band keyed on cost-plus-zero-rows would light up the healthy install. */
+  { key: "rows_stored", label: "Rows", format: "int" },
+  { key: "runs_with_rows", label: "Runs w/ Rows", format: "int" },
   { key: "last_success", label: "Last Success", format: "time" },
   { key: "last_error", label: "Last Error", wrap: true },
   /* #1837: what a NON-failing run reported (an enumeration that came back with 0 items). Blank for a
@@ -2868,6 +2877,11 @@ const COLLECTOR_COLUMNS = [
      "(all N runs)" qualifier that separates a persistently empty collector from an occasionally quiet
      one, composed server-side from the shared formatter so this table cannot render it a third way. */
   { key: "note_summary", label: "Note", wrap: true },
+  /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
+     found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
+     column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so
+     this table cannot render the sentence a second way. */
+  { key: "output_finding", label: "Output", wrap: true },
 ];
 
 const HEAVIEST_COLUMNS = [

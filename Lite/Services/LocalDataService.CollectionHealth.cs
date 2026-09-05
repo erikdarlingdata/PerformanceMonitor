@@ -168,7 +168,22 @@ SELECT
     -- call it a denial. Compared against last_success_time this separates a collector still being
     -- refused from one whose refusals all predate a later success. APPENDED, and Darling's
     -- CollectionHealthSql mirrors the ordinal, because both are read positionally.
-    MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time
+    MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time,
+    -- #3017: what the spend BOUGHT. Every other statistic on a health row describes cost -- total_runs,
+    -- the three durations, and the sweep-pressure roll-up built from them -- and the rows figure lived
+    -- on a different tool over a different (hourly, fleet-wide) series, so correlating spend against
+    -- output was a join a reader had to know to make. Read from THIS query's own window so cost and
+    -- output cannot describe different runs, the same reason #3010's two instants come out of one
+    -- aggregate. COALESCE so a zero is unambiguous at the store: without it a collector whose every
+    -- rows_collected is NULL returns NULL, which a reader would have to guess between not-measured and
+    -- stored-nothing, and the whole point is that the second becomes a fact rather than an absence.
+    -- APPENDED, and Darling's CollectionHealthSql mirrors both ordinals, because both are read
+    -- positionally.
+    COALESCE(SUM(rows_collected), 0) AS rows_stored,
+    -- The denominator's partner, and the honest half of a cost/output pair: 12 rows over 3 of 79,333
+    -- runs is a different collector from 12 rows over all of them. get_pg_blocking already reports
+    -- captures_with_blocking beside captures_total off this same rows_collected > 0 test.
+    SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows
 FROM
 (
     -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
@@ -268,7 +283,12 @@ ORDER BY collector_name";
                 /* Appended (#2804), for the same reason the four above were. */
                 AbandonedCount = reader.IsDBNull(20) ? 0 : ToInt64(reader.GetValue(20)),
                 /* Appended (#3010), for the same reason every column before it was. */
-                LastDeniedTime = reader.IsDBNull(21) ? null : reader.GetDateTime(21)
+                LastDeniedTime = reader.IsDBNull(21) ? null : reader.GetDateTime(21),
+                /* Appended (#3017), for the same reason every column before it was. ToInt64 rather than
+                   Convert: DuckDB widens SUM over an INTEGER column to HUGEINT, which arrives as a
+                   BigInteger and which Convert.ToInt64 cannot take. */
+                RowsStored = reader.IsDBNull(22) ? 0 : ToInt64(reader.GetValue(22)),
+                RunsWithRows = reader.IsDBNull(23) ? 0 : ToInt64(reader.GetValue(23))
             });
         }
 
@@ -536,6 +556,49 @@ public class CollectorHealthRow
     /// </summary>
     public bool DeniedSinceLastSuccess => CollectorHealthClassifier.DeniedSinceLastSuccess(
         PermissionDeniedCount, ErrorCount, LastSuccessTime, LastDeniedTime);
+
+    /* ── What the spend bought (#3017), twinning Darling's CollectorHealth ───────────────────────────
+       Populated by the per-server health read ALONE, so nothing but get_collection_health's own tool
+       row may render them - a defaulted zero reaching a surface as "stored nothing" is the #2804
+       hazard exactly. */
+
+    /// <summary>
+    /// Rows the window's runs stored (<c>rows_stored</c>) — the output half of the cost/output pair, over
+    /// the SAME window as <see cref="TotalRuns"/> and the durations beside it. Never
+    /// <c>get_collector_cost</c>'s <c>total_rows</c>, which is Darling's own separate hourly series over
+    /// that caller's window and across every server: see
+    /// <see cref="CollectorHealthClassifier.OutputWindowNote"/> for what this figure is and is not.
+    /// </summary>
+    public long RowsStored { get; set; }
+
+    /// <summary>
+    /// How many of <see cref="TotalRuns"/> stored anything (<c>runs_with_rows</c>) — the numerator whose
+    /// denominator is <see cref="TotalRuns"/>, on <c>get_pg_blocking</c>'s
+    /// <c>captures_with_blocking</c>/<c>captures_total</c> pattern: a rows total with no run count behind
+    /// it cannot tell a collector that is productive occasionally from one that is productive throughout.
+    /// </summary>
+    public long RunsWithRows { get; set; }
+
+    /// <summary>Share of runs that stored anything. 0 with a large <see cref="TotalRuns"/> is the reading
+    /// #3017 exists to surface; 0 runs gives 0 rather than a divide, matching every sibling rate here.</summary>
+    public double ProductiveRunPercent => TotalRuns > 0 ? (double)RunsWithRows / TotalRuns * 100 : 0;
+
+    /// <summary>
+    /// The sentence a collector that spent and stored NOTHING gets, or null when it stored something
+    /// (#3017). Its own member rather than an expression at the call site for the reason
+    /// <see cref="DeniedSinceLastSuccess"/> is one: both SKUs' tools compose it from the one shared
+    /// formatter instead of each writing the branch out, so the two cannot answer differently.
+    ///
+    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term. Zero output with
+    /// a current denial is a collector that could not read; zero output alone is one that read and found
+    /// nothing. The predicate is READ here and still not banded — <c>HealthStatus</c> does not call this,
+    /// and this returns display text.</para>
+    /// </summary>
+    public string? OutputFinding =>
+        CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess)
+            is { Length: > 0 } finding
+            ? finding
+            : null;
 
     /// <summary>Share of runs the #2673 budget abandoned (#2804) — its own rate, not folded into
     /// <see cref="FailureRatePercent"/>, because the two carry very different thresholds and merging
