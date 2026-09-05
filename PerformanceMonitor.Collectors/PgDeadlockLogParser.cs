@@ -144,9 +144,14 @@ public static class PgDeadlockLogParser
     /// every cycle.</para>
     ///
     /// <para><b>Whether that skip is ever recovered depends on the transport, and on the managed one it is
-    /// not (#3009).</b> <see cref="PgDeadlocksCollector"/>'s <c>pg_read_file</c> route re-reads an
-    /// overlapping byte-window tail every cycle, so a report cut at one read's edge arrives whole in the
-    /// next and skipping it costs nothing. The RDS log-API route is CONSUME-ONCE: <c>RdsLogSource</c>
+    /// not (#3009).</b> <see cref="PgDeadlocksCollector"/>'s <c>pg_read_file</c> route re-reads a
+    /// byte-window tail every cycle that overlaps the previous one <b>while the log grows by less than
+    /// that tail between cycles</b>, and a report cut at one read's edge arrives whole in the next only
+    /// inside that condition. The tail is 4 MB and the cadence is five minutes, so the condition is a
+    /// write rate under roughly 14 KB/s. Above it consecutive reads stop touching and the bytes between
+    /// them are read by nobody — reports lost entire rather than cut, which is a different outcome from
+    /// the one this paragraph is about and is not recovered by anything. Neither collector measures the
+    /// write rate, so neither can distinguish a quiet server from a truncated view of a loud one. The RDS log-API route is CONSUME-ONCE: <c>RdsLogSource</c>
     /// holds a resume marker per (instance, file) and <c>DownloadDBLogFilePortion</c> starts the next call
     /// where the last one stopped, so there is no overlap and no next pass, and a report straddling a
     /// chunk boundary is not completed for the life of that marker. The paragraph above is not a recovery

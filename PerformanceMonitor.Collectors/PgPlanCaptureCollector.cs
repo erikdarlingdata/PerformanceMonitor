@@ -74,6 +74,22 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
     /// How much of the log tail to read per cycle. Bounded because the file can reach hundreds of megabytes
     /// — #2565 measured 772 MB in twenty seconds at capture-everything — and reading it whole would turn a
     /// monitoring collector into the server's biggest reader.
+    ///
+    /// <para><b>It is a window, not a resume marker, and that is what decides coverage.</b> The read is
+    /// always the last <c>TailBytes</c> of the current file, so consecutive cycles see overlapping text
+    /// only while the log grows by less than this between them. At the <c>pg_plan_capture</c> default of
+    /// sixty minutes that threshold is about 1.2 KB/s. Above it the two windows do not meet and the span
+    /// between them is read by no cycle: those plans are lost, not deferred, and the result reads
+    /// downstream as a target with nothing slow on it. The measurement quoted above is exactly a rate that
+    /// clears the threshold by four orders of magnitude, so this is the ordinary case on a target with
+    /// <c>auto_explain.log_min_duration</c> set low rather than a pathological one.</para>
+    ///
+    /// <para>Raising this number moves the threshold without establishing one, which is why it has not
+    /// been raised: at 772 MB in twenty seconds no fixed tail covers an hour. The gap is that nothing
+    /// reports the shortfall — the query already selects the file's <c>size</c>, so comparing it against
+    /// the previous cycle's would turn a silent skip into a number. An operator on a busy self-hosted
+    /// target lowers the interval for that server in the meantime; the managed route reaches this table
+    /// through the RDS log API instead, which keeps a resume marker and has no equivalent exposure.</para>
     /// </summary>
     private const int TailBytes = 4 * 1024 * 1024;
 

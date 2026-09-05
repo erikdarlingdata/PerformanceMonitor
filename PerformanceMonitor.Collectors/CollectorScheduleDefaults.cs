@@ -148,11 +148,25 @@ public static class CollectorScheduleDefaults
            rows are small, and the changes read only ever looks at consecutive snapshots. */
         ["pg_server_config"] = new(60, 365),
 
-        /* Every 5 minutes against a 4 MB tail, matching pg_plan_capture: the two read the same file the
-           same way, and a deadlock is an EVENT rather than a level, so the cadence has to be short enough
-           that a report is still inside the window when the read comes round. 90 days because deadlocks
-           are asked about in retrospect - "we had a spike last month" - and a shorter horizon answers that
-           with silence. The overlapping window is deliberate and the hash is what makes it free. */
+        /* Every 5 minutes against the same 4 MB tail pg_plan_capture reads, of the same file, by the same
+           pg_read_file call - and at a TWELFTH of its interval. The two are not on a shared cadence and
+           the difference is the point: a deadlock is an EVENT rather than a level, so the cadence has to
+           be short enough that a report is still inside the window when the read comes round.
+
+           The 5 is also what makes the overlap real on the self-hosted route, and that is arithmetic
+           rather than intent. The tail is a fixed 4 MB read from the END of the file, so consecutive reads
+           overlap only while the log grows by less than 4 MB between them - under about 14 KB/s here.
+           Past that the reads no longer touch, and the bytes between them are seen by nobody: whole
+           reports lost rather than merely cut, and the loss is silent because a report nobody read looks
+           exactly like a deadlock that did not happen. PgDeadlockLogParser states the condition at the
+           claim it qualifies. Nothing in either collector measures the log's write rate, so neither can
+           tell a quiet server from a truncated view of a busy one; an operator whose target logs harder
+           than that lowers this number per server rather than relying on the default.
+
+           90 days because deadlocks are asked about in retrospect - "we had a spike last month" - and a
+           shorter horizon answers that with silence. Repeats are expected and cheap: the hash carries the
+           identity and every read groups on it, so a report seen in six consecutive tails is one row to
+           every consumer. */
         ["pg_deadlocks"] = new(5, 90),
 
         /* Per-minute, unlike its wraparound sibling: an xmin holder is the FAST-moving leading
@@ -266,11 +280,29 @@ public static class CollectorScheduleDefaults
            managed target they can only ever record a non-fatal skip, and at a five-minute cadence that
            is roughly 900 skip rows per target per day saying the same thing.
 
-           Hourly costs nothing where they DO work: every one of these reads a CUMULATIVE counter
-           (pg_wait_sampling_profile, pg_stat_kcache, pg_qualstats) or an append-only log, so a longer
-           interval loses no events - it only widens the window each delta covers. That is the opposite
-           of a sampled collector like pg_blocking, where the cadence IS the resolution and stretching
-           it genuinely loses sightings. */
+           Hourly costs nothing for THREE of them: pg_wait_sampling_profile, pg_stat_kcache and
+           pg_qualstats are cumulative COUNTERS, so a longer interval loses no events - it only widens the
+           window each delta covers. That is the opposite of a sampled collector like pg_blocking, where
+           the cadence IS the resolution and stretching it genuinely loses sightings.
+
+           pg_plan_capture is the fourth and it is neither. It reads a LOG, and "append-only" is not the
+           property that matters - the property that matters is how much of it a read can see. Its two
+           transports fail in opposite directions at this cadence, and one schedule number serves both:
+
+             - Aurora and RDS reach the table through the log API, which is consume-once and keeps a resume
+               marker per (instance, file). An hour there batches more text per call and loses nothing,
+               which is the case this 60 was chosen for.
+             - A self-hosted target is read with pg_read_file as a fixed 4 MB tail with NO marker, so an
+               hour holds only the last 4 MB whatever was written before it - about 1.2 KB/s before the
+               window stops covering the interval. That is a low bar; a server doing nothing but logging
+               connections can clear it. Plans past it are not re-read later, they are never read, and
+               that reads downstream as a target with no slow queries.
+
+           Growing the tail does not fix it and is not the pending change: #2565 measured 772 MB of log in
+           twenty seconds at capture-everything, so no fixed number bounds the worst case - it only moves
+           the threshold. What is missing is that the collector cannot SAY it happened, and it already
+           selects the file's size, so a stored previous size would make the skipped span a measurement
+           instead of an absence. Until then a self-hosted operator lowers this per server. */
         ["pg_wait_sampling"] = new(60, 30),
         ["pg_kernel_stats"] = new(60, 30),
         ["pg_predicate_stats"] = new(60, 30),
