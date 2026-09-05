@@ -212,6 +212,14 @@ public sealed class AlertEngine
     /// </param>
     /// <param name="logger">Optional diagnostics logger.</param>
     /// <param name="utcNow">Test seam for the cooldown clock; production leaves it null (UtcNow).</param>
+    /// <param name="readFailures">
+    /// Where a SWALLOWED condition read is counted (#3013). Every per-check catch below logs and skips —
+    /// correctly, because firing on absent evidence fabricates an alert and resolving on it fabricates a
+    /// recovery — but the skip reached no surface a person reads, so the alert pass could go blind one
+    /// condition at a time behind a green health read. Null leaves the counting off and changes nothing
+    /// else; production passes <see cref="AlertReadFailureCounter.Shared"/>, and tests that want to
+    /// observe the counting pass their own instance rather than touching that one.
+    /// </param>
     public AlertEngine(
         IAlertEngineSettings settings,
         IAlertReadAdapter readAdapter,
@@ -221,7 +229,8 @@ public sealed class AlertEngine
         Func<string, int, CancellationToken, Task<List<FailedJobInfo>>>? failedJobsFetcher = null,
         Func<AlertResolution, CancellationToken, Task>? resolutionCallback = null,
         ILogger? logger = null,
-        Func<DateTime>? utcNow = null)
+        Func<DateTime>? utcNow = null,
+        AlertReadFailureCounter? readFailures = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _readAdapter = readAdapter ?? throw new ArgumentNullException(nameof(readAdapter));
@@ -232,7 +241,11 @@ public sealed class AlertEngine
         _resolutionCallback = resolutionCallback;
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _readFailures = readFailures;
     }
+
+    /// <summary>#3013: the swallowed-read counter, or null when nothing is counting.</summary>
+    private readonly AlertReadFailureCounter? _readFailures;
 
     /// <summary>
     /// Runs one full alert sweep for one server — Lite's <c>CheckPerformanceAlerts(summary)</c>.
@@ -275,6 +288,11 @@ public sealed class AlertEngine
         var now = _utcNow();                                                        /* Lite AlertEngine.cs:41 */
         var alertCooldown = TimeSpan.FromMinutes(_settings.CooldownMinutes);        /* :57 */
         bool suppressed = snapshot.Suppressed;                                      /* :60 (suppressPopups) */
+
+        /* #3013: the denominator for this server's swallowed-read count, recorded HERE rather than in
+           EvaluateServerAsync so the master-switch-off early return does not count a pass that never
+           looked at the store. */
+        _readFailures?.RecordPass(key);
 
         await EnsureWatermarksSeededAsync(key, ct);
 
@@ -338,6 +356,7 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to seed edge-trigger watermarks for {ServerKey}: {Message}", key, ex.Message);
+            _readFailures?.RecordReadFailure(key, "edge-trigger watermark seed");
         }
 
         _seededServerKeys[key] = true;
@@ -446,6 +465,7 @@ public sealed class AlertEngine
                 /* :129-132 shape — log and skip this check for the sweep (class remarks
                    adaptation (2)): never run the gate on a fabricated zero count. */
                 _logger?.LogError("Failed to check blocking for {Server}: {Message}", serverName, ex.Message);
+                _readFailures?.RecordReadFailure(key, "blocking");
                 return;
             }
         }
@@ -565,6 +585,9 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: an occurrence total is bookkeeping ABOUT an alert,
+               not the condition read the alert is judged on. The check still fires or resolves on its own
+               evidence when this fails, so alerting did not go blind — it lost a count. */
             _logger?.LogWarning("Could not load incident occurrences for {Metric}: {Message}", metricName, ex.Message);
             persisted = EmptyOccurrenceStates;
         }
@@ -598,6 +621,8 @@ public sealed class AlertEngine
         {
             /* A dropped write costs accuracy on the next delivery's total — that fingerprint reads as new
                and restarts, with a start time saying so — never a missed or duplicated alert. */
+            /* NOT counted by #3013's counter: a WRITE, and the counter is about reads the alert pass performs
+               and swallows. Logged at Warning for the same reason. */
             _logger?.LogWarning("Could not persist incident occurrences for {Metric}: {Message}", metricName, ex.Message);
         }
     }
@@ -696,6 +721,7 @@ public sealed class AlertEngine
                 /* Log and skip for the sweep — state untouched, so a transient store error neither
                    fires nor resolves (the same adaptation (2) shape as the count gate). */
                 _logger?.LogError("Failed to check blocking wait time for {Server}: {Message}", serverName, ex.Message);
+                _readFailures?.RecordReadFailure(key, "blocking wait time");
                 return;
             }
         }
@@ -784,6 +810,7 @@ public sealed class AlertEngine
             {
                 /* :207-210 shape — log and skip (class remarks adaptation (2)). */
                 _logger?.LogError("Failed to check deadlocks for {Server}: {Message}", serverName, ex.Message);
+                _readFailures?.RecordReadFailure(key, "deadlocks");
                 return;
             }
         }
@@ -927,6 +954,7 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to check poison waits for {Server}: {Message}", serverName, ex.Message); /* :337 */
+            _readFailures?.RecordReadFailure(key, "poison waits");
         }
     }
 
@@ -1016,6 +1044,7 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to check long-running queries for {Server}: {Message}", serverName, ex.Message); /* :409 */
+            _readFailures?.RecordReadFailure(key, "long-running queries");
         }
     }
 
@@ -1077,6 +1106,7 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to check TempDB space for {Server}: {Message}", serverName, ex.Message); /* :471 */
+            _readFailures?.RecordReadFailure(key, "TempDB space");
         }
     }
 
@@ -1166,6 +1196,7 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to check volume free space for {Server}: {Message}", serverName, ex.Message); /* :553 */
+            _readFailures?.RecordReadFailure(key, "volume free space");
         }
 
         return conditionPresent;
@@ -1252,6 +1283,7 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to check PVS pressure for {Server}: {Message}", serverName, ex.Message);
+            _readFailures?.RecordReadFailure(key, "PVS pressure");
         }
     }
 
@@ -1350,6 +1382,7 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to check database file growth for {Server}: {Message}", serverName, ex.Message);
+            _readFailures?.RecordReadFailure(key, "database file growth");
         }
     }
 
@@ -1444,6 +1477,7 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to check anomalous jobs for {Server}: {Message}", serverName, ex.Message); /* :630 */
+            _readFailures?.RecordReadFailure(key, "anomalous jobs");
         }
     }
 
@@ -1533,6 +1567,7 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to check failed jobs for {Server}: {Message}", serverName, ex.Message); /* :715 */
+            _readFailures?.RecordReadFailure(key, "failed jobs");
         }
 
         return conditionPresent;
@@ -1576,6 +1611,7 @@ public sealed class AlertEngine
             /* Log-and-skip, like the other collected reads: never resolve an active database on a
                failed fetch (that would fabricate a recovery), and never fire on absent evidence. */
             _logger?.LogError("Failed to check database state for {Server}: {Message}", serverName, ex.Message);
+            _readFailures?.RecordReadFailure(key, "database state");
             return;
         }
 
@@ -1787,6 +1823,7 @@ public sealed class AlertEngine
             /* Log-and-skip, like every other collected read: never resolve an active plan on a failed
                fetch (that would fabricate a recovery), and never fire on absent evidence. */
             _logger?.LogError("Failed to check forced-plan failures for {Server}: {Message}", serverName, ex.Message);
+            _readFailures?.RecordReadFailure(key, "forced-plan failures");
             return;
         }
 
@@ -1955,6 +1992,9 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: this is the DELIVERY path, not a condition read.
+               A failed delivery is a different fact with a different remedy, and #3013 deliberately left
+               alerting on the alerting out of scope as its own decision. */
             _logger?.LogError("Alert resolution callback failed for {Server} / {Metric}: {Message}",
                 resolution.ServerName, resolution.MetricName, ex.Message);
         }
