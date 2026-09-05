@@ -1207,8 +1207,8 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>21 columns since #2804 (16 at #2460, plus #2472's four fan-out columns and #2804's
-    /// abandoned_count) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// <para>22 columns since #3010 (16 at #2460, plus #2472's four fan-out columns, #2804's
+    /// abandoned_count and #3010's last_denied_time) — every addition APPENDED, never inserted, because both MCP surfaces read
     /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
@@ -1322,7 +1322,19 @@ internal static class DarlingDataReader
             -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
             -- for query_store), so equality against one rendered sentence matches one collector.
             SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
-                     THEN 1 ELSE 0 END) AS abandoned_count
+                     THEN 1 ELSE 0 END) AS abandoned_count,
+            -- #3010: the newest DENIAL on its own, which is what dates the last_error slot above.
+            -- last_error_time cannot stand in for it: that column is a MAX over ERROR and PERMISSIONS
+            -- together, so on a collector carrying both it hands a reader an error's instant and lets
+            -- them call it a denial. Compared against last_success_time this separates a collector
+            -- still being refused from one whose refusals all predate a later success -- the exact
+            -- distinction pg_deadlocks needed and no surface could make.
+            --
+            -- Appended LAST, like abandoned_count before it: both MCP surfaces read this result set
+            -- POSITIONALLY and Lite's DuckDB read mirrors these ordinals, so a mid-list insert would
+            -- silently re-map every column after it in whichever surface was not edited in the same
+            -- breath.
+            MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1418,6 +1430,8 @@ internal static class DarlingDataReader
                 SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19)),
                 /* Appended (#2804), for the same reason the four above were. */
                 AbandonedCount = reader.IsDBNull(20) ? 0 : Convert.ToInt64(reader.GetValue(20)),
+                /* Appended (#3010), for the same reason every column before it was. */
+                LastDeniedTime = reader.IsDBNull(21) ? null : reader.GetDateTime(21),
             });
         }
 
@@ -1937,6 +1951,14 @@ internal sealed class CollectorHealth
     public string? LastError { get; set; }
     public DateTime? LastErrorTime { get; set; }
     public long PermissionDeniedCount { get; set; }
+
+    /// <summary>
+    /// The newest PERMISSIONS instant in the window (#3010) — what dates <see cref="LastError"/>.
+    /// Distinct from <see cref="LastErrorTime"/>, a MAX over ERROR and PERMISSIONS together, which
+    /// therefore cannot answer whether the last thing that happened here was a refusal. Null when the
+    /// window holds no denial.
+    /// </summary>
+    public DateTime? LastDeniedTime { get; set; }
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
@@ -2011,6 +2033,15 @@ internal sealed class CollectorHealth
             : null;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
+
+    /// <summary>
+    /// Whether <see cref="LastError"/> describes the collector's CURRENT state or a fault from a code
+    /// path it no longer takes (#3010). Its own member rather than an expression at the call site so
+    /// both SKUs' tools derive it from the one shared predicate instead of each writing the comparison
+    /// out. Reported, never banded: <see cref="HealthStatus"/> does not read it.
+    /// </summary>
+    public bool DeniedSinceLastSuccess => CollectorHealthClassifier.DeniedSinceLastSuccess(
+        PermissionDeniedCount, ErrorCount, LastSuccessTime, LastDeniedTime);
 
     /// <summary>
     /// Share of runs the #2673 budget abandoned (#2804). Its own rate rather than part of
