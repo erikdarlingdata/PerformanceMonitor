@@ -67,11 +67,7 @@ public sealed class AnalysisPassCommandTimeoutTests
        BOTH construction shapes, as the viewer's pin does - `.CreateCommand(` was absent from #2871's
        census and is how the two DMV-snapshot factories build their commands. */
     private static readonly Regex s_commandCtor = new(
-        @"new NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    private static readonly Regex s_setsTimeout = new(
-        @"CommandTimeout\s*=",
+        @"new\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -102,28 +98,25 @@ public sealed class AnalysisPassCommandTimeoutTests
 
         foreach (var file in AnalysisSources())
         {
-            var lines = File.ReadAllLines(file);
+            var text = File.ReadAllText(file);
 
-            for (var i = 0; i < lines.Length; i++)
+            /* Both halves of the question are asked of STRIPPED text, which is character-aligned with its
+               input. This replaced a raw three-LINE window that could tell neither a construction from the
+               same words in a comment, nor this site's deadline from the next site's, nor a real deadline
+               from one merely spelled in prose. */
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+            foreach (Match ctor in s_commandCtor.Matches(code))
             {
-                if (!s_commandCtor.IsMatch(lines[i]))
-                {
-                    continue;
-                }
+                var line = text.Take(ctor.Index).Count(c => c == '\n') + 1;
 
-                /* The deadline may sit in the object initializer on the construction line or be
-                   assigned in the following statement — both spellings are in use here. */
-                var window = string.Join(
-                    "\n",
-                    lines.Skip(i).Take(Math.Min(3, lines.Length - i)));
-
-                if (s_setsTimeout.IsMatch(window))
+                if (CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
                 {
                     covered++;
                 }
                 else
                 {
-                    missing.Add($"{Path.GetFileName(file)}:{i + 1}");
+                    missing.Add($"{Path.GetFileName(file)}:{line}");
                 }
             }
         }
@@ -286,25 +279,12 @@ public sealed class AnalysisPassCommandTimeoutTests
     public void TheCtorScan_SeesTheStampingFactory_AndNotTheMethodGroup(
         string source, bool expectedMatched, bool expectedTimed)
     {
-        var lines = source.Split('\n');
-        var matched = false;
-        var timed = false;
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var ctor = s_commandCtor.Match(code);
 
-        for (var i = 0; i < lines.Length; i++)
-        {
-            if (!s_commandCtor.IsMatch(lines[i]))
-            {
-                continue;
-            }
+        Assert.Equal(expectedMatched, ctor.Success);
 
-            matched = true;
-            var window = string.Join("\n", lines.Skip(i).Take(Math.Min(3, lines.Length - i)));
-            timed = s_setsTimeout.IsMatch(window);
-            break;
-        }
-
-        Assert.Equal(expectedMatched, matched);
-        Assert.Equal(expectedTimed, timed);
+        Assert.Equal(expectedTimed, ctor.Success && CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index));
     }
 
     /* The literal- and comment-aware walk this pin used to carry lives in CSharpSourceWalker as of
@@ -312,6 +292,96 @@ public sealed class AnalysisPassCommandTimeoutTests
        with the literal text around them, so a call written inside an interpolation was invisible to every
        scan built on them. The reasoning that shaped the walk moved there with it, and
        CSharpSourceWalkerTests carries the witnesses. */
+
+    /// <summary>
+    /// Scanner blind spots, pinned - a false positive here fails a green build on correct code. The first
+    /// two are this assembly's real shapes; the next three are the layouts the raw three-line window this
+    /// scan replaced could not report, where the deadline it found belonged to the NEXT construction. The
+    /// last is why the span is not simply CUT at that next construction, which is the tempting one-line
+    /// version of the same rule: two constructions can legitimately share ONE deadline. The last two are the
+    /// value half of the same mistake: a deadline SPELLED in a comment or a literal is not a deadline, so the
+    /// span is judged over STRIPPED source - this codebase quotes code in its prose constantly.
+    /// </summary>
+    [Theory]
+    [InlineData(
+        "var command = new NpgsqlCommand(Sql, connection) { CommandTimeout = 45 };\n",
+        true)]
+    [InlineData(
+        "var command = connection.CreateCommand();\n"
+        + "/* a method result cannot take an initializer; set it here. */\n"
+        + "command.CommandTimeout = 45;\n",
+        true)]
+    [InlineData(
+        "using (var untimed = new NpgsqlCommand(Sql, connection))\n"
+        + "{\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n"
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 45 };\n",
+        false)]
+    [InlineData(
+        "using var untimed = new NpgsqlCommand(Sql, connection);\n"
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 45 };\n",
+        false)]
+    [InlineData(
+        "using (var untimed = new NpgsqlCommand(Sql, connection))\n"
+        + "{\n"
+        + "    using var sibling = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 45 };\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n",
+        false)]
+    [InlineData(
+        "await using var command = filtered\n"
+        + "    ? connection.CreateCommand(FilteredSql)\n"
+        + "    : connection.CreateCommand(AllSql);\n"
+        + "command.CommandTimeout = 45;\n",
+        true)]
+    [InlineData(
+        "using var command = connection.CreateCommand();\n"
+        + "/* the deadline used to be command.CommandTimeout = 10 here */\n"
+        + "await command.ExecuteNonQueryAsync(cancellationToken);\n",
+        false)]
+    [InlineData(
+        "using var command = connection.CreateCommand();\n"
+        + "var doc = \"command.CommandTimeout = 10\";\n",
+        false)]
+    /* The sibling spelled as an ASSIGNMENT rather than an initializer. Every other sibling fixture in this
+       family used the initializer form, which has no leading dot and so never reached the assignment regex -
+       while the assignment spelling is the dominant one in this codebase. Found in review. */
+    [InlineData(
+        "using (var untimed = connection.CreateCommand())\n"
+        + "{\n"
+        + "    using var sibling = connection.CreateCommand();\n"
+        + "    sibling.CommandTimeout = 10;\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n",
+        false)]
+    public void TheScanner_JudgesTheSiteItself_NotItsNeighbours(string source, bool expectedTimed)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var ctor = s_commandCtor.Match(code);
+
+        Assert.True(ctor.Success, "the fixture did not contain a command construction");
+
+        Assert.Equal(expectedTimed, CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index));
+    }
+
+    /// <summary>
+    /// A construction written ONLY in a comment or a literal is not a construction. The scan reads
+    /// stripped text so it cannot report one: a phantom offender names a line where no edit can ever make
+    /// the build pass. The last case is a fifth construction shape the unqualified pattern could not see.
+    /// </summary>
+    [Theory]
+    [InlineData("var command = connection.CreateCommand();", true)]
+    [InlineData("/* these go through connection.CreateCommand() and leave nothing open. */", false)]
+    [InlineData("// TODO: replace with new NpgsqlCommand(Sql, connection)", false)]
+    [InlineData("var doc = \"using var c = new NpgsqlCommand(Sql, connection);\";", false)]
+    [InlineData("await using var command = new Npgsql.NpgsqlCommand(Sql, connection);", true)]
+    public void TheConstructionScan_ReadsCodeNotProse(string source, bool expectedSite)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+
+        Assert.Equal(expectedSite, s_commandCtor.IsMatch(code));
+    }
 
     private static IEnumerable<string> AnalysisSources()
     {
