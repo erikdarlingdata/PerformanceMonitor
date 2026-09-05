@@ -2297,9 +2297,14 @@ CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     /// generator-parity pin applies): it is written by the service's post-analysis bot pass, the
     /// store_metrics/collector_cost pattern. APPEND-ONLY by design — reviews and outcomes are their own rows
     /// pointing back via <c>related_action_id</c>, never UPDATEs, so the trail cannot be rewritten by the
-    /// thing it audits. Deliberately NOT enrolled in retention: an audit of writes to production servers is
-    /// the one series that should outlive the metrics that motivated it, and its volume is bounded by the
-    /// bot's own cooldowns (at most one decision per query per cooldown window).</para>
+    /// thing it audits. Enrolled in retention at the LONGEST horizon in the store
+    /// (<c>DarlingRetention.PlanForceLedgerRetentionDays</c>, a year), because an audit of writes to
+    /// production servers is the one series that should outlive the metrics that motivated it. The bot's own
+    /// cooldowns (at most one decision per query per cooldown window) bound the arrival RATE, which is not a
+    /// size bound — a bounded rate over unbounded time is unbounded — so the horizon is what keeps it
+    /// finite. A batched DELETE on <c>action_time</c>, not <c>drop_chunks</c>: the identity PRIMARY KEY that
+    /// <c>related_action_id</c> points back to is exactly what
+    /// <c>TimescaleSupport</c> excludes PK-bearing tables for.</para>
     ///
     /// <para><c>reasons</c> is a comma-joined text of the named gate/blocker reasons (the same strings the
     /// MCP <c>structured_remediation</c> blockers carry) rather than <c>text[]</c>, so a future Lite twin

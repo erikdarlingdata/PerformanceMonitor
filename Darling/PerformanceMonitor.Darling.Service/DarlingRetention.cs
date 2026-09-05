@@ -98,6 +98,26 @@ public static class DarlingRetention
     internal const int CommandHistoryRetentionDays = DataRetentionBaseDays;
 
     /// <summary>
+    /// collect.plan_force_actions (the auto force-plan bot's decision journal) keeps its rows this long. Like
+    /// config_alert_log it is neither a collector (no <see cref="CollectorScheduleDefaults"/> horizon) nor a
+    /// hypertable, and it is APPEND-ONLY with no other purge path — so this horizon is the only thing bounding
+    /// it. The bot's own cooldowns bound the arrival RATE, which is not a size bound: a bounded rate over
+    /// unbounded time is unbounded.
+    /// <para>A full year — deliberately the longest horizon in the store, because this is the audit trail of a
+    /// bot WRITING to production servers and it has to outlive the metrics that motivated each decision
+    /// (<see cref="DataRetentionBaseDays"/>) by enough that "why did this plan change" is still answerable
+    /// releases later. That is 4x the alert log's already-generous <see cref="AlertHistoryRetentionDays"/> and
+    /// 12x the metric window, and it is nearly free: volume is capped by the bot's per-query cooldown and
+    /// per-server daily force budget, so the ceiling is a few decisions per server per day rather than a
+    /// sample per collection cycle. It also clears, by a wide margin, the longest window the bot itself reads
+    /// back when judging eligibility (a week, for the two-taken-back-forces cooldown), so retention can never
+    /// make the bot forget a decision it is still bound by. Generous, but BOUNDED — a monitoring store is
+    /// sized for rolling windows, and "forever" is not a horizon. No operator setting governs this, so the
+    /// constant is the single source of truth.</para>
+    /// </summary>
+    internal const int PlanForceLedgerRetentionDays = 365;
+
+    /// <summary>
     /// The terminal-status filter for the command purge — the two states
     /// <c>ViewerDataService.IsTerminal</c> recognizes, which are also the only two
     /// <c>DarlingCommandExecutor</c> ever writes (its report path and its stale-command reaper). A
@@ -116,8 +136,9 @@ public static class DarlingRetention
     /// <summary>
     /// Purges every collector table past its shared <see cref="CollectorScheduleDefaults"/>
     /// RetentionDays, plus collection_log past <see cref="CollectionLogRetentionDays"/>,
-    /// config_alert_log past <see cref="AlertHistoryRetentionDays"/>, and terminal
-    /// config.config_command rows past <see cref="CommandHistoryRetentionDays"/>.
+    /// config_alert_log past <see cref="AlertHistoryRetentionDays"/>, terminal
+    /// config.config_command rows past <see cref="CommandHistoryRetentionDays"/>, and
+    /// collect.plan_force_actions past <see cref="PlanForceLedgerRetentionDays"/>.
     /// When <paramref name="timescaleAvailable"/> (the worker's startup detection), the
     /// collector tables purge via <c>drop_chunks</c> (<see cref="DropChunksSqlFor"/>) with a
     /// per-table DELETE fallback so a table that failed hypertable conversion still honors its
@@ -573,6 +594,36 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += commandsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* collect.plan_force_actions (the force-plan bot's decision journal) purges on its own action_time
+               column at PlanForceLedgerRetentionDays — the longest horizon in the store. NOT in
+               CollectorCatalog.All (it is written by the service's post-analysis bot pass, not a collector), so
+               the loop above skips it, and it is append-only with no other purge path, which makes this the
+               only thing bounding it.
+               A batched DELETE, never a hypertable: action_id is a PRIMARY KEY that related_action_id points
+               back to (a self-review row references the force row it re-judges), and TimescaleSupport already
+               excludes PK-bearing tables for exactly that reason — conversion would reject the key or force it
+               onto the partition column, breaking the self-reference the append-only design is built on.
+               idx_plan_force_actions_time (server_id, action_time) serves both min(action_time) probes and the
+               slice range scan, so the delete is cheap without one.
+               SCHEMA-QUALIFIED to match the V107 DDL and PgPlanForceActionStore, which both name
+               collect.plan_force_actions explicitly. Unlike config.config_command a bare name would also
+               resolve here (search_path = collect, config, public), but naming the schema keeps the purge and
+               the writer readable against each other.
+               Failure-isolated like every sibling: a failed statement is warned + counted, the sweep goes on. */
+            var forceLedgerDeleted = await PurgeOneAsync(
+                postgres, "collect.plan_force_actions",
+                TimeSlicedDeleteSql("collect.plan_force_actions", "action_time"),
+                utcNow.AddDays(-PlanForceLedgerRetentionDays), logger, cancellationToken);
+            if (forceLedgerDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += forceLedgerDeleted.Value;
             }
             else
             {
