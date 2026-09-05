@@ -102,7 +102,9 @@ public sealed class AlertReadFailureCounter
 
     private readonly Func<DateTime> _utcNow;
 
-    /// <summary>When this counter started counting — process start for <see cref="Shared"/>.</summary>
+    /// <summary>When this counter first counted. For <see cref="Shared"/> that is the first touch of the
+    /// static — early in the host's startup, not the process's first instruction, which is why the
+    /// surface reports the value rather than describing it.</summary>
     public DateTime CountingSince { get; }
 
     public AlertReadFailureCounter(Func<DateTime>? utcNow = null)
@@ -178,7 +180,7 @@ public sealed class AlertReadFailureCounter
     /// is the mistake <c>last_error</c> already taught this surface (#3010).
     /// </param>
     /// <param name="LastFailureRead">Which read failed most recently for this server.</param>
-    /// <param name="CountingSinceUtc">When counting began — process start.</param>
+    /// <param name="CountingSinceUtc">When counting began — see <see cref="CountingSince"/>.</param>
     public sealed record Reading(
         long ServerReadFailures,
         long ServerAlertPasses,
@@ -294,8 +296,8 @@ public sealed class AlertReadFailureCounter
         "alert_read_health is the ONLY block on this response that is not measured over the trailing seven "
         + "days. It is an in-memory count kept by the running service or app, from counting_since — which is "
         + "when this process began counting, early in its own startup — to now, and a restart takes it to "
-        + "zero. So a zero here means "
-        + "\"none since counting_since\" and NOT \"none in seven days\": check counting_since before reading "
+        + "zero. So a zero here means \"none since counting_since\" and NOT \"none in seven days\": check "
+        + "counting_since before reading "
         + "the zero as reassurance, because a process that started a minute ago can only report on a minute. "
         + "It is deliberately not persisted: what it counts is a failure to READ the store, so a counter that "
         + "had to write the store would be unavailable exactly when it has something to report. It counts "
