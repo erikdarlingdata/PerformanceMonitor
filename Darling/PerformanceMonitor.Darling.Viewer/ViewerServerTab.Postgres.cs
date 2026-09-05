@@ -298,6 +298,10 @@ public partial class ViewerServerTab
 
         await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask);
 
+        /* Released here rather than at the closing brace: the six sub-tab loads at the end of this method
+           run after these five have finished, so they do not contend with them. */
+        readFanOut.Release();
+
         var counts = countsTask.Result;
         var chains = chainsTask.Result;
         var cycles = cyclesTask.Result;
@@ -847,6 +851,9 @@ public partial class ViewerServerTab
         var indexTask = _dataService.GetPgIndexUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
         await Task.WhenAll(bloatTask, indexTask);
+
+        /* Released here — the two sub-tab loads at the end of this method do not contend with these two. */
+        readFanOut.Release();
 
         var bloat = bloatTask.Result;
         var indexes = indexTask.Result;

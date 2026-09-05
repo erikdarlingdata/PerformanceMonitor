@@ -105,6 +105,11 @@ public partial class ViewerServerTab
 
         await Task.WhenAll(latestTask, trendTask, grantTrendTask, clerkTypesTask, grantChartTask, pressureTask);
 
+        /* The six are done, and this method reads the store twice more below — the clerk chart and the
+           whole Plan Cache sub-tab, which declares its own fan-out. Release here or those inherit this
+           width and the nested one multiplies against a contention count that no longer exists. */
+        readFanOut.Release();
+
         RenderMemorySummary(latestTask.Result);
         RenderMemoryChart(trendTask.Result, grantTrendTask.Result, startUtc, endUtc);
         RenderMemoryGrantCharts(grantChartTask.Result, startUtc, endUtc);

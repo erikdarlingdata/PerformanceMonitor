@@ -421,6 +421,138 @@ public sealed class ViewerCommandTimeoutTests
     }
 
     /// <summary>
+    /// A declared width must not outlive the reads it describes. A method-scoped <c>using var</c> runs to
+    /// the closing brace, so a store read AFTER the join inherits a contention count that is over by the
+    /// whole fan-out — and a nested fan-out below it multiplies against that stale count and lands on the
+    /// pool ceiling. <c>ViewerReadFanOut.Scope.Release()</c> ends it at the join; this asserts it is called
+    /// wherever the method goes on to await anything.
+    ///
+    /// <para><b>The join is matched as a STATEMENT, not a line</b>, which is what makes the scan sound. The
+    /// two per-server fan-outs pass <c>Task.WhenAll(servers.Select(async item =&gt; ...))</c>, whose lambda
+    /// body contains the very <c>await</c> that IS the fan-out — searching from the line would report both
+    /// as offenders. Searching from the end of the parenthesised statement puts those awaits inside the
+    /// join rather than after it. Conversely the search cannot be depth-restricted to the join's own brace
+    /// level: <c>MainWindow</c>'s fleet-totals read sits inside a <c>try</c> block, so a same-depth rule
+    /// would miss a real one. Both shapes are live in this project, and each rules out one of the two
+    /// obvious implementations.</para>
+    /// </summary>
+    [Fact]
+    public void NoFanOutScope_OutlivesItsJoin()
+    {
+        var offenders = new List<string>();
+        var checked_ = 0;
+
+        foreach (var path in ViewerSources())
+        {
+            var text = File.ReadAllText(path);
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+            /* Only joins that a declaration precedes are in scope for this rule; a file with no fan-out
+               declaration at all is EveryViewerFanOut_DeclaresItsWidth's business, not this test's. */
+            var firstDeclaration = code.IndexOf("ViewerReadFanOut", System.StringComparison.Ordinal);
+
+            foreach (Match join in s_joinedFanOut.Matches(code))
+            {
+                if (firstDeclaration < 0 || firstDeclaration > join.Index)
+                {
+                    continue;
+                }
+
+                var afterJoin = EndOfParenthesisedStatement(code, join.Index + join.Length - 1);
+                if (afterJoin < 0)
+                {
+                    continue;
+                }
+
+                var methodEnd = EndOfEnclosingBlock(code, afterJoin);
+                var window = code[afterJoin..methodEnd];
+                var nextAwait = Regex.Match(window, @"(^|[^A-Za-z0-9_])await[^A-Za-z0-9_]");
+
+                if (!nextAwait.Success)
+                {
+                    continue;
+                }
+
+                checked_++;
+
+                var released = window[..nextAwait.Index].Contains(".Release()", System.StringComparison.Ordinal);
+                if (!released)
+                {
+                    var line = text.Take(afterJoin).Count(c => c == '\n') + 1;
+                    offenders.Add($"{Path.GetFileName(path)}:{line}");
+                }
+            }
+        }
+
+        Assert.True(checked_ >= 3, $"only {checked_} join(s) were followed by a further await — the scan is not reading the project");
+
+        Assert.True(
+            offenders.Count == 0,
+            $"{offenders.Count} fan-out scope(s) stay open past their join while the method reads the store again, "
+            + "so those later reads are priced against contention that has already finished (and a nested fan-out "
+            + "multiplies against it onto the pool ceiling). Call readFanOut.Release() right after the join: "
+            + string.Join(", ", offenders));
+    }
+
+    /// <summary>
+    /// The index just past the <c>;</c> that closes the statement whose opening <c>(</c> is at
+    /// <paramref name="openParen"/>, or -1. Counts parens so a nested lambda cannot end it early.
+    /// </summary>
+    private static int EndOfParenthesisedStatement(string code, int openParen)
+    {
+        var depth = 0;
+
+        for (var i = openParen; i < code.Length; i++)
+        {
+            if (code[i] == '(')
+            {
+                depth++;
+            }
+            else if (code[i] == ')')
+            {
+                depth--;
+
+                if (depth == 0)
+                {
+                    var semi = code.IndexOf(';', i);
+                    return semi < 0 ? -1 : semi + 1;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// The index of the <c>}</c> that closes the block containing <paramref name="from"/> — the method
+    /// body, for a statement at method level. Terminates on the first unmatched close rather than clamping
+    /// at zero, which is the walker bug that made two scanners miss real sites during #2888.
+    /// </summary>
+    private static int EndOfEnclosingBlock(string code, int from)
+    {
+        var depth = 0;
+
+        for (var i = from; i < code.Length; i++)
+        {
+            if (code[i] == '{')
+            {
+                depth++;
+            }
+            else if (code[i] == '}')
+            {
+                if (depth == 0)
+                {
+                    return i;
+                }
+
+                depth--;
+            }
+        }
+
+        return code.Length;
+    }
+
+    /// <summary>
     /// The two ceilings answer different questions, and this is the pin that says so in the only terms
     /// available without a store: where each one sits relative to the CONCURRENT band #2901 measured
     /// (24.4-64.1 s per read for ten concurrent 30-day reads, against 3.01 s for the same read alone).

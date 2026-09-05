@@ -1443,6 +1443,9 @@ public partial class MainWindow : Window
             }
         }));
 
+        /* The per-server reads are done; the fleet-totals read below does not contend with them. */
+        readFanOut.Release();
+
         var built = summaries.OfType<ServerSummaryItem>().ToList();
         StampTagPills(built);
 

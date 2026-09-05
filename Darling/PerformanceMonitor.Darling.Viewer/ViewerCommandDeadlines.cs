@@ -74,7 +74,7 @@ public static class ViewerCommandDeadlines
     /// <c>ConnectionTimeoutSeconds</c> (default 5) for a slot and then throws a CONNECT error, which
     /// misattributes a slow store to the network. Fifteen seconds is half the inherited 30 s, which
     /// halves that worst-case hold.</para>
-
+    ///
     /// <para><b>This value bounds a read issued ALONE, and only that</b> (#3004). The permit argument
     /// above says a concurrent fan-out is the state worth protecting the pool from; it does not say a
     /// solo read's ceiling can bound one. On the same rig, ten concurrent 30-day reads measured

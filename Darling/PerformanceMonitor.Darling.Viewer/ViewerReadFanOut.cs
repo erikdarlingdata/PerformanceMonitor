@@ -104,10 +104,24 @@ public static class ViewerReadFanOut
         }
 
         /// <summary>
+        /// Ends the declared width EARLY — call it as soon as the reads it describes have been joined, so
+        /// that anything the method does afterwards is not priced as contending with reads that have
+        /// already finished. Without it a method-scoped <c>using var</c> runs to the closing brace, and a
+        /// store read after the join inherits a contention count that is over by the whole fan-out; a
+        /// nested fan-out below it then multiplies against that stale count and lands on the pool ceiling.
+        ///
+        /// <para>Idempotent, and safe to pair with <c>using</c>: both this and <see cref="Dispose"/> write
+        /// the same saved value, so the second write is a no-op and an exception between them still
+        /// restores. That is why this is a plain method on a <c>readonly struct</c> rather than a flag —
+        /// there is no state to keep, only a value to put back.</para>
+        /// </summary>
+        public void Release() => s_width.Value = _restore;
+
+        /// <summary>
         /// Restores the enclosing width on THIS context. Reads already in flight branched their context
         /// when they were created, so they keep the width they were given — which is the point: the
         /// declaring frame returns from <c>Task.WhenAll</c> long before the store does.
         /// </summary>
-        public void Dispose() => s_width.Value = _restore;
+        public void Dispose() => Release();
     }
 }
