@@ -124,6 +124,22 @@ public sealed class LiveCleanupConversionRatchetTests
     /// tree changes verdict, which is precisely why it was cheap to narrow now instead of on the day it
     /// silenced something.</para>
     ///
+    /// <para><b><c>File.</c> and <c>Directory.</c> are deliberately NOT narrowed the same way.</b> They
+    /// carry the same over-breadth in principle — <c>tempFile.Delete()</c> contains <c>File.</c> — and
+    /// measured, neither is matched that way in this tree: over the same 237 blocks, the bare token and an
+    /// identifier-boundary form exclude the same set, and both of the blocks <c>File.</c> excludes are
+    /// genuine static <c>File.Delete</c> calls. What decides it is what the narrowed form would COST.
+    /// <c>.Kill(</c> still matches every idiomatic spelling of a process kill, because a kill is an
+    /// instance call however the variable is named; a boundary-anchored <c>File.</c> would match only the
+    /// STATIC helper, so file teardown written through a <c>FileInfo</c> or <c>DirectoryInfo</c> —
+    /// <c>root.Delete(recursive: true)</c>, the idiom in seven files here and in the planted-tree pin
+    /// below — becomes a reported offender. The report then asks its author to wrap the block in
+    /// <see cref="LiveStoreCleanup"/>, whose <c>RunAsync</c> OPENS A STORE CONNECTION, for teardown that
+    /// touches no store. An over-broad exclusion fails toward a silent miss, which is the wrong direction
+    /// for a guard; a narrow one here would fail toward a loud demand to do the wrong thing, which is
+    /// worse, and unlike the kill there is no narrow pattern covering every real spelling of file
+    /// teardown.</para>
+    ///
     /// <para>Read as a SET by the sweep and asserted as one by
     /// <see cref="EveryNonStoreTeardownTokenIsPinned"/>, so a token added here without a case arrives
     /// unexercised and fails rather than passing quietly.</para>
