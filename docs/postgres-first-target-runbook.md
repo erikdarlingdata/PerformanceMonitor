@@ -474,7 +474,7 @@ re-probes the target — which is how a promoted reader stops being gated as a s
 | Autovacuum health reports everything fine on a cluster you know is behind | you are reading a **reader**. It reports all zeros, not an error. Measured: writer 13,654,458 dead tuples, reader 0, same cluster and tables |
 | Added a target to darling.json and nothing happened | the store was already seeded; use `add_servers` (step 2) |
 | `pg_wait_stats` and `pg_top_queries` empty, everything else fine | not Aurora. Core PostgreSQL has no cumulative wait counters at all |
-| Only some databases in `pg_autovacuum_stats` | by design: `datallowconn` and non-template only, minus your `excludedDatabases` |
+| Only some databases in `pg_autovacuum_stats` | by design: `datallowconn` and non-template only, minus `rdsadmin` on a managed instance (it rejects every customer principal) and your `excludedDatabases` |
 | Store stopped compressing after adding targets | background workers (step 4). Silent — check the postmaster log for "out of background workers" |
 
 ## 11. Removing a target
