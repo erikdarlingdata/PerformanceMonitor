@@ -202,6 +202,13 @@ public class StoreLogSelfMonitoringStoreTests
         Assert.Contains("CROSS JOIN buckets", DarlingStoreLogReader.ClassCensusSql, StringComparison.Ordinal);
         Assert.Contains("coalesce(h.occurrences, 0)", DarlingStoreLogReader.ClassCensusSql, StringComparison.Ordinal);
 
+        /* The tick count is DISTINCT capture_time, not count(*). One capture writes one row per FILE, so on
+           the hour a rotation falls in it writes two - and a tick count that could exceed the tick count
+           EXPECTED is one whose missing-interval comparison can never fire, which is the comparison this
+           denominator exists to make possible. */
+        Assert.Contains("count(DISTINCT w.capture_time)::bigint", DarlingStoreLogReader.CaptureSummarySql, StringComparison.Ordinal);
+        Assert.Contains("AS file_reads", DarlingStoreLogReader.CaptureSummarySql, StringComparison.Ordinal);
+
         /* The retained population is selected STRUCTURALLY (rows that have text) rather than by a class
            list, so it cannot drift from the classifier's own decision about which classes those are. */
         Assert.Contains("e.message_text IS NOT NULL", DarlingStoreLogReader.RetainedEventsSql, StringComparison.Ordinal);

@@ -68,7 +68,12 @@ newest AS
     WHERE n.capture_time = (SELECT max(m.capture_time) FROM windowed AS m)
 )
 SELECT
-    count(*)::bigint                                                AS captures,
+    /* DISTINCT capture_time, not count(*): one capture writes one row per FILE, so on the hour a rotation
+       falls in it writes two. Counting rows would make the tick count exceed the tick count EXPECTED and
+       the missing-interval comparison could then never fire, which is the one comparison this table exists
+       to make possible. file_reads carries the row count separately, where it means what it says. */
+    count(DISTINCT w.capture_time)::bigint                          AS captures,
+    count(*)::bigint                                                AS file_reads,
     count(DISTINCT date_trunc('hour', w.capture_time))::integer     AS capture_hours,
     coalesce(sum(w.bytes_read), 0)::bigint                          AS bytes_read,
     coalesce(sum(w.lines_read), 0)::bigint                          AS lines_read,
@@ -181,7 +186,12 @@ LIMIT $3";
     /// <summary>The capture denominator for the window.</summary>
     public sealed class CaptureSummary
     {
+        /// <summary>Sweep ticks that landed in the window — DISTINCT capture instants, not rows.</summary>
         [JsonPropertyName("captures")] public long Captures { get; init; }
+
+        /// <summary>File reads across those ticks. Higher than <see cref="Captures"/> exactly when a tick
+        /// spanned a log rotation and read the outgoing file as well as the incoming one.</summary>
+        [JsonPropertyName("file_reads")] public long FileReads { get; init; }
 
         [JsonPropertyName("capture_hours")] public int CaptureHours { get; init; }
 
@@ -459,17 +469,18 @@ LIMIT $3";
         return new CaptureSummary
         {
             Captures = reader.GetInt64(0),
-            CaptureHours = reader.GetInt32(1),
+            FileReads = reader.GetInt64(1),
+            CaptureHours = reader.GetInt32(2),
             CapturesExpected = windowHours,
-            BytesRead = reader.GetInt64(2),
-            LinesRead = reader.GetInt64(3),
-            EntriesRead = reader.GetInt64(4),
-            OffsetResets = reader.GetInt32(5),
-            MessagesFolded = reader.GetInt32(6),
-            FirstCaptureAt = reader.IsDBNull(7) ? null : Iso(reader.GetDateTime(7)),
-            LastCaptureAt = reader.IsDBNull(8) ? null : Iso(reader.GetDateTime(8)),
-            BytesPending = reader.GetInt64(9),
-            LogFiles = reader.IsDBNull(10) ? [] : reader.GetFieldValue<string[]>(10),
+            BytesRead = reader.GetInt64(3),
+            LinesRead = reader.GetInt64(4),
+            EntriesRead = reader.GetInt64(5),
+            OffsetResets = reader.GetInt32(6),
+            MessagesFolded = reader.GetInt32(7),
+            FirstCaptureAt = reader.IsDBNull(8) ? null : Iso(reader.GetDateTime(8)),
+            LastCaptureAt = reader.IsDBNull(9) ? null : Iso(reader.GetDateTime(9)),
+            BytesPending = reader.GetInt64(10),
+            LogFiles = reader.IsDBNull(11) ? [] : reader.GetFieldValue<string[]>(11),
         };
     }
 
