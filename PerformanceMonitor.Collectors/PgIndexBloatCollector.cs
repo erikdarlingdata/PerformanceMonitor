@@ -70,8 +70,8 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// <para><b>Why 20 GB and not more.</b> The only hard datum is a negative one: 286 GB of
     /// sub-ceiling index did NOT finish inside the 300-second deadline on a live Aurora target, so
     /// effective throughput there is below 0.95 GB/s and the true figure is unknown - a cut-off run
-    /// gives a lower bound on its own duration and nothing else. The <c>:61</c> "a few seconds of
-    /// I/O" figure beside the per-index ceiling is an estimate that was never measured, and the
+    /// gives a lower bound on its own duration and nothing else. The "a few seconds of I/O" figure in
+    /// <see cref="MeasureCeilingBytes"/>' own summary is an estimate that was never measured, and the
     /// live failure bounds it well away from that. So this is set an order of magnitude below the
     /// number that failed rather than derived from a throughput nobody has.</para>
     ///
