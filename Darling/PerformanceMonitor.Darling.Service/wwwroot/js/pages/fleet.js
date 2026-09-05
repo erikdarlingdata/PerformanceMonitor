@@ -476,15 +476,52 @@ function deadlockCoverageSub(coverage) {
     : { text: "read " + fmtInt(read) + " of " + fmtInt(total) + " " + noun, partial: true };
 }
 
+/*
+ * #3031: a stable id for one of a rollup tile's text rows, so the tile's NUMBER can point at it.
+ *
+ * Derived from the label rather than from a render counter so the relationship stays inspectable: whoever
+ * reads the DOM — an operator, a review, a check — can tell which figure "rollup-deadlocks-recent-sub"
+ * belongs to without counting siblings. `used` de-duplicates within one render, because two tiles sharing a
+ * label would emit a duplicate id and aria-describedby resolves a duplicate to the FIRST match: a silent
+ * mis-association rather than a visible break.
+ */
+function rollupTextId(lbl, part, used) {
+  const slug = String(lbl == null ? "" : lbl).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const base = "rollup-" + (slug || "tile") + "-" + part;
+  let id = base;
+  for (let n = 2; used.has(id); n++) id = base + "-" + n;
+  used.add(id);
+  return id;
+}
+
 function rollup(d) {
-  const tile = (num, lbl, cls, sub, title) =>
-    el("div", { class: "tile " + (cls || ""), title: title || null }, [
-      el("div", { class: "num", text: fmtInt(num) }),
-      el("div", { class: "lbl", text: lbl }),
+  /* #3031: every tile's number is programmatically tied to the text that says what it counts. The label and
+     the coverage sub-line carry stable ids and the number describes itself with them, so the figure and its
+     meaning travel together for a consumer that reaches the number's node on its own rather than browsing
+     the tile top to bottom. Reading order alone leaves that relationship inferable but not determinable, and
+     it is the same on all seven tiles — which is why it is wired once here in the helper and at no call site.
+
+     The label rides in aria-describedby rather than aria-label / aria-labelledby because .num is a plain
+     div: ARIA prohibits NAMING role=generic, so a name set there is invalid and may be dropped on the floor,
+     while a description is a supported property on it. Description is the carrier that works without
+     inventing a widget role for a static figure.
+
+     The coverage NOTE stays on the tile's title and out of describedby by design. It is a paragraph naming
+     both windows and every uncovered cause; announcing a paragraph on every pass over the number is worse
+     than the hover it would replace. The short coverage fact under the label is the accessible carrier, and
+     the note is detail on a signal that is already visible. */
+  const usedIds = new Set();
+  const tile = (num, lbl, cls, sub, title) => {
+    const lblId = rollupTextId(lbl, "lbl", usedIds);
+    const subId = sub ? rollupTextId(lbl, "sub", usedIds) : null;
+    return el("div", { class: "tile " + (cls || ""), title: title || null }, [
+      el("div", { class: "num", text: fmtInt(num), "aria-describedby": subId ? lblId + " " + subId : lblId }),
+      el("div", { class: "lbl", id: lblId, text: lbl }),
       /* The sub-line's colour tracks COVERAGE, not the tile's number severity: "read all 12 servers" under a
          red count is good news about a bad number and must not be painted as part of the alarm. */
-      sub ? el("div", { class: sub.partial ? "sub partial" : "sub", text: sub.text }) : null,
+      sub ? el("div", { class: sub.partial ? "sub partial" : "sub", id: subId, text: sub.text }) : null,
     ]);
+  };
 
   const coverage = d.deadlock_coverage;
   const deadlockSub = deadlockCoverageSub(coverage);
