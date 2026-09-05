@@ -195,14 +195,32 @@ LIMIT 5";
     }
 
     public const string ParameterSensitiveSql = @"
-WITH latest AS
+WITH svr AS
+(
+    -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
+    -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
+    -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
+    SELECT COALESCE
+    (
+        (
+            SELECT sp.utc_offset_minutes
+            FROM server_properties AS sp
+            WHERE sp.server_id = $1
+            AND   sp.utc_offset_minutes IS NOT NULL
+            ORDER BY sp.collection_time DESC
+            LIMIT 1
+        ),
+        0
+    ) AS offset_minutes
+),
+latest AS
 (
     SELECT
         database_name,
         query_hash,
         query_plan_hash,
         execution_count,
-        creation_time,
+        creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -215,7 +233,7 @@ WITH latest AS
             PARTITION BY database_name, query_hash, query_plan_hash
             ORDER BY collection_time DESC
         ) AS rn
-    FROM v_query_stats
+    FROM v_query_stats, svr
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
@@ -237,7 +255,7 @@ WHERE rn = 1
 AND   min_worker_time >= 10000
 AND   max_worker_time >= 250000
 AND   execution_count >= 20
-AND   creation_time <= $2
+AND   creation_time_utc <= $2
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
 ORDER BY worker_ratio DESC
 LIMIT 5";
@@ -280,7 +298,25 @@ LIMIT 5";
     }
 
     public const string RegressedQueriesSql = @"
-WITH psp_signature AS
+WITH svr AS
+(
+    -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
+    -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
+    -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
+    SELECT COALESCE
+    (
+        (
+            SELECT sp.utc_offset_minutes
+            FROM server_properties AS sp
+            WHERE sp.server_id = $1
+            AND   sp.utc_offset_minutes IS NOT NULL
+            ORDER BY sp.collection_time DESC
+            LIMIT 1
+        ),
+        0
+    ) AS offset_minutes
+),
+psp_signature AS
 (
     -- #2138 gap 3: the PARAMETER_SENSITIVITY detector's EXACT firing signature (same floors, same
     -- ratio, same analysis window) reduced to the (database, query_hash) set it would report. Using
@@ -297,7 +333,7 @@ WITH psp_signature AS
             query_hash,
             query_plan_hash,
             execution_count,
-            creation_time,
+            creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,
             min_worker_time,
             max_worker_time,
             ROW_NUMBER() OVER
@@ -305,7 +341,7 @@ WITH psp_signature AS
                 PARTITION BY database_name, query_hash, query_plan_hash
                 ORDER BY collection_time DESC
             ) AS rn
-        FROM v_query_stats
+        FROM v_query_stats, svr
         WHERE server_id = $1
         AND   collection_time >= $3
         AND   collection_time <= $4
@@ -315,7 +351,7 @@ WITH psp_signature AS
     AND   min_worker_time >= 10000
     AND   max_worker_time >= 250000
     AND   execution_count >= 20
-    AND   creation_time <= $3
+    AND   creation_time_utc <= $3
     AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
 ),
 deduped AS
