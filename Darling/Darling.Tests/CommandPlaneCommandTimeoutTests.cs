@@ -403,6 +403,76 @@ public sealed class CommandPlaneCommandTimeoutTests
     }
 
     /// <summary>
+    /// <c>ServiceCommandDeadlines.cs</c>'s doc comments are STRUCTURALLY intact — every
+    /// <c>&lt;summary&gt;</c> opens and closes, and no constant sits inside an open element.
+    ///
+    /// <para><b>This guards a merge artifact that has now bitten twice on this one file.</b> Four
+    /// groups append constants to it, and each group's block continues a <c>&lt;summary&gt;</c> that
+    /// its predecessor opened above the conflict hunk — so a keep-both-sides resolution leaves the
+    /// second block with a closing tag and no opening one. Group E hit it and reopened the element;
+    /// this group hit it and shipped it to CI, where <b>all six checks passed</b> on a file with 8
+    /// openings against 9 closings.</para>
+    ///
+    /// <para><b>Why <c>DocCommentHygieneTests</c> does not catch it.</b> That rule counts
+    /// <c>&lt;summary&gt;</c> OPENINGS per doc run and fails on two or more, which is the right shape
+    /// for the displaced-block defect it was written for. A run with ZERO openings satisfies it
+    /// vacuously. The same scan widened to require balance finds exactly ONE other offender in the
+    /// 2,108 <c>.cs</c> files of this repository — <c>Lite.Tests/FindingStoreTests.cs:656</c>, the
+    /// identical <c>opens=0 closes=1</c> shape — so the repo-wide rule is worth adding and is tracked
+    /// separately rather than folded into a deadline change. This assertion is the narrow version: the
+    /// one file where the trap is structural, with no cross-project surface.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeadlinesFile_HasBalancedSummaryElements()
+    {
+        var lines = File.ReadAllLines(SourcePath("ServiceCommandDeadlines.cs"));
+        var opens = 0;
+        var closes = 0;
+        var depth = 0;
+        var offenders = new List<string>();
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var opening = lines[i].Contains("<summary>", System.StringComparison.Ordinal)
+                && !lines[i].Contains("</summary>", System.StringComparison.Ordinal);
+            var closing = lines[i].Contains("</summary>", System.StringComparison.Ordinal)
+                && !lines[i].Contains("<summary>", System.StringComparison.Ordinal);
+
+            if (opening)
+            {
+                opens++;
+                depth++;
+            }
+
+            if (closing)
+            {
+                closes++;
+                depth--;
+            }
+
+            if (depth is < 0 or > 1)
+            {
+                offenders.Add($"line {i + 1}: nesting depth {depth}");
+            }
+
+            /* A constant reached while an element is still open means the block above it never closed,
+               which is the mirror of the tag it never opened. */
+            if (depth != 0 && lines[i].Contains("public const int", System.StringComparison.Ordinal))
+            {
+                offenders.Add($"line {i + 1}: a constant sits inside an unclosed <summary>");
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "ServiceCommandDeadlines.cs has malformed doc comments, which is what a keep-both-sides "
+            + $"merge of two groups' constants produces: {string.Join(", ", offenders)}");
+
+        Assert.Equal(opens, closes);
+        Assert.Equal(0, depth);
+    }
+
+    /// <summary>
     /// The four regimes stay DISTINCT. Two of them landing on the same number would mean one of the four
     /// derivations was not doing any work, and the cheapest way for this file to rot is for a later edit to
     /// converge them for tidiness.
