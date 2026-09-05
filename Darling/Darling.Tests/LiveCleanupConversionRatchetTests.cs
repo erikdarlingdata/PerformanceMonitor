@@ -60,6 +60,34 @@ namespace Darling.Tests;
 /// that split and nothing needs to: a class that both joins the shared collection and mints its own store is
 /// simply scanned, and a teardown on resources the test already holds is what <c>RunOwnedAsync</c> is for —
 /// the same answer that converted the two by-hand classes instead of exempting them.</para>
+///
+/// <para><b>Why the scratch-database classes are out of scope, as facts about the code (#3036).</b> #3014
+/// justified the exemption it inherited by saying the exempt files stand up their own throwaway CLUSTER.
+/// That is true of the two <c>#1776 own-store</c> classes that bootstrap the bundled runtime, and false of
+/// <see cref="ScratchPostgres"/>, whose own summary says it mints a database on the SHARED
+/// <c>DARLING_TEST_PG</c> server. Three separate facts put those classes out of this scan's reach, and "it
+/// has its own cluster" is not one of them. MEMBERSHIP: not one of the ten classes backed by the scratch
+/// helper APPLIES the attribute, so the code-reading test above leaves them unscanned without an exemption
+/// existing at all. SHAPE: not one <c>finally</c> in any of them tears down store state — all four delete a
+/// temp config file, which is the file-teardown exclusion's own case — so there is nothing here for
+/// <see cref="LiveStoreCleanup"/> to wrap. EQUIVALENCE: the scratch drop already holds both properties
+/// #1902 is about, and could not be given them by conversion in any case, being an <c>await using</c>
+/// rather than a <c>try</c>/<c>finally</c>. It runs on an admin connection it opens itself and could not
+/// run on the body's if it tried, because <c>DROP DATABASE</c> cannot be issued from inside the database it
+/// drops; and it cannot throw out of its teardown at all, so it can never replace the body's in-flight
+/// exception.</para>
+///
+/// <para><b>An abandoned scratch-database drop is tolerable because of what the code does, not because of
+/// the word "throwaway".</b> The database is named from a fresh <c>Guid</c>, so a leaked one collides with
+/// nothing a later run creates; the drop is <c>WITH (FORCE)</c> against a <c>Pooling=false</c> connection
+/// string, so no lingering connection can wedge it; the one live class that reads <c>pg_database</c>
+/// deliberately asserts no total count, BECAUSE these databases come and go, so a leak is invisible to the
+/// only test that could have noticed it; and the shared server is itself a cluster the workflow
+/// <c>initdb</c>s in the runner's temp directory and stops again around this suite, so a leak cannot
+/// outlive the job. What one costs is disk on a cluster that is about to be deleted. This ratchet exists to
+/// stop state being stranded for someone ELSE, and a scratch database strands none — but that is a fact
+/// about scratch DATABASES and not a licence for the classes that use them: one which joins the shared
+/// collection is scanned like anything else, pinned below in both directions.</para>
 /// </summary>
 public sealed class LiveCleanupConversionRatchetTests
 {
@@ -80,6 +108,27 @@ public sealed class LiveCleanupConversionRatchetTests
     /// </summary>
     private static readonly Regex FinallyBlock =
         new(@"(?<![A-Za-z0-9_])finally\s*\{", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Teardown that is not store state, and so has nothing to do with a connection and nothing for
+    /// <see cref="LiveStoreCleanup"/> to do: deleting a file or a directory, and killing a process the test
+    /// started.
+    ///
+    /// <para><b>Every token is the shape of a CALL, which <c>Kill</c> alone was not (#3036).</b> As a bare
+    /// substring it also matched <c>Killed</c> and <c>Killer</c>, so a teardown holding nothing more than a
+    /// <c>wasKilled</c> local excluded itself from the sweep. That direction matters: these are EXCLUSIONS,
+    /// so an over-broad one fails toward a MISSED offender, which is the half of a guard whose mistakes are
+    /// silent. Measured before narrowing rather than after: the bare token excluded 0 of the 237
+    /// <c>finally</c> blocks in the 120 files that apply the attribute, and the project's only real
+    /// <c>process.Kill(</c> sites sit in classes that are not in the collection at all — so no block in the
+    /// tree changes verdict, which is precisely why it was cheap to narrow now instead of on the day it
+    /// silenced something.</para>
+    ///
+    /// <para>Read as a SET by the sweep and asserted as one by
+    /// <see cref="EveryNonStoreTeardownTokenIsPinned"/>, so a token added here without a case arrives
+    /// unexercised and fails rather than passing quietly.</para>
+    /// </summary>
+    private static readonly string[] NonStoreTeardownTokens = ["File.", "Directory.", ".Kill("];
 
     /// <summary>What one sweep found, and the population it actually examined to find it.</summary>
     private readonly record struct Sweep(List<string> Offenders, int Files, int Blocks);
@@ -254,20 +303,226 @@ public sealed class LiveCleanupConversionRatchetTests
         Assert.Empty(sweep.Offenders);
     }
 
-    /// <summary>Every <c>*.cs</c> in the test project, as (file name, source) pairs.</summary>
+    /// <summary>
+    /// The first test file placed in a SUBDIRECTORY is scanned, and build output under the same root is
+    /// not (#3036).
+    ///
+    /// <para>The enumeration was <c>TopDirectoryOnly</c> while its sibling guard over this same project was
+    /// <c>AllDirectories</c> with a written rationale for it. Latent, because the project is flat — which is
+    /// what makes it worth a pin rather than a flag flip: the vacuity floor added with #3032 fails when the
+    /// population reaches zero, and a population missing exactly one subdirectory is not zero. Nothing about
+    /// a green run distinguishes "no offenders" from "never looked there".</para>
+    ///
+    /// <para>Every expectation is COUNTED from <see cref="PlantedTree"/> rather than written as a literal,
+    /// so a case added to that table cannot pass against a stale number, and the offenders are compared as
+    /// a SET of relative paths — which is what makes this one pin fail three different ways: drop the
+    /// recursion and the nested file leaves the population and the offender set empties; drop the build-output
+    /// filter and two generated files join both; report the bare file name again and the paths stop
+    /// matching.</para>
+    ///
+    /// <para>The root is planted under a directory literally named <c>bin</c>, so the exclusion is proven to
+    /// be judged relative to the scanned directory. Judged on the absolute path it would classify the whole
+    /// tree as build output and this sweep would report no offenders having read nothing at all, which is
+    /// the shape of every failure this file is about.</para>
+    /// </summary>
+    [Fact]
+    public void ANestedTestFileIsScannedAndBuildOutputIsNot()
+    {
+        var temporary = Directory.CreateTempSubdirectory("darling-live-cleanup-ratchet-");
+        try
+        {
+            var root = Path.Combine(temporary.FullName, "bin", "project");
+
+            foreach (var planted in PlantedTree())
+            {
+                var path = Path.Combine(
+                    root, planted.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, planted.Source);
+            }
+
+            var sweep = Scan(SourcesUnder(root));
+
+            var expectedFiles = PlantedTree().Count(planted => planted.Scanned);
+            var expectedBlocks = PlantedTree().Where(planted => planted.Scanned).Sum(planted => planted.Blocks);
+
+            Assert.True(sweep.Files == expectedFiles,
+                $"the sweep read {sweep.Files} of the {expectedFiles} planted source file(s). Too few means "
+                + "a subdirectory never reached the population — the whole defect — and too many means "
+                + "build output is being read as source.");
+
+            Assert.True(sweep.Blocks == expectedBlocks,
+                $"the sweep found {sweep.Blocks} finally block(s) where the planted files hold "
+                + $"{expectedBlocks}. The file count can be right while the blocks inside a nested file go "
+                + "unread, and this assertion is the one that separates them.");
+
+            var expected = PlantedTree()
+                .Where(planted => planted.Scanned && planted.Offends)
+                .Select(planted => planted.RelativePath)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+
+            /* Offenders are reported as path:line; the path is what this pin is about. */
+            var reported = sweep.Offenders
+                .Select(offender => offender[..offender.LastIndexOf(':')])
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+
+            Assert.True(reported.SequenceEqual(expected, StringComparer.Ordinal),
+                "the offenders reported are not the ones planted. Expected ["
+                + string.Join(", ", expected) + "], got [" + string.Join(", ", reported)
+                + "]. A missing nested path means the recursion is not reaching it; a bin or obj path means "
+                + "the build-output filter has come detached from the enumeration; a bare file name means a "
+                + "nested offender no longer says where it is.");
+        }
+        finally
+        {
+            temporary.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A class that mints its own scratch database is scanned anyway once it JOINS the shared collection
+    /// (#3036) — the direction the answer about scratch databases does not exempt.
+    ///
+    /// <para>No class in the project is in both states today, and that is the point: the reason the scratch
+    /// classes go unscanned is that they do not apply the attribute, not that minting a database is a
+    /// property that exempts anything. Add the attribute to one of them, or write a new class in both
+    /// states, and its teardown is read like any other — this is what stops "it has its own database" from
+    /// becoming the by-hand exemption <see cref="LiveStoreCleanup"/>'s two converted classes were denied.</para>
+    /// </summary>
+    [Fact]
+    public void MintingAScratchDatabaseDoesNotExemptAClassInTheSharedCollection()
+    {
+        var sweep = ScanOne(LiveClass(ScratchDatabaseTeardown("Drop();")));
+
+        Assert.Equal(1, sweep.Files);
+        Assert.Equal(1, sweep.Blocks);
+        Assert.Single(sweep.Offenders);
+    }
+
+    /// <summary>
+    /// The counterweight, and the other half of #3036's answer: a genuinely own-store scratch-database
+    /// class is not read at all, so its file teardown needs no conversion and its absence from the offender
+    /// list is not a near miss.
+    ///
+    /// <para>Shaped like the real ones — the <c>#1776 own-store</c> header that NAMES the attribute rather
+    /// than applying it, a scratch database minted in the body, and a <c>finally</c> that deletes a temp
+    /// config file. <c>Files</c> and <c>Blocks</c> are asserted at zero rather than only the offender list
+    /// being empty, because those two claims differ: an empty offender list is also what a scan that read
+    /// the file and wrongly excluded the block would produce.</para>
+    /// </summary>
+    [Fact]
+    public void AnOwnStoreScratchDatabaseClassIsNotReadAtAll()
+    {
+        var sweep = ScanOne(OwnStoreClass(ScratchDatabaseTeardown("File.Delete(configPath);")));
+
+        Assert.Equal(0, sweep.Files);
+        Assert.Equal(0, sweep.Blocks);
+        Assert.Empty(sweep.Offenders);
+    }
+
+    /// <summary>
+    /// Each non-store teardown token excludes the CALL it is for and leaves its near miss alone (#3036).
+    ///
+    /// <para>The near miss is the assertion that has teeth. <c>Kill</c> as a bare substring matched
+    /// <c>Killed</c>, so a <c>wasKilled</c> local in an otherwise unconverted teardown silenced it — and an
+    /// over-broad exclusion fails toward a MISSED offender, so nothing would have said so. Both halves are
+    /// asserted per token: without the excluded half, narrowing to the point of matching nothing would pass
+    /// the near-miss half on its own.</para>
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(NonStoreTeardownCases))]
+    public void ANonStoreTeardownIsExcludedAndItsNearMissIsNot(string token, string excluded, string nearMiss)
+    {
+        var excludedSweep = ScanOne(LiveClass(Teardown(excluded)));
+
+        Assert.Equal(1, excludedSweep.Blocks);
+        Assert.True(excludedSweep.Offenders.Count == 0,
+            $"'{excluded}' is the teardown '{token}' exists to exclude, and it was reported as an offender "
+            + "instead. Narrowing the token past the call it is for turns every real file, directory or "
+            + "process teardown in a live class into a false failure.");
+
+        var nearMissSweep = ScanOne(LiveClass(Teardown(nearMiss)));
+
+        Assert.Equal(1, nearMissSweep.Blocks);
+        Assert.True(nearMissSweep.Offenders.Count == 1,
+            $"'{nearMiss}' merely CONTAINS '{token}' and tears down store state, so it must be reported. "
+            + "It was not, which means the token is matching a substring rather than a call — an exclusion "
+            + "wide enough to silence an unconverted teardown, in the direction nothing complains about.");
+    }
+
+    /// <summary>
+    /// The tokens the sweep excludes on and the tokens pinned above are the same set.
+    ///
+    /// <para>A per-token pin list cannot see the set GROW: add a fourth exclusion to
+    /// <see cref="NonStoreTeardownTokens"/> and every case above still passes, having never exercised it.
+    /// Asserting the two as sets is what makes the new token's arrival the failure.</para>
+    /// </summary>
+    [Fact]
+    public void EveryNonStoreTeardownTokenIsPinned()
+    {
+        var scanned = NonStoreTeardownTokens.Order(StringComparer.Ordinal).ToArray();
+        var pinned = NonStoreTeardownPins.Select(pin => pin.Token).Order(StringComparer.Ordinal).ToArray();
+
+        Assert.True(scanned.SequenceEqual(pinned, StringComparer.Ordinal),
+            "the tokens the sweep excludes on and the tokens pinned by the theory above have drifted. "
+            + "Sweep: [" + string.Join(", ", scanned) + "]; pinned: [" + string.Join(", ", pinned)
+            + "]. Every one of these is an EXCLUSION, so an unexercised one fails toward a missed offender "
+            + "and nothing else in this file would report it.");
+    }
+
+    /// <summary>
+    /// Every <c>*.cs</c> SOURCE file in the test project, as (path relative to
+    /// <paramref name="directory"/>, source) pairs.
+    ///
+    /// <para><b>Recursive, for the reason the sibling guard already wrote down (#3036).</b>
+    /// <c>LivePostgresCollectionHygieneTests</c> enumerates this same project with
+    /// <see cref="SearchOption.AllDirectories"/> and says why: the project is flat today, so
+    /// <c>TopDirectoryOnly</c> is equivalent — and it also means the first test file someone puts in a
+    /// subfolder leaves this population silently, which is indistinguishable from a compliant tree and is
+    /// the failure mode the ratchet exists to prevent. The vacuity floor in the rule above catches the
+    /// population going to ZERO, not one subdirectory's worth of it never arriving.</para>
+    ///
+    /// <para><b>Build output is not source, and excluding it is load-bearing rather than defensive here.</b>
+    /// <c>Darling.Tests.csproj</c> copies three product <c>.cs</c> files into the output directory as
+    /// fixtures, so a BUILT tree really does hold <c>.cs</c> under <c>bin</c> — recursing without this would
+    /// read product source, generated <c>.AssemblyInfo.cs</c> and <c>.g.cs</c> as though they were tests.
+    /// The rule is <c>DocCommentHygieneTests</c>': whole path SEGMENTS, both separator characters, judged
+    /// RELATIVE to the scanned directory. A substring test eats <c>Objects</c> and <c>mybin</c>; an
+    /// absolute-path test excludes the entire tree whenever the checkout itself sits under a directory
+    /// called <c>bin</c>, and this sweep then reports no offenders having read nothing; and the host's
+    /// separator alone hands a Windows run and a macOS run different populations.</para>
+    ///
+    /// <para>The name reported is that relative path with <c>/</c> separators rather than the bare file
+    /// name, so a nested offender says where it is and says the same thing on either platform.</para>
+    /// </summary>
     private static IEnumerable<(string Name, string Source)> SourcesUnder(string directory) =>
-        Directory.EnumerateFiles(directory, "*.cs")
-            .OrderBy(p => p, StringComparer.Ordinal)
-            .Select(p => (Path.GetFileName(p), File.ReadAllText(p)));
+        Directory.EnumerateFiles(directory, "*.cs", SearchOption.AllDirectories)
+            .Select(path => (Name: Path.GetRelativePath(directory, path).Replace('\\', '/'), Path: path))
+            .Where(found => !IsBuildOutput(found.Name))
+            .OrderBy(found => found.Name, StringComparer.Ordinal)
+            .Select(found => (found.Name, File.ReadAllText(found.Path)));
+
+    /// <summary>
+    /// True when any whole SEGMENT of <paramref name="relativePath"/> is <c>bin</c> or <c>obj</c>, reading
+    /// both separator characters whatever the host's is. The path is already relative to the scanned
+    /// directory, which is what keeps a <c>bin</c> ABOVE that directory from excluding the whole tree.
+    /// </summary>
+    private static bool IsBuildOutput(string relativePath) =>
+        relativePath.Split('/', '\\')
+            .Any(segment => string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Every <c>finally</c> in a shared-store live class whose block does not go through
     /// <see cref="LiveStoreCleanup"/>, reported as <c>file:line</c>, alongside the counts of files and blocks
     /// the sweep examined.
     ///
-    /// <para>Own-store classes are not scanned for the same reason #1776 does not serialize them: they mint
-    /// and drop their own database, so an abandoned teardown cannot reach anyone else. That is decided by
-    /// whether the class APPLIES the collection attribute, not by anything it says about itself. File and
+    /// <para>Own-store classes are not scanned for the same reason #1776 does not serialize them, which
+    /// this class's summary states as properties of their teardown rather than as a claim about what they
+    /// mint: an abandoned one of theirs strands nothing another test can read. That is decided by whether
+    /// the class APPLIES the collection attribute, not by anything it says about itself. File, directory and
     /// process teardown is excluded because it is not store state and has nothing to do with a
     /// connection.</para>
     ///
@@ -310,9 +565,7 @@ public sealed class LiveCleanupConversionRatchetTests
                     continue;
                 }
 
-                if (block.Contains("File.", StringComparison.Ordinal)
-                    || block.Contains("Directory.", StringComparison.Ordinal)
-                    || block.Contains("Kill", StringComparison.Ordinal))
+                if (NonStoreTeardownTokens.Any(t => block.Contains(t, StringComparison.Ordinal)))
                 {
                     continue;
                 }
@@ -382,7 +635,63 @@ public sealed class LiveCleanupConversionRatchetTests
             string.Empty);
 
     /// <summary>A teardown that drops store state without going through <see cref="LiveStoreCleanup"/>.</summary>
-    private static readonly string UnconvertedTeardown = Lines(
+    private static readonly string UnconvertedTeardown = Teardown("Drop();");
+
+    /// <summary>The same teardown, converted — the compliant half of every planted tree above.</summary>
+    private static readonly string ConvertedTeardown =
+        Teardown("LiveStoreCleanup.RunAsync(ConnectionString, ok, Drop);");
+
+    /// <summary>
+    /// One planted source file: where it goes under the scanned root, what it holds, how many
+    /// <c>finally</c> blocks it holds, whether the sweep is meant to READ it, and whether its teardown is
+    /// an offender. The last two are separate on purpose: the build-output entries carry a non-compliant
+    /// teardown deliberately, so if the filter ever comes detached from the enumeration they turn up.
+    /// </summary>
+    private readonly record struct Planted(
+        string RelativePath, string Source, int Blocks, bool Scanned, bool Offends);
+
+    /// <summary>
+    /// The tree <see cref="ANestedTestFileIsScannedAndBuildOutputIsNot"/> plants, and the only place its
+    /// expectations are written down. A method rather than a field so it cannot depend on where the fixture
+    /// strings it composes are declared.
+    /// </summary>
+    private static Planted[] PlantedTree() =>
+    [
+        new("TopLevel.cs", LiveClass(ConvertedTeardown), 1, Scanned: true, Offends: false),
+        new("Nested/Deeper/NestedOffender.cs", LiveClass(UnconvertedTeardown), 1, Scanned: true, Offends: true),
+        /* Named LIKE build output and not build output — the half a substring filter gets wrong. */
+        new("Objects/NamedLikeOutput.cs", LiveClass(ConvertedTeardown), 1, Scanned: true, Offends: false),
+        new("bin/Debug/net10.0/Copied.cs", LiveClass(UnconvertedTeardown), 1, Scanned: false, Offends: true),
+        new("obj/Debug/net10.0/Generated.g.cs", LiveClass(UnconvertedTeardown), 1, Scanned: false, Offends: true),
+    ];
+
+    /// <summary>
+    /// Per token: the call it exists to exclude, and a near miss that merely contains it and must still be
+    /// reported. Read as the coverage set by <see cref="EveryNonStoreTeardownTokenIsPinned"/>, so this table
+    /// and <see cref="NonStoreTeardownTokens"/> cannot drift apart.
+    /// </summary>
+    private static readonly (string Token, string Excluded, string NearMiss)[] NonStoreTeardownPins =
+    [
+        ("File.", "File.Delete(configPath);", "var configFile = Drop();"),
+        ("Directory.", "Directory.Delete(spillDirectory, recursive: true);", "var directoryUsed = Drop();"),
+        (".Kill(", "process.Kill(entireProcessTree: true);", "var wasKilled = Drop();"),
+    ];
+
+    /// <summary>The same table as xUnit data, so the theory and the coverage pin read one source.</summary>
+    public static TheoryData<string, string, string> NonStoreTeardownCases()
+    {
+        var cases = new TheoryData<string, string, string>();
+
+        foreach (var pin in NonStoreTeardownPins)
+        {
+            cases.Add(pin.Token, pin.Excluded, pin.NearMiss);
+        }
+
+        return cases;
+    }
+
+    /// <summary>A test whose <c>finally</c> body is <paramref name="statement"/> and nothing else.</summary>
+    private static string Teardown(string statement) => Lines(
         "    [Fact]",
         "    public void T()",
         "    {",
@@ -392,7 +701,31 @@ public sealed class LiveCleanupConversionRatchetTests
         "        }",
         "        finally",
         "        {",
-        "            Drop();",
+        "            " + statement,
+        "        }",
+        "    }");
+
+    /// <summary>
+    /// The shape the scratch-database classes actually have: a database minted for this test alone, and a
+    /// <c>try</c>/<c>finally</c> inside it.
+    ///
+    /// <para>The helper's factory call is deliberately NOT spelled here.
+    /// <c>LivePostgresCollectionHygieneTests</c> keys its own membership rule on that exact string, so a
+    /// fixture containing it would enrol THIS class in that guard's population as a shared-store
+    /// toucher — a fixture changing what a different guard thinks of the file that holds it.</para>
+    /// </summary>
+    private static string ScratchDatabaseTeardown(string statement) => Lines(
+        "    [Fact]",
+        "    public async Task T()",
+        "    {",
+        "        await using var scratch = await MintAScratchDatabaseAsync(ct);",
+        "        try",
+        "        {",
+        "            Work(scratch.ConnectionString);",
+        "        }",
+        "        finally",
+        "        {",
+        "            " + statement,
         "        }",
         "    }");
 
