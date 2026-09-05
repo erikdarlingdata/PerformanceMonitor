@@ -25,7 +25,7 @@ WHAT THIS DOES AND DOES NOT CATCH, measured over 110 real merged PRs from this r
 
 Advisory, always exit 0, and it must never be marked a required check.
 """
-import argparse, json, os, re, sys
+import argparse, json, os, re, sys, tempfile
 
 # ---------------------------------------------------------------- body preprocessing
 FENCE = re.compile(r'(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$')
@@ -320,6 +320,25 @@ def self_test():
                    'patch': '@@ -1,3 +1,3 @@\n-    <PackageVersion Include="A" Version="0.2.0" />\n'
                             '+    <PackageVersion Include="A" Version="0.2.1" />'}])[0] == 'abstain')
     check('empty body abstains', assess('', FIXTURE_DIFF)[0] == 'abstain')
+    # A lookup that failed must not be able to fail the job (#2309). The workflow's own `[]`
+    # fallback depends on this, so pin every shape a broken diff arrives in -- and pin that each
+    # one WARNS, or a silent empty read would abstain looking exactly like a clean no-op.
+    said = []
+    check('a missing diff file loads as empty rather than raising',
+          load_files('/nonexistent/diffdesc-not-here.json', said.append) == [])
+    check('a malformed diff file loads as empty rather than raising',
+          load_files(__file__, said.append) == [])
+    check('both unreadable-diff cases warn', len(said) == 2)
+    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as handle:
+        json.dump([FIXTURE_DIFF, FIXTURE_DIFF], handle)     # the --slurp page-per-element shape
+        nested = handle.name
+    try:
+        check('a page-per-element diff list is flattened',
+              [f['filename'] for f in load_files(nested, said.append)]
+              == [FIXTURE_DIFF[0]['filename']] * 2)
+        check('flattening a well-formed nested list does not warn', len(said) == 2)
+    finally:
+        os.unlink(nested)
 
     failed = [n for n, ok in cases if not ok]
     for name, ok in cases:
@@ -352,6 +371,39 @@ def measure(corpus_dir):
     return 0
 
 
+def load_files(path, warn=None):
+    """The changed-file list, or an empty list plus a warning. Never raises.
+
+    Same rule as the workflow's lookup handling (#2309): this check is advisory, so an
+    unreadable or malformed diff must abstain loudly rather than exit non-zero and turn the
+    mark red for a reason that says nothing about the description.
+
+    `warn` is injectable so the self-test can assert the warning happened without emitting a
+    real annotation -- two bogus "could not read the diff" annotations on every healthy run
+    would be a check reporting its own tests as findings.
+    """
+    warn = warn if warn is not None else (lambda message: print(
+        f'::warning title=Description drift could not read the diff::{message}'))
+    if not path:
+        return []
+    try:
+        with open(path, encoding='utf-8') as handle:
+            files = json.load(handle)
+    except (OSError, ValueError) as problem:
+        warn(f'{problem}. The description was NOT compared against the diff on this run.')
+        return []
+    if isinstance(files, dict):
+        files = files.get('files', [])
+    if not isinstance(files, list):
+        return []
+    # A page-per-element array is what `gh api --paginate --slurp` hands back for this endpoint.
+    # The workflow flattens before writing, but tolerate the nested shape so a future caller
+    # that does use --slurp gets a verdict rather than a silent zero-file abstain.
+    if files and isinstance(files[0], list):
+        files = [entry for page in files for entry in page]
+    return [f for f in files if isinstance(f, dict)]
+
+
 # ---------------------------------------------------------------- entry point
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -371,14 +423,7 @@ def main():
     # expression: it is author-controlled text on a public repo, and interpolating it into a
     # shell would be a script-injection seam.
     body = os.environ.get('PR_BODY', '')
-    files = json.load(open(args.files)) if args.files else []
-    if isinstance(files, dict):
-        files = files.get('files', [])
-    # A page-per-element array is what `gh api --paginate --slurp` hands back for this endpoint.
-    # The workflow flattens before writing, but tolerate the nested shape so a future caller
-    # that does use --slurp gets a verdict rather than a silent zero-file abstain.
-    if files and isinstance(files[0], list):
-        files = [entry for page in files for entry in page]
+    files = load_files(args.files)
 
     verdict, missing, hit = assess(body, files)
     print(f'verdict: {verdict} (named-and-present {len(hit)}, named-and-absent {len(missing)})')

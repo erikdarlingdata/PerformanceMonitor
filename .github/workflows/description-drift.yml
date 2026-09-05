@@ -41,7 +41,8 @@ jobs:
       # The extractor is the whole check, and its filtering is tuned against a measured flag
       # rate rather than derived from anything. Running its own assertions first means a change
       # that quietly widens what counts as a symbol reports here instead of in the flag rate
-      # weeks later. This is the only step that can fail the job, and only on its own logic.
+      # weeks later. This is the ONLY step that can fail the job: the two below cannot, by the
+      # lookup handling and the always-zero exit documented on each.
       - name: Self-test the extractor
         run: python3 .github/scripts/ci_description_symbol_drift.py --self-test
 
@@ -52,13 +53,23 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          set -euo pipefail
+          # Deliberately NOT `set -e`: a lookup failure is not a verdict (#2309, same repo). This
+          # check is advisory, so a rate limit, a 5xx or a network blip must abstain loudly rather
+          # than turn the mark red for a reason that has nothing to do with the description.
+          set -uo pipefail
           # `--jq '.[]'` then `jq -s .` rather than `--slurp`: this endpoint returns an array per
           # page, and --slurp would hand back an array OF pages that reads as one file entry per
           # page. Emitting elements and re-slurping flattens to one array at any page count.
-          gh api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[]' \
-            | jq -s . > diffdesc-files.json
-          echo "changed files: $(jq 'length' diffdesc-files.json)"
+          if ! gh api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[]' \
+               2>diffdesc-lookup-error.txt | jq -s . > diffdesc-files.json; then
+            echo "::warning title=Description drift lookup failed::gh api (pulls/$PR/files) failed:"\
+              "$(head -c 300 diffdesc-lookup-error.txt). The description was NOT compared against"\
+              "the diff on this run -- re-run this check to get a verdict."
+            # An empty list is what the script reads as "no diff to compare", which it reports as
+            # an abstention rather than as a finding.
+            echo '[]' > diffdesc-files.json
+          fi
+          echo "changed files: $(jq 'length' diffdesc-files.json 2>/dev/null || echo unknown)"
 
       - name: Compare the description against the diff
         if: github.event_name == 'pull_request'
