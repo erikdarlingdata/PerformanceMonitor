@@ -854,15 +854,25 @@ SELECT sum(total_runs), sum(total_successes), sum(total_failures) FROM timescale
 
 ### Retention
 
-A purge runs on the first sweep after startup and then daily, driven by the same shared per-collector horizons Lite uses:
+A purge runs on the first sweep after startup and then daily, and it does not draw from a single source. Every **collector** table takes its horizon from the shared per-collector `CollectorScheduleDefaults` Lite also uses (fleet-wide overrides layer on top); the non-collector tables purged alongside them each carry their own horizon, listed beneath the table.
 
-| Horizon | Tables |
+| Horizon | Collector tables |
 |---|---|
-| 7 days | `query_snapshots`, `waiting_tasks`, `running_jobs` |
-| 30 days | Most collector tables (wait/query/procedure/Query Store stats, CPU, memory, file I/O, tempdb, perfmon, deadlocks, blocking, sessions, config snapshots), plus `collection_log` and `analysis_findings` |
-| 90 days | `database_size_stats`, `index_object_stats`, `pvs_stats` |
-| 365 days | `server_properties` |
-| 365 days | `collect.plan_force_actions`, the auto force-plan bot's decision journal — a **fixed** horizon (`DarlingRetention.PlanForceLedgerRetentionDays`) rather than a per-collector one, and deliberately the longest in the store: it audits a bot *writing* to production servers rather than measuring them, so it has to outlive the metrics that motivated each decision. Append-only, never a hypertable, so it purges by bounded DELETE |
+| 7 days | `query_snapshots`, `waiting_tasks`, `running_jobs`, `agent_status` |
+| 14 days | `pg_plan_capture` |
+| 30 days | Most collector tables (wait/query/procedure/Query Store stats, CPU, memory, file I/O, tempdb, perfmon, deadlocks, blocking, sessions, config snapshots) |
+| 90 days | `database_size_stats`, `index_object_stats`, `pvs_stats`, and the PostgreSQL bloat/vacuum/replication families (`pg_table_bloat_stats`, `pg_index_bloat`, `pg_index_usage_stats`, `pg_autovacuum_stats`, `pg_replication_slots`, `pg_wraparound_stats`, `pg_deadlocks`) |
+| 365 days | `server_properties`, `job_history`, `pg_server_config`, `pg_column_stats`, `pg_extension_availability`, `pg_plan_capture_readiness` |
+
+`CollectorScheduleDefaults.cs` is the authority for that half; the rows above are its distinct horizon values, not a hand-maintained copy of every entry.
+
+**The non-collector tables**, purged on the same daily tick, each for its own reason:
+
+- **`collection_log` — 60 days**, deliberately **2x** the 30-day base window (`DarlingRetention.DataRetentionBaseDays`) rather than equal to it: a collector run-record has to outlive the metric rows it explains. At an equal horizon a failed collection and the data you would diagnose it against expire the same night, which erases the evidence at exactly the moment someone finally goes looking for it.
+- **`config_alert_log` — 90 days.** Fired-alert history is low-volume and a useful audit trail, so the horizon is generous, but it is bounded — this purge is the only thing that ever deletes from it.
+- **`collect.plan_force_actions` — 365 days** (`DarlingRetention.PlanForceLedgerRetentionDays`), the auto force-plan bot's decision journal and deliberately the longest horizon in the store: it audits a bot *writing* to production servers rather than measuring them, so it has to outlive the metrics that motivated each decision. Append-only, and never a hypertable because `action_id` is an identity primary key its own `related_action_id` points back to, so it purges by bounded `DELETE`.
+- **`config.config_command` — 30 days, terminal rows only.** A `pending` or `in_progress` row is **never purged at any age**, because deleting a live command would strand the caller polling it. An abandoned `in_progress` row is the stale-command reaper's problem, not retention's — the reaper marks it failed, which makes it terminal and purgeable — and an ancient `pending` row means the service has not run it yet.
+- **`analysis_findings` — 30 days**, purged by `PgFindingStore.CleanupOldFindingsAsync` on the same tick rather than by the sweep above. It is also not a hypertable — it was designed keyless so it could become one, but the conversion is deliberately not made until finding volume warrants it — so it purges by `DELETE` on every store.
 
 On plain PostgreSQL the purge is DELETE-based. With TimescaleDB it switches to `drop_chunks` — a metadata-only detach of whole expired chunks (rows inside a partially-expired chunk survive until the whole chunk ages out; up to ~1 day of grace at the 1-day chunk width), with a per-table DELETE fallback for any table that is not a hypertable. Failure-isolated per table: one stuck purge is logged and retried the next day without stopping the sweep.
 
