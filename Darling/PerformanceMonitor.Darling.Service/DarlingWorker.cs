@@ -6075,7 +6075,16 @@ LIMIT 1";
            The fault arms have no split to report, because a fault by definition interrupted whichever
            phase was running, and what they recorded instead was three literal zeros. That made a
            300-second death indistinguishable from an instant one and sent two separate investigations
-           after a connection that dies at open. One honest total beats three precise zeros. */
+           after a connection that dies at open. One honest total beats three precise zeros.
+
+           WHICH SLOT each arm reads this into follows where the time was actually spent, not
+           convenience: an arm whose statement reached the target and was refused THERE passes it as
+           sqlMs, and an arm that never queried the target at all passes it as storageMs. The RDS/PI
+           authorization arms are the second kind, and take the accounting their own success paths
+           already use — see IngestRdsPlansAsync, IngestRdsDeadlocksAsync and IngestRdsCpuAsync, which
+           file an HTTPS round trip as storage time so that one target's sql_duration_ms cannot mean
+           something different from every other target's. duration_ms is sqlMs + storageMs either way,
+           so the wall clock is honest under both; only the decomposition differs. */
         var runClock = System.Diagnostics.Stopwatch.StartNew();
 
         try
@@ -6174,7 +6183,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName, ex.Message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (RdsLogUnavailableException ex) when (ex.IsAuthorizationFailure)
@@ -6192,7 +6201,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0,
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
                 $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: plan capture on managed PostgreSQL reads the server log through "
                 + "the RDS API, so the role needs rds:DescribeDBLogFiles and rds:DownloadDBLogFilePortion "
@@ -6210,7 +6219,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0,
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
                 $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: instance CPU on managed PostgreSQL reads AWS Performance Insights, "
                 + "so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters and "
@@ -6237,7 +6246,17 @@ LIMIT 1";
                wrong zone reading as a target with no deadlocks.
 
                Both transports arrive here: the pg_read_file route throws out of the collector's ReadAsync,
-               the RDS log-API route out of the ingestor's Extract. */
+               the RDS log-API route out of the ingestor's Extract.
+
+               That shared arrival is also why this is the ONE fault arm that records zeros rather than
+               runClock's wall clock. The slot rule at the stopwatch's declaration keys on whether the
+               target was queried, and the two transports answer that oppositely: pg_read_file IS a target
+               query and belongs in sqlMs, while the RDS log API is an HTTPS round trip that belongs in
+               storageMs. The exception carries only ObservedZone, so this catch cannot tell which one it
+               is, and either slot would be wrong for half the fleet. A zero here understates a duration;
+               a guessed slot would misattribute one, and this store's readers decompose sql vs storage
+               per target. Threading the transport onto PgLogTimezoneUnsupportedException is what would
+               let this arm join the rule. */
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the server log is stamped '{Zone}', not UTC",
                 server.Config.DisplayName, collectorName, ex.ObservedZone);
 
@@ -6262,7 +6281,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "YIELDED", 0, 0, 0,
+                _postgres!, runtime, collectorName, "YIELDED", 0, runClock.ElapsedMilliseconds, 0,
                 $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
@@ -6287,7 +6306,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName, ex.Number, message);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         /* #2997: the database is read off the EXCEPTION first, falling back to the runtime's own. #2638
@@ -6328,7 +6347,7 @@ LIMIT 1";
             }
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                _postgres!, runtime, collectorName, status, 0, runClock.ElapsedMilliseconds, 0, explanation, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         /* yieldsOnLockTimeout: false is deliberate, and matches the general catch below rather than the

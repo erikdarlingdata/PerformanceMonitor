@@ -489,6 +489,55 @@ public class PostgresFaultOutcomeTests
             worker);
     }
 
+    /// <summary>
+    /// The CLASSIFIED fault arms record the run's real elapsed time too, in the slot the time was actually
+    /// spent - the sibling of <see cref="TheErrorArmsRecordRealElapsedTimeRatherThanLiteralZeros"/> one
+    /// classification down.
+    ///
+    /// <para>Pinned in the source for the same reason that one is: the value is written by
+    /// <c>LogCollectionAsync</c> inside a live sweep, so no pure test can observe it, and the defect is an
+    /// argument list rather than a logic error.</para>
+    ///
+    /// <para><b>Why the SLOT is counted and not merely the presence of a clock.</b> An arm whose statement
+    /// reached the target and was refused THERE owes its time to <c>sqlMs</c>; an arm that never queried the
+    /// target owes it to <c>storageMs</c>, which is what the three RDS-API ingestors already do so that one
+    /// target's <c>sql_duration_ms</c> cannot mean something different from every other target's. Both
+    /// spellings produce an honest <c>duration_ms</c>, because that column is <c>sqlMs + storageMs</c> - so a
+    /// test that only looked for a stopwatch would pass on an arm filing an HTTPS round trip as target time,
+    /// which is the one mistake here that is invisible in the very column this pin exists to protect.</para>
+    /// </summary>
+    [Fact]
+    public void TheClassifiedFaultArmsRecordElapsedTimeInTheSlotTheTimeWasSpent()
+    {
+        var worker = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        /* Refused ON the target: the statement got there, so the wall clock is target-side. */
+        Assert.Equal(1, Regex.Matches(worker, @"""SESSION_MISSING"", 0, runClock\.ElapsedMilliseconds, 0").Count);
+        Assert.Equal(1, Regex.Matches(worker, @"""YIELDED"", 0, runClock\.ElapsedMilliseconds, 0").Count);
+        Assert.Equal(1, Regex.Matches(worker, @"""PERMISSIONS"", 0, runClock\.ElapsedMilliseconds, 0, message").Count);
+
+        /* The SQLSTATE arm passes a COMPUTED status rather than a literal, which is why it is invisible to a
+           census keyed on the status strings and earns its own pin here. */
+        Assert.Equal(1, Regex.Matches(worker, @"collectorName, status, 0, runClock\.ElapsedMilliseconds, 0").Count);
+
+        /* Never queried the target - the RDS log API and Performance Insights are both HTTPS. */
+        Assert.Equal(2, Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, runClock\.ElapsedMilliseconds").Count);
+
+        /* And exactly ONE arm still writes three zeros: the log_timezone arm, whose two transports
+           disagree about which slot is correct, documented at the arm itself. Counted rather than asserted
+           absent arm by arm, so an arm ADDED with three zeros reds HERE instead of passing unnoticed until
+           someone re-runs the census by hand.
+
+           Anchored on the CALL's shape (the collector name, then a status literal or the computed `status`)
+           rather than on a bare ", 0, 0, 0," run. The bare form counts 1 today too, but it would also match
+           any unrelated four-argument call elsewhere in this 6,600-line file, and a pin that reds on a
+           change it does not guard is a pin someone eventually loosens. This form still catches a new arm
+           whether it passes a literal status or a computed one. */
+        Assert.Equal(1, Regex.Matches(worker, @"collectorName, (?:""[A-Z_]+""|status), 0, 0, 0,").Count);
+        Assert.Equal(1, Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, 0, ex\.Message").Count);
+    }
+
     private static string ReadSource(string relativePath)
     {
         var dir = AppContext.BaseDirectory;
