@@ -23,8 +23,8 @@ namespace Darling.Tests;
 /// judgement and described five pins as asking it; #2940 made it six, #2966 seven, #2972 nine. Every one of
 /// those drifts was invisible, because a count written in a doc comment has nothing checking it. The
 /// enumerated LIST beside the count rotted the same way, which is the worse half: a reader looking for the
-/// adopters found four names and no hint that others existed. So the set is written down once, here, and
-/// the build re-derives it from the tree.</para>
+/// adopters found the pins named at extraction time and no hint that others had joined. So the set is
+/// written down once, here, and the build re-derives it from the tree.</para>
 ///
 /// <para><b>Both halves are declared, and the second is what earns this test.</b> Listing the adopters
 /// catches a pin that quietly STOPS calling the scanner. Listing the abstainers catches the likelier case:
