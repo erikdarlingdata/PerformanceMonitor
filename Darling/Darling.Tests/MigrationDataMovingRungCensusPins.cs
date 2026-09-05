@@ -412,6 +412,72 @@ public sealed class MigrationDataMovingRungCensusPins
             "DO $$ BEGIN EXECUTE format('CREATE INDEX %I ON %I (a)', 'ix', 'old'); END $$;");
     }
 
+    /// <summary>
+    /// #2894 residual 2: no rung may trap its OWN cancellation. This is the one rung shape that defeats
+    /// <c>PgMigrations.MigrationCommandTimeoutSeconds</c> SILENTLY, and it is one word from a shape the
+    /// ladder already contains.
+    ///
+    /// <para><b>Why this is a defect and not a style preference, measured on PostgreSQL 17.11.</b>
+    /// <c>WHEN OTHERS</c> deliberately does not match <c>query_canceled</c>, which is what makes V23's
+    /// <c>DO</c> block safe: cancelled mid-<c>create_hypertable</c>, its handler does not run, 57014
+    /// propagates, and the applier fails the rung and stamps nothing. Naming the condition instead
+    /// reverses every part of that. A <c>DO</c> block whose handler is <c>WHEN query_canceled</c> and
+    /// whose body was cancelled at its 2 s budget returned to the applier as SUCCESS; the applier
+    /// committed the rung and would have stamped its version, while the body's own write never happened.
+    /// So the store ends up permanently recorded at a version whose rung did nothing — which is exactly
+    /// the property <c>MigrationLockWaitTimeoutSeconds</c>' expiry split rests on ("a stamp of N proves
+    /// rung N and everything below it committed"), and it fails silently in the one direction nothing
+    /// downstream can detect.</para>
+    ///
+    /// <para><b>Green here has to mean something.</b> The ladder contains zero occurrences of either
+    /// spelling today, so the assertion alone would pass against a scan that had stopped scanning, or
+    /// against a comment stripper that had eaten the executable text. Three controls, each failing for a
+    /// different reason: the pattern fires on a rung that DOES trap the cancel; the ladder still holds a
+    /// real exception handler for the scan to be looking at (V23's, and after stripping it is the
+    /// handler rather than the sentence in V23's own comment describing it); and a rung carrying the
+    /// token in executable text is still found when a comment sits beside it.</para>
+    /// </summary>
+    [Fact]
+    public void NoRungTrapsItsOwnCancellation()
+    {
+        var offenders = PgMigrations.Scripts
+            .Where(m => s_cancelTrap.IsMatch(StripComments(m.Sql)))
+            .Select(m => $"V{m.Version.ToString(CultureInfo.InvariantCulture)} ({m.Name})")
+            .ToList();
+
+        Assert.True(
+            offenders.Count == 0,
+            "Rung(s) name their own cancellation condition: "
+            + string.Join(", ", offenders)
+            + ". A plpgsql handler that matches query_canceled (or SQLSTATE '57014') CATCHES the cancel "
+            + "MigrationCommandTimeoutSeconds sends, unlike WHEN OTHERS, which does not match it. "
+            + "Measured: the applier then sees the rung SUCCEED, commits it and stamps its version while "
+            + "the rung's work never happened, leaving the store permanently stamped at a version it "
+            + "never really reached — and the lock-wait expiry split reads that stamp as proof. Let the "
+            + "cancel out (WHEN OTHERS, or no handler), or if a rung genuinely must observe its own "
+            + "cancellation, re-raise it and re-derive both budgets in the same commit.");
+
+        /* Control 1: the pattern fires on the shape. Without it, a pattern that matched nothing at all
+           would read as a clean ladder. */
+        Assert.Matches(
+            s_cancelTrap,
+            "DO $$ BEGIN PERFORM pg_sleep(600); EXCEPTION WHEN query_canceled THEN NULL; END $$;");
+
+        /* Control 2: the scan is reading executable plpgsql, not an empty string. V23 is the ladder's
+           only exception handler and its own comment ALSO names WHEN OTHERS, so this is asserted on the
+           stripped text — which is the same delivery the assertion above uses. */
+        Assert.Contains(
+            PgMigrations.Scripts,
+            m => s_exceptionHandler.IsMatch(StripComments(m.Sql)));
+
+        /* Control 3: stripping comments must not blind the scan to executable text beside them. */
+        Assert.Matches(
+            s_cancelTrap,
+            StripComments(
+                "/* deliberately does not trap the cancel */\n"
+                + "DO $$ BEGIN NULL; EXCEPTION WHEN SQLSTATE '57014' THEN NULL; END $$;"));
+    }
+
     private sealed record DeclaredRung(int Version, bool SetsTheFloor, string Why);
 
     /// <summary>One data-moving statement: which rung, which shape, which table, and who created it.</summary>
@@ -450,6 +516,18 @@ public sealed class MigrationDataMovingRungCensusPins
     private static readonly Regex s_dynamicSql = new(
         @"\bEXECUTE\s+(?!FUNCTION\b|PROCEDURE\b)|\bformat\s*\(",
         Opts);
+
+    /// <summary>
+    /// The cancel condition, by either spelling PostgreSQL accepts for it. Deliberately a bare TOKEN
+    /// search rather than an attempt to parse a handler's condition list: a rung's executable SQL has no
+    /// legitimate reason to name its own cancellation at all, so anything that does is worth a human
+    /// look, and a token cannot be defeated by a condition list spelled in an order the pattern did not
+    /// anticipate (<c>WHEN OTHERS OR query_canceled</c>, <c>WHEN SQLSTATE '57014'</c>).
+    /// </summary>
+    private static readonly Regex s_cancelTrap = new(@"query_canceled|57014", Opts);
+
+    /// <summary>Any plpgsql exception handler, used only as this scan's own liveness control.</summary>
+    private static readonly Regex s_exceptionHandler = new(@"\bEXCEPTION\b[\s\S]{0,40}?\bWHEN\b", Opts);
 
     /// <summary>
     /// Shapes whose cost depends on WHOSE table it is: free when the rung created the table itself
