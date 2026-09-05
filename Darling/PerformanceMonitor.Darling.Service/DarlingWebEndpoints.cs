@@ -13,6 +13,7 @@ using System.Linq;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -87,14 +88,130 @@ public static class DarlingWebEndpoints
     private const int DefaultFleetHours = 1;
 
     /// <summary>
+    /// What <c>GET /api/ping</c> answers, as an object rather than a literal (#2953). <c>HttpStatus</c> is not
+    /// serialized — it is the same verdict expressed in the one field a load balancer or uptime check reads
+    /// without parsing a body.
+    /// </summary>
+    /// <param name="HttpStatus">200 while nothing is known to be wrong with collection, 503 once something is.</param>
+    /// <param name="Status">The machine-readable state: <c>ok</c>, <c>starting</c>, <c>degraded</c> or <c>stopped</c>.</param>
+    /// <param name="Collecting">The same answer as one bit, for a check that wants no string comparison at all.</param>
+    /// <param name="Step">Which startup step failed (<c>configuration</c>, <c>managed_store</c>, <c>store</c>); omitted otherwise.</param>
+    /// <param name="Attempt">The retry in flight and the cap it counts against; both omitted outside <c>degraded</c>.</param>
+    /// <param name="Attempts">The attempt cap the retry budget allows.</param>
+    /// <param name="Detail">The failure message, as the service's own log line reports it; omitted when there is none.</param>
+    /// <param name="SinceUtc">When this state began — collection start, or when the failure was last observed.</param>
+    internal sealed record PingReport(
+        [property: JsonIgnore] int HttpStatus,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("collecting")] bool Collecting,
+        [property: JsonPropertyName("step")] string? Step,
+        [property: JsonPropertyName("attempt")] int? Attempt,
+        [property: JsonPropertyName("attempts")] int? Attempts,
+        [property: JsonPropertyName("detail")] string? Detail,
+        [property: JsonPropertyName("since")] DateTime? SinceUtc);
+
+    /// <summary>Omits the null members so each ping state carries only the fields that mean something in it —
+    /// a <c>degraded</c> body has an attempt count and an <c>ok</c> body does not, rather than every body
+    /// carrying nulls a check has to know to ignore.</summary>
+    internal static readonly JsonSerializerOptions PingJsonOptions = new()
+    {
+        WriteIndented = false,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
+    /// <summary>
+    /// Turns the collector's published verdict into the ping response (#2953). Pure over the snapshot so the
+    /// whole four-state table is unit-pinned without a server or a store, exactly as
+    /// <c>DarlingWebHostService.DecideWebAction</c> pins the supervisor's.
+    ///
+    /// <para><b>The four states, and how an external monitor tells them apart.</b> The status CODE separates
+    /// "collection is not a known problem" from "collection is not running", because that is the only field a
+    /// load balancer or an uptime check reads without parsing JSON; the <c>status</c> string then separates the
+    /// four:</para>
+    /// <list type="bullet">
+    /// <item><description><b>200 <c>ok</c></b> — the collection loop started. Byte-compatible with what this
+    /// route always answered for the healthy case, so an existing check that asserts <c>status: ok</c> keeps
+    /// passing and only stops passing when something is genuinely wrong.</description></item>
+    /// <item><description><b>200 <c>starting</c></b> — the worker has not reached a verdict yet. 200 rather than
+    /// 503 deliberately: this is the ordinary state for the first seconds of every service start, and a check
+    /// that alarmed here would alarm on every restart. It is bounded — the worker publishes one of the other
+    /// three, and a terminal stand-down publishes <c>stopped</c> before it returns, so this cannot be where a
+    /// dead collector comes to rest.</description></item>
+    /// <item><description><b>503 <c>degraded</c></b> — a collection-blocking startup step failed transiently and
+    /// is being retried. 503 because collection is not happening; self-clearing because the failure was
+    /// classified retryable, so within <c>StartupFailureTriage.RetryBudget</c> this becomes <c>ok</c> or
+    /// <c>stopped</c>.</description></item>
+    /// <item><description><b>503 <c>stopped</c></b> — a collection-blocking startup step failed terminally.
+    /// Collection does not start for the life of this process; <c>detail</c> carries what the critical log line
+    /// says, and the fix is to correct that and restart. This is the state the whole issue is about: it used to
+    /// answer <c>200 ok</c>.</description></item>
+    /// </list>
+    ///
+    /// <para><b>Why 503 and not 200-with-a-body.</b> The reporting failure is that automation was told the
+    /// service was fine — and automation reads the code. A body-only signal would leave every existing uptime
+    /// check exactly as wrong as it is now. The cost is that a load balancer health-checking this route pulls
+    /// the host from rotation during a store outage, which is the correct verdict for an API whose data all
+    /// comes from that store; the dashboard's static surface and its other routes are untouched, so a human can
+    /// still open the UI directly and read the reason out of this body.</para>
+    /// </summary>
+    internal static PingReport DescribePing(CollectorRuntimeState.Snapshot? snapshot)
+    {
+        if (snapshot is null)
+        {
+            return new PingReport(StatusCodes.Status200OK, "starting", false, null, null, null, null, null);
+        }
+
+        return snapshot.Phase switch
+        {
+            CollectorRuntimeState.CollectorPhase.Collecting =>
+                new PingReport(StatusCodes.Status200OK, "ok", true, null, null, null, null, snapshot.AsOfUtc),
+
+            CollectorRuntimeState.CollectorPhase.Retrying =>
+                new PingReport(
+                    StatusCodes.Status503ServiceUnavailable, "degraded", false, DescribeStartupStep(snapshot.Step),
+                    snapshot.Attempt, snapshot.Attempts, snapshot.Detail, snapshot.AsOfUtc),
+
+            CollectorRuntimeState.CollectorPhase.Stopped =>
+                new PingReport(
+                    StatusCodes.Status503ServiceUnavailable, "stopped", false, DescribeStartupStep(snapshot.Step),
+                    null, null, snapshot.Detail, snapshot.AsOfUtc),
+
+            /* Default-deny to the loudest answer: a phase this method does not know about is a phase whose
+               health it cannot vouch for, and the whole point of the route is that it does not report healthy
+               on a state it has not reasoned about. */
+            _ => new PingReport(
+                StatusCodes.Status503ServiceUnavailable, "stopped", false, DescribeStartupStep(snapshot.Step),
+                null, null, snapshot.Detail, snapshot.AsOfUtc),
+        };
+    }
+
+    /// <summary>The wire name for a startup step — snake_case like the store's own identifiers, and an explicit
+    /// map rather than the enum name so renaming the enum cannot silently change a public response field.</summary>
+    private static string? DescribeStartupStep(CollectorRuntimeState.StartupStep? step)
+        => step switch
+        {
+            CollectorRuntimeState.StartupStep.Configuration => "configuration",
+            CollectorRuntimeState.StartupStep.ManagedStore => "managed_store",
+            CollectorRuntimeState.StartupStep.Store => "store",
+            _ => null,
+        };
+
+    /// <summary>
     /// Maps the web dashboard's HTTP endpoints onto <paramref name="app"/>, reading from <paramref name="postgres"/>
     /// (the VIEWER-role store pool). Called ONCE from the web host's pipeline, after the auth middleware and before
     /// the static files. Every route lives under <c>/api/*</c> so the SPA's static surface never collides.
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector)
     {
-        /* Liveness probe (Builder 1's stub, kept): proves the host is up and the pipeline reaches the API. */
-        app.MapGet("/api/ping", () => Results.Json(new { status = "ok" }));
+        /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
+           makes it the only one that can answer when the store IS the problem — so it reports the collector's
+           actual verdict instead of a hardcoded "ok". See DescribePing for the four states and their status
+           codes, and CollectorRuntimeState for why that verdict is an in-process field rather than a row. */
+        app.MapGet("/api/ping", () =>
+        {
+            var report = DescribePing(collector.Read());
+            return Results.Json(report, PingJsonOptions, statusCode: report.HttpStatus);
+        });
 
         /* The four analysis-READ tools take a DarlingAnalysisService; the web host does not register one, so
            build it once here from the same VIEWER-role pool (its read methods — fact collection, period compare,

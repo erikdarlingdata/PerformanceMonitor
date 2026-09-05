@@ -544,13 +544,23 @@ public sealed class DarlingWorker : BackgroundService
        encrypted_password SELECT-carve fails that whole read). */
     private readonly MonitoredServerRegistryState _registryState;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState)
+    /* #2953: the collector's own startup verdict, published to the web host so /api/ping can report whether
+       collection is actually running WITHOUT reading the store. The other three seams carry control-plane
+       values the store is the authority for; this one carries the one fact the store cannot be asked about,
+       because the failure it reports is the store being unreachable. Every collection-blocking exit below
+       publishes before it returns — a stand-down that completes the worker task successfully, leaves the host
+       up and the Windows service reporting Running, and diagnoses itself only in a file log, is otherwise
+       indistinguishable from a healthy service on every automated surface there is. */
+    private readonly CollectorRuntimeState _collectorState;
+
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
         _mcpState = mcpState;
         _webState = webState;
         _registryState = registryState;
+        _collectorState = collectorState;
     }
 
     private sealed class ServerLoopState
@@ -739,11 +749,14 @@ public sealed class DarlingWorker : BackgroundService
                     "or unreadable one does not and is not retried.",
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
+                _collectorState.PublishRetrying(
+                    CollectorRuntimeState.StartupStep.Configuration, ex.Message, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex)
             {
                 _logger.LogCritical("Cannot load configuration: {Message}", ex.Message);
+                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration, ex.Message);
                 return;
             }
         }
@@ -761,6 +774,12 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _logger.LogCritical("Configuration problem: {Problem}", problem);
             }
+
+            /* #2953: every problem, joined, rather than the first — Validate is all-fatal and reports the whole
+               set, so a ping body carrying one of several would send an operator to fix a config that still
+               does not start. */
+            _collectorState.PublishStopped(
+                CollectorRuntimeState.StartupStep.Configuration, string.Join("; ", problems));
             return;
         }
 
@@ -807,6 +826,10 @@ public sealed class DarlingWorker : BackgroundService
                 _logger.LogCritical(
                     "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
                     "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
+                _collectorState.PublishStopped(
+                    CollectorRuntimeState.StartupStep.ManagedStore,
+                    "postgres.managed = true requires Windows; set postgres.managed = false and point "
+                    + "postgres.connectionString at your own PostgreSQL instead.");
                 return;
             }
 
@@ -853,11 +876,14 @@ public sealed class DarlingWorker : BackgroundService
                         "not retried.",
                         ex.Message, attempt, StartupFailureTriage.Attempts,
                         (int)StartupFailureTriage.RetryDelay.TotalSeconds);
+                    _collectorState.PublishRetrying(
+                        CollectorRuntimeState.StartupStep.ManagedStore, ex.Message, attempt, StartupFailureTriage.Attempts);
                     await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
                 }
                 catch (Exception ex)
                 {
                     _logger.LogCritical("Managed Postgres bootstrap failed: {Message}", ex.Message);
+                    _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore, ex.Message);
                     return;
                 }
             }
@@ -1124,11 +1150,17 @@ public sealed class DarlingWorker : BackgroundService
                     "and collection does not start.",
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
+                _collectorState.PublishRetrying(
+                    CollectorRuntimeState.StartupStep.Store, ex.Message, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogCritical("Cannot reach or migrate the Postgres store: {Message}", ex.Message);
+                /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
+                   predates this seam; publishing first would put a new call between the failure and the one
+                   message an operator greps for. */
+                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store, ex.Message);
                 return;
             }
         }
@@ -1524,6 +1556,12 @@ public sealed class DarlingWorker : BackgroundService
         }
 
         _logger.LogInformation("PerformanceMonitor Darling collection loop started");
+        /* #2953: the one publish that clears the failure phases. Set HERE — the last statement before the
+           sweep loop's first iteration — and not re-published per cycle: this seam answers "did collection
+           start", which is the question no other surface could answer without the store. Whether the CURRENT
+           sweep is succeeding is collection_log's question, and by this point collection_log exists to be
+           asked. */
+        _collectorState.PublishCollecting();
 
         while (!stoppingToken.IsCancellationRequested)
         {
