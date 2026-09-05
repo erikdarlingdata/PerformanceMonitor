@@ -267,6 +267,14 @@ public class PostgresFaultOutcomeTests
         Assert.Contains("CLIENT-SIDE", client, StringComparison.Ordinal);
         Assert.DoesNotContain("57014", client, StringComparison.Ordinal);
 
+        /* And it names no KNOB. This arm fires for every PostgreSQL collector classified as
+           CommandTimeout, but only two of them set CommandTimeoutSecondsOverride - the rest use
+           DarlingCollectorRunner.CommandTimeoutSeconds - so naming the override would be false for most
+           of the collectors that can reach here and would send an operator after a setting that
+           collector does not have. The measured elapsed time is what the deadline actually was. */
+        Assert.DoesNotContain("CommandTimeoutSecondsOverride", client, StringComparison.Ordinal);
+        Assert.DoesNotContain("CommandTimeoutSecondsOverride", server, StringComparison.Ordinal);
+
         Assert.Contains("CANCELLED BY THE SERVER", server, StringComparison.Ordinal);
         Assert.Contains("57014", server, StringComparison.Ordinal);
         Assert.Contains("statement_timeout", server, StringComparison.Ordinal);

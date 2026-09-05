@@ -229,7 +229,7 @@ ORDER BY k.index_bytes DESC";
     private const string BudgetLiteral = "200";
 
     /* Kept in the C# type system as well as in the SQL literal so a reader has one authoritative
-       figure and CycleByteBudgetIsThePinnedConstant can pin that the two agree. */
+       figure and TheBudgetLiterals_AgreeWithTheirConstants can pin that the two agree. */
     private const string CycleByteBudgetLiteral = "21474836480";
 
     /// <summary>

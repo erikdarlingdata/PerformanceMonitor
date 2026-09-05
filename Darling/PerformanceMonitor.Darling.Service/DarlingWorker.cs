@@ -5948,13 +5948,20 @@ LIMIT 1";
               + "57014) — the target's own statement_timeout expired, so the deadline that fired is on "
               + "the monitored server, not here. Nothing was collected this cycle: this is NOT 'there "
               + "was nothing to collect'."
+            /* "its command timeout", never the name of a knob. This arm fires for EVERY PostgreSQL
+               collector classified as CommandTimeout, and only two of them set
+               CommandTimeoutSecondsOverride at all - the rest fall back to
+               DarlingCollectorRunner.CommandTimeoutSeconds. Naming the override would therefore be
+               false for most collectors that can reach here, and would send an operator looking for a
+               setting that collector does not have. The MEASURED elapsed time above says what the
+               deadline actually was, which is the more useful number anyway: it is what applied,
+               rather than what was configured somewhere. */
             : $"{collectorName} on {where} hit its CLIENT-SIDE command deadline after {elapsed} ms — "
-              + "the collector's CommandTimeoutSecondsOverride expired and Npgsql cancelled the read "
-              + "mid-stream, which is why the transport reports 'Exception while reading from stream' "
-              + "with no SQLSTATE. The statement was still running when it was cut off, so the work "
-              + "asked for does not fit the deadline; raising the deadline is the wrong half of that "
-              + "and shrinking the work is the right one. Nothing was collected this cycle: this is "
-              + "NOT 'there was nothing to collect'.";
+              + "its command timeout expired and Npgsql cancelled the read mid-stream, which is why the "
+              + "transport reports 'Exception while reading from stream' with no SQLSTATE. The statement "
+              + "was still running when it was cut off, so the work asked for does not fit the deadline; "
+              + "raising the deadline is the wrong half of that and shrinking the work is the right one. "
+              + "Nothing was collected this cycle: this is NOT 'there was nothing to collect'.";
     }
 
     /// <summary>
