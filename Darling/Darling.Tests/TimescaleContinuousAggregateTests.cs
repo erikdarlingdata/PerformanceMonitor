@@ -116,13 +116,149 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void ContinuousAggregatePolicy_IsTheConservativeHourlyShape_Idempotent()
     {
-        var sql = TimescaleSupport.AddContinuousAggregatePolicySql(TimescaleSupport.QueryStatsHourlyView);
+        var sql = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.QueryStatsHourlyView);
 
         Assert.Contains("add_continuous_aggregate_policy('collect.query_stats_hourly'", sql, StringComparison.Ordinal);
-        Assert.Contains("start_offset => INTERVAL '3 days'", sql, StringComparison.Ordinal);
         Assert.Contains("end_offset => INTERVAL '1 hour'", sql, StringComparison.Ordinal);
         Assert.Contains("schedule_interval => INTERVAL '1 hour'", sql, StringComparison.Ordinal);
         Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// TREATMENT ONE of #3012, pinned ALONE so that reverting it is red here even if the stagger survives.
+    ///
+    /// <para>An hourly refresh's cost is set by the window it re-scans, and a 3-day window against a 4-day raw
+    /// retention re-materialized roughly three quarters of the hypertable every hour. Measured on the
+    /// production store: the heaviest hourly refresh ran 3,301-6,330 s against its own 1-hour cadence — 118-175%
+    /// of it, so each run started into the tail of the last — while rows arriving per hour FELL ~3x. On the
+    /// narrowed window the same refresh runs 864 s, 24% of cadence, which is what makes the overlap
+    /// structurally impossible rather than merely absent.</para>
+    ///
+    /// <para>Asserted for EVERY hourly view rather than the heavy one alone: the defect was a shared default,
+    /// so a fix that reached only the aggregate named in the incident would leave twelve behind.</para>
+    /// </summary>
+    [Fact]
+    public void HourlyRefreshWindow_IsOneDay_NotTheRawRetentionHorizon()
+    {
+        Assert.Equal("1 day", TimescaleSupport.HourlyRefreshStartOffset);
+        Assert.Equal(TimeSpan.FromDays(1), TimescaleSupport.HourlyRefreshStartSpan);
+        Assert.Equal("1 hour", TimescaleSupport.HourlyRefreshScheduleInterval);
+        Assert.Equal(TimeSpan.FromHours(1), TimescaleSupport.HourlyRefreshScheduleSpan);
+
+        foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
+        {
+            var sql = TimescaleSupport.AddHourlyRefreshPolicySql(view);
+
+            Assert.Contains("start_offset => INTERVAL '1 day'", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("start_offset => INTERVAL '3 days'", sql, StringComparison.Ordinal);
+        }
+
+        /* The window is now chosen against its own cadence, and raw retention only has to clear it — the
+           opposite of the dependency that made the refresh expensive, where the window had to cover a depth
+           retention chose. Both directions asserted so neither can be narrowed into the other. */
+        Assert.True(TimescaleSupport.HourlyRefreshStartSpan < TimescaleSupport.RawRetentionSpan,
+            "raw retention must outlive the hourly refresh window, or a drop outruns the aggregate meant to preserve it");
+        Assert.True(TimescaleSupport.HourlyRefreshScheduleSpan < TimescaleSupport.HourlyRefreshStartSpan,
+            "a refresh window narrower than its own cadence would leave buckets no run ever covers");
+    }
+
+    /// <summary>
+    /// TREATMENT TWO of #3012, pinned ALONE so that reverting it is red here even if the narrowing survives.
+    ///
+    /// <para>The heaviest hourly refresh is still ~33x its lightest sibling on the narrowed window, so 864 s
+    /// has to be invisible to everything else rather than merely short. Two things do that, and the second is
+    /// the less obvious one:</para>
+    ///
+    /// <para><b>Distinct minutes of the hour.</b> A refresh holds <c>AccessShareLock</c> on what it reads; a
+    /// compression policy on that same hypertable queues an <c>AccessExclusiveLock</c> request behind it; and a
+    /// QUEUED exclusive request blocks every subsequent shared request, so collector store-writes convoy behind
+    /// a lock nobody holds. Policies that share a hypertable therefore have to start at different times, which
+    /// is why the <c>query_store_stats</c> family's slots are asserted DISTINCT rather than merely present.</para>
+    ///
+    /// <para><b>A fixed schedule.</b> Naming <c>initial_start</c> is what switches TimescaleDB from
+    /// finish-to-start to start-to-start scheduling. Under finish-to-start, one bad hour phase-locks a family
+    /// permanently — the incident's three jobs, on unrelated schedules with very different workloads, finished
+    /// within 119 seconds of each other and then re-started together every hour after that. The offsets without
+    /// the fixed schedule would drift back into coincidence the first time a run overran.</para>
+    /// </summary>
+    [Fact]
+    public void HourlyRefreshPolicies_AreStaggeredAcrossTheHour_OnAFixedSchedule()
+    {
+        Assert.Equal(15, TimescaleSupport.RefreshPhaseStepMinutes);
+        Assert.Equal(4, TimescaleSupport.RefreshPhaseSlots);
+
+        /* Thirteen hourly refreshes: the six named rollups plus the seven baseline aggregates. */
+        Assert.Equal(13, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+
+        foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
+        {
+            var phase = TimescaleSupport.RefreshPhaseMinutesFor(view);
+            Assert.Contains(phase, new[] { 0, 15, 30, 45 });
+
+            var sql = TimescaleSupport.AddHourlyRefreshPolicySql(view);
+            Assert.Contains(
+                $"initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '{phase.ToString(CultureInfo.InvariantCulture)} minutes'",
+                sql,
+                StringComparison.Ordinal);
+        }
+
+        /* The lock adjacency the convoy actually formed on: the hourly policies over the query_store_stats
+           family must not be coincident with each other. */
+        var family = new[]
+        {
+            TimescaleSupport.QueryStoreStatsHourlyView,
+            TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+        };
+
+        var slots = family.Select(TimescaleSupport.RefreshPhaseMinutesFor).ToArray();
+        Assert.Equal(slots.Length, slots.Distinct().Count());
+
+        /* UTC, not the session time zone: a bare date_trunc('hour', now()) lands off-grid on the half-hour and
+           quarter-hour zones, which is a store-wide silent skew rather than a local oddity. */
+        var anchored = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.QueryStatsHourlyView);
+        Assert.Contains("now() AT TIME ZONE 'UTC'", anchored, StringComparison.Ordinal);
+        Assert.DoesNotContain("date_trunc('hour', now())", anchored, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The phase grid is keyed on the VIEW, and nothing shipped carries a job id.
+    ///
+    /// <para>#3012's evidence names job ids in the 1050s. Those exist only on the store it was measured
+    /// against and would name entirely different jobs anywhere else, so a fix that encoded one would be
+    /// correct on exactly one deployment. The converge path recovers the view name with a join rather than
+    /// reading an id, because a refresh job's own <c>hypertable_name</c> is the aggregate's per-deployment
+    /// materialization hypertable.</para>
+    /// </summary>
+    [Fact]
+    public void RefreshPolicyIdentity_IsTheView_NeverAJobId()
+    {
+        var read = TimescaleSupport.ContinuousAggregateRefreshStateSql;
+
+        Assert.Contains("j.proc_name = 'policy_refresh_continuous_aggregate'", read, StringComparison.Ordinal);
+        Assert.Contains("ca.view_name", read, StringComparison.Ordinal);
+        Assert.Contains("ca.materialization_hypertable_name = j.hypertable_name", read, StringComparison.Ordinal);
+        Assert.Contains("ca.view_schema = 'collect'", read, StringComparison.Ordinal);
+
+        /* Compared as SECONDS, so '1 day' / '1 day 00:00:00' / '24:00:00' cannot read as a difference and
+           re-alter the same job on every start; and the phase read in UTC for the same reason the write is. */
+        Assert.Contains("EXTRACT(EPOCH FROM (j.config->>'start_offset')::interval)::bigint", read, StringComparison.Ordinal);
+        Assert.Contains("EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int", read, StringComparison.Ordinal);
+
+        var write = TimescaleSupport.SetContinuousAggregateRefreshSql;
+
+        /* The job id reaches alter_job ONLY as a bound parameter, cast ::integer (the #1586 trap). */
+        Assert.Contains("j.job_id = $1::integer", write, StringComparison.Ordinal);
+        Assert.Contains("jsonb_set(j.config, '{start_offset}', to_jsonb($2::text))", write, StringComparison.Ordinal);
+        Assert.Contains("fixed_schedule => true", write, StringComparison.Ordinal);
+        Assert.Contains("initial_start =>", write, StringComparison.Ordinal);
+
+        /* Every un-named alter_job parameter means "leave unchanged", so the converge cannot arm a paused job
+           or retune a cadence. Naming `scheduled` here would weaken #1680's never-expose-an-armed-window
+           discipline through a path that has nothing to do with retention. */
+        Assert.DoesNotContain("scheduled =>", write, StringComparison.Ordinal);
+        Assert.DoesNotContain("schedule_interval =>", write, StringComparison.Ordinal);
+        Assert.DoesNotContain("next_start =>", write, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -204,16 +340,52 @@ public sealed class TimescaleContinuousAggregateTests
         Assert.Contains("WITH NO DATA", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The DAILY tier keeps its 3-day window and stays OFF the phase grid — the regression #3012 invites is a
+    /// tidy-up that makes every refresh window "consistent".
+    ///
+    /// <para>Narrowing this would trade nothing for a correctness risk. A daily job's 3-day window is 3 days
+    /// of scan against an 86,400-second cadence rather than a 3,600-second one, so it was never near its own
+    /// schedule interval and never appeared in the convoy; and the 3 days are the buffer
+    /// <see cref="TimescaleSupport.HourlyRetentionInterval"/> leans on, so the hourly rollups' drop at 90 days
+    /// can never outrun the daily aggregate meant to preserve that history.</para>
+    ///
+    /// <para><see cref="TimescaleSupport.RefreshPhaseMinutesFor"/> is asserted to THROW for every daily view,
+    /// which is what stops one being dragged onto the grid by a caller that only knows it has a view name.</para>
+    /// </summary>
     [Fact]
     public void DailyPolicy_UsesOneDayEndOffsetAndSchedule_KeepsThreeDayStart()
     {
-        var sql = TimescaleSupport.AddContinuousAggregatePolicySql(TimescaleSupport.QueryStatsDailyView, "1 day", "1 day");
+        Assert.Equal("3 days", TimescaleSupport.DailyRefreshStartOffset);
+        Assert.Equal(TimeSpan.FromDays(3), TimescaleSupport.DailyRefreshStartSpan);
 
-        Assert.Contains("add_continuous_aggregate_policy('collect.query_stats_daily'", sql, StringComparison.Ordinal);
-        Assert.Contains("start_offset => INTERVAL '3 days'", sql, StringComparison.Ordinal);
-        Assert.Contains("end_offset => INTERVAL '1 day'", sql, StringComparison.Ordinal);
-        Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);
-        Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+        foreach (var view in new[]
+        {
+            TimescaleSupport.QueryStatsDailyView,
+            TimescaleSupport.ProcedureStatsDailyView,
+            TimescaleSupport.QueryStoreStatsDailyView,
+            TimescaleSupport.QueryStoreStatsCorrectedDailyView,
+            TimescaleSupport.QueryStatsDbDailyView,
+            TimescaleSupport.QueryStoreStatsIntervalDailyView,
+            TimescaleSupport.QueryStoreStatsDayGrainDailyView,
+        })
+        {
+            var sql = TimescaleSupport.AddDailyRefreshPolicySql(view);
+
+            Assert.Contains($"add_continuous_aggregate_policy('collect.{view}'", sql, StringComparison.Ordinal);
+            Assert.Contains("start_offset => INTERVAL '3 days'", sql, StringComparison.Ordinal);
+            Assert.Contains("end_offset => INTERVAL '1 day'", sql, StringComparison.Ordinal);
+            Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);
+            Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+
+            /* No initial_start: the daily tier keeps TimescaleDB's finish-to-start scheduling, untouched. */
+            Assert.DoesNotContain("initial_start", sql, StringComparison.Ordinal);
+
+            Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.RefreshPhaseMinutesFor(view));
+        }
+
+        Assert.True(TimescaleSupport.DailyRefreshStartSpan < TimescaleSupport.HourlyRetentionSpan,
+            "the hourly rollups' retention must outlive the daily refresh window, or a drop outruns the daily aggregate");
     }
 
     [Fact]
@@ -229,9 +401,11 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void RetentionTiers_RawFourDays_HourlyNinetyDays_StayPastTheNextRefreshWindow()
     {
-        /* The buffers the whole tiering rests on: raw's 4d stays past the hourly CAGG's 3d refresh start; the
-           hourly CAGGs' 90d stays past the daily CAGG's 3d refresh start. Either dropping below 3 days would let a
-           drop outrun the aggregate meant to preserve that history.
+        /* The buffers the whole tiering rests on: raw's 4d stays past the hourly CAGG's refresh start; the
+           hourly CAGGs' 90d stays past the daily CAGG's refresh start. Either horizon dropping below the
+           refresh window beneath it would let a drop outrun the aggregate meant to preserve that history —
+           asserted against the refresh constants themselves in HourlyRefreshWindow_IsOneDay_... and
+           DailyPolicy_UsesOneDayEndOffsetAndSchedule_..., so the pair cannot drift.
 
            The hourly number is 90 rather than 21 since #1937, and the reason is a READ one rather than a refresh
            one: the viewer offers month-plus windows, and at 21 days a 30-day view could not render at hourly

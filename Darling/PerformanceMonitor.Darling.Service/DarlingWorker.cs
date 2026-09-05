@@ -1233,13 +1233,23 @@ public sealed class DarlingWorker : BackgroundService
                 // in the composer-dimension shape (no-op once reshaped, and on a fresh store nothing matches).
                 await TimescaleSupport.DropStaleContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
                 await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
+
+                /* #3012: same if_not_exists no-op as the compression tick above, on the refresh policies. The
+                   CREATE carries the narrowed 1-day window and the 15-minute phase grid, but a store that ever
+                   ran an older build keeps re-materializing three days every hour — cost set by the window, so
+                   it grows with the hypertable and eventually outruns its own cadence, at which point a queued
+                   compression exclusive lock convoys every collector store-write behind it. Only selects
+                   policies that DIFFER, and only hourly ones, so the daily tier keeps its 3-day window and a
+                   settled store is a no-op. */
+                await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(timescaleConnection, _logger, stoppingToken);
+
                 // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly HISTORY CAGGs 90d per #1937, daily
                 // history kept indefinitely; the interval-dedup and baseline tiers carry their own, #1958).
                 await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);
 
                 /* #1757: the baseline aggregates ship WITH NO DATA and their refresh policy only ever covers
-                   the trailing 3 days, so without this they would answer a 30-day question with 3 days of
-                   supply. DELIBERATELY LAUNCHED, NOT AWAITED: it is a bulk materialization whose cost scales
+                   the trailing TimescaleSupport.HourlyRefreshStartOffset, so without this they would answer a
+                   30-day question with a day of supply. DELIBERATELY LAUNCHED, NOT AWAITED: it is a bulk materialization whose cost scales
                    with however much history the store already had, and every step below this block — the
                    composer tuning, the delta re-seed, the collection loop itself — is sequenced after it.
                    Awaiting it here would take a restarted service dark for as long as the backfill runs,
@@ -2148,7 +2158,8 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>
     /// Materializes the baseline aggregates over the history the store already had (#1757), concurrently with
     /// the collection sweep rather than ahead of it. On a fresh store the coverage gate makes this a no-op; on
-    /// an upgraded store it is the one-time pass that turns a 3-day supply into the full baseline window.
+    /// an upgraded store it is the one-time pass that turns a refresh-window-deep supply into the full
+    /// baseline window.
     ///
     /// <para>Takes its OWN connection rather than borrowing the startup one: the caller's connection is scoped
     /// to the TimescaleDB setup block and is disposed the moment that block exits, which is long before this
