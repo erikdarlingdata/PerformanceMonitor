@@ -476,6 +476,34 @@ public sealed class MigrationDataMovingRungCensusPins
             StripComments(
                 "/* deliberately does not trap the cancel */\n"
                 + "DO $$ BEGIN NULL; EXCEPTION WHEN SQLSTATE '57014' THEN NULL; END $$;"));
+
+        /* Control 4: the token is bounded, so a longer digit run or a longer identifier that merely
+           CONTAINS it is not a finding (#2975 review). Both halves matter: without this the pattern
+           could be loosened back to a substring search and every assertion above would still pass,
+           while a rung with an unrelated 57014 in it would fail the build accused of trapping a
+           cancel. Each condition spelling is asserted here too, so the boundaries cannot be shown
+           harmless by only ever being tested on the one shape control 1 uses. */
+        foreach (var traps in new[]
+                 {
+                     "EXCEPTION WHEN query_canceled THEN NULL;",
+                     "EXCEPTION WHEN OTHERS OR query_canceled THEN NULL;",
+                     "EXCEPTION WHEN query_canceled OR OTHERS THEN NULL;",
+                     "EXCEPTION WHEN SQLSTATE '57014' THEN NULL;",
+                 })
+        {
+            Assert.Matches(s_cancelTrap, traps);
+        }
+
+        foreach (var innocent in new[]
+                 {
+                     "INSERT INTO collect.t (n) VALUES (5701400);",
+                     "ALTER TABLE collect.t ADD COLUMN port int NOT NULL DEFAULT 157014;",
+                     "UPDATE collect.t SET rows_collected = 570140 WHERE id = 1;",
+                     "ALTER TABLE collect.t ADD COLUMN my_query_canceled_flag boolean;",
+                 })
+        {
+            Assert.DoesNotMatch(s_cancelTrap, innocent);
+        }
     }
 
     private sealed record DeclaredRung(int Version, bool SetsTheFloor, string Why);
@@ -518,13 +546,24 @@ public sealed class MigrationDataMovingRungCensusPins
         Opts);
 
     /// <summary>
-    /// The cancel condition, by either spelling PostgreSQL accepts for it. Deliberately a bare TOKEN
-    /// search rather than an attempt to parse a handler's condition list: a rung's executable SQL has no
+    /// The cancel condition, by either spelling PostgreSQL accepts for it. Deliberately a TOKEN search
+    /// rather than an attempt to parse a handler's condition list: a rung's executable SQL has no
     /// legitimate reason to name its own cancellation at all, so anything that does is worth a human
     /// look, and a token cannot be defeated by a condition list spelled in an order the pattern did not
-    /// anticipate (<c>WHEN OTHERS OR query_canceled</c>, <c>WHEN SQLSTATE '57014'</c>).
+    /// anticipate (<c>WHEN OTHERS OR query_canceled</c>, <c>WHEN query_canceled OR OTHERS</c>,
+    /// <c>WHEN SQLSTATE '57014'</c>).
+    ///
+    /// <para><b>The word boundaries are load-bearing in the FALSE-POSITIVE direction</b> (#2975 review).
+    /// Without them <c>57014</c> matches inside any longer digit run and <c>query_canceled</c> inside any
+    /// longer identifier, so a rung carrying an unrelated numeric literal or a column named for the
+    /// condition would fail the build with a message accusing it of trapping a cancel. Measured against
+    /// both forms: the boundaries cost nothing on any of the five real spellings — the quotes around
+    /// <c>'57014'</c> are non-word characters, so the boundary is already satisfied there — and they turn
+    /// <c>5701400</c>, <c>157014</c>, <c>570140</c> and <c>my_query_canceled_flag</c> from findings into
+    /// misses. A pin that fires on those is a pin that gets deleted, which is the same argument the
+    /// <c>CREATE INDEX</c> same-rung exemption above rests on.</para>
     /// </summary>
-    private static readonly Regex s_cancelTrap = new(@"query_canceled|57014", Opts);
+    private static readonly Regex s_cancelTrap = new(@"\bquery_canceled\b|\b57014\b", Opts);
 
     /// <summary>Any plpgsql exception handler, used only as this scan's own liveness control.</summary>
     private static readonly Regex s_exceptionHandler = new(@"\bEXCEPTION\b[\s\S]{0,40}?\bWHEN\b", Opts);
