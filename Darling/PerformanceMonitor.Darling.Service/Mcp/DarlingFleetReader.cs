@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -205,7 +206,16 @@ FULL OUTER JOIN
 ) AS dmv ON xe.server_id = dmv.server_id";
 
     /// <summary>Deadlocks in the window per server — count and newest deadlock instant (for each card's
-    /// "last seen" detail). $1 window start, $2 window end (both naive UTC).</summary>
+    /// "last seen" detail). $1 window start, $2 window end (both naive UTC).
+    ///
+    /// <para><b>This view is the SQL Server extended-event capture and nothing else</b> (#3017).
+    /// <c>v_deadlocks</c> is <c>SELECT * FROM deadlocks</c>, and <c>deadlocks</c> is written by exactly one
+    /// collector — <c>DeadlocksCollector</c>, whose <c>TargetTable</c> it is. A PostgreSQL target's deadlocks
+    /// go to <c>pg_deadlocks</c> instead, there is no <c>v_pg_deadlocks</c>, and nothing joins the two, so
+    /// this count is structurally zero for a PostgreSQL server no matter how many deadlocks its clusters
+    /// have. Zero is also what a genuinely quiet SQL Server reports, which is why the total ships with
+    /// <see cref="FleetDeadlockCoverage"/> beside it: the reading that needs no action and the reading that
+    /// does not cover the fleet are otherwise the same character.</para></summary>
     public const string FleetDeadlockSql = @"
 SELECT server_id, COUNT(*) AS cnt, MAX(deadlock_time) AS last_seen
 FROM v_deadlocks
@@ -441,6 +451,7 @@ GROUP BY server_id, collector_name";
             DeadlockCount = deadlockCount,
             DeadlockLastSeen = deadlock.LastSeen,
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(deadlockCount),
+            DeadlockCollectorBand = collectors.DeadlockBand,
             TotalThreads = threads.TotalThreads,
             CurrentWorkers = threads.CurrentWorkers,
             AvailableThreads = availableThreads,
@@ -471,6 +482,10 @@ GROUP BY server_id, collector_name";
         var failures = 0;
         long totalBlocking = 0;
         long totalDeadlocks = 0;
+        var deadlockSourcesRead = 0;
+        var deadlockPostgresTargets = 0;
+        var deadlockCollectorsSilent = 0;
+        var deadlockCollectorsDenied = 0;
 
         foreach (var card in cards)
         {
@@ -485,6 +500,20 @@ GROUP BY server_id, collector_name";
             if (card.FailedCollectorCount > 0)
             {
                 failures++;
+            }
+
+            /* #3017's denominator, reduced from the CARDS for the same reason the totals above are: the
+               coverage figure and the total it qualifies then reconcile by construction rather than by two
+               queries agreeing. Only Read is counted as read — every other arm, INCLUDING an enum value a
+               later build adds and this switch has never heard of, lands in the silent bucket. A new source
+               kind that inflated the read count would restore exactly the defect this exists to fix, where
+               one that lands in an uncovered bucket merely attributes a real gap imprecisely. */
+            switch (card.DeadlockSource)
+            {
+                case FleetDeadlockSource.Read: deadlockSourcesRead++; break;
+                case FleetDeadlockSource.PostgresTarget: deadlockPostgresTargets++; break;
+                case FleetDeadlockSource.CollectorDenied: deadlockCollectorsDenied++; break;
+                default: deadlockCollectorsSilent++; break;
             }
 
             totalBlocking += card.BlockingCount;
@@ -524,6 +553,14 @@ GROUP BY server_id, collector_name";
             ServersWithCollectionFailures = failures,
             TotalBlockingEvents = totalBlocking,
             TotalDeadlocks = totalDeadlocks,
+            DeadlockCoverage = new FleetDeadlockCoverage
+            {
+                ServersRead = deadlockSourcesRead,
+                ServersTotal = cards.Count,
+                PostgresServers = deadlockPostgresTargets,
+                ServersCollectorSilent = deadlockCollectorsSilent,
+                ServersCollectorDenied = deadlockCollectorsDenied,
+            },
             WorstServers = worst,
             AdditionalProblemCount = Math.Max(0, problems.Count - worst.Count),
             Cards = cards,
@@ -622,6 +659,49 @@ GROUP BY server_id, collector_name";
     /// </summary>
     internal static (bool IsPostgres, bool IsAurora) ClassifyEngineKind(string? engineKind) =>
         (MonitoredEngineKind.IsPostgres(engineKind), MonitoredEngineKind.IsAurora(engineKind));
+
+    /// <summary>
+    /// Whether one server's deadlock count — and so the fleet total it sums into — actually read a deadlock
+    /// source, and when it did not, which of the three causes it was (#3017). The three take OPPOSITE
+    /// actions, which is why one uncovered tally would not have been enough: a different tool for a
+    /// PostgreSQL target, a collector to look at for one that is not being invoked, a grant for one that was
+    /// refused.
+    ///
+    /// <para><b>PostgreSQL is asked first and answers on its own.</b> It is not a degraded collector, it is
+    /// the wrong table: <see cref="FleetDeadlockSql"/> reads <c>v_deadlocks</c>, which holds only the SQL
+    /// Server extended-event capture, and no health band on any collector changes that. A PostgreSQL target
+    /// whose <c>pg_deadlocks</c> collector is perfectly healthy still contributes nothing here.</para>
+    ///
+    /// <para><b>A null band is uncovered, not covered.</b> Null means the <c>deadlocks</c> collector left no
+    /// row in the health window — nothing was read for this server, whatever else is true of it — and
+    /// defaulting an absent band to "read" is precisely how a coverage figure becomes another number nobody
+    /// can trust. It is folded in with STOPPED and NEVER_RUN because all three take the same action.</para>
+    ///
+    /// <para><b>FAILING, STALE and WARNING count as READ, deliberately.</b> Those collectors succeeded on
+    /// some cycles, so their rows really are in the total and a denominator excluding them would understate
+    /// the fleet — a new wrong number in place of the old one. They are not hidden by being counted here:
+    /// <see cref="FleetOverviewResult.ServersWithCollectionFailures"/> and each card's
+    /// <see cref="FleetServerCard.FailedCollectorCount"/> are where a degraded collector shows, and the
+    /// card's own <see cref="FleetServerCard.DeadlockCollectorBand"/> carries the band verbatim.</para>
+    /// </summary>
+    internal static FleetDeadlockSource ClassifyDeadlockSource(bool isPostgres, string? deadlockCollectorBand)
+    {
+        if (isPostgres)
+        {
+            return FleetDeadlockSource.PostgresTarget;
+        }
+
+        /* Tested ahead of the general set below rather than as part of it: NO_PERMISSIONS is IN
+           NothingReadBands, so asking the set first would swallow the one cause with a different fix. */
+        if (string.Equals(deadlockCollectorBand, CollectorHealthClassifier.NoPermissions, StringComparison.Ordinal))
+        {
+            return FleetDeadlockSource.CollectorDenied;
+        }
+
+        return deadlockCollectorBand is null || CollectorHealthClassifier.ReadNothing(deadlockCollectorBand)
+            ? FleetDeadlockSource.CollectorSilent
+            : FleetDeadlockSource.Read;
+    }
 
     /* ─────────────────────────── per-query readers ─────────────────────────── */
 
@@ -847,7 +927,15 @@ GROUP BY server_id, collector_name";
             var status = health.HealthStatus;
             counts[serverId] = new CollectorCounts(
                 existing.Healthy + (status == "HEALTHY" ? 1 : 0),
-                existing.Failing + (status == "FAILING" ? 1 : 0));
+                existing.Failing + (status == "FAILING" ? 1 : 0),
+                /* #3017: the ONE collector whose band the deadlock total's coverage turns on, kept
+                   alongside the Healthy/Failing tallies because it comes out of the same aggregate — no
+                   extra round trip, which is what keeps this reader's fan-out bounded. Named from the
+                   collector rather than as a literal so a rename cannot leave this silently matching
+                   nothing and reporting every server uncovered. */
+                string.Equals(health.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal)
+                    ? status
+                    : existing.DeadlockBand);
         }
 
         return counts;
@@ -865,7 +953,12 @@ GROUP BY server_id, collector_name";
     private readonly record struct ThreadsRow(int? TotalThreads, int? CurrentWorkers, int RunnableTasks, long WorkQueue);
     private readonly record struct BlockingRow(int XeCount, long XeMaxWait, int DmvCount, long DmvMaxWait);
     private readonly record struct DeadlockRow(int Count, DateTime? LastSeen);
-    private readonly record struct CollectorCounts(int Healthy, int Failing);
+    /// <param name="DeadlockBand">The <c>deadlocks</c> collector's own 7-day band for this server, or null
+    /// when that collector left no row in the health window at all (#3017). Null and
+    /// <see cref="CollectorHealthClassifier.NeverRun"/> mean the same thing to a reader and take the same
+    /// action, but they arrive differently: null is the absent GROUP, NEVER_RUN would be a present group with
+    /// no runs in it.</param>
+    private readonly record struct CollectorCounts(int Healthy, int Failing, string? DeadlockBand = null);
 }
 
 /// <summary>
@@ -981,6 +1074,26 @@ public sealed class FleetServerCard
     [JsonPropertyName("deadlock_last_seen")] public DateTime? DeadlockLastSeen { get; init; }
     [JsonPropertyName("deadlock_severity")] public HealthSeverity DeadlockSeverity { get; init; }
 
+    /// <summary>This server's <c>deadlocks</c> collector band over the trailing seven days of collection
+    /// health (#3017) — the fact that explains a <see cref="DeadlockCount"/> of zero. Null when that
+    /// collector left no row in the health window, which is itself the answer rather than the absence of
+    /// one: nothing was read for this server. A PostgreSQL target has no <c>deadlocks</c> collector at all,
+    /// so it is null there too and <see cref="DeadlockSource"/> answers on the engine instead.</summary>
+    [JsonPropertyName("deadlock_collector_band")] public string? DeadlockCollectorBand { get; init; }
+
+    /// <summary>Whether <see cref="DeadlockCount"/> read a deadlock source for this server, and when it did
+    /// not, which cause (#3017) — see <see cref="DarlingFleetReader.ClassifyDeadlockSource"/> for what each
+    /// value means and what it asks an operator to do.
+    ///
+    /// <para>DERIVED rather than assigned, for the reason <see cref="EngineDescription"/> is: every card is
+    /// built by an object initializer, and a settable field would sit at its enum default on any card whose
+    /// builder did not think of it — including one added later on a path nobody re-reads. Derived, the
+    /// unset case is <see cref="FleetDeadlockSource.CollectorSilent"/>, which is the honest reading of a
+    /// card carrying no band and the only default that cannot inflate the fleet's coverage.</para></summary>
+    [JsonPropertyName("deadlock_source")]
+    public FleetDeadlockSource DeadlockSource =>
+        DarlingFleetReader.ClassifyDeadlockSource(IsPostgres, DeadlockCollectorBand);
+
     [JsonPropertyName("total_threads")] public int? TotalThreads { get; init; }
     [JsonPropertyName("current_workers")] public int? CurrentWorkers { get; init; }
     [JsonPropertyName("available_threads")] public int? AvailableThreads { get; init; }
@@ -1062,6 +1175,11 @@ public sealed class FleetOverviewResult
     [JsonPropertyName("servers_with_collection_failures")] public int ServersWithCollectionFailures { get; init; }
     [JsonPropertyName("total_blocking_events")] public long TotalBlockingEvents { get; init; }
     [JsonPropertyName("total_deadlocks")] public long TotalDeadlocks { get; init; }
+
+    /// <summary>How much of the fleet <see cref="TotalDeadlocks"/> actually read a deadlock source for, with
+    /// the causes named (#3017). Never null — a total with no denominator beside it is the defect.</summary>
+    [JsonPropertyName("deadlock_coverage")] public FleetDeadlockCoverage DeadlockCoverage { get; init; } = new();
+
     [JsonPropertyName("additional_problem_count")] public int AdditionalProblemCount { get; init; }
     [JsonPropertyName("worst_servers")] public IReadOnlyList<FleetRankedServer> WorstServers { get; init; } = Array.Empty<FleetRankedServer>();
     [JsonPropertyName("cards")] public IReadOnlyList<FleetServerCard> Cards { get; init; } = Array.Empty<FleetServerCard>();
@@ -1070,4 +1188,152 @@ public sealed class FleetOverviewResult
     /// parent, ordering, and colour, so the fleet page can group cards under a nested tag tree even when a parent
     /// tag has no directly-assigned servers. Empty when no tags are defined. Assignment/editing stays desktop-only.</summary>
     [JsonPropertyName("tags")] public IReadOnlyList<FleetTagNode> Tags { get; init; } = Array.Empty<FleetTagNode>();
+}
+
+/// <summary>
+/// Whether one server's deadlock count read a deadlock source at all, and when it did not, which cause
+/// (#3017). Serialized as its STRING name (the fleet DTOs' <c>JsonStringEnumConverter</c>), so a consumer
+/// switches on a word rather than on an ordinal that a reordering would move underneath it.
+///
+/// <para>The three uncovered arms exist as three rather than as one flag because they take OPPOSITE actions,
+/// which is the whole reason a bare tally would not have been enough.</para>
+/// </summary>
+public enum FleetDeadlockSource
+{
+    /// <summary>The <c>deadlocks</c> collector read this server over the health window, so this server's
+    /// deadlocks — however many that is, including none — are in the total. Its band may still be FAILING,
+    /// STALE or WARNING: those collectors succeeded on some cycles, and their rows are in the total.</summary>
+    Read,
+
+    /// <summary>A PostgreSQL target, whose deadlocks the total cannot count at all: they are stored in
+    /// <c>pg_deadlocks</c>, which nothing joins into <c>v_deadlocks</c>. Nothing about this server's health
+    /// changes it and no grant addresses it — <c>get_pg_deadlocks</c> is the read that answers.</summary>
+    PostgresTarget,
+
+    /// <summary>The <c>deadlocks</c> collector is not being invoked — STOPPED, NEVER_RUN, or no row in the
+    /// health window at all. Silence, not failure: a collector still running and erroring every cycle bands
+    /// FAILING and counts as <see cref="Read"/>. Check the collector (<c>get_collection_health</c>).</summary>
+    CollectorSilent,
+
+    /// <summary>Every one of the <c>deadlocks</c> collector's attempts was refused for permissions
+    /// (NO_PERMISSIONS). The one cause a grant fixes, which is why it is not folded in with
+    /// <see cref="CollectorSilent"/> despite both meaning nothing was read.</summary>
+    CollectorDenied,
+}
+
+/// <summary>
+/// The denominator beside <see cref="FleetOverviewResult.TotalDeadlocks"/> (#3017): how many of the fleet's
+/// servers that total actually read a deadlock source for, and for the rest, which of the three causes it
+/// was.
+///
+/// <para><b>Why a total needs one at all.</b> <c>v_deadlocks</c> is the SQL Server extended-event capture and
+/// only that, so <c>total_deadlocks</c> is structurally zero for a PostgreSQL server — permanently, whatever
+/// its clusters do and whatever grants the monitoring role holds. Zero is also exactly what a genuinely quiet
+/// SQL Server fleet reports. The reading that needs no action and the reading that does not cover the fleet
+/// are the same character, and that is what makes the bare number unusable.</para>
+///
+/// <para><b>The convention this follows.</b> <c>get_pg_blocking</c> already reports <c>captures_total</c>
+/// beside <c>captures_with_blocking</c> and a sentence saying what an empty answer does and does not mean,
+/// because the denominator is the honest part of a sampled signal; <c>target_has_user_databases</c> (#1852)
+/// already states a fact about the TARGET beside a persistently empty result rather than banding it, so
+/// "nothing to collect" stops looking like "collecting nothing". This is the same move on a fleet total: a
+/// count, a denominator, named causes, and a note — and deliberately not a new band, for #1852's reason. A
+/// quiet SQL Server fleet with full coverage is healthy and must keep reading that way.</para>
+/// </summary>
+public sealed class FleetDeadlockCoverage
+{
+    /// <summary>Servers the total read a deadlock source for — the numerator of the coverage this object
+    /// reports, and NOT a count of servers that had deadlocks (that is
+    /// <see cref="FleetOverviewResult.TotalDeadlocks"/>'s job).</summary>
+    [JsonPropertyName("servers_read")] public int ServersRead { get; init; }
+
+    /// <summary>Enabled servers in the fleet — the same population as
+    /// <see cref="FleetOverviewResult.TotalServers"/>, repeated here so the denominator travels with its
+    /// numerator and a consumer reading only this object is never one field short of the ratio.</summary>
+    [JsonPropertyName("servers_total")] public int ServersTotal { get; init; }
+
+    /// <summary>Uncovered because the target is PostgreSQL — <c>get_pg_deadlocks</c> is the read that
+    /// answers for these.</summary>
+    [JsonPropertyName("postgres_servers")] public int PostgresServers { get; init; }
+
+    /// <summary>Uncovered because the <c>deadlocks</c> collector is not being invoked (STOPPED, NEVER_RUN,
+    /// or no row in the health window) — check the collector.</summary>
+    [JsonPropertyName("servers_collector_silent")] public int ServersCollectorSilent { get; init; }
+
+    /// <summary>Uncovered because every one of the <c>deadlocks</c> collector's attempts was refused for
+    /// permissions — these need a grant.</summary>
+    [JsonPropertyName("servers_collector_denied")] public int ServersCollectorDenied { get; init; }
+
+    /// <summary>
+    /// The sentence that keeps the two figures from being read as one measurement.
+    ///
+    /// <para><b>The windows genuinely diverge and this is the whole point of the field.</b>
+    /// <see cref="FleetOverviewResult.TotalDeadlocks"/> is counted between the caller's
+    /// <c>window_start</c> and <c>window_end</c> (one hour by default); coverage is banded over the FIXED
+    /// trailing seven days of collection health. That divergence is correct — whether a reader works is a
+    /// durable fact, and the banding thresholds are themselves defined in DAYS, so an hour-wide health
+    /// window could not produce a band at all — but a note claiming both were "read in this window" would be
+    /// the same defect one level up: a surface asserting a scope it did not measure. So the sentence names
+    /// each window against the figure it belongs to, and says outright that coverage makes no claim about
+    /// the caller's window.</para>
+    /// </summary>
+    public const string WindowNote =
+        "Coverage bands each server's deadlock reader over the fixed trailing seven days of collection "
+        + "health - whether the reader works at all, which is a durable fact - while total_deadlocks counts "
+        + "only between window_start and window_end. The two windows differ deliberately, and this coverage "
+        + "figure therefore makes no claim about what was read inside window_start..window_end.";
+
+    /// <summary>What to do about the PostgreSQL arm, appended after its count.</summary>
+    public const string PostgresCause =
+        "are PostgreSQL targets, whose deadlocks this total cannot count at all - they are stored separately "
+        + "and served by get_pg_deadlocks.";
+
+    /// <summary>What to do about the silent arm, appended after its count.</summary>
+    public const string CollectorSilentCause =
+        "have no current deadlock collection - the collector has stopped being invoked, or has never run; "
+        + "check it with get_collection_health.";
+
+    /// <summary>What to do about the denied arm, appended after its count.</summary>
+    public const string CollectorDeniedCause =
+        "had every deadlock-collector attempt refused for permissions - those need a grant.";
+
+    /// <summary>
+    /// The coverage in a sentence, with <see cref="WindowNote"/> and only the causes that actually apply.
+    ///
+    /// <para>DERIVED rather than assigned, for the reason <see cref="FleetServerCard.DeadlockSource"/> is:
+    /// a settable note is a note that can be omitted, or can drift from the counts it describes. Computed,
+    /// the numbers and the sentence cannot disagree.</para>
+    /// </summary>
+    [JsonPropertyName("note")]
+    public string Note
+    {
+        get
+        {
+            var note = new StringBuilder();
+
+            note.Append("total_deadlocks read a deadlock source for ")
+                .Append(ServersRead)
+                .Append(" of ")
+                .Append(ServersTotal)
+                .Append(" enabled servers. ")
+                .Append(WindowNote);
+
+            if (PostgresServers > 0)
+            {
+                note.Append(' ').Append(PostgresServers).Append(' ').Append(PostgresCause);
+            }
+
+            if (ServersCollectorSilent > 0)
+            {
+                note.Append(' ').Append(ServersCollectorSilent).Append(' ').Append(CollectorSilentCause);
+            }
+
+            if (ServersCollectorDenied > 0)
+            {
+                note.Append(' ').Append(ServersCollectorDenied).Append(' ').Append(CollectorDeniedCause);
+            }
+
+            return note.ToString();
+        }
+    }
 }

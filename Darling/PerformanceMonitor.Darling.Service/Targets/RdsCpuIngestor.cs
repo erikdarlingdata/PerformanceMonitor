@@ -69,11 +69,15 @@ public sealed class RdsCpuIngestor
         _logger = logger;
     }
 
-    /// <param name="host">The target's connection host. A non-RDS host is skipped silently — self-hosted
-    /// PostgreSQL has no CPU route at all (see <see cref="PgCpuUtilizationCollector"/>'s doc comment), so
-    /// there is nowhere else for it to fall back to.</param>
-    /// <returns>Rows stored, or zero when this target is not RDS/Aurora or PI had nothing new.</returns>
-    public async Task<int> IngestAsync(
+    /// <param name="host">The target's connection host. A non-RDS host means Performance Insights was never
+    /// queried — self-hosted PostgreSQL has no CPU route at all (see
+    /// <see cref="PgCpuUtilizationCollector"/>'s doc comment), so there is nowhere else for it to fall back
+    /// to — and the outcome says so rather than reporting an empty sample window (#3017).</param>
+    /// <returns>Rows stored and whether Performance Insights was reached at all. This ingestor is the one
+    /// that meets the not-reached case routinely: <c>pg_cpu_utilization</c>'s dispatch is UNCONDITIONAL, with
+    /// no <c>pg_read_file</c>-shaped fallback for a self-hosted target, so every cycle of every self-hosted
+    /// PostgreSQL target lands here and no-ops.</returns>
+    public async Task<RdsIngestOutcome> IngestAsync(
         int serverId,
         string storageName,
         string host,
@@ -83,7 +87,11 @@ public sealed class RdsCpuIngestor
 
         if (endpoint is null)
         {
-            return 0;
+            /* #3017: NOT_REACHED, not zero rows. No AWS call has been made at this point — nothing is known
+               about this instance's CPU, which is a different fact from PI answering with no samples, and
+               the runner's note now says which one it was. This branch is reached on every cycle of every
+               self-hosted PostgreSQL target, because the dispatch above it is unconditional. */
+            return RdsIngestOutcome.NotReached;
         }
 
         var parsed = endpoint.Value;
@@ -164,10 +172,14 @@ public sealed class RdsCpuIngestor
 
         if (dataPoints.Count == 0)
         {
-            return 0;
+            /* READ, and it held nothing new. PI answered — the caller's "no new Performance Insights CPU
+               samples this cycle" is a true statement here, which is exactly why the not-reached branch
+               above must not share it. */
+            return RdsIngestOutcome.Read(0);
         }
 
-        return await WriteAsync(serverId, storageName, dataPoints, cancellationToken);
+        return RdsIngestOutcome.Read(
+            await WriteAsync(serverId, storageName, dataPoints, cancellationToken));
     }
 
     /// <summary>Identical resolution to <see cref="RdsLogSource"/>'s own — kept as a separate copy rather

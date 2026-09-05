@@ -601,7 +601,7 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var rows = await _rdsPlans.IngestAsync(
+        var outcome = await _rdsPlans.IngestAsync(
             server.ServerId, server.StorageName, host, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -609,8 +609,8 @@ public sealed class DarlingCollectorRunner
         /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
            filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
            different from every other target's. */
-        return new CollectorRunResult(rows, 0, elapsedMs,
-            rows == 0 ? "no new auto_explain plans in the RDS log window" : null);
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs,
+            RdsIngestNote(outcome, RdsPlanLogNotReachedNote, RdsPlanLogEmptyNote));
     }
 
     /// <summary>
@@ -629,13 +629,13 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var rows = await _rdsDeadlocks.IngestAsync(
+        var outcome = await _rdsDeadlocks.IngestAsync(
             server.ServerId, server.StorageName, host, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        return new CollectorRunResult(rows, 0, elapsedMs,
-            rows == 0 ? "no new deadlocks in the RDS log window" : null);
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs,
+            RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
     }
 
     /// <summary>
@@ -655,7 +655,7 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var rows = await _rdsCpu.IngestAsync(
+        var outcome = await _rdsCpu.IngestAsync(
             server.ServerId, server.StorageName, host, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -663,9 +663,69 @@ public sealed class DarlingCollectorRunner
         /* Counted as STORAGE time rather than SQL time, matching the other two RDS-API ingestors: no query
            ran against the monitored server, and filing an HTTPS round trip under sql_duration_ms would make
            one target's numbers mean something different from every other target's. */
-        return new CollectorRunResult(rows, 0, elapsedMs,
-            rows == 0 ? "no new Performance Insights CPU samples this cycle" : null);
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs,
+            RdsIngestNote(outcome, PiCpuNotReachedNote, PiCpuEmptyNote));
     }
+
+    /* ── #3017: the notes an AWS-API ingest cycle leaves in collection_log ──────────────────────────────
+       Six constants, in pairs, because the two members of each pair are the whole point: one says the
+       source was read and held nothing, the other says the source was never asked. Before this there was
+       one sentence per collector and it was the first of the two, stamped on both outcomes — a claim about
+       the contents of a log nobody opened.
+
+       Named constants rather than inline strings so RdsIngestNote can be pinned without a store or an AWS
+       client, and so the pair for each collector can be asserted DIFFERENT — the failure mode of a fix like
+       this is the two arms converging back onto one sentence during a later edit, which no compiler
+       notices.
+
+       No host is interpolated into any of them. collection_log is read by operators and shipped in support
+       bundles, and the fact worth recording is the KIND of target, not its name. */
+
+    /// <summary>The plan log was read and no auto_explain block in it was new.</summary>
+    internal const string RdsPlanLogEmptyNote = "no new auto_explain plans in the RDS log window";
+
+    /// <summary>The plan log was never opened: this host is not an RDS or Aurora endpoint.</summary>
+    internal const string RdsPlanLogNotReachedNote =
+        "this target's host is not an RDS or Aurora endpoint, so no RDS log was requested and no plan "
+        + "capture was attempted - this cycle did not look";
+
+    /// <summary>The deadlock log was read and held no new deadlock.</summary>
+    internal const string RdsDeadlockLogEmptyNote = "no new deadlocks in the RDS log window";
+
+    /// <summary>The deadlock log was never opened: this host is not an RDS or Aurora endpoint.</summary>
+    internal const string RdsDeadlockLogNotReachedNote =
+        "this target's host is not an RDS or Aurora endpoint, so no RDS log was requested and no deadlock "
+        + "capture was attempted - this cycle did not look";
+
+    /// <summary>Performance Insights answered and had no new CPU sample.</summary>
+    internal const string PiCpuEmptyNote = "no new Performance Insights CPU samples this cycle";
+
+    /// <summary>Performance Insights was never queried: this host is not an RDS or Aurora endpoint.</summary>
+    internal const string PiCpuNotReachedNote =
+        "this target's host is not an RDS or Aurora endpoint, so Performance Insights was not queried and "
+        + "no instance CPU was attempted - this cycle did not look";
+
+    /// <summary>
+    /// The <c>collection_log</c> note for one AWS-API ingest cycle (#3017) — the three-way rendering the
+    /// bare row count could not express.
+    ///
+    /// <para><b>Not reached is asked FIRST and answers on its own.</b> A cycle that never made an AWS call
+    /// knows nothing about the source, so <paramref name="nothingNewNote"/> — which is a claim about what
+    /// the source held — must not be reachable from it. That ordering is the fix; the rest is unchanged
+    /// behaviour.</para>
+    ///
+    /// <para><b>A productive cycle still leaves no note</b>, exactly as before: the rows themselves are the
+    /// statement, and a note on every successful cycle would fill the column an operator scans for the
+    /// unusual.</para>
+    ///
+    /// <para>Pure and <c>internal static</c> so the three-way decision can be pinned directly, with no
+    /// store, no <c>ServerRuntime</c> and no AWS client — the shape #2633's own pins already use for this
+    /// family.</para>
+    /// </summary>
+    internal static string? RdsIngestNote(RdsIngestOutcome outcome, string notReachedNote, string nothingNewNote) =>
+        !outcome.SourceReached ? notReachedNote
+        : outcome.Rows == 0 ? nothingNewNote
+        : null;
 
     /// <summary>
     /// The per-database phase line for a database that FAULTED (#2896) — the case the #2855 split was added

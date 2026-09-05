@@ -14,6 +14,7 @@ using Amazon.RDS;
 using Amazon.RDS.Model;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
@@ -243,10 +244,10 @@ public sealed class RdsDeadlockIngestorTests
         var (ingestor, client, _) = Build(store, new FakeRds { FirstBody = QuietText });
 
         var rows = await ingestor.IngestAsync(1, "target-a", Host);
-        Assert.Equal(0, rows);
+        Assert.Equal(RdsIngestOutcome.Read(0), rows);
 
         var more = await ingestor.IngestAsync(1, "target-a", Host);
-        Assert.Equal(0, more);
+        Assert.Equal(RdsIngestOutcome.Read(0), more);
 
         /* Advanced: the second read resumed from the first read's marker instead of asking for the tail
            again. */
@@ -287,14 +288,102 @@ public sealed class RdsDeadlockIngestorTests
     /// <summary>
     /// A non-RDS host is skipped without touching the store or the marker — that target reads its log
     /// through <c>pg_read_file</c>, and there is nothing here to report or to resume.
+    ///
+    /// <para><b>Skipped is reported as NOT REACHED, and that is a different value from an empty log</b>
+    /// (#3017). No log file was listed and none was downloaded (<c>client.Downloads</c> is empty), so
+    /// "no new deadlocks in the RDS log window" would be a claim about the contents of a log this cycle
+    /// never opened. The pairing with <see cref="AQuietCycleAdvancesTheMarker"/> is the point: that test
+    /// reaches the log and finds nothing, this one does not reach it, and the two now carry different
+    /// outcomes rather than the same zero.</para>
     /// </summary>
     [Fact]
-    public async Task ANonRdsHostIsSkipped()
+    public async Task ANonRdsHost_ReportsTheSourceUnreached_WithNoAwsCall()
     {
         await using var store = NpgsqlDataSource.Create(DeadStore);
         var (ingestor, client, _) = Build(store);
 
-        Assert.Equal(0, await ingestor.IngestAsync(1, "target-a", "db.internal.example.com"));
+        var outcome = await ingestor.IngestAsync(1, "target-a", "db.internal.example.com");
+
+        Assert.Equal(RdsIngestOutcome.NotReached, outcome);
+        Assert.False(outcome.SourceReached);
+        Assert.NotEqual(RdsIngestOutcome.Read(0), outcome);
         Assert.Empty(client.Downloads);
+    }
+
+    /// <summary>
+    /// The runner's rendering of both, side by side — the assertion that actually closes #3017, because the
+    /// two ingest outcomes above are only worth distinguishing if the note distinguishes them.
+    ///
+    /// <para>Pure: <see cref="DarlingCollectorRunner.RdsIngestNote"/> takes the outcome and the two
+    /// sentences, so no store, <c>ServerRuntime</c> or AWS client is needed to pin the three-way choice.</para>
+    /// </summary>
+    [Fact]
+    public void TheRunnerRendersADifferentNote_ForAnUnreachedLogThanForAnEmptyOne()
+    {
+        var notReached = DarlingCollectorRunner.RdsIngestNote(
+            RdsIngestOutcome.NotReached,
+            DarlingCollectorRunner.RdsDeadlockLogNotReachedNote,
+            DarlingCollectorRunner.RdsDeadlockLogEmptyNote);
+
+        var readNothing = DarlingCollectorRunner.RdsIngestNote(
+            RdsIngestOutcome.Read(0),
+            DarlingCollectorRunner.RdsDeadlockLogNotReachedNote,
+            DarlingCollectorRunner.RdsDeadlockLogEmptyNote);
+
+        var productive = DarlingCollectorRunner.RdsIngestNote(
+            RdsIngestOutcome.Read(3),
+            DarlingCollectorRunner.RdsDeadlockLogNotReachedNote,
+            DarlingCollectorRunner.RdsDeadlockLogEmptyNote);
+
+        Assert.Equal(DarlingCollectorRunner.RdsDeadlockLogNotReachedNote, notReached);
+        Assert.Equal(DarlingCollectorRunner.RdsDeadlockLogEmptyNote, readNothing);
+
+        /* The defect, stated directly: these two must never be the same sentence. */
+        Assert.NotEqual(readNothing, notReached);
+
+        /* A productive cycle still leaves no note — the rows are the statement. */
+        Assert.Null(productive);
+    }
+
+    /// <summary>
+    /// What the two sentences have to SAY, not merely that they differ. A pair of distinct strings that both
+    /// described the log's contents would satisfy the inequality above and still be the defect.
+    ///
+    /// <para>All three collectors' pairs are asserted here rather than one, because the three notes were
+    /// three independent copies of the same mistake and a fix that reached two of them would look
+    /// complete.</para>
+    /// </summary>
+    [Fact]
+    public void EveryNotReachedNote_SaysTheCycleDidNotLook_AndNamesWhy()
+    {
+        foreach (var note in new[]
+        {
+            DarlingCollectorRunner.RdsDeadlockLogNotReachedNote,
+            DarlingCollectorRunner.RdsPlanLogNotReachedNote,
+            DarlingCollectorRunner.PiCpuNotReachedNote,
+        })
+        {
+            /* #2633's own closing sentence, as an outcome rather than a rule: a cycle that could not look
+               must not claim it looked. An operator who learned the distinction from #2633's PERMISSIONS
+               rows meets the same words arriving through the one door that is not a failure. */
+            Assert.Contains("this cycle did not look", note, StringComparison.Ordinal);
+
+            /* And the cause, because "did not look" alone would send someone hunting for a collector to
+               restart. Nothing is wrong: this transport does not apply to this target. */
+            Assert.Contains("not an RDS or Aurora endpoint", note, StringComparison.Ordinal);
+        }
+
+        /* The empty notes are unchanged claims about a source that WAS read, and must stay that way -
+           those sentences are correct on their own path and are what the not-reached notes exist to stop
+           being borrowed. */
+        foreach (var note in new[]
+        {
+            DarlingCollectorRunner.RdsDeadlockLogEmptyNote,
+            DarlingCollectorRunner.RdsPlanLogEmptyNote,
+            DarlingCollectorRunner.PiCpuEmptyNote,
+        })
+        {
+            Assert.DoesNotContain("did not look", note, StringComparison.Ordinal);
+        }
     }
 }
