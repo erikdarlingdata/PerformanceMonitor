@@ -8,10 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Amazon.RDS;
 using Amazon.RDS.Model;
+using Npgsql;
 using PerformanceMonitor.Collectors;
 
 using PerformanceMonitor.Darling.Service.Targets;
@@ -36,32 +38,52 @@ public class RdsLogSourceTests
         public string LogName { get; init; } = "error/postgresql.log.2026-08-25-18";
         public string? NextMarker { get; set; } = "MARKER-1";
 
+        /* The three shapes a real answer takes that the populated fixtures above cannot produce. The AWS SDK
+           leaves a response collection NULL rather than empty when the service omits it, so every fixture
+           that sets its lists exercises only the populated half — which is why a null-source crash reached a
+           production fleet past a green suite (#2996). */
+        public bool OmitClusters { get; init; }
+        public bool OmitClusterMembers { get; init; }
+        public bool OmitLogFiles { get; init; }
+
+        /// <summary>An empty-but-present list, which is the same FACT as an absent one and has to reach the
+        /// same named branch — pre-#2996 the two diverged, one crashing and one answering silently.</summary>
+        public bool EmptyLogFiles { get; init; }
+
         public override Task<DescribeDBClustersResponse> DescribeDBClustersAsync(
             DescribeDBClustersRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new DescribeDBClustersResponse
             {
-                DBClusters = new List<DBCluster>
-                {
-                    new()
+                DBClusters = OmitClusters
+                    ? null
+                    : new List<DBCluster>
                     {
-                        DBClusterMembers = new List<DBClusterMember>
+                        new()
                         {
-                            new() { DBInstanceIdentifier = "reader-1", IsClusterWriter = false },
-                            new() { DBInstanceIdentifier = WriterId ?? "writer-1", IsClusterWriter = true },
+                            DBClusterMembers = OmitClusterMembers
+                                ? null
+                                : new List<DBClusterMember>
+                                {
+                                    new() { DBInstanceIdentifier = "reader-1", IsClusterWriter = false },
+                                    new() { DBInstanceIdentifier = WriterId ?? "writer-1", IsClusterWriter = true },
+                                },
                         },
                     },
-                },
             });
 
         public override Task<DescribeDBLogFilesResponse> DescribeDBLogFilesAsync(
             DescribeDBLogFilesRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new DescribeDBLogFilesResponse
             {
-                DescribeDBLogFiles = new List<DescribeDBLogFilesDetails>
-                {
-                    new() { LogFileName = "error/postgresql.log.2026-08-09-01", LastWritten = 1000 },
-                    new() { LogFileName = LogName, LastWritten = 9999 },
-                },
+                DescribeDBLogFiles = OmitLogFiles
+                    ? null
+                    : EmptyLogFiles
+                        ? new List<DescribeDBLogFilesDetails>()
+                        : new List<DescribeDBLogFilesDetails>
+                        {
+                            new() { LogFileName = "error/postgresql.log.2026-08-09-01", LastWritten = 1000 },
+                            new() { LogFileName = LogName, LastWritten = 9999 },
+                        },
             });
 
         public override Task<DownloadDBLogFilePortionResponse> DownloadDBLogFilePortionAsync(
@@ -172,6 +194,133 @@ public class RdsLogSourceTests
 
         Assert.Null(await source.ReadNewestAsync("db.internal.example.com"));
         Assert.Empty(client.Downloads);
+    }
+
+    /// <summary>
+    /// An instance that lists no PostgreSQL log file is NAMED, whether the SDK omitted the collection or
+    /// handed back an empty one. Both mean no log was opened, and neither may reach the runner as
+    /// <c>Value cannot be null. (Parameter 'source')</c> — the whole message the null form produced on a
+    /// live fleet, which names no call, no branch and no instance (#2996).
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task AnInstanceListingNoPostgresLogFileIsNamed(bool omit, bool empty)
+    {
+        var (source, client) = Build(new FakeRds { OmitLogFiles = omit, EmptyLogFiles = empty });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com"));
+
+        Assert.Contains("listed no PostgreSQL server log file", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("solo", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("NO LOG WAS OPENED", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Value cannot be null", ex.Message, StringComparison.Ordinal);
+
+        /* And nothing was downloaded — the branch is decided before a byte is asked for. */
+        Assert.Empty(client.Downloads);
+    }
+
+    /// <summary>
+    /// A cluster the API returns nothing for gets the "was not found" answer that was already written for
+    /// it. It was unreachable: the SDK's absent collection made LINQ raise first, so a target pointed at a
+    /// cluster that does not exist reported the same seven words as a failover.
+    /// </summary>
+    [Fact]
+    public async Task AnAbsentClusterListNamesTheMissingCluster()
+    {
+        var (source, _) = Build(new FakeRds { OmitClusters = true });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => source.ReadNewestAsync("shared.cluster-abc123.us-east-1.rds.amazonaws.com"));
+
+        Assert.Contains("was not found", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("DescribeDBClusters returned no cluster", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Value cannot be null", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A cluster with no member list is the FAILOVER answer, and it says so — the distinction the
+    /// "was not found" message above must not absorb, because one is worth retrying and the other is a
+    /// target to repoint.
+    /// </summary>
+    [Fact]
+    public async Task AClusterWithNoMemberListReportsTheFailoverState()
+    {
+        var (source, _) = Build(new FakeRds { OmitClusterMembers = true });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => source.ReadNewestAsync("shared.cluster-abc123.us-east-1.rds.amazonaws.com"));
+
+        Assert.Contains("reports no writer", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("during a failover", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Value cannot be null", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The SDK contract the three guards above exist for, pinned rather than remembered: a response
+    /// collection is <c>null</c> when the service omits it, and LINQ over one names only <c>source</c>.
+    /// An SDK upgrade that went back to empty collections would make the guards look like dead defence;
+    /// this says they are not.
+    /// </summary>
+    [Fact]
+    public void AnOmittedResponseCollectionIsNullAndLinqOverItNamesOnlySource()
+    {
+        Assert.Null(new DescribeDBLogFilesResponse().DescribeDBLogFiles);
+        Assert.Null(new DescribeDBClustersResponse().DBClusters);
+        Assert.Null(new DBCluster().DBClusterMembers);
+        Assert.Null(new DescribeDBInstancesResponse().DBInstances);
+
+        var ex = Assert.Throws<ArgumentNullException>(
+            () => new DescribeDBLogFilesResponse().DescribeDBLogFiles.FirstOrDefault());
+
+        Assert.Equal("source", ex.ParamName);
+        Assert.Equal("Value cannot be null. (Parameter 'source')", ex.Message);
+    }
+}
+
+/// <summary>
+/// What the deadlock ingestor hands the runner for each of <see cref="RdsLogSource"/>'s named branches —
+/// the layer that decides what <c>collection_log</c> says (#2996).
+///
+/// <para>The classification matters as much as the message. <c>IsAuthorizationFailure</c> false is what
+/// keeps a transient log-file absence out of the PERMISSIONS bucket, whose text tells an operator to go
+/// add an IAM grant; and the message is what the runner stores, so it is the difference between a row that
+/// names the instance and the branch and a row reading only <c>Value cannot be null. (Parameter
+/// 'source')</c>.</para>
+/// </summary>
+public class RdsDeadlockBranchClassificationTests
+{
+    private sealed class FakeRds : AmazonRDSClient
+    {
+        public FakeRds() : base(new Amazon.Runtime.BasicAWSCredentials("a", "b"),
+            Amazon.RegionEndpoint.USEast1) { }
+
+        public override Task<DescribeDBLogFilesResponse> DescribeDBLogFilesAsync(
+            DescribeDBLogFilesRequest request, CancellationToken cancellationToken = default)
+            => Task.FromResult(new DescribeDBLogFilesResponse());
+    }
+
+    /* Never opened: IngestAsync reads the log before it touches the store, and this branch throws there.
+       NpgsqlDataSource.Create does not connect eagerly, the same stand-in RdsCpuIngestorTests uses. */
+    private static NpgsqlDataSource UnusedDataSource()
+        => NpgsqlDataSource.Create("Host=localhost;Port=1;Database=unused");
+
+    [Fact]
+    public async Task AnAbsentLogFileListReachesTheRunnerNamedAndNotAsAPermissionsSkip()
+    {
+        var ingestor = new RdsDeadlockIngestor(
+            UnusedDataSource(), new RdsLogSource(_ => new FakeRds()));
+
+        var ex = await Assert.ThrowsAsync<RdsLogUnavailableException>(
+            () => ingestor.IngestAsync(1, "srv", "solo.abc123.us-east-1.rds.amazonaws.com"));
+
+        Assert.Contains("listed no PostgreSQL server log file", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Value cannot be null", ex.Message, StringComparison.Ordinal);
+
+        /* Not an authorization refusal, so the runner does not append the "the role needs
+           rds:DescribeDBLogFiles" sentence to a fault no grant fixes. */
+        Assert.False(ex.IsAuthorizationFailure);
     }
 }
 

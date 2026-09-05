@@ -131,19 +131,31 @@ public sealed class RdsLogSource
             return new LogChunk(response.LogFileData ?? string.Empty, response.AdditionalDataPending == true);
     }
 
+    /* An AWS SDK response collection is NULL when the service omitted it, not an empty list, so the two
+       null tests below are the ordinary path rather than defence: DescribeDBClusters answers with no
+       DBClusters element when it matched nothing, and DBClusterMembers is absent on a cluster reporting no
+       members. LINQ over either raises ArgumentNullException, whose entire message is "Value cannot be
+       null. (Parameter 'source')" — seven words naming neither the call nor the branch, and it lands in
+       collection_log as a raw ERROR.
+
+       Each null is therefore routed into the message that already says what THAT branch means, rather than
+       coalesced to an empty sequence: "this cluster does not exist" is a target pointed somewhere wrong and
+       "this cluster has no writer" is a failover in progress, and the two have opposite responses. */
     private static async Task<string> ResolveWriterAsync(
         IAmazonRDS client, string clusterId, CancellationToken cancellationToken)
     {
         var clusters = await client.DescribeDBClustersAsync(
             new DescribeDBClustersRequest { DBClusterIdentifier = clusterId }, cancellationToken);
 
-        var cluster = clusters.DBClusters.FirstOrDefault()
-            ?? throw new InvalidOperationException($"Aurora cluster '{clusterId}' was not found.");
-
-        var writer = cluster.DBClusterMembers.FirstOrDefault(m => m.IsClusterWriter == true)
+        var cluster = clusters.DBClusters?.FirstOrDefault()
             ?? throw new InvalidOperationException(
-                $"Aurora cluster '{clusterId}' reports no writer. That is a real state during a failover, "
-                + "so this is worth retrying rather than treating as a configuration error.");
+                $"Aurora cluster '{clusterId}' was not found: DescribeDBClusters returned no cluster for it.");
+
+        var writer = cluster.DBClusterMembers?.FirstOrDefault(m => m.IsClusterWriter == true)
+            ?? throw new InvalidOperationException(
+                $"Aurora cluster '{clusterId}' reports no writer among its members. That is a real state "
+                + "during a failover, so this is worth retrying rather than treating as a configuration "
+                + "error.");
 
         return writer.DBInstanceIdentifier;
     }
@@ -152,6 +164,14 @@ public sealed class RdsLogSource
     /// The newest PostgreSQL log file. Filtered by name because an instance's log list also carries
     /// upgrade and other logs, and sorted by last-written rather than by name — the filename embeds a
     /// timestamp, but sorting text would order 2026-08-9 after 2026-08-10.
+    ///
+    /// <para><b>An instance that lists no PostgreSQL log file raises rather than answering "nothing".</b>
+    /// A caller can act on two outcomes — the log was opened and held nothing new, or no log was opened —
+    /// and only the first licenses the "no new … in the RDS log window" note the runner stamps on a
+    /// zero-row cycle, which is a claim about the log's CONTENTS. Answering an absent file list with a
+    /// silent empty read is the #2633 confusion arriving by a second route. A stopped instance, one still
+    /// being created, and one whose logs have just rotated all answer this way, so the message says it is
+    /// worth retrying rather than sending anyone to look for a grant.</para>
     /// </summary>
     private static async Task<string?> NewestLogFileAsync(
         IAmazonRDS client, string instanceId, CancellationToken cancellationToken)
@@ -163,6 +183,20 @@ public sealed class RdsLogSource
                 FilenameContains = "postgresql",
             },
             cancellationToken);
+
+        /* Absent and empty are the same fact here, and both have to be caught BEFORE the LINQ: the SDK
+           omits the collection entirely on an answer that carried no file, so ordering a null throws
+           ArgumentNullException and buries this branch behind "Value cannot be null. (Parameter
+           'source')". */
+        if (files.DescribeDBLogFiles is not { Count: > 0 })
+        {
+            throw new InvalidOperationException(
+                $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
+                + "filtered on 'postgresql' returned nothing. NO LOG WAS OPENED this cycle, so this is not "
+                + "an empty log — whatever this window held is unread. An instance that is stopped, still "
+                + "being created, or has just rotated its logs answers this way, so it is worth retrying "
+                + "rather than treating as a configuration error.");
+        }
 
         return files.DescribeDBLogFiles
             .OrderByDescending(f => f.LastWritten)
