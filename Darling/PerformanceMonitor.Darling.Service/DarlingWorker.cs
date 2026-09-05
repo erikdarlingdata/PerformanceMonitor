@@ -3265,8 +3265,19 @@ public sealed class DarlingWorker : BackgroundService
            or a PostgreSQL target's denominator reports two passes for three. One pass for the whole
            group, not one per check: the six checks below are independently failure-isolated exactly as
            AlertEngine's fourteen Check*Async calls are, and those fourteen are one pass. Isolation
-           granularity is not pass granularity. Recorded AFTER the guard above for the same reason the
-           engine records after its master switch — a pass that cannot reach the store is not one. */
+           granularity is not pass granularity. Recorded after the guard above because a pass that cannot
+           reach the store is not one.
+
+           NOT parity with the other two sites, and an earlier version of this comment wrongly claimed it
+           was. The shared engine records its pass after AlertEngine.EvaluateServerAsync's
+           !_settings.AlertsEnabled early return, and DarlingSelfAlertEvaluator.EvaluateStoreAlertsAsync
+           returns before recording on the same check. This path has no master-switch gate at all —
+           DarlingWorker holds no reference to AlertsEnabled anywhere — so with alerting switched off the
+           PostgreSQL predictors still read, still evaluate and still reach _alertDeliverer, and this
+           counts the pass that really did run. That gap pre-dates this counter and is a question about
+           whether the Tier 0 predictors are deliberately exempt from the switch, not something to settle
+           by gating a denominator: gating only this line would make the count deny passes that happened
+           and alerts that fired. The count stays truthful and the gap stays named. */
         _readFailures.RecordPass(snapshot.ServerKey);
 
         try
