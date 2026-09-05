@@ -174,6 +174,7 @@ WHERE status = 'in_progress'
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(ReclaimStaleCommandsSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = StaleCommandTimeout });
 
             var reclaimed = await command.ExecuteNonQueryAsync(cancellationToken);
@@ -198,6 +199,7 @@ WHERE status = 'in_progress'
     {
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(ClaimCommandSql, connection);
+        command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
         command.Parameters.AddWithValue(_serviceInstance);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -530,6 +532,7 @@ WHERE status = 'in_progress'
     {
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(plan.Sql, connection);
+        command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
         if (plan.Parameters is not null)
         {
             foreach (var parameter in plan.Parameters)
@@ -547,6 +550,7 @@ WHERE status = 'in_progress'
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(ReportCommandSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
             command.Parameters.AddWithValue(commandId);
             command.Parameters.AddWithValue(outcome.Success ? "succeeded" : "failed");
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)outcome.ResultStatus ?? DBNull.Value });

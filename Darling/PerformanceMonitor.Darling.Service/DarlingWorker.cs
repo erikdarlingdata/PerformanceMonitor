@@ -1072,10 +1072,11 @@ public sealed class DarlingWorker : BackgroundService
            instance holding the migration advisory lock both succeed seconds later; a rung that cannot
            apply against this store never will. StartupFailureTriage decides which arrived and carries
            the reasoning for where that boundary sits, including why anything it cannot place positively
-           stays terminal. This block is the ONLY step of the collection loop's start that kills collection,
-           so the degrade-vs-kill question the next block answers out loud is answered here too: a
-           transient store failure now degrades to a delayed first cycle, and everything else keeps the
-           critical line and the stand-down byte for byte. Both caps are load-bearing: an attempt is not
+           stays terminal. This is the LAST of the three startup steps that can kill collection — the config
+           load and the managed bootstrap above are the other two, triaged the same way through the same
+           predicate — so the degrade-vs-kill question the next block answers out loud is answered here
+           too: a transient store failure now degrades to a delayed first cycle, and everything else keeps
+           the critical line and the stand-down byte for byte. Both caps are load-bearing: an attempt is not
            quick just because a refused connect is — one that blocks behind a peer's advisory lock can
            spend MigrationLockWaitTimeoutSeconds — so the wall-clock budget is what stops 25 attempts from
            becoming ten hours, and the attempt count is what the warning line reports.
@@ -5405,6 +5406,7 @@ LIMIT 1";
         await using (var lookup = _postgres!.CreateCommand(
             "SELECT query_text FROM collect.pg_statement_text WHERE server_id = $1 AND queryid = $2"))
         {
+            lookup.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
             lookup.Parameters.AddWithValue(serverId);
             lookup.Parameters.AddWithValue(queryId);
             statementText = (await lookup.ExecuteScalarAsync(cancellationToken)) as string;
@@ -5674,6 +5676,7 @@ LIMIT 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(ResolveActualPlanSql(request.Source), connection);
+            command.CommandTimeout = ServiceCommandDeadlines.ActualPlanResolveSeconds;
             BindActualPlanResolveParameters(command, serverId, request);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
