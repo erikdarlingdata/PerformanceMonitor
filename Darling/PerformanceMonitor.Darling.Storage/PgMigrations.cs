@@ -4013,6 +4013,36 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// <c>migrate_data =&gt; true</c>, which rewrites every existing row into chunks; on a long-collected /
     /// many-server store that can exceed 30s. Mirrors <see cref="TimescaleSupport"/>'s runtime-conversion
     /// budget. Harmless for the DDL-only migrations — they finish in milliseconds regardless.
+    ///
+    /// <para><b>Per RUNG, not per statement.</b> <see cref="MigrateLockedAsync"/> issues one
+    /// <c>NpgsqlCommand</c> carrying a rung's entire SQL, so V39's two <c>CREATE INDEX</c>es share one
+    /// budget instead of getting one each. That is the unit
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/>' floor is counted in.</para>
+    ///
+    /// <para><b>The cancel it sends IS honoured, on every rung this ladder has.</b> Client-side bounds
+    /// are only requests, so this was measured rather than assumed, against a seeded PostgreSQL 17.11 /
+    /// TimescaleDB 2.29.2 store carrying 13.5 million rows and 90 chunks in each of the four
+    /// floor-setting rungs' targets (unbounded there: V22 6.08 s, V39 4.28 s, V104 10.57 s, V23 25.61 s).
+    /// At a 1 s and a 2 s budget all four abort within 50 ms of it, from inside <c>IO/DataFileRead</c> and
+    /// <c>IO/BuffileRead</c> waits; the backend leaves <c>pg_stat_activity</c> inside 0.4 s, the rung's
+    /// transaction rolls back whole and the connection stays usable. The realistic overrun was run at this
+    /// constant's real value through this applier — a rung parked behind a peer's table lock, which is
+    /// what a second instance collecting into the same store produces: V22 sat in <c>Lock/relation</c> for
+    /// the entire budget and ended at 300.06 s, nothing applied and nothing stamped. So the floor in
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> is a ceiling on real holds as well, one budget per
+    /// rung.</para>
+    ///
+    /// <para><b>What it bounds is SILENCE, not wall clock — which is why #2894's residual is a
+    /// rung-SHAPE question and not a missing mechanism.</b> Npgsql implements this as a socket READ
+    /// timeout, and every message the backend sends restarts it. Matched pair, same statement and the same
+    /// 40 s of work both times: emitting one <c>RAISE NOTICE</c> a second it ran to completion in 40.18 s
+    /// and a 5 s budget never fired at all, while silent it was cancelled at 5.02 s. A rung is therefore
+    /// bounded at this many seconds of BACKEND SILENCE. Today's ladder is quiet — no rung contains a
+    /// <c>LOOP</c>, and V23's is its only <c>RAISE</c>, in an exception handler that runs only when the
+    /// rung is already failing — so the whole exposure is the two messages <c>create_hypertable</c> emits
+    /// itself, both inside the first 3 s, which offsets V23's real ceiling to 303 s while V22, V39 and
+    /// V104 are cancelled at 300.05 s. A rung that instrumented its own progress, the natural way to write
+    /// a long data move, would not be cancelled at all.</para>
     /// </summary>
     private const int MigrationCommandTimeoutSeconds = 300;
 
@@ -4073,7 +4103,12 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// <c>BackgroundService</c>, so the service reports Running before the first migration statement runs. The
     /// value therefore comes from the failure ASYMMETRY: too short and the waiter throws into
     /// <c>DarlingWorker</c>'s <c>LogCritical</c>-and-return, which takes that instance out of the collection
-    /// loop entirely with no retry until an operator restarts it; too long and it only delays its own first
+    /// loop entirely until an operator restarts it. #2936's retry loop around that call does not save it,
+    /// and deliberately so: <c>StartupFailureTriage</c> does classify the expiry's bare
+    /// <see cref="TimeoutException"/> as retryable, but gates the retries on a 120 s WALL-CLOCK budget —
+    /// an order of magnitude under a single spend of this constant, precisely so 25 attempts cannot become
+    /// ten hours — so the first expiry has already exhausted it and lands in the terminal arm. One expiry
+    /// is terminal by design, not by omission. Too long and it only delays its own first
     /// cycle, because its MCP and web surfaces start independently and are already serving. Waiting is the
     /// cheap direction, so this errs long — but stays FINITE, so a genuinely wedged holder still produces a
     /// readable deadline instead of the silent hang #2874 exists to stop.</para>
@@ -4092,19 +4127,38 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// of a lock it had nothing to do with. Never proceeding without a POSITIVE version match is what keeps
     /// this from being "give up and collect anyway".</para>
     ///
-    /// <para><b>What still bounds a rung that overruns its own budget: nothing available here, measured
-    /// rather than assumed.</b> <see cref="MigrationCommandTimeoutSeconds"/> is client-side — it sends a
-    /// cancel request, and a backend in a phase that does not reach an interrupt check keeps going, so the
-    /// lower bound above is a floor on LEGITIMATE holds and not a ceiling on real ones. Both server-side
-    /// alternatives were tried on PostgreSQL 17.11 and neither has the right shape. <c>statement_timeout</c>
-    /// is per STATEMENT, not per transaction — three one-second statements all survive a two-second setting
-    /// — so it would bound V39's two <c>CREATE INDEX</c>es at one budget EACH, making the ladder's floor
-    /// five multiples instead of four and spending this constant's entire margin to buy a bound that still
-    /// is not per-rung. <c>transaction_timeout</c> has exactly the right unit, since each rung is one
-    /// transaction, but it is PostgreSQL 17+ against readers here that gate as low as 13, and it ends the
-    /// session with FATAL rather than failing the statement. So the holder stays unbounded, and this budget
-    /// is deliberately NOT sized to cover an unbounded holder — the waiter is instead made independent of
-    /// whether it was covered, which is the part that was reachable.</para>
+    /// <para><b>What bounds a rung that overruns its own budget: that budget does, and the residual is a
+    /// rung SHAPE rather than a missing mechanism.</b> <see cref="MigrationCommandTimeoutSeconds"/> is
+    /// client-side, so whether it BINDS was measured rather than reasoned about — see that constant: the
+    /// cancel it sends is honoured by all four floor-setting rungs within 50 ms of the budget, from inside
+    /// I/O waits and from a full-budget <c>Lock/relation</c> wait, so the floor above is a ceiling on real
+    /// holds too. What it does not bound is a rung that keeps TALKING, because Npgsql restarts the timeout
+    /// on every backend message. Two rung shapes opt out of it and both are one line of plpgsql from V23's
+    /// existing <c>DO</c> block. A <c>RAISE</c> inside a <c>LOOP</c> is never cancelled and holds this lock
+    /// for as long as it runs — loud, because the waiter says so, and caught anyway by the census above
+    /// whenever such a rung also moves data. An <c>EXCEPTION WHEN query_canceled</c> is the silent one:
+    /// <c>OTHERS</c> deliberately does not match a cancel, but naming the condition does, and measured, the
+    /// applier then saw SUCCESS, committed the rung and stamped the version while the rung's own work never
+    /// happened. That destroys the "a stamp of N proves rung N committed" property the expiry split above
+    /// rests on, and permanently, so <c>MigrationDataMovingRungCensusPins</c> fails the build on the shape
+    /// rather than leaving it to be rediscovered.</para>
+    ///
+    /// <para><b>Three mechanisms considered instead of that pin, and why none of them is built.</b> A
+    /// watchdog cancelling the migrate backend out of band buys nothing measurable:
+    /// <c>pg_cancel_backend</c> stopped the same four rungs at 2.01-2.03 s and
+    /// <c>pg_terminate_backend</c> at 2.01-2.05 s, against this applier's own 2.04-2.07 s on the identical
+    /// rungs, because all three arrive through the same <c>CHECK_FOR_INTERRUPTS</c> — nothing one can stop
+    /// is beyond the others. Terminate is worse than merely redundant: it reports <c>57P01</c>, which
+    /// <c>StartupFailureTriage</c> holds retryable, so it would turn a rung that can never apply into one
+    /// that is retried. Splitting the expensive rungs so each statement gets its own budget helps exactly
+    /// one of the four — V22, V23 and V104 are each a single statement — and pays for that by raising this
+    /// floor from four multiples to five. Both server-side timeouts have the wrong unit or the wrong
+    /// reach: <c>statement_timeout</c> is per STATEMENT, not per transaction — three one-second statements
+    /// all survive a two-second setting — so it would bound V39's two <c>CREATE INDEX</c>es at one budget
+    /// EACH, making the ladder's floor five multiples instead of four and spending this constant's entire
+    /// margin to buy a bound that still is not per-rung. <c>transaction_timeout</c> has exactly the right
+    /// unit, since each rung is one transaction, but it is PostgreSQL 17+ against readers here that gate
+    /// as low as 13, and it ends the session with FATAL rather than failing the statement.</para>
     ///
     /// <para>A multiple rather than a literal so the two budgets cannot drift apart if the rung bound moves.
     /// #2894 recorded two ways the wait still dies, and both are now narrowed rather than closed. A fifth
@@ -4113,12 +4167,15 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// above, so a new one arrives carrying this derivation in a failure message instead of arriving
     /// silently. It resolves each statement's TARGET rather than counting keywords, because an index on a
     /// table the same rung creates is free and 130 of this ladder's 134 <c>CREATE INDEX</c> statements are
-    /// that shape. A rung needing longer than its own bound is still not bounded, per the paragraph above;
-    /// what changed is that its victim no longer dies undiagnosed, and no longer dies at all when it had
-    /// nothing to apply. The refinement deliberately NOT built is extending this budget whenever the stamp
-    /// table is seen to advance, which would make a slow-but-progressing holder unable to strand a waiter
-    /// at all: it costs a catalog probe and a read per poll on the store being migrated, to buy a case that
-    /// needs a single rung to exceed five minutes on a ladder measured at 0.301 s.</para>
+    /// that shape. A rung needing longer than its own bound turns out to be bounded after all, per the two
+    /// paragraphs above — one <see cref="MigrationCommandTimeoutSeconds"/> per rung, honoured, plus V23's
+    /// 3 s of <c>create_hypertable</c> chatter — and what is left of that residual is the rung shape that
+    /// opts out of the bound silently, which is pinned. Its victim also no longer dies undiagnosed, and no
+    /// longer dies at all when it had nothing to apply. The refinement deliberately NOT built is
+    /// extending this budget whenever the stamp table is seen to advance, which would make a
+    /// slow-but-progressing holder unable to strand a waiter at all: it costs a catalog probe and a read
+    /// per poll on the store being migrated, to buy a case that needs a single rung to exceed five minutes
+    /// on a ladder measured at 0.301 s.</para>
     /// </summary>
     private const int MigrationLockWaitTimeoutSeconds = 5 * MigrationCommandTimeoutSeconds;
 
