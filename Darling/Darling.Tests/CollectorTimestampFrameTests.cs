@@ -88,6 +88,43 @@ public sealed class CollectorTimestampFrameTests
     }
 
     /// <summary>
+    /// <c>default_trace_events.event_time</c> is the monitored server's LOCAL wall clock — the .trc files
+    /// store local time and <c>ft.StartTime</c> is shipped verbatim — so every bound this collector compares
+    /// against it has to come from the server's clock too.
+    ///
+    /// <para>Only the archival-empty fallback was ever at risk, and it is the branch nobody exercises: the
+    /// steady-state bound is the watermark, which IS a previously-stored <c>event_time</c> and therefore
+    /// already server-local, and the true-first-run bound is a 1900 sentinel that no clock can misread. The
+    /// third branch fires only when the hot store has been emptied by retention/archival on a server that HAS
+    /// collected before, which is why a host-UTC bound there survived review: it is correct on a UTC server,
+    /// and every store anyone develops against is UTC.</para>
+    ///
+    /// <para>Pinned against the SOURCE rather than a rendered query because the point is the absence of the
+    /// alternative: this collector must carry a LOCAL clock and no UTC clock at all, which is the exact
+    /// inverse of <see cref="MemoryPressureEvents_StampsSampleTimeInUtc"/>. Both facts are per-TABLE. There is
+    /// no store-wide rule to appeal to, and no name-keyed one either — <c>system_health.event_time</c> is UTC
+    /// under the same column name, which is why <c>StoreSqlClockDisciplineTests</c> cannot judge either.</para>
+    /// </summary>
+    [Fact]
+    public void DefaultTraceEvents_DerivesEveryCutoffFromTheServersClock()
+    {
+        var sql = QueryTextOf("DefaultTraceEventsCollector.cs");
+
+        Assert.True(
+            s_localClock.IsMatch(sql),
+            "DefaultTraceEventsCollector's archival-empty fallback must derive its cutoff from SYSDATETIME(). "
+            + "ft.StartTime is the server's LOCAL wall clock, so a host-supplied UTC bound delivers the wrong "
+            + "window by the server's offset: 17 hours at UTC-7 (a hole in trace history nothing refills) and "
+            + "34 at UTC+10 (re-ingesting events already in parquet, which v_default_trace_events UNIONs "
+            + "without dedup — the double-count the bound exists to prevent). Both are silent.");
+
+        Assert.False(
+            s_utcClock.IsMatch(sql),
+            "DefaultTraceEventsCollector's query contains a UTC clock function; every bound it compares "
+            + "against the server-local ft.StartTime must be in the server's clock (see above).");
+    }
+
+    /// <summary>
     /// The collector's query constants, with COMMENT spans removed and string literals kept — the inverse
     /// of <c>CSharpSourceWalker.StripCommentsAndStrings</c>, because the SQL under test IS a verbatim
     /// literal. Both C# and embedded T-SQL comment forms go, since this codebase's SQL carries its
