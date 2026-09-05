@@ -240,6 +240,7 @@ public static class ServiceCommandDeadlines
     /// </summary>
     public const int SerialLoopSeconds = 5;
 
+    /// <summary>
     /// The store&lt;-&gt;service COMMAND plane's own bookkeeping — the stale-command reaper, the atomic
     /// claim, the desired-state store write a claimed command dispatches, the terminal result report,
     /// and the <c>pg_statement_text</c> lookup <c>test_hypothetical_index</c> resolves its statement
