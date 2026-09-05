@@ -564,8 +564,8 @@ public partial class ViewerServerTab
 
         PgDeadlocksNote.Text = PanelNote("pg_deadlocks", rows.Count,
             "No deadlock was reported in this window. That is the healthy answer, and it is also what an "
-            + "unreadable server log looks like — the plan-capture panel above reads the same file and says "
-            + "which it is.")
+            + "unreadable server log looks like — the Vacuum tab's plan-capture readiness panel reads the "
+            + "same file and says which it is.")
             + (rows.Count == 0
                 ? string.Empty
                 : "  Sightings counts how often the collector saw the SAME report while it stayed inside "
