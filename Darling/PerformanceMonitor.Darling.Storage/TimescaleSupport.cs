@@ -95,8 +95,14 @@ public static class TimescaleSupport
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="CompressScheduleInterval"/>, for callers comparing a
     /// job's cadence numerically instead of by text — <c>01:00:00</c> and <c>1 hour</c> are the same interval
-    /// and must never read as a difference (that would re-alter the same job on every service start). Pinned
-    /// equal to the string by TimescaleSupportTests.</summary>
+    /// and must never read as a difference (that would re-alter the same job on every service start).
+    ///
+    /// <para>Cross-checked against <see cref="CompressScheduleInterval"/> by PARSING that literal, not by
+    /// pinning each side to its own constant: two independent pins force the edit on whichever side the
+    /// editor is looking at and force nothing on the other, and a divergence here is not cosmetic —
+    /// <see cref="ConvergeCompressionScheduleAsync(NpgsqlConnection, ILogger, CancellationToken)"/> takes its
+    /// target seconds from THIS while the policy is created with the STRING, so the two disagreeing makes
+    /// every job read stale forever. Raised by review.</para></summary>
     public static readonly TimeSpan CompressScheduleSpan = TimeSpan.FromHours(1);
 
     /// <summary>

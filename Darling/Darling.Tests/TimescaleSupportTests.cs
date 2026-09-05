@@ -2522,8 +2522,47 @@ LIMIT 1", connection))
         Assert.DoesNotContain("fixed_schedule", TimescaleSupport.SetCompressionScheduleSql, StringComparison.Ordinal);
         Assert.DoesNotContain("initial_start", TimescaleSupport.SetCompressionScheduleSql, StringComparison.Ordinal);
 
+        /* THE TWIN CROSS-CHECK, and it has to PARSE the literal rather than pin both sides to their own
+           constant. Two independent literal pins force the edit on whichever side the editor happens to be
+           looking at and force nothing on the other: change the interval to "30 minutes", update the string
+           pin because it went red, and CompressScheduleSpan keeps an hour with its own pin still green. The
+           consequence is not cosmetic — `desiredSeconds` in ConvergeCompressionScheduleAsync comes off the
+           SPAN while the policy is created with the STRING, so a divergence makes `cadenceStale` true forever
+           and the converge re-alters every compression policy on every service start. That is the exact
+           "same interval read as a difference" failure the read's own doc comment is careful about,
+           reintroduced through the twin. Same mechanism as
+           TimescaleContinuousAggregateTests.EveryRetentionIntervalLiteral_EqualsItsTimeSpanTwin. Raised by
+           review. */
         Assert.Equal("1 hour", TimescaleSupport.CompressScheduleInterval);
-        Assert.Equal(TimeSpan.FromHours(1), TimescaleSupport.CompressScheduleSpan);
+        Assert.Equal(ParsePostgresInterval(TimescaleSupport.CompressScheduleInterval), TimescaleSupport.CompressScheduleSpan);
+
+        /* Control on the parser, in the identical form: it must return the value under test for the shipped
+           literal AND reject a shape it cannot read, or a parser that answered TimeSpan.Zero to everything
+           would make the assertion above vacuous the moment the literal changed. */
+        Assert.Equal(TimeSpan.FromHours(1), ParsePostgresInterval("1 hour"));
+        Assert.Equal(TimeSpan.FromDays(3), ParsePostgresInterval("3 days"));
+        Assert.Equal(TimeSpan.Zero, ParsePostgresInterval("30 minutes"));
+    }
+
+    /// <summary>"1 hour" / "4 days" -> a <see cref="TimeSpan"/>, so a string literal and its
+    /// <see cref="TimeSpan"/> twin can be compared against ONE representation instead of two hand-maintained
+    /// ones. Unreadable shapes come back <see cref="TimeSpan.Zero"/> rather than throwing, which fails the
+    /// comparison loudly instead of passing it quietly — deliberately the same shape as
+    /// TimescaleContinuousAggregateTests' own parser, so the two do not disagree about what a literal
+    /// means.</summary>
+    private static TimeSpan ParsePostgresInterval(string interval)
+    {
+        var parts = interval.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2 || !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var count))
+        {
+            return TimeSpan.Zero;
+        }
+
+        return parts[1].StartsWith("day", StringComparison.OrdinalIgnoreCase)
+            ? TimeSpan.FromDays(count)
+            : parts[1].StartsWith("hour", StringComparison.OrdinalIgnoreCase)
+                ? TimeSpan.FromHours(count)
+                : TimeSpan.Zero;
     }
 
     /// <summary>
