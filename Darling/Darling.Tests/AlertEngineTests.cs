@@ -290,6 +290,11 @@ public sealed class AlertEngineTests
         public bool Muted { get; set; }
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
+        /* #3013: the swallowed-read counter is an OPTIONAL harness input, defaulting to null, so every
+           pin above builds an engine that counts nothing and no test can leak into another's totals or
+           into the process-wide AlertReadFailureCounter.Shared. */
+        public AlertReadFailureCounter? ReadFailures { get; set; }
+
         public AlertEngine Build(bool withFailedJobsFetcher = false) => new(
             Settings, Adapter, StateStore, Deliverer,
             isAlertMuted: _ => Muted,
@@ -298,7 +303,8 @@ public sealed class AlertEngineTests
                 : null,
             resolutionCallback: (r, _) => { Resolutions.Add(r); return Task.CompletedTask; },
             logger: null,
-            utcNow: () => Now);
+            utcNow: () => Now,
+            readFailures: ReadFailures);
 
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
@@ -1418,6 +1424,112 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
         Assert.Single(h.StateStore.SavedFailedJob);
+    }
+
+    /* ---------------- #3013: swallowed condition reads reach a counter ---------------- */
+
+    [Fact]
+    public async Task EverySwallowedConditionRead_LandsOnTheCounter_UnderTheServerItBelongsTo()
+    {
+        /* #3013's whole defect is that these skips reached no surface. The log-and-skip posture itself is
+           correct and is pinned by AdapterFailure_SkipsThatCheck_WithoutDisturbingItsState below; what this
+           pin adds is that the skip is now COUNTED, per server, with the failing read named.
+
+           Three checks enabled rather than all of them, because the exact total over an all-enabled sweep
+           depends on gates this pin is not about (Azure-ness, the wait-seconds opt-in, whether a fetcher was
+           supplied). Three is enough to prove the count is per-read and not per-pass. */
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 9, 5, 8, 0, 0, DateTimeKind.Utc));
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.BlockingEnabled = true;
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DatabaseStateEnabled = true;
+        h.Settings.ForcePlanFailureEnabled = true;
+
+        var engine = new AlertEngine(
+            h.Settings, new ThrowingAdapter(), h.StateStore, h.Deliverer, _ => false,
+            utcNow: () => h.Now, readFailures: counter);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var reading = counter.ReadFor(Key);
+
+        /* Blocking, deadlocks, database state and forced plans all threw. The watermark seed reads the same
+           throwing adapter and is counted too, which is deliberate: a failed seed means the edge triggers
+           start from nothing for that server, which is exactly the kind of silent degradation #3013 is
+           about. Bounded rather than exact so the pin does not have to be rewritten every time a check is
+           added, with the LOWER bound the part that carries the claim. */
+        Assert.True(
+            reading.ServerReadFailures >= 4,
+            $"expected at least the four enabled condition reads to be counted, got {reading.ServerReadFailures}");
+
+        /* The denominator, and the reason this is not just a count: one pass. */
+        Assert.Equal(1, reading.ServerAlertPasses);
+
+        /* Nothing leaked to another server or to the fleet bucket: the instance total is this server's. */
+        Assert.Equal(reading.ServerReadFailures, reading.InstanceReadFailures);
+        Assert.Equal(0, counter.ReadFor("999").ServerReadFailures);
+
+        /* The currency stamp and the named read — the two things a bare count cannot say. */
+        Assert.Equal(new DateTime(2026, 9, 5, 8, 0, 0, DateTimeKind.Utc), reading.LastFailureAtUtc);
+        Assert.False(string.IsNullOrWhiteSpace(reading.LastFailureRead));
+
+        /* The finding names the read rather than restating the number. */
+        var finding = AlertReadFailureCounter.FormatFinding(reading);
+        Assert.NotNull(finding);
+        Assert.Contains(reading.LastFailureRead!, finding, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AHealthyPass_CountsItselfAndLeavesTheFailureCountAtZero()
+    {
+        /* The control, and the half that decides whether the counter can be read as reassurance: a pass over
+           an adapter that answers normally must move the DENOMINATOR and nothing else. Without this, a
+           counter wired to increment on every pass would look identical to a working one on the test above.
+
+           The control also has to exercise the case worth worrying about — a pass that actually RAN its
+           checks — so the same four checks are enabled here as in the failing pin, against the harness's
+           own answering adapter rather than the throwing one. */
+        var counter = new AlertReadFailureCounter();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.BlockingEnabled = true;
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DatabaseStateEnabled = true;
+        h.Settings.ForcePlanFailureEnabled = true;
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var reading = counter.ReadFor(Key);
+        Assert.Equal(2, reading.ServerAlertPasses);
+        Assert.Equal(0, reading.ServerReadFailures);
+        Assert.Equal(0, reading.InstanceReadFailures);
+        Assert.Null(reading.LastFailureAtUtc);
+        Assert.Null(reading.LastFailureRead);
+
+        /* A clean reading carries no sentence at all, rather than a sentence saying it is clean — the
+           #3017 discipline: a finding that always renders trains a reader to skip it. */
+        Assert.Null(AlertReadFailureCounter.FormatFinding(reading));
+
+        /* And the checks really did run against the adapter, so the zero above is a zero from a pass that
+           looked rather than one that was gated off. */
+        Assert.True(h.Adapter.ForcePlanFetches > 0, "the control pass performed no reads, so its zero proves nothing");
+    }
+
+    [Fact]
+    public async Task TheMasterSwitchOffPass_IsNotInTheDenominator()
+    {
+        /* A pass that never looked at the store must not dilute the denominator — otherwise a fleet with
+           alerts switched off accumulates passes forever and three failures over "50,000 passes" reads as
+           negligible when the real denominator is three. */
+        var counter = new AlertReadFailureCounter();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.AlertsEnabled = false;
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(0, counter.ReadFor(Key).ServerAlertPasses);
     }
 
     /* ---------------- engine hygiene ---------------- */
