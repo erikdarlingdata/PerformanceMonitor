@@ -540,7 +540,7 @@ public sealed class ViewerCommandTimeoutTests
 
             var joins = s_joinedFanOut.Matches(code).Select(m => m.Index).ToArray();
             var discards = s_fireAndForget.Matches(code).Select(m => m.Index).ToArray();
-            var deferred = s_deferredRead.Matches(code).Select(m => (m.Index, End: m.Index + m.Length)).ToArray();
+            var deferred = DeferredReads(code);
             var declarations = s_fanOutDeclaration.Matches(code).Select(m => m.Index).ToArray();
 
             /* A marker inside no recognised member means the member walk missed a declaration shape, and a
@@ -694,7 +694,7 @@ public sealed class ViewerCommandTimeoutTests
 
         var joins = s_joinedFanOut.Matches(code).Select(m => m.Index).ToArray();
         var discards = s_fireAndForget.Matches(code).Select(m => m.Index).ToArray();
-        var deferred = s_deferredRead.Matches(code).Select(m => (m.Index, End: m.Index + m.Length)).ToArray();
+        var deferred = DeferredReads(code);
 
         var isFanOut = joins.Length > 0 || discards.Length >= 2 || ConcurrentRun(code, deferred) >= 2;
 
@@ -736,11 +736,80 @@ public sealed class ViewerCommandTimeoutTests
         Assert.Equal(expectedName, bodies[0].Name);
 
         /* And the fan-out inside it is attributed to that member rather than landing nowhere. */
-        var deferred = s_deferredRead.Matches(code).Select(m => (m.Index, End: m.Index + m.Length)).ToArray();
+        var deferred = DeferredReads(code);
 
         Assert.True(deferred.Length == 2, $"{deferred.Length} deferred read(s) parsed out of the fixture, not 2");
         Assert.All(deferred, d => Assert.NotNull(Owner(bodies, d.Index)));
         Assert.True(ConcurrentRun(code, deferred) >= 2, "the generic method's deferred pair did not read as a fan-out");
+    }
+
+    /// <summary>
+    /// An <c>await</c> inside the FIRST call's own argument list does not sequence the pair. The two tasks
+    /// are still started back to back, so this is a fan-out.
+    ///
+    /// <para>Deliberately separate from
+    /// <see cref="TheDeferredRun_IsBrokenByAnAwaitBetweenTheTwoStatements"/>: measuring the window from the
+    /// wrong end satisfies one of the two and breaks the other, so a single assertion would call a half-fix
+    /// proven. That is the lesson the <c>where T : class, new()</c> fixture taught on this same file.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeferredRun_IgnoresAnAwaitInsideTheFirstCallsOwnArguments()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            "var firstTask = _dataService.GetOneAsync(await ResolveIdAsync());\n"
+            + "var secondTask = _dataService.GetTwoAsync(id);\n");
+
+        var deferred = DeferredReads(code);
+
+        Assert.True(deferred.Length == 2, $"{deferred.Length} deferred read(s) parsed, not 2");
+
+        Assert.True(
+            ConcurrentRun(code, deferred) >= 2,
+            "an await inside the first call's own arguments broke the run, so a real fan-out reads as "
+            + "sequential — the window is being measured from the match end instead of the statement end");
+    }
+
+    /// <summary>
+    /// An <c>await</c> genuinely BETWEEN the two statements does sequence them: the first task is finished
+    /// before the second starts, so nothing is in flight together and this is not a fan-out.
+    /// </summary>
+    [Fact]
+    public void TheDeferredRun_IsBrokenByAnAwaitBetweenTheTwoStatements()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            "var firstTask = _dataService.GetOneAsync(id);\n"
+            + "var first = await firstTask;\n"
+            + "var secondTask = _dataService.GetTwoAsync(id);\n"
+            + "var second = await secondTask;\n");
+
+        var deferred = DeferredReads(code);
+
+        Assert.True(deferred.Length == 2, $"{deferred.Length} deferred read(s) parsed, not 2");
+
+        Assert.True(
+            ConcurrentRun(code, deferred) < 2,
+            "start-await-start-await read as a fan-out; the window has been widened past the intervening "
+            + "await and the shape is now over-reported");
+    }
+
+    /// <summary>
+    /// A deferred read nested inside an earlier statement — a task started in a lambda handed to another
+    /// started task — does not index the window backwards. No site in this project is written that way; the
+    /// naive form throws rather than mis-reporting, so it is pinned rather than left to appear.
+    /// </summary>
+    [Fact]
+    public void TheDeferredRun_SurvivesAStartNestedInsideAnEarlierStatement()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            "var outerTask = _dataService.RunAsync(() => { var innerTask = _dataService.GetOneAsync(id); return innerTask; });\n");
+
+        var deferred = DeferredReads(code);
+
+        Assert.True(deferred.Length == 2, $"{deferred.Length} deferred read(s) parsed, not 2");
+        Assert.True(deferred[0].End > deferred[1].Index, "the fixture no longer nests, so it pins nothing");
+
+        /* The assertion is that this returns at all. */
+        Assert.True(ConcurrentRun(code, deferred) >= 1);
     }
 
     /// <summary>
@@ -827,9 +896,17 @@ public sealed class ViewerCommandTimeoutTests
     }
 
     /// <summary>
-    /// The longest run of deferred reads with no <c>await</c> between consecutive members of the run — the
-    /// number actually in flight together. Two starts either side of an <c>await</c> are sequential and
-    /// must not count; see <see cref="TheFanOutCensus_RecognisesEachShape_AndOnlyThose"/>.
+    /// The longest run of deferred reads with no <c>await</c> between consecutive STATEMENTS of the run —
+    /// the number actually in flight together. Two starts either side of an <c>await</c> are sequential and
+    /// must not count; see <see cref="TheDeferredRun_IsBrokenByAnAwaitBetweenTheTwoStatements"/>.
+    ///
+    /// <para><b>The window starts at the end of the previous STATEMENT, not at the end of its regex
+    /// match.</b> <see cref="s_deferredRead"/> ends on the call's opening paren, so a window measured from
+    /// there spans the rest of that call's own argument list — and an <c>await</c> in those arguments
+    /// (<c>var t1 = FooAsync(await Bar());</c>) would break the run and silently drop a real fan-out. That
+    /// is #3019's own failure inside the detector for it, and it applied to all 63 deferred sites in the
+    /// project rather than to an edge case. <see cref="DeferredReads"/> therefore carries the statement end.
+    /// Found in review.</para>
     /// </summary>
     private static int ConcurrentRun(string code, (int Index, int End)[] deferred)
     {
@@ -839,12 +916,47 @@ public sealed class ViewerCommandTimeoutTests
 
         foreach (var (index, end) in deferred)
         {
-            run = previousEnd >= 0 && !s_await.IsMatch(code[previousEnd..index]) ? run + 1 : 1;
+            if (previousEnd < 0)
+            {
+                run = 1;
+            }
+            else
+            {
+                /* previousEnd can sit PAST the next start, when that start is nested inside the previous
+                   statement — a task started inside a lambda handed to another. There is no "between" to
+                   scan and both are in flight, so the run continues rather than indexing backwards, which
+                   would throw. */
+                var between = previousEnd <= index ? code[previousEnd..index] : string.Empty;
+
+                run = s_await.IsMatch(between) ? 1 : run + 1;
+            }
+
             best = System.Math.Max(best, run);
-            previousEnd = end;
+
+            /* Monotonic, so a nested statement's earlier end cannot rewind the enclosing one's. */
+            previousEnd = System.Math.Max(previousEnd, end);
         }
 
         return best;
+    }
+
+    /// <summary>
+    /// Every deferred read in <paramref name="code"/>, each carrying the end of the STATEMENT it starts
+    /// rather than the end of its match. Shared by the sweep and its fixtures deliberately: a fixture
+    /// computing the window differently from the sweep would pin a property the sweep does not have.
+    /// </summary>
+    private static (int Index, int End)[] DeferredReads(string code)
+    {
+        return s_deferredRead.Matches(code)
+            .Select(match =>
+            {
+                /* The match ends ON the opening paren, which is what EndOfParenthesisedStatement wants;
+                   it counts parens, so a lambda argument cannot terminate the statement early. */
+                var end = EndOfParenthesisedStatement(code, match.Index + match.Length - 1);
+
+                return (match.Index, End: end < 0 ? match.Index + match.Length : end);
+            })
+            .ToArray();
     }
 
     /// <summary>
