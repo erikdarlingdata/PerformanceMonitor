@@ -545,6 +545,13 @@ public sealed class StoreSqlClockDisciplineTests
     /// Both apps' store-side source: everything that composes SQL against a Darling (PostgreSQL) or Lite
     /// (DuckDB) store. The collectors are deliberately NOT here — their SQL runs against a monitored SQL
     /// Server, whose clock policy is a separate question with at least one deliberately local caller.
+    ///
+    /// <para>The two analysis projects are BOTH roots, and the pairing is the point: they are ports of one
+    /// another (<c>PgFactCollector</c> / <c>DuckDbFactCollector</c>, <c>PgDrillDownCollector</c> /
+    /// <c>DrillDownCollector</c>) composing the same windowed reads against the two stores, so covering one
+    /// and not the other leaves the scan blind on whichever side the next port lands. Darling's analysis
+    /// project carries 225 <c>collection_time</c> references across its SQL literals — the exact corpus this
+    /// scan exists to judge.</para>
     /// </summary>
     private static IEnumerable<string> StoreSourceFiles([CallerFilePath] string thisFile = "")
     {
@@ -553,6 +560,7 @@ public sealed class StoreSqlClockDisciplineTests
             StorageDir(thisFile),
             ServiceDir(thisFile),
             ViewerDir(thisFile),
+            AnalysisDir(thisFile),
             LiteDir(thisFile, "Services"),
             LiteDir(thisFile, "Database"),
             LiteDir(thisFile, "Analysis"),
@@ -586,6 +594,9 @@ public sealed class StoreSqlClockDisciplineTests
 
     private static string ViewerDir(string thisFile) =>
         Path.Combine(DarlingDir(thisFile), "PerformanceMonitor.Darling.Viewer");
+
+    private static string AnalysisDir(string thisFile) =>
+        Path.Combine(DarlingDir(thisFile), "PerformanceMonitor.Darling.Analysis");
 
     private static string LiteDir(string thisFile, string leaf) =>
         Path.GetFullPath(Path.Combine(DarlingDir(thisFile), "..", "Lite", leaf));
