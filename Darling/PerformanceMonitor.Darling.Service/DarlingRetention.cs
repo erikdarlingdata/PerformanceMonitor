@@ -143,8 +143,9 @@ public static class DarlingRetention
     /// When <paramref name="timescaleAvailable"/> (the worker's startup detection), the
     /// collector tables purge via <c>drop_chunks</c> (<see cref="DropChunksSqlFor"/>) with a
     /// per-table DELETE fallback so a table that failed hypertable conversion still honors its
-    /// horizon; when false, the extension-free DELETE path runs unchanged. collection_log is
-    /// DELETE-based either way. Failure-isolated per table: one failed statement is logged as a
+    /// horizon; when false, the extension-free DELETE path runs unchanged. collection_log — a
+    /// hypertable since V23 — follows that same two-path shape at its own 2x horizon.
+    /// Failure-isolated per table: one failed statement is logged as a
     /// warning and the sweep continues (that table is retried on the next purge). Safe on a
     /// fresh/empty store — a purge that matches nothing removes nothing. Returns a coarse
     /// activity count: rows deleted by the DELETE paths plus whole chunks dropped by
