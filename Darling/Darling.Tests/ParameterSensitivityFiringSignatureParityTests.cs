@@ -152,13 +152,11 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
             .Select(e => RepoPath(e.RelativePath))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var scanned = 0;
+        var scanned = AnalysisSourceFiles().ToList();
         var strays = new List<string>();
 
-        foreach (var path in AnalysisSourceFiles())
+        foreach (var path in scanned)
         {
-            scanned++;
-
             if (declared.Contains(path))
             {
                 continue;
@@ -174,11 +172,17 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
         /* A floor, so a broken glob cannot report a clean bill of health. 44 files across the two
            analysis projects when this was written; set well below that so ordinary growth never trips it,
            but high enough that an empty enumeration fails instead of passing. */
-        Assert.True(scanned >= 20, $"scanned only {scanned} analysis source files — check the globs below");
+        Assert.True(
+            scanned.Count >= 20,
+            $"scanned only {scanned.Count} analysis source files — check the globs below");
 
-        /* And the declared files must be part of what was scanned, or the two halves of this guard are
-           looking at different trees. */
-        Assert.Equal(ExpectedCopies.Length, declared.Count);
+        /* And every declared file must be one of the files scanned, or the census above and this sweep are
+           reading different trees — which is how the sweep comes to skip exactly the files that matter. */
+        var unreached = declared.Except(scanned, StringComparer.OrdinalIgnoreCase).ToList();
+        Assert.True(
+            unreached.Count == 0,
+            "the globs below do not reach every declared file:" + Environment.NewLine
+            + string.Join(Environment.NewLine, unreached));
 
         Assert.True(
             strays.Count == 0,
