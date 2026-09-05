@@ -97,6 +97,41 @@ public sealed class CollectorRuntimeStateTests
         }
     }
 
+    /// <summary>
+    /// A store failure's message reaches the ping body as ONE line, capped. PostgreSQL answers a rung that
+    /// cannot apply with the message, a blank line, then a character offset into SQL the reader of a health
+    /// probe cannot see; and this text is the only part of the critical log line that leaves the
+    /// ACL-protected file log for an HTTP response, so what an unbounded driver or server message can put in
+    /// that body is worth bounding. Truncation is marked, so a shortened message is distinguishable from a
+    /// complete one.
+    /// </summary>
+    [Fact]
+    public void Detail_ArrivesAsOneCappedLine()
+    {
+        var state = new CollectorRuntimeState();
+
+        /* The exact shape a failing rung produced against PostgreSQL 17.11. */
+        state.PublishStopped(
+            CollectorRuntimeState.StartupStep.Store,
+            "3F000: no schema has been selected to create in\n\nPOSITION: 30");
+        Assert.Equal("3F000: no schema has been selected to create in", state.Read()!.Detail);
+
+        /* CRLF too, not just LF - the working copies of this repo are CRLF. */
+        state.PublishRetrying(CollectorRuntimeState.StartupStep.Store, "Failed to connect\r\ndetail", 1, 25);
+        Assert.Equal("Failed to connect", state.Read()!.Detail);
+
+        var long_ = new string('x', CollectorRuntimeState.MaxDetailLength + 50);
+        state.PublishStopped(CollectorRuntimeState.StartupStep.Configuration, long_);
+        var capped = state.Read()!.Detail!;
+        Assert.Equal(CollectorRuntimeState.MaxDetailLength + 1, capped.Length);
+        Assert.EndsWith("\u2026", capped, StringComparison.Ordinal);
+
+        /* A message already inside the cap is passed through whole - the cap must not cost the ordinary case
+           its last character. */
+        state.PublishStopped(CollectorRuntimeState.StartupStep.Store, "Failed to connect to 127.0.0.1:5953");
+        Assert.Equal("Failed to connect to 127.0.0.1:5953", state.Read()!.Detail);
+    }
+
     // ── The mapping ───────────────────────────────────────────────────────────────────────
 
     /// <summary>

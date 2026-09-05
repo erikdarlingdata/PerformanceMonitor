@@ -126,13 +126,14 @@ public sealed class CollectorRuntimeState
     /// <summary>Publishes a classified-transient failure of <paramref name="step"/> that is being retried
     /// (worker only; called from each retry arm alongside its warning line).</summary>
     public void PublishRetrying(StartupStep step, string detail, int attempt, int attempts)
-        => _current = new Snapshot(CollectorPhase.Retrying, step, detail, attempt, attempts, DateTime.UtcNow);
+        => _current = new Snapshot(
+            CollectorPhase.Retrying, step, FirstLineOf(detail), attempt, attempts, DateTime.UtcNow);
 
     /// <summary>Publishes a terminal failure of <paramref name="step"/> (worker only; called from each
     /// collection-blocking exit, before the <c>return</c> — after the critical line, so a throw here could
     /// never cost the operator the log line).</summary>
     public void PublishStopped(StartupStep step, string detail)
-        => _current = new Snapshot(CollectorPhase.Stopped, step, detail, 0, 0, DateTime.UtcNow);
+        => _current = new Snapshot(CollectorPhase.Stopped, step, FirstLineOf(detail), 0, 0, DateTime.UtcNow);
 
     /// <summary>Publishes that the collection loop started (worker only; called once, where the loop logs
     /// that it began).</summary>
@@ -141,4 +142,31 @@ public sealed class CollectorRuntimeState
 
     /// <summary>The latest published snapshot, or null when the worker has not reached a verdict yet.</summary>
     public Snapshot? Read() => _current;
+
+    /// <summary>
+    /// The first line of a failure message, CR-trimmed and length-capped — the same reduction
+    /// <c>DarlingCliCommands.FirstLineOf</c> and <c>ViewerStoreUnreachableException</c> apply, for the same
+    /// reason and one more.
+    ///
+    /// <para>PostgreSQL errors are multi-line: a rung that cannot apply answers with the message, then a
+    /// blank line, then <c>POSITION: 30</c> — a character offset into SQL the reader of a health probe cannot
+    /// see. The first line is the whole of what is actionable there.</para>
+    ///
+    /// <para>The cap is the second reason, and it is about the destination rather than the reader. This text
+    /// is the only part of the log's critical line that leaves the ACL-protected file log and travels over
+    /// HTTP, so it is worth bounding what an arbitrarily long driver or server message can put in a response
+    /// body. Truncation is MARKED, so a reader can tell a shortened message from a complete one and go to the
+    /// log for the rest.</para>
+    /// </summary>
+    private static string FirstLineOf(string detail)
+    {
+        var line = (detail ?? string.Empty).Split('\n')[0].TrimEnd('\r');
+
+        return line.Length <= MaxDetailLength ? line : line[..MaxDetailLength] + "…";
+    }
+
+    /// <summary>How much of a failure message travels in the ping body. Generous enough for the shapes that
+    /// actually arrive — a refused connect names a host and port, a rung failure a SQLSTATE and a sentence —
+    /// and finite because neither is bounded by anything this process controls.</summary>
+    internal const int MaxDetailLength = 400;
 }
