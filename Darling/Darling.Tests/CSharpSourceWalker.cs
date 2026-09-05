@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Text;
 
 namespace Darling.Tests;
@@ -78,7 +79,7 @@ internal static class CSharpSourceWalker
         ArgumentNullException.ThrowIfNull(text);
 
         var code = new bool[text.Length];
-        ScanCode(text, 0, code, null);
+        ScanCode(text, 0, code, null, null);
 
         return code;
     }
@@ -100,6 +101,45 @@ internal static class CSharpSourceWalker
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Every string literal's BODY, in source order: the offset its text starts at, and that text with
+    /// interpolation holes blanked to spaces. The mirror image of <see cref="StripCommentsAndStrings"/> —
+    /// that one keeps the code and discards the literals, this one keeps the literals — built on the same
+    /// walk, so a delimiter one of them understands cannot desynchronise the other.
+    ///
+    /// <para>Holes are blanked rather than dropped because a scanner reading SQL out of a literal is asking
+    /// about the SQL, and eliding <c>{filter}</c> to nothing welds the tokens either side of it into one
+    /// word that neither the source nor the database ever contains. A space is the only substitution that
+    /// changes no adjacency.</para>
+    ///
+    /// <para>Literals nested inside an interpolation hole are yielded too, because the walk recurses through
+    /// the hole: a query assembled one clause at a time is still a query.</para>
+    /// </summary>
+    internal static IEnumerable<(int Start, string Text)> StringLiteralBodies(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        var code = new bool[text.Length];
+        var bodies = new List<(int Start, int End)>();
+        ScanCode(text, 0, code, null, bodies);
+
+        var result = new List<(int Start, string Text)>(bodies.Count);
+
+        foreach (var (start, end) in bodies)
+        {
+            var sb = new StringBuilder(end - start);
+
+            for (var i = start; i < end; i++)
+            {
+                sb.Append(code[i] ? ' ' : text[i]);
+            }
+
+            result.Add((start, sb.ToString()));
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -403,7 +443,7 @@ internal static class CSharpSourceWalker
     /// that literal's interpolation hole, and the scan RETURNS at the hole's closing brace run or at its
     /// top-level format-specifier colon without consuming either — the caller owns those delimiters.
     /// </summary>
-    private static int ScanCode(string text, int i, bool[] code, Frame? hole)
+    private static int ScanCode(string text, int i, bool[] code, Frame? hole, List<(int Start, int End)>? bodies)
     {
         var depth = 0;
 
@@ -461,7 +501,15 @@ internal static class CSharpSourceWalker
             if (TryReadOpener(text, i, out var frame, out var bodyStart))
             {
                 /* A QuoteRun of zero is the empty string `""`, which has no body to walk. */
-                i = frame.QuoteRun == 0 ? bodyStart : ScanLiteral(text, bodyStart, code, frame);
+                if (frame.QuoteRun == 0)
+                {
+                    bodies?.Add((bodyStart, bodyStart));
+                    i = bodyStart;
+                    continue;
+                }
+
+                i = ScanLiteral(text, bodyStart, code, frame, bodies, out var bodyEnd);
+                bodies?.Add((bodyStart, bodyEnd));
                 continue;
             }
 
@@ -484,9 +532,11 @@ internal static class CSharpSourceWalker
     /// <summary>
     /// Walks a literal's body from <paramref name="i"/> — which is the first character AFTER the opening
     /// delimiter — marking any interpolation holes it contains as code. Returns the index just past the
-    /// closing delimiter.
+    /// closing delimiter, and reports through <paramref name="bodyEnd"/> where the body itself stopped, so a
+    /// caller collecting literal TEXT does not have to re-derive the delimiter's length per flavour.
     /// </summary>
-    private static int ScanLiteral(string text, int i, bool[] code, Frame frame)
+    private static int ScanLiteral(
+        string text, int i, bool[] code, Frame frame, List<(int Start, int End)>? bodies, out int bodyEnd)
     {
         while (i < text.Length)
         {
@@ -500,6 +550,7 @@ internal static class CSharpSourceWalker
 
                     if (run >= frame.QuoteRun)
                     {
+                        bodyEnd = i;
                         return i + run;
                     }
 
@@ -516,6 +567,7 @@ internal static class CSharpSourceWalker
                         continue;
                     }
 
+                    bodyEnd = i;
                     return i + 1;
                 }
 
@@ -524,12 +576,14 @@ internal static class CSharpSourceWalker
                     continue;
 
                 case LiteralKind.Regular when c == '"':
+                    bodyEnd = i;
                     return i + 1;
 
                 /* A non-verbatim string cannot span lines, so a newline means the opener was mis-read or the
                    file is malformed. Ending here bounds the damage to one line instead of to the next quote
                    anywhere in the file. */
                 case LiteralKind.Regular when c == '\n':
+                    bodyEnd = i;
                     return i;
             }
 
@@ -547,7 +601,7 @@ internal static class CSharpSourceWalker
                         continue;
                     }
 
-                    i = ScanHole(text, i + 1, code, frame);
+                    i = ScanHole(text, i + 1, code, frame, bodies);
                     continue;
                 }
 
@@ -555,7 +609,7 @@ internal static class CSharpSourceWalker
                    literal text — `{{typeParams}}` inside a `$$"""..."""` is one hole, not two braces. */
                 if (run >= frame.Dollars)
                 {
-                    i = ScanHole(text, i + frame.Dollars, code, frame);
+                    i = ScanHole(text, i + frame.Dollars, code, frame, bodies);
                     continue;
                 }
 
@@ -574,6 +628,7 @@ internal static class CSharpSourceWalker
             i++;
         }
 
+        bodyEnd = i;
         return i;
     }
 
@@ -582,9 +637,9 @@ internal static class CSharpSourceWalker
     /// just past its closing brace run. The expression is code; the closing braces and any format specifier
     /// are not.
     /// </summary>
-    private static int ScanHole(string text, int i, bool[] code, Frame frame)
+    private static int ScanHole(string text, int i, bool[] code, Frame frame, List<(int Start, int End)>? bodies)
     {
-        i = ScanCode(text, i, code, frame);
+        i = ScanCode(text, i, code, frame, bodies);
 
         if (i < text.Length && text[i] == ':')
         {
