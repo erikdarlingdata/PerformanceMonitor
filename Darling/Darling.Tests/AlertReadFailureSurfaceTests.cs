@@ -202,7 +202,7 @@ public sealed class AlertReadFailureSurfaceTests
     };
 
     private const int WorkerCountedSites = 8;
-    private const int WorkerExemptSites = 5;
+    private const int WorkerExemptSites = 6;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -226,10 +226,24 @@ public sealed class AlertReadFailureSurfaceTests
         ["could not read pg_database_size"] = "context for the alert text, not the evidence the alert is judged on",
         ["Store self-metrics sweep did not finish"] = "a metrics write sweep; no alert is judged on its result",
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
+        ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
     };
 
+    /// <summary>
+    /// ANY caught type, not just <c>Exception</c>. A census keyed on the one spelling it was written
+    /// for is #2786's failure, and this file walked into it: <c>DarlingWorker.FetchFailedJobsAsync</c>
+    /// swallows a failed msdb read in a <c>catch (SqlException ex) when (…)</c> filter, and the
+    /// <c>Exception</c>-only pattern could not see it. That one is exempt for its own stated reason, so
+    /// nothing was miscounted today — but a store read moved into a narrower catch inside a scoped
+    /// member would have reported CLEAN, which is the whole failure mode.
+    ///
+    /// <para><c>OperationCanceledException</c> is excluded, and proven rather than assumed: it is
+    /// cancellation propagation, not a swallowed read, and
+    /// <see cref="NoCancellationCatch_QuietlySwallowsAReadFailure"/> asserts every one of those blocks in
+    /// scope either rethrows or logs nothing — so excluding them cannot hide a counted site.</para>
+    /// </summary>
     private static readonly Regex s_catch = new(
-        @"catch\s*\(\s*(?:System\s*\.\s*)?Exception\b",
+        @"catch\s*\(\s*(?!OperationCanceledException\b)(?:System\s*\.\s*)?[A-Za-z_][A-Za-z0-9_.]*\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     [Fact]
@@ -283,7 +297,7 @@ public sealed class AlertReadFailureSurfaceTests
         /* The whole-tree totals, so a site MOVED between the scoped regions still has to be re-counted by
            a person rather than netting out silently. */
         Assert.Equal(27, totalCounted);
-        Assert.Equal(15, totalExempt);
+        Assert.Equal(16, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
@@ -337,6 +351,39 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Equal(0, exempt);
         Assert.Single(unclassified);
         Assert.Contains("sprockets", unclassified[0], StringComparison.Ordinal);
+        unclassified.Clear();
+
+        /* A NARROWER caught type is still a catch. This is the arm that was missing: the scanner matched
+           only `Exception`, so a swallowed read behind `catch (SqlException ex) when (…)` inside a scoped
+           member was invisible to it. The `when` filter is carried in the fixture because that is the shape
+           that actually occurs. */
+        const string narrowFixture = """
+            try { Read(); }
+            catch (SqlException ex) when (IsPermissionDenied(ex.Number))
+            {
+                _logger.LogInformation("Skipping widget read: {Message}", ex.Message);
+            }
+            """;
+        (counted, exempt) = Classify(narrowFixture, CSharpSourceWalker.StripCommentsAndStrings(narrowFixture), "fixture", unclassified);
+        Assert.Equal(0, counted);
+        Assert.Equal(0, exempt);
+        Assert.Single(unclassified);
+        Assert.Contains("Skipping widget read", unclassified[0], StringComparison.Ordinal);
+        unclassified.Clear();
+
+        /* And a cancellation catch is deliberately NOT a census subject — excluded by the regex itself, with
+           NoCancellationCatch_QuietlySwallowsAReadFailure proving the exclusion cannot hide a counted site. */
+        const string cancelFixture = """
+            try { Read(); }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            """;
+        (counted, exempt) = Classify(cancelFixture, CSharpSourceWalker.StripCommentsAndStrings(cancelFixture), "fixture", unclassified);
+        Assert.Equal(0, counted);
+        Assert.Equal(0, exempt);
+        Assert.Empty(unclassified);
 
         /* And a catch written only in PROSE is not a catch. The census reads stripped source for exactly
            this reason — the exemption comments this change added to fourteen sites are prose, and a
@@ -480,6 +527,62 @@ public sealed class AlertReadFailureSurfaceTests
             "Darling runs two passes per sweep where Lite runs one",
             AlertReadFailureCounter.WindowNote,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The census excludes <c>catch (OperationCanceledException …)</c>. That exclusion is only safe while
+    /// those blocks never quietly swallow a read failure — so it is asserted rather than assumed.
+    ///
+    /// <para>Every such block in the whole-file scopes must either rethrow (propagating cancellation, which
+    /// is not a failed read) or log nothing at error level. A block that logged an error and returned would
+    /// be a swallowed read hiding behind the one type the census does not look at — the same shape as the
+    /// narrower-catch gap that widening <see cref="s_catch"/> closed.</para>
+    /// </summary>
+    [Fact]
+    public void NoCancellationCatch_QuietlySwallowsAReadFailure()
+    {
+        var offenders = new List<string>();
+        var examined = 0;
+
+        var cancellationCatch = new Regex(
+            @"catch\s*\(\s*OperationCanceledException\b",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        foreach (var (relative, _, _) in s_wholeFileScopes)
+        {
+            var raw = ReadSource(relative);
+            var stripped = CSharpSourceWalker.StripCommentsAndStrings(raw);
+
+            foreach (Match m in cancellationCatch.Matches(stripped))
+            {
+                var open = stripped.IndexOf('{', m.Index);
+                if (open < 0)
+                {
+                    continue;
+                }
+
+                examined++;
+                var body = CSharpSourceWalker.BraceBalanced(stripped, open);
+
+                var rethrows = Regex.IsMatch(body, @"\bthrow\s*;");
+                var shouts = body.Contains("LogError", StringComparison.Ordinal)
+                          || body.Contains("LogCritical", StringComparison.Ordinal);
+
+                if (!rethrows && shouts)
+                {
+                    offenders.Add($"{Path.GetFileName(relative)} @offset {open}");
+                }
+            }
+        }
+
+        /* The precondition. A regex that matched nothing would make the assertion below vacuous, which is
+           exactly how an exclusion starts covering for something. */
+        Assert.True(examined >= 20, $"only {examined} cancellation catches were examined — the scan is not reaching them");
+
+        Assert.True(
+            offenders.Count == 0,
+            "cancellation catch block(s) log an error without rethrowing, so a swallowed read is hiding "
+            + $"behind the one caught type the census does not examine: {string.Join(", ", offenders)}");
     }
 
     /* ---------------- the surfaces ---------------- */
