@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
@@ -113,8 +114,15 @@ public sealed class TimescaleSupportTests
         Assert.Equal(
             "ALTER TABLE wait_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
             TimescaleSupport.EnableCompressionSql(byName["wait_stats"]));
+        /* #3035: initial_start is named too, which is what puts the job on a FIXED schedule. The minute
+           is interpolated from the grid rather than restated so this pin cannot disagree with it; the
+           grid itself is pinned literally, and wait_stats' own minute too, by the #3035 tests below —
+           so a moved grid is loud there rather than silently agreed with here. */
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("wait_stats", out var waitStatsPhase));
         Assert.Equal(
-            "SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true)",
+            "SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
+            + "initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '"
+            + waitStatsPhase.ToString(CultureInfo.InvariantCulture) + " minutes')",
             TimescaleSupport.AddCompressionPolicySql(byName["wait_stats"]));
 
         /* 1 day matches the 1-day chunk interval so chunks become compressible quickly, keeping the
@@ -140,8 +148,11 @@ public sealed class TimescaleSupportTests
         Assert.Equal(
             "ALTER TABLE collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
             TimescaleSupport.EnableCompressionSql(TimescaleSupport.CollectionLogTable));
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(TimescaleSupport.CollectionLogTable, out var logPhase));
         Assert.Equal(
-            "SELECT add_compression_policy('collection_log', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true)",
+            "SELECT add_compression_policy('collection_log', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
+            + "initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '"
+            + logPhase.ToString(CultureInfo.InvariantCulture) + " minutes')",
             TimescaleSupport.AddCompressionPolicySql(TimescaleSupport.CollectionLogTable));
     }
 
@@ -481,7 +492,7 @@ WHERE hypertable_name = 'wait_stats'
     [Fact]
     public void CompressionScheduleConverge_ScopesToCompressionJobs_AndCastsJobIdToInteger()
     {
-        var probe = TimescaleSupport.StaleCompressionScheduleSql;
+        var probe = TimescaleSupport.CompressionPolicyStateSql;
 
         /* The same tolerant proc_name scoping the stuck-job reader uses — 'policy_compression' plus the 2.18+
            columnstore rebrand — and NOTHING else. */
@@ -489,9 +500,12 @@ WHERE hypertable_name = 'wait_stats'
         Assert.Contains("proc_name LIKE '%columnstore%'", probe, StringComparison.Ordinal);
         Assert.DoesNotContain("policy_retention", probe, StringComparison.Ordinal);
 
-        /* Compared as a typed INTERVAL by PostgreSQL, not as text in C#: '01:00:00' and '1 hour' are the same
-           interval and must not be seen as a difference to converge on every single start. */
-        Assert.Contains($"IS DISTINCT FROM INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", probe, StringComparison.Ordinal);
+        /* Compared as SECONDS rather than as text: '01:00:00' and '1 hour' are the same interval and must
+           not be seen as a difference to converge on every single start. The comparison itself moved out
+           of the WHERE clause in #3035 — the wanted MINUTE is per hypertable, so a job stale only on its
+           phase would be filtered out before the caller ever saw it — which is why this pin is on the
+           emitted seconds and not on a predicate. */
+        Assert.Contains("EXTRACT(EPOCH FROM j.schedule_interval)::bigint", probe, StringComparison.Ordinal);
 
         /* #1586: alter_job takes job_id INTEGER and PostgreSQL will not down-cast a bigint bind during function
            resolution — an un-cast parameter fails 42883 at runtime while every string pin still passes. */
@@ -2248,4 +2262,829 @@ LIMIT 1", connection))
             $"DELETE FROM wait_stats WHERE server_id = {TestServerId}; DELETE FROM collection_log WHERE server_id = {TestServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
+
+    /* ---------------- the compression PHASE grid (#3035) ---------------- */
+
+    /// <summary>
+    /// The grid's actual invariant: every minute a compression policy may start on is clear of the band
+    /// after each refresh slot, and none of them is inside the heaviest refresh's slot at all.
+    ///
+    /// <para><b>Not "different from the refresh minutes".</b> That weaker property is satisfied by :07, and
+    /// :07 sits squarely inside the 864 s the heaviest hourly refresh occupies from :00 — a compression tick
+    /// there is exactly the arrangement #3012's convoy formed on. What has to hold is a DISTANCE from each
+    /// refresh START, because the convoy needs compression's <c>AccessExclusiveLock</c> request to arrive
+    /// while a refresh already holds its shared lock.</para>
+    ///
+    /// <para>The whole minute list is pinned LITERALLY as well as checked against the rule that produced it.
+    /// A test that only re-derived the rule would agree with any derivation, including a wrong one; the
+    /// literal is what makes a moved grid loud.</para>
+    /// </summary>
+    [Fact]
+    public void CompressionPhaseGrid_ClearsEveryRefreshSlotsGuardBand_AndTheHeaviestRefreshsSlotWhole()
+    {
+        Assert.Equal(15, TimescaleSupport.RefreshPhaseStepMinutes);
+        Assert.Equal(7, TimescaleSupport.CompressionPhaseGuardMinutes);
+        Assert.Equal(TimescaleSupport.RefreshPhaseStepMinutes / 2, TimescaleSupport.CompressionPhaseGuardMinutes);
+
+        /* THE OPERATING ENVELOPE, as assertions rather than as prose. The whole grid rests on the
+           heaviest refresh finishing inside ONE slot; a downgrade whose condition is only written in a
+           comment reads as unconditional to whoever finds it next. Raising the recorded ceiling past the
+           slot width therefore has to FAIL here rather than be renumbered through, because past that
+           point the refresh runs into its neighbour and the grid needs redesigning. */
+        Assert.Equal(864, TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
+        Assert.Equal(140, TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds);
+        Assert.True(
+            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds < TimescaleSupport.RefreshPhaseStepMinutes * 60,
+            $"the heaviest hourly refresh's recorded ceiling is {TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds}s "
+            + $"against a {TimescaleSupport.RefreshPhaseStepMinutes * 60}s slot — it no longer fits inside its own slot, so "
+            + "excluding one slot is no longer enough and the compression grid has to be re-derived");
+
+        /* And it is WHY the heaviest slot is excluded whole rather than guarded: the guard band is
+           shorter than the ceiling, so no minute of that slot could be recovered by widening it. */
+        Assert.True(
+            TimescaleSupport.CompressionPhaseGuardMinutes * 60 < TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
+            "the guard band now clears the heaviest refresh, so excluding its whole slot is over-conservative and the grid should be widened deliberately rather than left as-is");
+
+        /* The guard band itself is 3x the recorded ceiling for every OTHER hourly refresh, which is the
+           margin the light slots are held to. */
+        Assert.True(
+            TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds * 3 <= TimescaleSupport.CompressionPhaseGuardMinutes * 60,
+            $"the {TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard band is no longer 3x the "
+            + $"{TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s recorded ceiling for a non-heaviest hourly refresh");
+
+        var refreshSlots = TimescaleSupport.HourlyRefreshPhaseOrder
+            .Select(TimescaleSupport.RefreshPhaseMinutesFor)
+            .Distinct()
+            .OrderBy(m => m)
+            .ToArray();
+        Assert.Equal(new[] { 0, 15, 30, 45 }, refreshSlots);
+
+        var heaviestSlot = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView);
+
+        Assert.Equal(
+            new[] { 22, 23, 24, 25, 26, 27, 28, 29, 37, 38, 39, 40, 41, 42, 43, 44, 52, 53, 54, 55, 56, 57, 58, 59 },
+            TimescaleSupport.CompressionPhaseMinutes.ToArray());
+
+        foreach (var minute in TimescaleSupport.CompressionPhaseMinutes)
+        {
+            var slot = minute / TimescaleSupport.RefreshPhaseStepMinutes * TimescaleSupport.RefreshPhaseStepMinutes;
+
+            Assert.DoesNotContain(minute, refreshSlots);
+            Assert.NotEqual(heaviestSlot, slot);
+            Assert.True(
+                minute - slot >= TimescaleSupport.CompressionPhaseGuardMinutes,
+                $":{minute.ToString("00", CultureInfo.InvariantCulture)} is only {minute - slot} minute(s) past the "
+                + $":{slot.ToString("00", CultureInfo.InvariantCulture)} refresh start, inside the "
+                + $"{TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard band");
+        }
+
+        /* THE CONTROL: both exclusions actually removed a population. Every assertion in the loop above
+           passes vacuously on an empty or already-clear list, so the excluded sets are named, shown
+           non-empty, shown disjoint from the grid, and shown to account for exactly the minutes missing
+           from it — which is the difference between "the filter matched what it was aimed at" and "the
+           filter produced output". */
+        var excludedByGuard = Enumerable.Range(0, 60)
+            .Where(m => m % TimescaleSupport.RefreshPhaseStepMinutes < TimescaleSupport.CompressionPhaseGuardMinutes)
+            .ToArray();
+        var excludedByHeaviestSlot = Enumerable.Range(heaviestSlot, TimescaleSupport.RefreshPhaseStepMinutes).ToArray();
+
+        Assert.Equal(28, excludedByGuard.Length);
+        Assert.Equal(15, excludedByHeaviestSlot.Length);
+        Assert.Contains(7, excludedByHeaviestSlot);
+        Assert.Empty(excludedByGuard.Intersect(TimescaleSupport.CompressionPhaseMinutes));
+        Assert.Empty(excludedByHeaviestSlot.Intersect(TimescaleSupport.CompressionPhaseMinutes));
+        Assert.Equal(
+            60 - excludedByGuard.Union(excludedByHeaviestSlot).Count(),
+            TimescaleSupport.CompressionPhaseMinutes.Count);
+    }
+
+    /// <summary>
+    /// Every hypertable this product owns gets a minute on the grid, and they stay SPREAD across it.
+    ///
+    /// <para><b>The spread is a property, not an accident of the modulo.</b> All the compression policies
+    /// could share one minute as far as locks go — they compress different hypertables and so never contend
+    /// with each other — but <see cref="TimescaleSupport.CompressAfterDays"/> and
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> are both 1 and TimescaleDB aligns 1-day chunks to the
+    /// epoch, so every hypertable's newest closed chunk becomes eligible at the same UTC midnight. The number
+    /// of policies sharing a minute is therefore the number of hypertables rewritten SIMULTANEOUSLY once a
+    /// day, and collapsing the grid onto one minute would be this change introducing a burst rather than
+    /// removing one. Pinned as a per-minute ceiling so that collapse is red.</para>
+    ///
+    /// <para>One assignment is pinned literally, on the catalog's FIRST entry, so appending a collector
+    /// cannot move it and the pin does not have to be re-touched for unrelated work.</para>
+    /// </summary>
+    [Fact]
+    public void EveryHypertableWeOwn_GetsACompressionMinuteOnTheGrid_AndTheyStaySpread()
+    {
+        Assert.Equal(TimescaleSupport.HypertableCount, TimescaleSupport.CompressionPhaseOrder.Count);
+        Assert.Equal(CollectorCatalog.All.Count + 1, TimescaleSupport.CompressionPhaseOrder.Count);
+        Assert.Equal(TimescaleSupport.CollectionLogTable, TimescaleSupport.CompressionPhaseOrder[^1]);
+
+        var byMinute = new Dictionary<int, List<string>>();
+        foreach (var table in TimescaleSupport.CompressionPhaseOrder)
+        {
+            Assert.True(
+                TimescaleSupport.TryCompressionPhaseMinutesFor(table, out var minute),
+                $"{table} carries a compression policy but no phase, so its policy would be created finish-to-start and drift");
+            Assert.Contains(minute, TimescaleSupport.CompressionPhaseMinutes);
+
+            if (!byMinute.TryGetValue(minute, out var tables))
+            {
+                byMinute[minute] = tables = new List<string>();
+            }
+
+            tables.Add(table);
+        }
+
+        Assert.Equal(TimescaleSupport.CompressionPhaseMinutes.Count, byMinute.Count);
+
+        var ceiling = (TimescaleSupport.CompressionPhaseOrder.Count + TimescaleSupport.CompressionPhaseMinutes.Count - 1)
+            / TimescaleSupport.CompressionPhaseMinutes.Count;
+        Assert.Equal(3, ceiling);
+
+        var crowded = byMinute.Where(kv => kv.Value.Count > ceiling).ToArray();
+        Assert.True(crowded.Length == 0,
+            "compression policies are bunched onto one minute, which is one simultaneous chunk rewrite per hypertable once a day: "
+            + string.Join("; ", crowded.Select(kv => $":{kv.Key.ToString("00", CultureInfo.InvariantCulture)}={kv.Value.Count}")));
+
+        Assert.Equal("wait_stats", TimescaleSupport.CompressionPhaseOrder[0]);
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("wait_stats", out var waitStats));
+        Assert.Equal(22, waitStats);
+
+        /* A FOREIGN hypertable is left unphased rather than assigned a minute this code has no basis for
+           choosing — CompressionPhaseOrder is derived from the catalog, so an unrecognised name means "not
+           ours", never "forgotten". */
+        Assert.False(TimescaleSupport.TryCompressionPhaseMinutesFor("someone_elses_hypertable", out _));
+        Assert.False(TimescaleSupport.TryCompressionPhaseMinutesFor("", out _));
+
+        /* Bare or collect.-qualified resolve to the SAME minute: the product passes the bare TargetTable,
+           but the raw-name overload is reachable with a qualified one. */
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("collect.wait_stats", out var qualified));
+        Assert.Equal(waitStats, qualified);
+    }
+
+    /// <summary>
+    /// The converge statements: identity is the HYPERTABLE, the job id only ever reaches
+    /// <c>alter_job</c> as a bound <c>::integer</c>, and the phased form pins the schedule as well as the
+    /// minute.
+    ///
+    /// <para>#3012's evidence names TimescaleDB job ids. Those are assigned per deployment and would name
+    /// entirely different jobs on any other store, so a fix that encoded one would be correct on exactly one
+    /// box. Unlike a refresh job, a compression job reports its own hypertable directly, which is why this
+    /// read needs no catalog join to recover identity.</para>
+    /// </summary>
+    [Fact]
+    public void CompressionScheduleConverge_OwnsCadenceAndPhase_KeyedOnTheHypertable_NeverAJobId()
+    {
+        var read = TimescaleSupport.CompressionPolicyStateSql;
+
+        /* The same tolerant proc_name scoping the stuck-job reader uses, and NOTHING else: retuning a
+           retention job would re-cadence the armed/paused machinery #1680 depends on. */
+        Assert.Contains("proc_name LIKE '%compression%'", read, StringComparison.Ordinal);
+        Assert.Contains("proc_name LIKE '%columnstore%'", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("policy_retention", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("policy_refresh_continuous_aggregate", read, StringComparison.Ordinal);
+
+        Assert.Contains("j.hypertable_name", read, StringComparison.Ordinal);
+
+        /* Cadence as SECONDS so '01:00:00' and '1 hour' cannot read as a difference and re-alter the same
+           job on every start; phase as a minute already converted to UTC, because a bare EXTRACT would read
+           the SESSION time zone and skew the whole store on a quarter-hour zone. */
+        Assert.Contains("EXTRACT(EPOCH FROM j.schedule_interval)::bigint", read, StringComparison.Ordinal);
+        Assert.Contains("j.fixed_schedule", read, StringComparison.Ordinal);
+        Assert.Contains("EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int", read, StringComparison.Ordinal);
+
+        /* The staleness test is deliberately NOT in the WHERE clause, and it cannot be: the wanted minute
+           is per hypertable, so no single SQL literal stands for it and a job stale only on its phase would
+           be filtered out before the caller ever saw it. */
+        Assert.DoesNotContain("IS DISTINCT FROM", read, StringComparison.Ordinal);
+
+        /* THE ORDINAL CONTRACT. The reader positions its columns by index, and hypertable_schema was
+           APPENDED rather than inserted precisely so no existing index moved — an ordinal shift in a column
+           list is a defect only a live store can see, and it would silently read a phase out of a boolean.
+           So the schema is asserted to be the LAST of exactly seven selected columns, which is the property
+           the C# index depends on. */
+        var selected = SelectedColumns(read);
+
+        /* Control on the split itself: a CASE expression carries no top-level comma, so seven parts is the
+           column count and not an artifact of splitting inside one. */
+        Assert.Equal(7, selected.Length);
+        Assert.StartsWith("j.job_id", selected[0], StringComparison.Ordinal);
+        Assert.Equal("j.hypertable_schema", selected[6]);
+
+        /* And the phase is gated on it: CompressionPhaseOrder holds BARE names, so a foreign hypertable
+           called like one of ours must not inherit its minute. The cadence converge stays unscoped on
+           purpose — that is #1778's reach. */
+        Assert.Contains("j.hypertable_schema", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("hypertable_schema = ", read, StringComparison.Ordinal);
+
+        /* THE FALLBACK'S SHAPE PARITY. fixed_schedule and initial_start are younger columns than
+           schedule_interval, so a store that lacks them takes the narrow read rather than losing #1778's
+           cadence converge along with a phase it cannot use. One reader serves both statements, so the
+           narrow one's columns must be the wide one's FIRST FOUR, in the same order — a divergence there
+           reads a phase out of the wrong column and only a live old-runtime store could see it. Raised by
+           review. */
+        var narrowSelected = SelectedColumns(TimescaleSupport.CompressionCadenceOnlyStateSql);
+
+        Assert.Equal(4, narrowSelected.Length);
+        Assert.Equal(selected[..4], narrowSelected);
+        Assert.DoesNotContain("fixed_schedule", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("initial_start", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hypertable_schema", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+
+        /* Same scope as the wide read, so falling back cannot quietly change WHICH jobs get converged. */
+        Assert.Contains("proc_name LIKE '%compression%'", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+        Assert.Contains("proc_name LIKE '%columnstore%'", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+
+        var phased = TimescaleSupport.SetCompressionSchedulePhaseSql;
+
+        Assert.Contains("$1::integer", phased, StringComparison.Ordinal);
+        Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", phased, StringComparison.Ordinal);
+        Assert.Contains("fixed_schedule => true", phased, StringComparison.Ordinal);
+        Assert.Contains("($2::int * INTERVAL '1 minute')", phased, StringComparison.Ordinal);
+
+        /* UTC, not the session time zone — a bare date_trunc('hour', now()) lands off-grid on the half-hour
+           and quarter-hour zones. */
+        Assert.Contains("now() AT TIME ZONE 'UTC'", phased, StringComparison.Ordinal);
+        Assert.DoesNotContain("date_trunc('hour', now())", phased, StringComparison.Ordinal);
+
+        /* Every un-named alter_job parameter means "leave unchanged", so the converge cannot arm a paused
+           job. Load-bearing rather than defensive: the fixture idiom for a deterministic compression test
+           is a policy created and parked at scheduled = false in one transaction (#1888). */
+        Assert.DoesNotContain("scheduled =>", phased, StringComparison.Ordinal);
+        Assert.DoesNotContain("next_start =>", phased, StringComparison.Ordinal);
+
+        /* The FOREIGN-hypertable form is #1778's statement, unchanged: cadence only, so this code never
+           decides when a hypertable it does not own compresses. */
+        Assert.Equal(
+            "SELECT alter_job($1::integer, schedule_interval => INTERVAL '1 hour')",
+            TimescaleSupport.SetCompressionScheduleSql);
+        Assert.DoesNotContain("fixed_schedule", TimescaleSupport.SetCompressionScheduleSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("initial_start", TimescaleSupport.SetCompressionScheduleSql, StringComparison.Ordinal);
+
+        /* THE TWIN CROSS-CHECK, and it has to PARSE the literal rather than pin both sides to their own
+           constant. Two independent literal pins force the edit on whichever side the editor happens to be
+           looking at and force nothing on the other: change the interval to "30 minutes", update the string
+           pin because it went red, and CompressScheduleSpan keeps an hour with its own pin still green. The
+           consequence is not cosmetic — `desiredSeconds` in ConvergeCompressionScheduleAsync comes off the
+           SPAN while the policy is created with the STRING, so a divergence makes `cadenceStale` true forever
+           and the converge re-alters every compression policy on every service start. That is the exact
+           "same interval read as a difference" failure the read's own doc comment is careful about,
+           reintroduced through the twin. Same mechanism as
+           TimescaleContinuousAggregateTests.EveryRetentionIntervalLiteral_EqualsItsTimeSpanTwin. Raised by
+           review. */
+        Assert.Equal("1 hour", TimescaleSupport.CompressScheduleInterval);
+        Assert.Equal(ParsePostgresInterval(TimescaleSupport.CompressScheduleInterval), TimescaleSupport.CompressScheduleSpan);
+
+        /* Control on the parser, in the identical form: it must return the value under test for the shipped
+           literal AND reject a shape it cannot read, or a parser that answered TimeSpan.Zero to everything
+           would make the assertion above vacuous the moment the literal changed. */
+        Assert.Equal(TimeSpan.FromHours(1), ParsePostgresInterval("1 hour"));
+        Assert.Equal(TimeSpan.FromDays(3), ParsePostgresInterval("3 days"));
+        Assert.Equal(TimeSpan.Zero, ParsePostgresInterval("30 minutes"));
+    }
+
+    /// <summary>"1 hour" / "4 days" -> a <see cref="TimeSpan"/>, so a string literal and its
+    /// <see cref="TimeSpan"/> twin can be compared against ONE representation instead of two hand-maintained
+    /// ones. Unreadable shapes come back <see cref="TimeSpan.Zero"/> rather than throwing, which fails the
+    /// comparison loudly instead of passing it quietly — deliberately the same shape as
+    /// TimescaleContinuousAggregateTests' own parser, so the two do not disagree about what a literal
+    /// means.</summary>
+    private static TimeSpan ParsePostgresInterval(string interval)
+    {
+        var parts = interval.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2 || !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var count))
+        {
+            return TimeSpan.Zero;
+        }
+
+        return parts[1].StartsWith("day", StringComparison.OrdinalIgnoreCase)
+            ? TimeSpan.FromDays(count)
+            : parts[1].StartsWith("hour", StringComparison.OrdinalIgnoreCase)
+                ? TimeSpan.FromHours(count)
+                : TimeSpan.Zero;
+    }
+
+    /// <summary>
+    /// The refresh grid is UNCHANGED by the compression grid, view by view — and the compression grid's one
+    /// input from it is pinned separately.
+    ///
+    /// <para><b>Why a compression change pins the refresh assignment.</b> #3024's own stagger pin asserts
+    /// only that each phase is one of the four slots, so a reordering that permutes which view gets which
+    /// minute passes it. The compression grid is built by excluding the slot
+    /// <see cref="TimescaleSupport.HeaviestHourlyRefreshView"/> occupies, so that permutation is exactly the
+    /// edit that could put a compression minute back inside 864 s of refresh while every other pin in the
+    /// tree stayed green. Both halves are asserted: the full assignment, and the heaviest view's slot.</para>
+    /// </summary>
+    [Fact]
+    public void TheRefreshGridIsUnchanged_AndTheCompressionGridsOneInputFromItIsPinned()
+    {
+        var expected = new (string View, int Minute)[]
+        {
+            (TimescaleSupport.QueryStatsHourlyView, 0),
+            (TimescaleSupport.ProcedureStatsHourlyView, 15),
+            (TimescaleSupport.QueryStoreStatsHourlyView, 30),
+            (TimescaleSupport.QueryStatsDbHourlyView, 45),
+            (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 0),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 15),
+            (TimescaleSupport.PerfmonBaselineView, 30),
+            (TimescaleSupport.WaitStatsBaselineView, 45),
+            (TimescaleSupport.SessionStatsBaselineView, 0),
+            (TimescaleSupport.QueryStatsBaselineView, 15),
+            (TimescaleSupport.BlockedProcessBaselineView, 30),
+            (TimescaleSupport.DeadlockBaselineView, 45),
+            (TimescaleSupport.MemoryBaselineView, 0),
+        };
+
+        Assert.Equal(expected.Length, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        for (var index = 0; index < expected.Length; index++)
+        {
+            Assert.Equal(expected[index].View, TimescaleSupport.HourlyRefreshPhaseOrder[index]);
+            Assert.Equal(expected[index].Minute, TimescaleSupport.RefreshPhaseMinutesFor(expected[index].View));
+        }
+
+        Assert.Equal(TimescaleSupport.QueryStoreStatsIntervalHourlyView, TimescaleSupport.HeaviestHourlyRefreshView);
+        Assert.Equal(0, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView));
+
+        /* No compression minute shares a SLOT with the heaviest refresh — the property the permutation
+           above would break. */
+        var heaviestSlotIndex = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView)
+            / TimescaleSupport.RefreshPhaseStepMinutes;
+        Assert.DoesNotContain(
+            heaviestSlotIndex,
+            TimescaleSupport.CompressionPhaseMinutes.Select(m => m / TimescaleSupport.RefreshPhaseStepMinutes).ToArray());
+
+        /* The daily refresh tier stays off the grid entirely, so nothing added here can drag one on. */
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStatsDailyView));
+
+        /* And the refresh STATEMENTS are untouched: still the refresh phase, still no compression in them. */
+        var refreshSql = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.ProcedureStatsHourlyView);
+        Assert.Contains("INTERVAL '15 minutes'", refreshSql, StringComparison.Ordinal);
+        Assert.Contains("add_continuous_aggregate_policy", refreshSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("compression", refreshSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("columnstore", refreshSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Compression has no DAILY tier to exempt, which is the whole answer to the question #3024's daily
+    /// carve-out raises here.
+    ///
+    /// <para>#3024 left the daily refresh policies at a 3-day window on finish-to-start scheduling because a
+    /// daily job's window is 3 days of scan against an 86,400-second cadence rather than a 3,600-second one,
+    /// and it never appeared in the convoy. There is no counterpart on the compression side: ONE cadence
+    /// constant exists, every policy is created with it, and the converge moves every policy to it — so the
+    /// decision is not "which tier follows the convention", it is that there is only one tier. Pinned so a
+    /// second cadence cannot be introduced without landing here, which is where the exemption question would
+    /// then have to be answered.</para>
+    /// </summary>
+    [Fact]
+    public void CompressionHasNoDailyTier_OneCadenceAndOnePhaseGridForEveryHypertable()
+    {
+        const string Anchor = "+ INTERVAL '1 hour' + INTERVAL '";
+
+        var statements = TimescaleSupport.CompressionPhaseOrder
+            .Select(t => TimescaleSupport.AddCompressionPolicySql(t))
+            .ToArray();
+
+        Assert.Equal(TimescaleSupport.HypertableCount, statements.Length);
+
+        foreach (var sql in statements)
+        {
+            Assert.Contains($"compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days'", sql, StringComparison.Ordinal);
+            Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", sql, StringComparison.Ordinal);
+            Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+            Assert.Contains("initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' " + Anchor, sql, StringComparison.Ordinal);
+        }
+
+        /* THE CONTROL on the loop above: the statements really do differ in their minute, so those
+           Assert.Contains calls were matching a per-table value and not one constant substring that happens
+           to appear in all seventy strings. Recovered from the shipped text, then checked to cover the whole
+           grid and nothing outside it. */
+        var minutes = statements
+            .Select(sql =>
+            {
+                var at = sql.IndexOf(Anchor, StringComparison.Ordinal) + Anchor.Length;
+                var end = sql.IndexOf(' ', at);
+                Assert.True(end > at, $"could not recover a phase from the shipped statement: {sql}");
+                return int.Parse(sql[at..end], CultureInfo.InvariantCulture);
+            })
+            .ToArray();
+
+        Assert.Equal(TimescaleSupport.CompressionPhaseMinutes.Count, minutes.Distinct().Count());
+        Assert.Empty(minutes.Except(TimescaleSupport.CompressionPhaseMinutes));
+
+        /* A foreign hypertable gets the statement with NO initial_start — the one shape that stays
+           finish-to-start, and deliberately so. */
+        var foreignSql = TimescaleSupport.AddCompressionPolicySql("collect.someone_elses_hypertable");
+        Assert.DoesNotContain("initial_start", foreignSql, StringComparison.Ordinal);
+        Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", foreignSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The converge really references the phase-setting statement, read out of the IL — because a string pin
+    /// asserts what a statement SAYS and never that anything runs it.
+    ///
+    /// <para><b>What this catches, measured rather than assumed.</b> It goes red when the phased branch is
+    /// wired to the cadence-only statement — the phase computed, selected on, logged, and never written —
+    /// which is the shape where the whole feature is inert and every other pin in this file stays green.
+    /// That was proven by mutation.</para>
+    ///
+    /// <para><b>And what it does NOT catch, which matters more than what it does.</b> Making the branch
+    /// GUARD always false leaves this pin green: the call is still emitted into the unreachable branch, so
+    /// its presence in the IL says the statement is wired, not that the branch is taken. Reachability
+    /// through that guard is only covered by the live converge test, which runs in CI's PostgreSQL job
+    /// alone. Both of those were run; this comment records the boundary rather than implying there
+    /// isn't one.</para>
+    ///
+    /// <para>Scanned inside the compiler-generated state machine, because an async method's body lives there
+    /// after compilation and not in the source method. The cadence-only statement is the control: it has to
+    /// appear too, so a scan that resolved nothing cannot satisfy this by finding zero of everything — and
+    /// the state-machine name is asserted present first, for the same reason.</para>
+    /// </summary>
+    [Fact]
+    public void ConvergeCompressionSchedule_ReferencesThePhaseStatement_NotOnlyTheCadenceOne()
+    {
+        const string Machine = "<ConvergeCompressionScheduleAsync>d__";
+        const string Phase = "get_SetCompressionSchedulePhaseSql";
+        const string Cadence = "get_SetCompressionScheduleSql";
+
+        var assemblyPath = typeof(TimescaleSupport).Assembly.Location;
+        Assert.True(File.Exists(assemblyPath), $"Storage assembly not found at '{assemblyPath}'.");
+
+        var byMachine = IlCallSiteScanner.CountCallsByStateMachine(
+            assemblyPath,
+            [Machine],
+            [Phase, Cadence]);
+
+        Assert.True(byMachine.ContainsKey(Machine),
+            $"no state machine whose name starts with {Machine} in {assemblyPath} — a renamed or inlined machine "
+            + "would report zero calls to everything and satisfy this pin for the wrong reason");
+
+        var counts = byMachine[Machine];
+
+        Assert.True(counts[Phase] >= 1,
+            "the converge never reads the phase-setting statement, so a deployed store's compression policies would keep drifting while every string pin stayed green");
+        Assert.True(counts[Cadence] >= 1,
+            "the converge never reads the cadence-only statement, so #1778's reach onto a foreign hypertable is gone");
+    }
+
+    /// <summary>
+    /// THE PHASE PIN (#3035), live — the half that reaches already-deployed stores, and the only way to
+    /// settle whether <c>add_compression_policy</c> behaves like the refresh function it is being modelled
+    /// on.
+    ///
+    /// <para><b>The sibling question, answered by running it.</b>
+    /// <c>add_continuous_aggregate_policy(if_not_exists =&gt; true)</c> RAISES <c>22023</c> against a policy
+    /// whose window differs, which is what forced #3024's converge to run BEFORE its create.
+    /// <c>add_compression_policy</c> was assumed to do the opposite — key on the policy EXISTING and skip
+    /// quietly — and this test is what makes that an observation rather than an analogy. It matters twice
+    /// over: it is why the compression create can stay where it is, ahead of the converge, and it is why
+    /// the create path cannot move a deployed store at all.</para>
+    ///
+    /// <para><b>What it would mean for this test not to exist.</b> Every assertion the phase rests on is
+    /// invisible to a string pin, because a string pin never runs the statement: that a policy created with
+    /// <c>initial_start</c> comes back <c>fixed_schedule = true</c> (on which the converge's own no-op-ness
+    /// rests — a store whose jobs read <c>false</c> would be re-altered on every start forever), that
+    /// <c>alter_job</c> takes <c>schedule_interval</c>, <c>fixed_schedule</c> and <c>initial_start</c>
+    /// together on this runtime, and that the minute survives the round trip through
+    /// <c>timescaledb_information.jobs</c>.</para>
+    ///
+    /// <para><b>The #1581 interaction is checked too</b>, because a fixed schedule is the one thing that
+    /// could plausibly break the stuck-job self-heal: it re-arms a job with
+    /// <c>alter_job(next_start =&gt; now())</c>, which has to be accepted against a fixed-schedule job and
+    /// has to leave it on its slot afterwards. Under finish-to-start a re-arm re-phases the job
+    /// permanently, which is the drift this change removes.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_CompressionSchedule_PinsADriftingPolicyToItsPhase_AndLeavesForeignHypertablesUnphased_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compression-phase converge test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* A REAL collector hypertable, because the phase is scoped by membership of CompressionPhaseOrder
+           and a throwaway name would be skipped — which is a property worth having, and is asserted below
+           against a planted foreign hypertable. */
+        const string Owned = "wait_stats";
+        const string Foreign = "tick3035_foreign";
+        const string Phased = "tick3035_phased";
+        const int PlantedPhase = 37;
+
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(Owned, out var ownedPhase));
+        Assert.False(TimescaleSupport.TryCompressionPhaseMinutesFor(Foreign, out _));
+        var ownedPhaseText = ownedPhase.ToString("00", CultureInfo.InvariantCulture);
+
+        /* Idempotent, and needed before add_compression_policy will accept the table at all — the product
+           runs this on every start. */
+        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{Owned}"), ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DropTickTableAsync(connection, Foreign, ct);
+            await DropTickTableAsync(connection, Phased, ct);
+
+            /* ---- (1) A REAL hypertable's policy as an OLDER BUILD left it: no schedule_interval and no
+                    initial_start. Both halves MEASURED rather than assumed — the 12 hours is TimescaleDB's
+                    computed default, and the finish-to-start scheduling is the drift itself. ---- */
+            await ExecAsync(connection, $"SELECT remove_compression_policy('collect.{Owned}', if_exists => true)", ct);
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Owned}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+
+            var legacy = await CompressionPolicyStateAsync(connection, Owned, ct);
+            Assert.NotNull(legacy);
+            Assert.Equal(TimeSpan.FromHours(12), legacy!.ScheduleInterval);
+            Assert.False(legacy.FixedSchedule,
+                "a compression policy created without initial_start is expected to be finish-to-start on this runtime — that is the drift #3035 is about");
+            Assert.Null(legacy.PhaseMinutes);
+
+            /* ---- (2) THE SIBLING BEHAVIOUR, settled. The shipped create statement carries BOTH the tick
+                    and the phase, runs cleanly against the existing policy, and changes NOTHING. Contrast
+                    the refresh side, where the same call raises 22023 against a differing window. ---- */
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{Owned}"), ct);
+
+            var afterCreate = await CompressionPolicyStateAsync(connection, Owned, ct);
+            Assert.Equal(TimeSpan.FromHours(12), afterCreate!.ScheduleInterval);
+            Assert.False(afterCreate.FixedSchedule);
+            Assert.Null(afterCreate.PhaseMinutes);
+
+            /* ---- (3) A FOREIGN hypertable on the same store, planted so the scope check at (5) is not
+                    satisfied vacuously by a store that has none. ---- */
+            await CreateTickTableAsync(connection, Foreign, ct);
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Foreign}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+            Assert.Equal(TimeSpan.FromHours(12), (await CompressionPolicyStateAsync(connection, Foreign, ct))!.ScheduleInterval);
+
+            /* ---- (4) THE ASSERTION THE WHOLE CHANGE COMES DOWN TO: the deployed store converges, on both
+                    properties, and the phase is the one the grid chose for THIS hypertable. ---- */
+            var convergeLog = new CapturingTestLogger();
+            var converged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, convergeLog, ct);
+            Assert.True(converged >= 2,
+                $"expected both the owned and the planted foreign policy to be converged; {convergeLog.Joined}");
+
+            var moved = await CompressionPolicyStateAsync(connection, Owned, ct);
+            Assert.NotNull(moved);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, moved!.ScheduleInterval);
+            Assert.True(moved.FixedSchedule,
+                $"the converge must pin the schedule, or the minute slides off by the run's own duration every cycle; {convergeLog.Joined}");
+            Assert.Equal(ownedPhase, moved.PhaseMinutes);
+
+            /* The rendered line names the hypertable, the cadence it left and the minute it is on now,
+               because that line IS the operator's evidence the store changed — and a structured-logging
+               placeholder/argument mismatch would render it wrong with no error anywhere. */
+            Assert.Contains(
+                $"retuned {Owned}'s compression policy from a 12:00:00 tick to 1 hour on a fixed :{ownedPhaseText} schedule",
+                convergeLog.Joined, StringComparison.Ordinal);
+
+            /* ---- (5) SCOPE: the foreign hypertable gets #1778's cadence and NOT a phase, deliberately.
+                    Checked AFTER a converge that demonstrably moved things, so "it was left alone" cannot
+                    be a sweep that looked at nothing. ---- */
+            var foreignAfter = await CompressionPolicyStateAsync(connection, Foreign, ct);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, foreignAfter!.ScheduleInterval);
+            Assert.False(foreignAfter.FixedSchedule,
+                "a hypertable this product does not own must keep its own scheduling — the grid is derived from the collector catalog");
+            Assert.False(foreignAfter.HasInitialStart);
+
+            /* ---- (6) Idempotent: nothing left stale, so a settled store never churns alter_job. This is
+                    also what fails if a policy created with initial_start does not come back
+                    fixed_schedule = true. ---- */
+            Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct));
+
+            /* ---- (7) The CREATE path on a hypertable with no policy yet: both halves from the start, which
+                    is the FRESH-store state — the mirror of the refresh converge, which sees an empty set on
+                    a fresh store because its aggregates do not exist yet. ---- */
+            await ExecAsync(connection, $"SELECT remove_compression_policy('collect.{Owned}', if_exists => true)", ct);
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql(Owned), ct);
+
+            var fresh = await CompressionPolicyStateAsync(connection, Owned, ct);
+            Assert.NotNull(fresh);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, fresh!.ScheduleInterval);
+            Assert.True(fresh.FixedSchedule,
+                "passing initial_start is expected to put the job on a fixed schedule; if it does not, the converge re-alters every compression policy on every start");
+            Assert.Equal(ownedPhase, fresh.PhaseMinutes);
+            Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct));
+
+            /* ---- (8) THE #1581 INTERACTION. Planted on a throwaway so the fixture's own policies are not
+                    made to run mid-suite, and pinned with the SHIPPED alter statement so the statement
+                    itself is exercised independently of the converge's selection logic. ---- */
+            await CreateTickTableAsync(connection, Phased, ct);
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Phased}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+
+            int phasedJobId;
+            using (var probe = new NpgsqlCommand($@"
+SELECT job_id
+FROM timescaledb_information.jobs
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{Phased}'
+AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection))
+            {
+                phasedJobId = Convert.ToInt32((await probe.ExecuteScalarAsync(ct))!, CultureInfo.InvariantCulture);
+            }
+
+            using (var pin = new NpgsqlCommand(TimescaleSupport.SetCompressionSchedulePhaseSql, connection))
+            {
+                pin.Parameters.AddWithValue(phasedJobId);
+                pin.Parameters.AddWithValue(PlantedPhase);
+                await pin.ExecuteNonQueryAsync(ct);
+            }
+
+            var pinned = await CompressionPolicyStateAsync(connection, Phased, ct);
+            Assert.NotNull(pinned);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, pinned!.ScheduleInterval);
+            Assert.True(pinned.FixedSchedule);
+            Assert.Equal(PlantedPhase, pinned.PhaseMinutes);
+
+            using (var rearm = new NpgsqlCommand(TimescaleSupport.RearmJobSql, connection))
+            {
+                rearm.Parameters.AddWithValue(phasedJobId);
+                await rearm.ExecuteNonQueryAsync(ct);
+            }
+
+            var rearmed = await CompressionPolicyStateAsync(connection, Phased, ct);
+            Assert.NotNull(rearmed);
+            Assert.True(rearmed!.FixedSchedule,
+                "the #1581 self-heal must not knock a compression job off its fixed schedule, or one re-arm undoes the pinning for good");
+            Assert.Equal(PlantedPhase, rearmed.PhaseMinutes);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DropTickTableAsync(cleanup, Foreign, cleanupCt);
+                await DropTickTableAsync(cleanup, Phased, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// THE DEGRADATION DIRECTION (#3035), live: a probe failure costs the PHASE and nothing else.
+    ///
+    /// <para><b>Why this is the assertion that makes the widened read safe.</b>
+    /// <see cref="TimescaleSupport.CompressionPolicyStateSql"/> names <c>fixed_schedule</c> and
+    /// <c>initial_start</c>, which entered <c>timescaledb_information.jobs</c> later than
+    /// <c>schedule_interval</c> did. Nothing in this product declares a TimescaleDB floor or checks
+    /// <c>extversion</c>, and the file's own comments state a 2.x compatibility target, handle a store where
+    /// <c>force</c> does not exist, and name "a TimescaleDB too old to expose <c>initial_start</c>" as a
+    /// state that reaches the continuous-aggregate converge's catch. So on a store inside the stated range the
+    /// wide read can throw — and if that returned 0, the store would silently lose #1778's cadence converge
+    /// as well, which had worked there before this change ever existed. A total regression wearing a
+    /// partial's clothes.</para>
+    ///
+    /// <para><b>Proven by inducing the failure rather than by reading the catch.</b> The fixture is 2.28.1 and
+    /// has the columns, so the only way to exercise the fallback is to hand the converge a wide statement that
+    /// fails — which is what <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync(NpgsqlConnection, Microsoft.Extensions.Logging.ILogger, string, System.Threading.CancellationToken)"/>
+    /// exists for. The fallback statement itself is NOT injectable, so this cannot pass against a statement
+    /// the product does not ship.</para>
+    ///
+    /// <para>The planted hypertable is FOREIGN on purpose: it is the population #1778 exists for, and it also
+    /// makes the "phase not applied" half of the assertion unambiguous — a foreign hypertable would be left
+    /// unphased on the happy path too, so the pin that separates the two is that the CADENCE moved.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_CompressionSchedule_AProbeFailureCostsThePhaseAndKeepsTheCadenceConverge_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compression-converge degradation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string Stale = "tick3035_degrade";
+
+        /* A wide read shaped exactly like the shipped one except for a column no job catalog has — so it
+           fails the same way a missing fixed_schedule/initial_start would, at the same point, and the SCOPE
+           it would have selected is identical. */
+        const string BrokenPhasedRead = @"
+SELECT
+    j.job_id,
+    j.hypertable_name,
+    j.schedule_interval::text,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds,
+    j.fixed_schedule,
+    j.initial_start_column_that_does_not_exist,
+    j.hypertable_schema
+FROM timescaledb_information.jobs AS j
+WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
+
+        var bodySucceeded = false;
+        try
+        {
+            await DropTickTableAsync(connection, Stale, ct);
+            await CreateTickTableAsync(connection, Stale, ct);
+
+            /* A policy on the 12-hour default — the #1778 population, which must survive the degradation. */
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Stale}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+            Assert.Equal(TimeSpan.FromHours(12), (await CompressionPolicyStateAsync(connection, Stale, ct))!.ScheduleInterval);
+
+            /* CONTROL, first: the broken read really does fail, and fails on its own rather than because
+               the store is unreachable. Without this the test could "prove" the fallback while the wide read
+               was quietly succeeding. */
+            var broken = await Assert.ThrowsAsync<PostgresException>(
+                async () => await ExecAsync(connection, BrokenPhasedRead, ct));
+            Assert.Equal("42703", broken.SqlState);
+
+            /* And the shipped wide read does NOT fail on this runtime — so the fallback below is being
+               reached by the induced failure and not by an ambient one. */
+            await ExecAsync(connection, TimescaleSupport.CompressionPolicyStateSql, ct);
+
+            /* ---- THE ASSERTION: the phase is lost, the cadence converge is not. ---- */
+            var log = new CapturingTestLogger();
+            var converged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, log, BrokenPhasedRead, ct);
+
+            Assert.True(converged >= 1,
+                $"a failed phase probe returned no conversions, so the store lost #1778's cadence converge along with the phase it could not have; {log.Joined}");
+
+            var after = await CompressionPolicyStateAsync(connection, Stale, ct);
+            Assert.NotNull(after);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, after!.ScheduleInterval);
+
+            /* The phase half is genuinely absent, so this is a DEGRADATION and not a silent success. */
+            Assert.False(after.FixedSchedule);
+            Assert.False(after.HasInitialStart);
+
+            /* The operator is told which half was lost and which was kept — the line is the only signal a
+               store has silently dropped to cadence-only. */
+            Assert.Contains("retrying without it", log.Joined, StringComparison.Ordinal);
+            Assert.Contains("#1778", log.Joined, StringComparison.Ordinal);
+
+            /* Idempotent on the fallback path too: the cadence now matches, so a second degraded pass finds
+               nothing rather than re-altering the same job on every start. */
+            Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, BrokenPhasedRead, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropTickTableAsync(cleanup, Stale, cleanupCt));
+        }
+    }
+
+    /// <summary>The top-level items of a statement's SELECT list, trimmed and newline-flattened — used to
+    /// assert the ORDINAL contract the compression converge's reader depends on. Split on commas, which is
+    /// safe for these two statements specifically because neither carries a top-level comma inside an
+    /// expression; the caller asserts the resulting count, which is what would catch it if that ever stopped
+    /// being true.</summary>
+    private static string[] SelectedColumns(string sql)
+        => sql[(sql.IndexOf("SELECT", StringComparison.Ordinal) + "SELECT".Length)
+                ..sql.IndexOf("FROM timescaledb_information.jobs", StringComparison.Ordinal)]
+            .Split(',')
+            .Select(part => part.Trim().Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal))
+            .Where(part => part.Length > 0)
+            .ToArray();
+
+    /// <summary>A compression policy's schedule as the store reports it: cadence, whether that cadence is a
+    /// FIXED schedule, and which minute of the hour it is anchored to (in UTC, for the same reason the shipped
+    /// read converts it there). <c>HasInitialStart</c> is carried separately so "no anchor at all" is
+    /// distinguishable from "anchored to minute zero".</summary>
+    private sealed record CompressionPolicyState(TimeSpan? ScheduleInterval, bool FixedSchedule, int? PhaseMinutes, bool HasInitialStart);
+
+    private static async Task<CompressionPolicyState?> CompressionPolicyStateAsync(
+        NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand($@"
+SELECT
+    j.schedule_interval,
+    j.fixed_schedule,
+    CASE
+        WHEN j.initial_start IS NULL THEN NULL
+        ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
+    END,
+    (j.initial_start IS NOT NULL)
+FROM timescaledb_information.jobs AS j
+WHERE j.hypertable_schema = 'collect' AND j.hypertable_name = '{table}'
+AND   (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')", connection);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+        {
+            return null;
+        }
+
+        return new CompressionPolicyState(
+            reader.IsDBNull(0) ? null : reader.GetFieldValue<TimeSpan>(0),
+            !reader.IsDBNull(1) && reader.GetBoolean(1),
+            reader.IsDBNull(2) ? null : reader.GetInt32(2),
+            !reader.IsDBNull(3) && reader.GetBoolean(3));
+    }
+
 }

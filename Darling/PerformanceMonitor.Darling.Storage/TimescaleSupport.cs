@@ -93,6 +93,18 @@ public static class TimescaleSupport
     /// </summary>
     public const string CompressScheduleInterval = "1 hour";
 
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="CompressScheduleInterval"/>, for callers comparing a
+    /// job's cadence numerically instead of by text — <c>01:00:00</c> and <c>1 hour</c> are the same interval
+    /// and must never read as a difference (that would re-alter the same job on every service start).
+    ///
+    /// <para>Cross-checked against <see cref="CompressScheduleInterval"/> by PARSING that literal, not by
+    /// pinning each side to its own constant: two independent pins force the edit on whichever side the
+    /// editor is looking at and force nothing on the other, and a divergence here is not cosmetic —
+    /// <see cref="ConvergeCompressionScheduleAsync(NpgsqlConnection, ILogger, CancellationToken)"/> takes its
+    /// target seconds from THIS while the policy is created with the STRING, so the two disagreeing makes
+    /// every job read stale forever. Raised by review.</para></summary>
+    public static readonly TimeSpan CompressScheduleSpan = TimeSpan.FromHours(1);
+
     /// <summary>
     /// Hypertable chunk width in days. TimescaleDB's 7-day default is far too coarse for
     /// 1-minute-cadence monitoring data: a chunk stays open (and uncompressible) for its whole
@@ -276,6 +288,12 @@ public static class TimescaleSupport
     /// initial_start TIMESTAMPTZ, timezone TEXT, compress_created_before INTERVAL)</c>, and the extension's own
     /// SQL notes it is "not strict because we need to set different default values for schedule_interval" —
     /// i.e. the default is computed in C, so omitting the argument is not the same as passing what we want.</para>
+    ///
+    /// <para>That verified signature is also where <c>initial_start</c> comes from: the statement names
+    /// it, which puts the job on this hypertable's slot on the <see cref="CompressionPhaseMinutes"/> grid
+    /// and on a FIXED schedule (#3035). The <c>-1</c> skip above applies to that too — it keys on the policy
+    /// EXISTING, not on its parameters matching — so the phase reaches a deployed store through the converge
+    /// and through nothing else.</para>
     /// </summary>
     public static string AddCompressionPolicySql(ICollectorSchemaInfo schema)
     {
@@ -287,10 +305,36 @@ public static class TimescaleSupport
         return AddCompressionPolicySql(schema.TargetTable);
     }
 
-    /// <summary>The raw-name compression-policy overload — the collection_log path (see
-    /// <see cref="CreateHypertableSql(string, string)"/>).</summary>
+    /// <summary>
+    /// The raw-name compression-policy overload — the collection_log path (see
+    /// <see cref="CreateHypertableSql(string, string)"/>), and the one that carries the phase.
+    ///
+    /// <para><b><c>initial_start</c> is named for every hypertable this product owns, and that is what puts
+    /// the job on a FIXED schedule (#3035).</b> Without it TimescaleDB computes each next start from the
+    /// previous FINISH, so a compression policy drifts through the hour by its own runtime every cycle and
+    /// crosses each fixed refresh slot in turn, spending hours to days inside one before drifting out. A
+    /// table outside <see cref="CompressionPhaseOrder"/> gets the statement without it: this code has no
+    /// business deciding when a foreign hypertable compresses.</para>
+    ///
+    /// <para><b>This resolves a bare name where the converge additionally checks the schema, and the
+    /// asymmetry is a caller invariant rather than an oversight.</b> A statement takes a table name and has
+    /// no schema to check — <c>add_compression_policy</c> resolves it through the session's search path, the
+    /// same way every other bare name in this file does. So the safety rests on WHO calls it, and both
+    /// callers pass names this product owns: <see cref="ApplyCompressionPolicyAsync"/> walks
+    /// <see cref="HypertableTables"/> and <see cref="EnsureCollectionLogHypertableAsync"/> passes
+    /// <see cref="CollectionLogTable"/>. The converge has a schema available because it reads one back from
+    /// the job catalog, where the rows are whatever the store contains rather than whatever this product
+    /// created, so it checks. A future caller handing this overload a foreign or qualified name would break
+    /// that invariant and get a phase it should not have. Raised by review.</para>
+    /// </summary>
     public static string AddCompressionPolicySql(string table)
-        => $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true)";
+    {
+        var initialStart = TryCompressionPhaseMinutesFor(table, out var phase)
+            ? $", initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '{phase.ToString(CultureInfo.InvariantCulture)} minutes'"
+            : string.Empty;
+
+        return $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true{initialStart})";
+    }
 
     /* ─────────────────────────── continuous aggregates (query acceleration) ─────────────────────────── */
 
@@ -1673,6 +1717,183 @@ WITH NO DATA";
             "not an hourly continuous aggregate — register it in TimescaleSupport.HourlyRefreshPhaseOrder before giving it an hourly refresh policy");
     }
 
+    /* ─────────────────────── the compression phase grid (#3035) ─────────────────────── */
+
+    /// <summary>
+    /// The hourly refresh the compression grid is placed AGAINST, named because its slot is the one no other
+    /// background work may be scheduled inside.
+    ///
+    /// <para>On the narrowed <see cref="HourlyRefreshStartOffset"/> window it is still by far the largest job
+    /// on the grid — see <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> for the number the grid is
+    /// sized against and for the operating envelope that number defines. Every other hourly refresh is an
+    /// order of magnitude smaller (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), and that asymmetry
+    /// is what the grid below is shaped by: one slot treated as FULL, the rest as occupied only at their
+    /// start.</para>
+    /// </summary>
+    public const string HeaviestHourlyRefreshView = QueryStoreStatsIntervalHourlyView;
+
+    /// <summary>
+    /// The longest run recorded for <see cref="HeaviestHourlyRefreshView"/> under the narrowed
+    /// <see cref="HourlyRefreshStartOffset"/> window, and the number the compression grid is sized against.
+    ///
+    /// <para><b>The measured range, so a later reader can tell whether they are still inside it.</b> Before
+    /// the narrowing this job ran 3,301-6,330 s against a 1-hour cadence. Under the 1-day window the highest
+    /// figure recorded is the 864 s here; the drift chart's most recent readings for the same job are
+    /// <b>194 s, 225 s and 335 s</b>, climbing with volume rather than settling. The grid is sized against the
+    /// 864 s ceiling and not against the 194 s low, because a slot chosen against the low would be correct
+    /// only at the load it was chosen at.</para>
+    ///
+    /// <para><b>THE OPERATING ENVELOPE, stated because it is a condition and not a property.</b> #3012's
+    /// convoy needed a refresh and a compression policy to want the same relation at the same time. Two things
+    /// make that residual small right now, and BOTH are load-dependent. The refresh window
+    /// (<c>[now - 1 day, now - 1 hour]</c>) and the chunks a compression policy finds eligible
+    /// (<c>range_end &lt;= now - 1 day</c> on <see cref="CompressAfterDays"/>) are disjoint at any single
+    /// instant — but the two <c>now</c>s are not the same instant. A refresh that started D seconds ago is
+    /// still holding its lock while a compression job evaluates eligibility against a <c>now</c> that has moved
+    /// D forward, so the set of chunks that are inside the running refresh's window AND already eligible for
+    /// the compression starting now is exactly <b>D wide</b>. The overlap therefore grows with D, and so does
+    /// the plain window in which a compression tick can queue an <c>AccessExclusiveLock</c> behind a refresh's
+    /// <c>AccessShareLock</c> on the same hypertable — the mechanism #3012 measured, which never needed chunk
+    /// overlap at all.</para>
+    ///
+    /// <para><b>So: the small-residual reading holds while this job completes well inside its slot, and what
+    /// invalidates it is this number approaching <see cref="RefreshPhaseStepMinutes"/> x 60.</b> At 864 s
+    /// against a 900-second slot the margin is already only 36 seconds, which is why the heaviest slot is
+    /// excluded WHOLE rather than guarded, and why a value at or past the slot width is asserted as a failure
+    /// rather than accommodated: past that point the refresh runs into its neighbour and the grid needs
+    /// redesigning, not renumbering.</para>
+    /// </summary>
+    public const int HeaviestHourlyRefreshObservedCeilingSeconds = 864;
+
+    /// <summary>
+    /// The longest run recorded for any hourly refresh OTHER than
+    /// <see cref="HeaviestHourlyRefreshView"/> — the number <see cref="CompressionPhaseGuardMinutes"/> is
+    /// derived from. The first full staggered cycle came back 26 s / 2 s / 864 s / 140 s, so this is the 140.
+    /// </summary>
+    public const int OtherHourlyRefreshObservedCeilingSeconds = 140;
+
+    /// <summary>
+    /// How long after a refresh slot starts a compression policy may be scheduled — half a
+    /// <see cref="RefreshPhaseStepMinutes"/> slot.
+    ///
+    /// <para><b>The guard is one-sided, and that asymmetry is the mechanism rather than a simplification.</b>
+    /// #3012's convoy needs compression's <c>AccessExclusiveLock</c> request to ARRIVE while a refresh already
+    /// holds <c>AccessShareLock</c> on the same hypertable: a QUEUED exclusive blocks every subsequent shared
+    /// request, so collector writes pile up behind a lock nobody holds. The reverse order does not compose
+    /// that way — a compression run already holding its lock blocks collectors for its own duration whether or
+    /// not a refresh starts, which is the ordinary cost of compressing and not something a schedule can move.
+    /// So compression is kept clear of the minutes AFTER a refresh start and needs no clearance before the
+    /// next one.</para>
+    ///
+    /// <para>Half a slot is 7 minutes here, which is exactly 3x
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> — the longest run recorded for any hourly
+    /// refresh other than the heaviest — and it can never exceed the gap it sits in, because it is
+    /// derived from the slot width rather than chosen against it. That 3x is the margin the envelope on
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> is stated in terms of: the light
+    /// refreshes would have to climb past 420 s, three times their recorded ceiling, before a
+    /// compression tick could land inside one.</para>
+    /// </summary>
+    public const int CompressionPhaseGuardMinutes = RefreshPhaseStepMinutes / 2;
+
+    /// <summary>
+    /// Every minute of the hour a compression policy may start on: the second half of each refresh slot,
+    /// with the heaviest refresh's slot excluded entirely.
+    ///
+    /// <para><b>Why a spread rather than one shared minute.</b> All the compression policies would happily
+    /// share a minute as far as LOCKS go — they compress different hypertables, so they do not contend with
+    /// each other at all — but they would then do their real work simultaneously. <see cref="CompressAfterDays"/>
+    /// and <see cref="ChunkIntervalDays"/> are both 1 and TimescaleDB aligns 1-day chunks to the epoch, so
+    /// every hypertable's newest closed chunk becomes eligible at the same UTC midnight. Drifting policies
+    /// discover that eligibility at whatever minute they have drifted to, which spreads the daily rewrite
+    /// across the hour; collapsing them onto one minute would concentrate it into one. That is a burst this
+    /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.</para>
+    ///
+    /// <para><b>Why the heaviest slot is excluded whole rather than guarded.</b>
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 14.4 of the 15 minutes in its slot, so there is no
+    /// minute of that slot a <see cref="CompressionPhaseGuardMinutes"/> band could recover. Excluding it is
+    /// also what keeps the remaining minutes far from the only refresh that can reach forward: the nearest is
+    /// a full slot past the heaviest one, and the furthest is 59 minutes past it.</para>
+    ///
+    /// <para>Derived from the refresh grid, so a change to <see cref="RefreshPhaseStepMinutes"/> or to where
+    /// the heaviest refresh sits moves these minutes with it rather than leaving behind a literal that used to
+    /// be clear. Declared HERE, after <see cref="HourlyRefreshPhaseOrder"/>, because a static field
+    /// initializer runs in declaration order and this one reads that list through
+    /// <see cref="RefreshPhaseMinutesFor"/>.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<int> CompressionPhaseMinutes = BuildCompressionPhaseMinutes();
+
+    private static int[] BuildCompressionPhaseMinutes()
+    {
+        var heaviestSlot = RefreshPhaseMinutesFor(HeaviestHourlyRefreshView);
+        var minutes = new List<int>(60);
+
+        for (var minute = 0; minute < 60; minute++)
+        {
+            var slot = minute / RefreshPhaseStepMinutes * RefreshPhaseStepMinutes;
+            if (slot == heaviestSlot || minute - slot < CompressionPhaseGuardMinutes)
+            {
+                continue;
+            }
+
+            minutes.Add(minute);
+        }
+
+        return minutes.ToArray();
+    }
+
+    /// <summary>
+    /// The hypertables that carry a compression policy, in phase order — the collector catalog, then
+    /// <c>collection_log</c>, which is a hypertable OUTSIDE that catalog (the same <c>+ 1</c>
+    /// <see cref="HypertableCount"/> accounts for).
+    ///
+    /// <para><b>Keyed on the HYPERTABLE, never on a job id.</b> TimescaleDB assigns job ids per deployment, so
+    /// an encoded id would name a different job on every other store. A compression job reports its own
+    /// hypertable directly in <c>timescaledb_information.jobs</c>, which is why the converge needs no catalog
+    /// join to recover identity the way the refresh converge does — and why the id only ever reaches
+    /// <c>alter_job</c> as a bound parameter.</para>
+    ///
+    /// <para>Derived from <see cref="HypertableTables"/> rather than hand-listed, so a new collector is
+    /// registered by adding it to the catalog and there is no second list to forget. That is why an
+    /// unrecognised name is a FOREIGN hypertable — a bring-your-own store's own table, or a fixture table —
+    /// rather than an omission, and is left unphased instead of throwing the way an unregistered hourly view
+    /// does.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> CompressionPhaseOrder =
+        HypertableTables.Select(t => t.TargetTable).Append(CollectionLogTable).ToArray();
+
+    /// <summary>
+    /// Which minute of the hour <paramref name="table"/>'s compression policy starts on; <c>false</c> when
+    /// this product does not own the hypertable, in which case its schedule is none of this code's business
+    /// beyond the <see cref="CompressScheduleInterval"/> tick #1778 already converges.
+    ///
+    /// <para>Accepts a bare or <c>collect.</c>-qualified name: the product always passes the bare
+    /// <c>TargetTable</c>, but the raw-name overload of <see cref="AddCompressionPolicySql(string)"/> is
+    /// reachable with a qualified one.</para>
+    /// </summary>
+    public static bool TryCompressionPhaseMinutesFor(string table, out int minutes)
+    {
+        minutes = 0;
+
+        if (string.IsNullOrEmpty(table))
+        {
+            return false;
+        }
+
+        var dot = table.LastIndexOf('.');
+        var bare = dot >= 0 ? table[(dot + 1)..] : table;
+
+        for (var index = 0; index < CompressionPhaseOrder.Count; index++)
+        {
+            if (string.Equals(CompressionPhaseOrder[index], bare, StringComparison.Ordinal))
+            {
+                minutes = CompressionPhaseMinutes[index % CompressionPhaseMinutes.Count];
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// An HOURLY continuous aggregate's refresh policy: <see cref="HourlyRefreshStartOffset"/> of window, an
     /// <see cref="HourlyRefreshScheduleInterval"/> cadence, and this view's own slot on the phase grid.
@@ -3035,26 +3256,94 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// Every COMPRESSION-policy job whose <c>schedule_interval</c> is not
-    /// <see cref="CompressScheduleInterval"/> — the stores that need converging (#1778). The comparison is
-    /// done by PostgreSQL against a typed <c>INTERVAL</c> literal rather than by string in C#, so
-    /// <c>01:00:00</c> and <c>1 hour</c> compare equal instead of drifting on formatting.
+    /// Every COMPRESSION-policy job's schedule, with the three things a converged policy is made of: the
+    /// cadence it wakes on, whether that cadence is a FIXED schedule, and which minute of the hour it starts
+    /// on.
+    ///
+    /// <para><b>Unfiltered, with staleness decided in C# (#3035).</b> The #1778 form carried
+    /// <c>schedule_interval IS DISTINCT FROM INTERVAL '1 hour'</c> in the WHERE clause, and that cannot
+    /// express the phase test: the wanted minute is PER HYPERTABLE, so no single SQL literal stands for it and
+    /// a job stale only on its phase would be filtered out before the caller ever saw it. The cadence is
+    /// therefore emitted as SECONDS as well as text, which is what the typed-INTERVAL comparison used to
+    /// provide — <c>01:00:00</c> and <c>1 hour</c> cannot read as a difference and re-alter the same job on
+    /// every start — and the text form stays because the line an operator reads names the cadence the policy
+    /// LEFT.</para>
     ///
     /// <para>Scoped to compression jobs the SAME tolerant way <see cref="ReadStuckCompressionJobsAsync"/> is
     /// (<c>policy_compression</c> plus the 2.18+ <c>columnstore</c> rebrand). Retention, continuous-aggregate
     /// refresh, reorder and every other job type are deliberately untouched: their cadences are separate
     /// decisions, and the retention jobs in particular carry an armed/paused state (#1680) this must never
     /// disturb.</para>
+    ///
+    /// <para><b>Two of these columns are younger than the rest of the read, which is why
+    /// <see cref="CompressionCadenceOnlyStateSql"/> exists.</b> <c>fixed_schedule</c> and
+    /// <c>initial_start</c> entered <c>timescaledb_information.jobs</c> later than <c>schedule_interval</c>
+    /// did, so on a store old enough to lack them this statement throws — and #1778's cadence converge, which
+    /// only ever needed the older columns, would be lost with it. The caller retries with the narrow read
+    /// instead of returning zero.</para>
+    ///
+    /// <para>The phase comes back as a minute-of-hour already converted to UTC. A bare
+    /// <c>EXTRACT(MINUTE FROM initial_start)</c> would read the SESSION time zone, which on any of the
+    /// half-hour and quarter-hour zones is a store-wide silent skew rather than a local oddity.</para>
+    ///
+    /// <para><b><c>hypertable_schema</c> is selected because a bare name is not an identity.</b>
+    /// <see cref="CompressionPhaseOrder"/> holds bare table names, so a bring-your-own store carrying its own
+    /// <c>wait_stats</c> hypertable in another schema would otherwise match one of ours and be given a minute
+    /// this code has no basis for choosing. The cadence converge stays deliberately unscoped — that is
+    /// #1778's reach and narrowing it would be a behaviour change — so the schema gates the PHASE only.
+    /// Appended rather than inserted, so every ordinal the reader already uses keeps its position: an ordinal
+    /// shift in a column list is a defect nothing but a live store can see.</para>
     /// </summary>
-    public static string StaleCompressionScheduleSql =>
-        $@"
+    public const string CompressionPolicyStateSql = @"
 SELECT
     j.job_id,
     j.hypertable_name,
-    j.schedule_interval::text
+    j.schedule_interval::text,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds,
+    j.fixed_schedule,
+    CASE
+        WHEN j.initial_start IS NULL THEN NULL
+        ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
+    END AS phase_minutes,
+    j.hypertable_schema
 FROM timescaledb_information.jobs AS j
-WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
-AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'";
+WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
+
+    /// <summary>
+    /// The same read as <see cref="CompressionPolicyStateSql"/> minus the two columns the PHASE needs — the
+    /// fallback for a store whose <c>timescaledb_information.jobs</c> does not have them.
+    ///
+    /// <para><b>This exists because widening a read can turn a partial capability into a total outage, and
+    /// that direction is worse than the one it was widening for.</b> <c>schedule_interval</c> has been in that
+    /// view far longer than <c>fixed_schedule</c> and <c>initial_start</c> have. #1778's cadence converge only
+    /// ever needed the former, so a store old enough to lack the latter two used to be converged fine — and
+    /// once the phase columns were added to the one read this function makes, that store's probe would throw,
+    /// be caught, return 0, and lose the cadence converge it already had. A silent TOTAL regression in the
+    /// name of a feature it cannot use. Falling back keeps the old behaviour exactly: cadence converged, phase
+    /// skipped. Raised by review.</para>
+    ///
+    /// <para><b>The version range this is for is the one this file already states, not one assumed from the
+    /// bundled runtime.</b> Nothing in the product declares a TimescaleDB floor and nothing checks
+    /// <c>extversion</c>: <see cref="EnableCompressionSql"/> says the pre-2.18 compression vocabulary is
+    /// "preferred here for compatibility across 2.x", the forced-refresh path already handles a store where
+    /// <c>force</c> does not exist (2.18+), and the continuous-aggregate converge's own catch already names "a
+    /// TimescaleDB too old to expose <c>initial_start</c>" as a state that reaches it. Fixed-schedule
+    /// background jobs — and therefore these two columns — are a later 2.x addition than
+    /// <c>schedule_interval</c>, so inside a stated 2.x compatibility target they cannot be assumed present.
+    /// That is the whole argument for degrading rather than for a floor pin.</para>
+    ///
+    /// <para>The first four columns are byte-identical to the wide read's, in the same order, because the
+    /// caller reads both with one set of ordinals — the phase columns are what it stops reading, not a
+    /// different shape it starts reading.</para>
+    /// </summary>
+    public const string CompressionCadenceOnlyStateSql = @"
+SELECT
+    j.job_id,
+    j.hypertable_name,
+    j.schedule_interval::text,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds
+FROM timescaledb_information.jobs AS j
+WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
 
     /// <summary>
     /// Retunes one existing compression policy to <see cref="CompressScheduleInterval"/>. The job id is BOUND
@@ -3067,72 +3356,220 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
     /// considers eligible. Measured on 2.28.1: the change also re-anchors <c>next_start</c> immediately
     /// (a job sitting at last-finish + 12h moved to last-finish + 1h), so a converged store starts honoring the
     /// new cadence on the next tick rather than after one final half-day wait.</para>
+    ///
+    /// <para>This is the FOREIGN-hypertable form. A hypertable this product owns takes
+    /// <see cref="SetCompressionSchedulePhaseSql"/> instead, which also pins the schedule; leaving a foreign
+    /// hypertable's <c>fixed_schedule</c> alone keeps #1778's reach exactly as wide as it was without this
+    /// code choosing a minute for a table it knows nothing about.</para>
     /// </summary>
     public static string SetCompressionScheduleSql =>
         $"SELECT alter_job($1::integer, schedule_interval => INTERVAL '{CompressScheduleInterval}')";
 
     /// <summary>
-    /// Retunes EXISTING compression policies to <see cref="CompressScheduleInterval"/> (#1778) — the half of
-    /// the tick fix that reaches stores which already have policies.
+    /// Moves one existing compression policy onto <see cref="CompressScheduleInterval"/> AND onto its slot on
+    /// the compression phase grid. <c>$1</c> the job id (<c>::integer</c>, the #1586 trap), <c>$2</c> the
+    /// minute of the hour.
     ///
-    /// <para>Without this the change would only ever help fresh installs: <see cref="AddCompressionPolicySql"/>
-    /// carries the interval, but <c>if_not_exists => true</c> makes it a documented no-op against an existing
-    /// policy (measured: returns -1, NOTICE, parameters untouched), so every store that ever ran an older build
-    /// — the field store in #1778 among them — would keep waking twice a day forever. Idempotent by
-    /// construction: it selects only the jobs that DIFFER, so the first start after deploy converges the store
-    /// and every start after that finds nothing and logs nothing.</para>
+    /// <para><b>Naming <c>initial_start</c> is the half that makes the minute durable</b>, not decoration:
+    /// TimescaleDB computes the next start from the previous FINISH when <c>initial_start</c> is absent, which
+    /// is why a compression policy set to a minute by hand slides off it by its own runtime every cycle. The
+    /// anchor is the NEXT whole hour plus the phase — deliberately in the future, because a fixed schedule
+    /// needs a non-null <c>initial_start</c> and anchoring forward never depends on how a past anchor is
+    /// handled — and computed in UTC rather than with a bare <c>date_trunc('hour', now())</c>, which truncates
+    /// in the SESSION time zone. Both for the same reasons
+    /// <see cref="AddContinuousAggregatePolicySql"/> computes it that way.</para>
+    ///
+    /// <para><c>scheduled</c> is deliberately not named, so this cannot arm a paused job. That is
+    /// load-bearing here rather than defensive: the fixture idiom for a deterministic compression test is a
+    /// policy created and parked at <c>scheduled = false</c> in one transaction (#1888), and a converge that
+    /// re-armed it would make those tests race the scheduler again.</para>
+    /// </summary>
+    public static string SetCompressionSchedulePhaseSql =>
+        $@"SELECT alter_job(
+    $1::integer,
+    schedule_interval => INTERVAL '{CompressScheduleInterval}',
+    fixed_schedule => true,
+    initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + ($2::int * INTERVAL '1 minute'))";
+
+    /// <summary>
+    /// Converges EXISTING compression policies onto <see cref="CompressScheduleInterval"/> (#1778) and onto
+    /// the <see cref="CompressionPhaseMinutes"/> grid on a fixed schedule (#3035) — one function owning both
+    /// properties, because they are set by the same <c>alter_job</c> and a second sweep would fight this one
+    /// for the same rows.
+    ///
+    /// <para><b>Why converging is the only path that reaches a deployed store, and why the reason is not the
+    /// one the refresh side has.</b> <see cref="AddCompressionPolicySql"/> carries both the interval and the
+    /// phase, but <c>if_not_exists =&gt; true</c> makes it a documented no-op against a policy the store
+    /// already has (measured: returns -1, NOTICE, parameters untouched) — it keys on the policy EXISTING, not
+    /// on its parameters matching. So the create path reaches fresh installs only. That is a quiet skip rather
+    /// than the <c>22023</c> raise <c>add_continuous_aggregate_policy</c> answers a differing window with,
+    /// which is why the compression create can keep running BEFORE this converge while the refresh create has
+    /// to run after its own.</para>
+    ///
+    /// <para><b>Behaviour on each of the three store states.</b> A FRESH store has already had its policies
+    /// created by <see cref="ApplyCompressionPolicyAsync"/> and
+    /// <see cref="EnsureCollectionLogHypertableAsync"/> moments earlier, WITH <c>initial_start</c>, so this
+    /// reads them back matching and returns 0 — the mirror image of the refresh converge, which sees an empty
+    /// set on a fresh store because its aggregates do not exist yet. A store carrying OLD values gets both
+    /// properties on the first start after deploy. A store an operator already patched BY HAND to a minute is
+    /// re-phased anyway, and that is deliberate: a hand-set minute on a finish-to-start job is not a stagger
+    /// with a slow leak, it is one with a countdown, and the production store settled the argument by reading
+    /// <c>fixed_schedule = f</c> on every compression job it had.</para>
+    ///
+    /// <para><b>Idempotent by construction</b>: only jobs that DIFFER on cadence or on phase are altered, so
+    /// the first start after deploy converges the store and every start after that finds nothing and logs
+    /// nothing. FOREIGN hypertables — a bring-your-own store's own tables, fixture tables — keep #1778's
+    /// cadence converge and are left off the grid, because <see cref="CompressionPhaseOrder"/> is derived from
+    /// the collector catalog and an unrecognised name means "not ours" rather than "forgotten".</para>
     ///
     /// <para>Failure-isolated PER JOB, the #1775 shape: one <c>alter_job</c> that fails (most often because a
     /// least-privilege bring-your-own store's login does not own the job) leaves that one hypertable on its old
-    /// cadence and the rest still converge. Returns how many it retuned.</para>
+    /// schedule and the rest still converge. Returns how many it moved.</para>
     /// </summary>
-    public static async Task<int> ConvergeCompressionScheduleAsync(
+    public static Task<int> ConvergeCompressionScheduleAsync(
         NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        => ConvergeCompressionScheduleAsync(connection, logger, CompressionPolicyStateSql, cancellationToken);
+
+    /// <summary>
+    /// The seam that lets the FALLBACK DIRECTION be tested: <paramref name="phasedStateSql"/> is the wide read
+    /// the public entry point supplies, and a test supplies a deliberately-failing one instead.
+    ///
+    /// <para><b>Why a seam rather than prose.</b> The property that has to hold is not "the phase applies" but
+    /// "a probe failure costs the phase and NOTHING ELSE" — an old store must keep the
+    /// <see cref="CompressScheduleInterval"/> cadence converge it already had from #1778. Returning 0 there
+    /// would be a total regression wearing a partial's clothes, which is the failure shape this whole area
+    /// keeps producing: silent and partial, never loud. Against a runtime that HAS the phase columns there is
+    /// no other way to make the wide read fail, so without this the direction could only be reasoned about,
+    /// and that is exactly what a reviewer had to do.</para>
+    ///
+    /// <para>The FALLBACK statement is deliberately NOT injectable — <see cref="CompressionCadenceOnlyStateSql"/>
+    /// is always the one used, so a test cannot accidentally prove the degradation against a statement the
+    /// product does not ship. And the wide statement being injectable costs nothing: the public path's own
+    /// live assertions land real phases, which a wrong wide read could not do.</para>
+    /// </summary>
+    internal static async Task<int> ConvergeCompressionScheduleAsync(
+        NpgsqlConnection connection, ILogger? logger, string phasedStateSql, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
         }
 
-        var stale = new List<(int JobId, string? Hypertable, string? Interval)>();
-        try
+        var desiredSeconds = (long)CompressScheduleSpan.TotalSeconds;
+
+        var stale = new List<(int JobId, string? Hypertable, string? Interval, bool WasFixed, int? WasPhase, int? Phase)>();
+
+        /* One reader for both statements: the narrow one is the wide one's first four columns in the same
+           order, so withPhase decides which ordinals are READ rather than selecting a different shape. */
+        async Task ReadStateAsync(string sql, bool withPhase)
         {
-            using var probe = new NpgsqlCommand(StaleCompressionScheduleSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            stale.Clear();
+
+            using var probe = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds };
             await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                var hypertable = reader.IsDBNull(1) ? null : reader.GetString(1);
+                var intervalText = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var seconds = reader.IsDBNull(3) ? (long?)null : reader.GetInt64(3);
+
+                var fixedSchedule = withPhase && !reader.IsDBNull(4) && reader.GetBoolean(4);
+                var wasPhase = withPhase && !reader.IsDBNull(5) ? reader.GetInt32(5) : (int?)null;
+
+                /* Schema-exact, because CompressionPhaseOrder holds BARE names: a foreign hypertable
+                   named like one of ours must not inherit its minute. */
+                var ours = withPhase
+                    && !reader.IsDBNull(6)
+                    && string.Equals(reader.GetString(6), PgSchemaGenerator.CollectSchema, StringComparison.Ordinal);
+
+                int? phase = ours && hypertable is not null && TryCompressionPhaseMinutesFor(hypertable, out var slot)
+                    ? slot
+                    : null;
+
+                /* A NULL cadence is the widest wakeup there is, so it counts as stale rather than as
+                   "nothing to compare". */
+                var cadenceStale = seconds != desiredSeconds;
+                var phaseStale = phase is int wanted && (!fixedSchedule || wasPhase != wanted);
+
+                if (!cadenceStale && !phaseStale)
+                {
+                    continue;
+                }
+
                 stale.Add((
                     Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
-                    reader.IsDBNull(1) ? null : reader.GetString(1),
-                    reader.IsDBNull(2) ? null : reader.GetString(2)));
+                    hypertable,
+                    intervalText,
+                    fixedSchedule,
+                    wasPhase,
+                    phase));
             }
+        }
+
+        try
+        {
+            await ReadStateAsync(phasedStateSql, withPhase: true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* A plain-PostgreSQL store (the views do not exist) or a store hiccup. The caller already gates on
-               the extension; nothing to converge either way. */
-            logger?.LogDebug("Compression-schedule converge: could not read policy jobs: {Message}", ex.Message);
-            return 0;
+            /* The wide read names fixed_schedule and initial_start, which entered
+               timescaledb_information.jobs later than schedule_interval did. Retry WITHOUT them rather than
+               giving up: a store old enough to lack them was converged fine by #1778 before the phase was
+               added to this read, and returning 0 here would silently take that away as well. See
+               CompressionCadenceOnlyStateSql. */
+            /* The catch is deliberately broad — the file's existing tolerant style — so this line must not
+               assert a cause it has not established. It states what was observed and what it costs, and
+               offers the two candidate reasons as candidates. Raised by review. */
+            logger?.LogInformation(
+                "TimescaleDB: could not read compression-policy schedules with their phase ({Message}) — retrying without it, so the {Interval} tick (#1778) still converges and only the phase is skipped. The reason is not established here: a job catalog predating fixed_schedule/initial_start fails this way on every start, while a transient store error fails this way once and the next start pins the phases. Either way these policies keep TimescaleDB's finish-to-start scheduling until a phased read succeeds, so they drift through the refresh slots (#3035).",
+                ex.Message, CompressScheduleInterval);
+
+            try
+            {
+                await ReadStateAsync(CompressionCadenceOnlyStateSql, withPhase: false);
+            }
+            catch (Exception narrow) when (narrow is not OperationCanceledException)
+            {
+                /* A plain-PostgreSQL store (the views do not exist) or a store hiccup. The caller already
+                   gates on the extension; nothing to converge either way. */
+                logger?.LogDebug("Compression-schedule converge: could not read policy jobs: {Message}", narrow.Message);
+                return 0;
+            }
         }
 
         var converged = 0;
-        foreach (var (jobId, hypertable, interval) in stale)
+        foreach (var (jobId, hypertable, interval, wasFixed, wasPhase, phase) in stale)
         {
             try
             {
-                using var alter = new NpgsqlCommand(SetCompressionScheduleSql, connection) { CommandTimeout = SetupTimeoutSeconds };
-                alter.Parameters.AddWithValue(jobId);
-                await alter.ExecuteNonQueryAsync(cancellationToken);
-                converged++;
+                if (phase is int slot)
+                {
+                    using var alter = new NpgsqlCommand(SetCompressionSchedulePhaseSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    alter.Parameters.AddWithValue(jobId);
+                    alter.Parameters.AddWithValue(slot);
+                    await alter.ExecuteNonQueryAsync(cancellationToken);
+                    converged++;
 
-                logger?.LogInformation(
-                    "TimescaleDB: retuned {Hypertable}'s compression policy from a {Was} tick to {Now} — that is the longest an already-eligible chunk can now sit uncompressed.",
-                    hypertable, interval, CompressScheduleInterval);
+                    logger?.LogInformation(
+                        "TimescaleDB: retuned {Hypertable}'s compression policy from a {Was} tick to {Now} on a fixed :{Phase} schedule (was fixed_schedule={WasFixed}, phase {WasPhase}) — an unpinned policy computes its next start from its last FINISH, so it drifts by its own runtime every cycle and laps the hour through every refresh slot in turn (#3035).",
+                        hypertable, interval, CompressScheduleInterval, slot.ToString("00", CultureInfo.InvariantCulture), wasFixed, wasPhase);
+                }
+                else
+                {
+                    using var alter = new NpgsqlCommand(SetCompressionScheduleSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    alter.Parameters.AddWithValue(jobId);
+                    await alter.ExecuteNonQueryAsync(cancellationToken);
+                    converged++;
+
+                    logger?.LogInformation(
+                        "TimescaleDB: retuned {Hypertable}'s compression policy from a {Was} tick to {Now} — that is the longest an already-eligible chunk can now sit uncompressed.",
+                        hypertable, interval, CompressScheduleInterval);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger?.LogWarning(
-                    "Could not retune {Hypertable}'s compression policy (job {JobId}) to a {Interval} tick — it keeps its {Was} cadence, so its newest closed chunk stays uncompressed longer (often a permission issue: the store login must own the job): {Message}",
+                    "Could not converge {Hypertable}'s compression policy (job {JobId}) onto a {Interval} tick — it keeps its {Was} cadence and its old schedule, so its newest closed chunk stays uncompressed longer and its tick keeps drifting through the refresh slots (often a permission issue: the store login must own the job): {Message}",
                     hypertable, jobId, CompressScheduleInterval, interval, ex.Message);
             }
         }
@@ -3140,7 +3577,7 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
         if (converged > 0)
         {
             logger?.LogInformation(
-                "TimescaleDB: {Converged}/{Total} compression policies retuned to a {Interval} tick (#1778 — TimescaleDB's own default for 1-day chunks is 12 hours).",
+                "TimescaleDB: {Converged}/{Total} compression policies converged onto a {Interval} tick and, where the hypertable is ours, onto the compression phase grid (#1778 — TimescaleDB's own default for 1-day chunks is 12 hours; #3035 — an unpinned policy drifts finish-to-start).",
                 converged, stale.Count, CompressScheduleInterval);
         }
 
