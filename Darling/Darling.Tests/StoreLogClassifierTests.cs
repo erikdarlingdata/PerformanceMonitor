@@ -173,6 +173,53 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
+    /// No excluding rule's text may be a prefix of a retained rule's text at a shared severity — the
+    /// ORDER-INDEPENDENT half.
+    ///
+    /// <para>Written after the anchoring pin above failed to notice a real weakening: shortening
+    /// <c>admin_termination</c>'s text from the full administrative phrase to <c>terminating connection</c>
+    /// leaves it anchored and severity-scoped, and still classifies
+    /// <c>terminating connection because of crash of another server process</c> correctly — but only because
+    /// <c>crash_recovery</c> happens to sit ABOVE it in the table. A safety property that rests on rule order
+    /// is one nobody reading a rule can see, and one that breaks silently the next time the table is
+    /// re-sorted. So the pair is refused outright rather than relying on the ordering that saves it.</para>
+    /// </summary>
+    [Fact]
+    public void NoExcludingRuleCanShadowARetainedRule()
+    {
+        var offenders = StoreLogClassifier.ExcludingRulesThatCouldShadowARetainedRule();
+
+        Assert.True(
+            offenders.Count == 0,
+            "an excluding rule's text is a prefix of a retained rule's at a shared severity, so only rule "
+            + "ORDER keeps the retained shape visible: " + string.Join("; ", offenders));
+
+        /* The population control: the check is only meaningful if both populations exist, and the shape it
+           hunts is a StartsWith excluding rule against a StartsWith retained rule at a shared severity. A
+           planted pair proves the identical comparison finds one. */
+        var planted = new[]
+        {
+            new StoreLogClassifier.Rule("floor", ["FATAL"], StoreLogClassifier.MatchKind.StartsWith, "terminating connection", false, "planted"),
+            new StoreLogClassifier.Rule("signal", ["FATAL"], StoreLogClassifier.MatchKind.StartsWith, "terminating connection because of crash", true, "planted"),
+        };
+
+        var plantedOffenders = new List<string>();
+        foreach (var excluding in planted.Where(r => !r.Retained))
+        {
+            foreach (var retained in planted.Where(r => r.Retained))
+            {
+                if (retained.Text.StartsWith(excluding.Text, StringComparison.Ordinal)
+                    && excluding.Severities.Intersect(retained.Severities, StringComparer.Ordinal).Any())
+                {
+                    plantedOffenders.Add(excluding.EventClass);
+                }
+            }
+        }
+
+        Assert.Single(plantedOffenders);
+    }
+
+    /// <summary>
     /// The #3014 shape, pointed at a log filter: benign-noise text inside a line the exclusion was not
     /// written for must not be excluded.
     ///
@@ -225,6 +272,20 @@ public class StoreLogClassifierTests
         var group = Assert.Single(census.Groups);
         Assert.Equal("user_request_cancel", group.EventClass);
         Assert.Equal(1, group.Occurrences);
+
+        /* And the separator is colon plus TWO spaces, which is what elog.c's "%s:  " writes. A tab-indented
+           continuation carrying a severity word followed by ONE colon is arbitrary text inside a statement,
+           not a field: relaxing the separator to a single colon turns it into an entry with a severity the
+           server never wrote, and the entry it manufactures is indistinguishable from a real one. */
+        var withOneColon = StoreLogClassifier.Classify(
+            DefaultPrefix + "ERROR:  canceling statement due to user request\n"
+            + DefaultPrefix + "STATEMENT:  SELECT note FROM audit\n"
+            + "\tWHERE note = 'ERROR:not a severity' AND kind = 'LOG:also not'\n");
+
+        Assert.Equal(3, withOneColon.LinesRead);
+        Assert.Equal(1, withOneColon.EntriesRead);
+        Assert.Equal(2, withOneColon.ContinuationLines);
+        Assert.Equal("user_request_cancel", Assert.Single(withOneColon.Groups).EventClass);
     }
 
     /// <summary>

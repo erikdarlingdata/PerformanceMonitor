@@ -313,6 +313,63 @@ public static class StoreLogClassifier
     }
 
     /// <summary>
+    /// The second invariant, and the one that is ORDER-INDEPENDENT: no excluding rule's text may be a prefix
+    /// of a retained rule's text at a severity they share.
+    ///
+    /// <para>Why this is needed on top of the anchoring check. <c>admin_termination</c> excludes
+    /// <c>terminating connection due to administrator command</c> and <c>crash_recovery</c> retains
+    /// <c>terminating connection because of crash of another server process</c> — two FATAL messages whose
+    /// wording begins identically, one expected job churn and the other the clearest crash signal the store
+    /// can emit. Shortening the excluding rule to <c>terminating connection</c> is still anchored, still
+    /// severity-scoped, and would still classify the crash correctly TODAY only because the retained rule
+    /// happens to sit above it in the table. Order is not a property anyone reading a rule can see, so a
+    /// safety argument that rests on it is a safety argument that breaks the next time the table is
+    /// re-sorted. This returns the offending pair instead.</para>
+    ///
+    /// <para>Stated limit: it compares STARTS-WITH texts. A retained <see cref="MatchKind.Contains"/> rule's
+    /// population is not decidable from the two strings alone, so those are not checked here — the reason
+    /// <c>Contains</c> is permitted only on RETAINED rules in the first place is that its mistakes add
+    /// visibility rather than remove it.</para>
+    /// </summary>
+    public static IReadOnlyList<string> ExcludingRulesThatCouldShadowARetainedRule()
+    {
+        var offenders = new List<string>();
+
+        foreach (var excluding in Rules)
+        {
+            if (excluding.Retained || excluding.Match != MatchKind.StartsWith)
+            {
+                continue;
+            }
+
+            foreach (var retained in Rules)
+            {
+                if (!retained.Retained || retained.Match != MatchKind.StartsWith)
+                {
+                    continue;
+                }
+
+                if (!retained.Text.StartsWith(excluding.Text, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                foreach (var severity in excluding.Severities)
+                {
+                    if (Array.IndexOf(retained.Severities, severity) >= 0)
+                    {
+                        offenders.Add($"{excluding.EventClass} ('{excluding.Text}') can shadow "
+                            + $"{retained.EventClass} ('{retained.Text}') at {severity}");
+                        break;
+                    }
+                }
+            }
+        }
+
+        return offenders;
+    }
+
+    /// <summary>
     /// Splits a slab of log text into entries, classifies each, and groups them for storage.
     ///
     /// <para>Every line in <paramref name="slab"/> is assumed COMPLETE — <see cref="StoreLogSlab"/> is what
