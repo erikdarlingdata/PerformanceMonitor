@@ -97,10 +97,6 @@ public sealed class StragglerCommandTimeoutTests
         @"new\s+(?:Npgsql\.)?NpgsqlCommand\s*\(|\.CreateCommand\s*\(|\.CreateCommand\s*[,);]",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private static readonly Regex s_setsTimeout = new(
-        @"CommandTimeout\s*=",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
     /// <summary>
     /// A file's evidence that it holds a handle on the STORE. Each token is boundaried on both sides, which
     /// is the lesson #2931's review produced: without a boundary <c>targetPostgres</c> matches
@@ -151,6 +147,59 @@ public sealed class StragglerCommandTimeoutTests
             offenders.Count == 0,
             $"{offenders.Count} command(s) in {file} do not carry {constant}, so they take whatever deadline "
             + "the connection or Npgsql happens to supply: " + string.Join(", ", offenders));
+
+        Assert.Equal(expected, total);
+    }
+
+    /// <summary>
+    /// The same thirteen sites, judged a SECOND way — through the shared
+    /// <see cref="CommandDeadlineScanner"/> that #2938 extracted and #2874's other pins route through.
+    ///
+    /// <para><b>Additive rather than a replacement, because the two ask different questions.</b> The
+    /// relational guard above asks whether each site carries ITS OWN regime's constant, which is the claim
+    /// this file exists to make: cross-wiring HypoPG's monitored-target bound to the CLI's store bound
+    /// would satisfy every deadline-shaped check while bounding the wrong hop. The shared scanner cannot
+    /// express that — it answers only whether a deadline was set at all — but it answers that better than
+    /// a bare regex can, reading the construction's own initializer from the CONSTRUCTION span and
+    /// qualifying an assignment by the name bound to the construction, so neither a following
+    /// construction's initializer nor a sibling's assignment can certify a site that set nothing itself.
+    /// So the relational assertion stays primary and this runs beside it, the way #2940 put the two side
+    /// by side on the command plane. If they ever disagree, one of them is wrong and the build says so.</para>
+    ///
+    /// <para>Every site in these three files writes its deadline as an object initializer ON the
+    /// construction, so it is the scanner's CONSTRUCTION-span half that carries all thirteen; the
+    /// name-qualified assignment half is inert here and is exercised instead by
+    /// <see cref="TheCollectorRunnersUntimedSites_ThreadTheDeadlineAsAParameterInstead"/>, whose nine
+    /// timed sites are all assignments.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void EveryStragglerSite_AlsoPassesTheSharedDeadlineScanner(int regime)
+    {
+        var (file, _, expected, _, _) = s_regimes[regime];
+        var path = SourcePath(file);
+        var text = File.ReadAllText(path);
+        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+        var offenders = new List<string>();
+        var total = 0;
+
+        foreach (Match ctor in s_commandCtor.Matches(code))
+        {
+            total++;
+
+            if (!CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
+            {
+                offenders.Add($"{file}:{LineOf(text, ctor.Index)}");
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            $"{offenders.Count} command(s) in {file} fail the SHARED deadline scanner even though the "
+            + "relational check passed — the two guards disagree, so one of them is reading the wrong "
+            + "span: " + string.Join(", ", offenders));
 
         Assert.Equal(expected, total);
     }
@@ -545,7 +594,11 @@ public sealed class StragglerCommandTimeoutTests
         {
             var span = CSharpSourceWalker.StatementSpanFrom(code, ctor.Index, statements: 2);
 
-            if (s_setsTimeout.IsMatch(span))
+            /* The SHARED judgement (#2938), not a local regex: this asks only "was a deadline set here at
+               all", which is the same question the six other pins in #2874 ask and the one this test needs
+               before it can decide whether an untimed site is accounted for. The per-regime value check
+               above is a different question and keeps its own relational regex. */
+            if (CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
             {
                 continue;
             }

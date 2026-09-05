@@ -569,11 +569,11 @@ public sealed class CSharpSourceWalkerTests
     }
 
     /// <summary>
-    /// <para>The corpus invariant, over every file the five pins actually read. With comments and literal
-    /// text blanked, and hole DELIMITERS blanked with them, a well-formed C# file's remaining braces and
-    /// parentheses balance to zero. A walk that loses its place on a delimiter cannot stay balanced across
-    /// hundreds of real files by luck, and this is the only failure this file can express against real
-    /// source rather than an arranged fixture.</para>
+    /// <para>The corpus invariant, over every file the pins built on this walk read. With comments and
+    /// literal text blanked, and hole DELIMITERS blanked with them, a well-formed C# file's remaining
+    /// braces and parentheses balance to zero. A walk that loses its place on a delimiter cannot stay
+    /// balanced across hundreds of real files by luck, and this is the only failure this file can express
+    /// against real source rather than an arranged fixture.</para>
     ///
     /// <para>Measured against the legacy walk when this landed: two of these files came out unbalanced —
     /// <c>ViewerServerTab.ChartContextMenu.cs</c> (the <c>'"'</c> char literal, braces -1 and parens +2) and
@@ -614,10 +614,10 @@ public sealed class CSharpSourceWalkerTests
     }
 
     /// <summary>
-    /// The stripper is character-aligned with its input and preserves every newline, because all five pins
-    /// report an offender's LINE by counting <c>\n</c> in the stripped text up to the match index. A walk
-    /// that dropped or added a character would report real offenders at the wrong line, which is worse than
-    /// not reporting them: it sends the reader to innocent code.
+    /// The stripper is character-aligned with its input and preserves every newline, because the pins built
+    /// on this walk report an offender's LINE by counting <c>\n</c> in the stripped text up to the match
+    /// index. A walk that dropped or added a character would report real offenders at the wrong line, which
+    /// is worse than not reporting them: it sends the reader to innocent code.
     /// </summary>
     [Fact]
     public void TheStrippedTextIsCharacterAlignedWithItsInput()
