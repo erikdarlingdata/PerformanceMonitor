@@ -6340,6 +6340,21 @@ LIMIT 1";
            55P03 included. */
         catch (Exception ex) when (
             server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql
+            /* The arm may only claim what the filter guarantees. Classify's first branch answers
+               CommandTimeout for ANY TimeoutException, and EnumeratedCollectorDriver.ItemBudgetException
+               throws a BARE one for the in-process per-item wall-clock budget - a monitoring-side cut
+               that never reached the database and has nothing to do with Npgsql. Without this term the
+               authored sentence below would tell an operator that Npgsql cancelled a read mid-stream
+               about a budget this service abandoned on its own. Latent today, because no PostgreSQL
+               collector declares PerItemWallClockBudget, which is exactly the kind of "true when written"
+               that stops being true without anyone revisiting the sentence.
+
+               NpgsqlException covers BOTH real deadlines and only those: PostgresException derives from
+               it (verified against Npgsql 10.0.3), so SQLSTATE 57014 still lands here, while the bare
+               TimeoutException falls through to the general catch - which classifies it CommandTimeout
+               too, so it still forces no reprobe, and now reports the budget's own message and the real
+               elapsed time rather than a borrowed narrative. */
+            && ex is NpgsqlException
             && PostgresTargetProvider.Instance.Classify(ex, yieldsOnLockTimeout: false)
                == CollectorTargetFault.CommandTimeout)
         {

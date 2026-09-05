@@ -445,6 +445,50 @@ public class PostgresFaultOutcomeTests
         Assert.IsType<NpgsqlException>(timeout);
     }
 
+    /// <summary>
+    /// The authored Npgsql narrative is only reachable for a fault that actually came from Npgsql.
+    ///
+    /// <para><c>Classify</c>'s first branch answers <see cref="CollectorTargetFault.CommandTimeout"/> for
+    /// ANY <see cref="TimeoutException"/>, and <c>EnumeratedCollectorDriver.ItemBudgetException</c> throws
+    /// a BARE one for the in-process per-item wall-clock budget — a cut this service makes on itself,
+    /// which never reached the database and involves no Npgsql read. So classification alone is not
+    /// enough to earn the sentence, and the arm carries an <c>ex is NpgsqlException</c> term.</para>
+    ///
+    /// <para>Both real deadlines keep it: <see cref="PostgresException"/> derives from
+    /// <see cref="NpgsqlException"/>, so SQLSTATE 57014 still qualifies. Verified against the shipped
+    /// Npgsql, not assumed — the whole point of the term is a type relationship.</para>
+    ///
+    /// <para>Latent today, because no PostgreSQL collector declares a <c>PerItemWallClockBudget</c>. That
+    /// is precisely the sort of "true when it was written" a message should not depend on.</para>
+    /// </summary>
+    [Fact]
+    public void OnlyAnNpgsqlFaultCanEarnTheAuthoredTimeoutNarrative()
+    {
+        /* The two real deadlines: both are NpgsqlException, so both still reach the arm. */
+        var clientSide = new NpgsqlException("Exception while reading from stream", new TimeoutException());
+        var serverSide = new PostgresException("cancelling statement", "ERROR", "ERROR", "57014");
+
+        Assert.IsAssignableFrom<NpgsqlException>(clientSide);
+        Assert.IsAssignableFrom<NpgsqlException>(serverSide);
+
+        /* The in-process budget's exception classifies identically and must NOT reach it. */
+        var budgetExpiry = new TimeoutException("collector budget expired");
+
+        Assert.Equal(
+            CollectorTargetFault.CommandTimeout,
+            PostgresTargetProvider.Instance.Classify(budgetExpiry, yieldsOnLockTimeout: false));
+        Assert.IsNotAssignableFrom<NpgsqlException>(budgetExpiry);
+
+        /* And the arm's filter carries the term that tells them apart. Pinned in source because an
+           exception filter cannot be invoked directly. */
+        var worker = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        Assert.Matches(
+            new Regex(@"&& ex is NpgsqlException\s*\r?\n\s*&& PostgresTargetProvider\.Instance\.Classify\("),
+            worker);
+    }
+
     private static string ReadSource(string relativePath)
     {
         var dir = AppContext.BaseDirectory;
