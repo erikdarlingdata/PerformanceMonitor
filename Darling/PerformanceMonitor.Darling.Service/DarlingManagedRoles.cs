@@ -220,18 +220,25 @@ public static class DarlingManagedRoles
            run before provisioning at startup, so the column exists by now -- and because this DDL is re-run
            on every managed start, a changed value reaches an existing install on its next restart without
            any new machinery. A store whose config row is not seeded yet answers with the default. */
-        var composeTimeoutSeconds = await ReadComposeStatementTimeoutAsync(connection, cancellationToken);
+        var composeTimeoutSeconds = await ReadComposeStatementTimeoutAsync(connection, logger, cancellationToken);
 
         await using var command = new NpgsqlCommand(
-            BuildProvisioningSql(adminPassword, viewerPassword, mcpPassword, composeTimeoutSeconds), connection);
+            BuildProvisioningSql(adminPassword, viewerPassword, mcpPassword, composeTimeoutSeconds), connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         await command.ExecuteNonQueryAsync(cancellationToken);
 
         logger.LogInformation(
             "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + write config.custom_views; mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
 
         /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
-           caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s'). */
-        return StoreConfigProvider.ClampComposeStatementTimeoutSeconds(composeTimeoutSeconds);
+           caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s').
+
+           And when the read FAILED, the batch above deliberately wrote nothing, so there is no applied value
+           to report. ComposeStatementTimeoutUnknown is the negative "not yet known" sentinel
+           ShouldReassertComposeStatementTimeout already documents: it can never equal a clamped store value,
+           so the next control-plane reload re-asserts rather than concluding the roles are already correct. */
+        return composeTimeoutSeconds is int read
+            ? StoreConfigProvider.ClampComposeStatementTimeoutSeconds(read)
+            : ComposeStatementTimeoutUnknown;
     }
 
     /// <summary>
@@ -260,6 +267,15 @@ public static class DarlingManagedRoles
         return $@"ALTER ROLE {viewer} SET statement_timeout = '{statementTimeout}';
 ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
     }
+
+    /// <summary>
+    /// The <c>appliedSeconds</c> value meaning "provisioning did not write a <c>statement_timeout</c> this
+    /// start, so the roles carry whatever they already had". Negative by construction so it can never equal
+    /// a value that came through <see cref="StoreConfigProvider.ClampComposeStatementTimeoutSeconds"/>,
+    /// which is what makes <see cref="ShouldReassertComposeStatementTimeout"/> converge on the next reload
+    /// instead of concluding the roles are already correct.
+    /// </summary>
+    internal const int ComposeStatementTimeoutUnknown = -1;
 
     /// <summary>
     /// Whether a control-plane reload should re-assert the compose <c>statement_timeout</c> onto the roles
@@ -316,7 +332,7 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(
-                BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds), connection);
+                BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds), connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             logger.LogInformation(
@@ -380,7 +396,10 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
         {
             DarlingFileSecurity.HardenFile(path, allowInteractiveRead);
         }
-        catch (Exception ex)
+        /* Filtered like every other catch in this file. HardenFile takes no CancellationToken so a
+           cancellation cannot reach here today; the filter is what keeps the rule uniform, and a
+           shutdown must never be reported to an operator as an ACL failure they should go fix. */
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
@@ -416,24 +435,57 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
     /// <summary>
     /// The store's compose <c>statement_timeout</c> in seconds (#2357), or 15 when it cannot be read.
     ///
-    /// <para>Defensive on purpose. This runs during startup provisioning, before the config row is
-    /// necessarily seeded and on stores that may predate the column, and a role-provisioning step that threw
-    /// over a tuning knob would stop the service from starting over something that has a perfectly good
-    /// default.</para>
+    /// <para><b>Two outcomes that used to look identical, and only one of them justifies a default.</b>
+    /// "The store has no opinion" — no <c>config_service</c> row yet, because this runs BEFORE
+    /// <c>StoreConfigProvider.SeedIfEmptyAsync</c>, or a store predating the column — genuinely means the
+    /// shipped 15 s is the answer. "I could not hear the store" does not: the operator's value is sitting in
+    /// a column we failed to read, and provisioning the role with 15 anyway OVERWRITES the last known-good
+    /// horizon with a number nobody chose. So a failed read returns <c>null</c> and the caller leaves the
+    /// roles' <c>statement_timeout</c> alone.</para>
+    ///
+    /// <para><b>Why that mattered more than it looks.</b> #2931 made
+    /// <c>McpCommandDeadlines.ResolveComposedQuerySecondsAsync</c> read this SAME column live, per run. A
+    /// silently-defaulted role therefore desyncs the two halves of one backstop: an operator who set 120
+    /// gets a client-side deadline of 120, a server-side ceiling of 15, every composed query dying at 15 s,
+    /// and the configured 120 visible in the UI throughout. Nothing corrected it either — #2918's reload
+    /// gate does fire on the difference, but only on a <c>config_version</c> bump, and a value set before
+    /// the restart bumps nothing.</para>
+    ///
+    /// <para>Cancellation now propagates rather than being swallowed: a shutdown arriving mid-start must not
+    /// be reported as "the store said 15". That is the <c>ex is not OperationCanceledException</c> filter
+    /// this file's own callers already use.</para>
     /// </summary>
-    private static async Task<int> ReadComposeStatementTimeoutAsync(
-        NpgsqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<int?> ReadComposeStatementTimeoutAsync(
+        NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
     {
         try
         {
             await using var command = new NpgsqlCommand(
-                "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1", connection);
+                "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var value = await command.ExecuteScalarAsync(cancellationToken);
-            return value is int seconds ? seconds : 15;
+
+            /* No row, or a NULL column: the store has not been seeded yet. The shipped default is the
+               answer, and the seed that runs a moment later inserts darling.json's value. */
+            return value is int seconds ? seconds : McpCommandDeadlines.ComposedQueryFallbackSeconds;
         }
-        catch (Exception) 
+        catch (PostgresException ex)
+            when (ex.SqlState is PostgresErrorCodes.UndefinedColumn or PostgresErrorCodes.UndefinedTable)
         {
-            return 15;
+            /* A store older than the column or the table. Also "no opinion", and expected on a first start
+               against a pre-#2357 store, so it is not a warning. */
+            logger.LogDebug(
+                "config_service.compose_statement_timeout_seconds is not present on this store ({SqlState}) — provisioning the roles with the shipped {Seconds}s default",
+                ex.SqlState, McpCommandDeadlines.ComposedQueryFallbackSeconds);
+
+            return McpCommandDeadlines.ComposedQueryFallbackSeconds;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                "Could not read config_service.compose_statement_timeout_seconds ({Message}) — leaving the viewer/mcp roles' statement_timeout at whatever the last successful provisioning set, rather than overwriting it with a default the operator did not choose. #2931's client-side composed-query deadline reads the same column, so writing a guess here would desync the two halves of that backstop.",
+                ex.Message);
+
+            return null;
         }
     }
 
@@ -450,9 +502,15 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
     /// <param name="composeStatementTimeoutSeconds">
     /// The per-session <c>statement_timeout</c> for the viewer and mcp roles (#2357). Defaults to the 15 the
     /// constant used to hard-code, so a caller that does not care gets today's behaviour exactly.
+    /// <para><c>null</c> means "the store's value could not be read", and OMITS the two <c>ALTER ROLE</c>
+    /// statements so the roles keep the horizon the last successful provisioning gave them. Writing a
+    /// default there would overwrite an operator's configured ceiling with a number nobody chose, and
+    /// silently disagree with the client-side deadline #2931 reads from the same column. It is a distinct
+    /// value rather than a sentinel integer because every integer in range is a legitimate ceiling.</para>
     /// </param>
     public static string BuildProvisioningSql(
-        string adminPassword, string viewerPassword, string mcpPassword, int composeStatementTimeoutSeconds = 15)
+        string adminPassword, string viewerPassword, string mcpPassword,
+        int? composeStatementTimeoutSeconds = McpCommandDeadlines.ComposedQueryFallbackSeconds)
     {
         RequireAlphanumeric(adminPassword, nameof(adminPassword));
         RequireAlphanumeric(viewerPassword, nameof(viewerPassword));
@@ -470,7 +528,11 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
            than inline, because #2918 made the reload path re-assert the same two statements: two renderers
            for one pair of ALTER ROLEs is a drift waiting to happen, and the drift would be invisible (both
            sides run, the roles just disagree about the ceiling depending on which path touched them last). */
-        var composeTimeoutStatements = BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds);
+        /* An unreadable value renders as a COMMENT rather than as a statement, so the batch stays one
+           round trip and the omission is visible to anyone reading the SQL that ran. */
+        var composeTimeoutStatements = composeStatementTimeoutSeconds is int composeSeconds
+            ? BuildComposeStatementTimeoutSql(composeSeconds)
+            : "--     LEFT AS-IS this start: config_service.compose_statement_timeout_seconds could not be read.";
 
         /* The fail-closed viewer column-ACL carve for the secret-bearing config tables (see
            ViewerRestrictedConfigTables). Runs AFTER the blanket config GRANT below, so it strips

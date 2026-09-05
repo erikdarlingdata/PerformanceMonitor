@@ -110,7 +110,7 @@ AND   (server_id, collection_time) IN (
 
     private async Task SeedWaitStatsAsync(NpgsqlConnection connection, DateTime cutoff, ILogger? logger, CancellationToken cancellationToken)
     {
-        using var cmd = new NpgsqlCommand(WaitStatsSeedSql, connection);
+        using var cmd = new NpgsqlCommand(WaitStatsSeedSql, connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         cmd.Parameters.AddWithValue(cutoff);
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         var count = 0;
@@ -130,7 +130,7 @@ AND   (server_id, collection_time) IN (
 
     private async Task SeedFileIoStatsAsync(NpgsqlConnection connection, DateTime cutoff, ILogger? logger, CancellationToken cancellationToken)
     {
-        using var cmd = new NpgsqlCommand(FileIoStatsSeedSql, connection);
+        using var cmd = new NpgsqlCommand(FileIoStatsSeedSql, connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         cmd.Parameters.AddWithValue(cutoff);
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         var count = 0;
@@ -156,7 +156,7 @@ AND   (server_id, collection_time) IN (
 
     private async Task SeedPerfmonStatsAsync(NpgsqlConnection connection, DateTime cutoff, ILogger? logger, CancellationToken cancellationToken)
     {
-        using var cmd = new NpgsqlCommand(PerfmonStatsSeedSql, connection);
+        using var cmd = new NpgsqlCommand(PerfmonStatsSeedSql, connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         cmd.Parameters.AddWithValue(cutoff);
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         var count = 0;
@@ -177,7 +177,7 @@ AND   (server_id, collection_time) IN (
     {
         try
         {
-            using var cmd = new NpgsqlCommand(MemoryGrantStatsSeedSql, connection);
+            using var cmd = new NpgsqlCommand(MemoryGrantStatsSeedSql, connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             cmd.Parameters.AddWithValue(cutoff);
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             var count = 0;
