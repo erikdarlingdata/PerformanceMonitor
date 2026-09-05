@@ -44,6 +44,20 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
     /// </summary>
     private const string CustomerDatabase = "darling_screen_appdb";
 
+    /// <summary>
+    /// The name RDS actually uses, spelled out here rather than read from
+    /// <c>PostgresTargetProvider.ManagedMaintenanceDatabase</c> — deliberately, and it is the difference
+    /// between this test proving something and proving nothing.
+    ///
+    /// <para>Building the fixture from the constant makes the test self-consistent under a rename: misspell
+    /// the constant and this would create <c>rdsadmn</c>, screen <c>rdsadmn</c>, and pass green while the
+    /// real <c>rdsadmin</c> went on failing every cycle on every managed target. Verified by mutation — with
+    /// the fixture built from the constant, a one-character typo in it left this test passing and only the
+    /// source pin in <c>TargetProviderTests</c> caught it. Hardcoding the platform's name here means the two
+    /// assertions have to AGREE with reality rather than with each other.</para>
+    /// </summary>
+    private const string ManagedMaintenanceDatabase = "rdsadmin";
+
     [Fact]
     public async Task TheShippedEnumerationScreensRdsadminAndKeepsEveryOtherDatabase()
     {
@@ -62,8 +76,7 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
 
         try
         {
-            weCreatedRdsadmin = await CreateIfAbsentAsync(
-                cs!, PostgresTargetProvider.ManagedMaintenanceDatabase, ct);
+            weCreatedRdsadmin = await CreateIfAbsentAsync(cs!, ManagedMaintenanceDatabase, ct);
             await CreateIfAbsentAsync(cs!, CustomerDatabase, ct);
 
             var (enumerationConnectionString, query) =
@@ -82,7 +95,7 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
             }
 
             /* The screen fired. */
-            Assert.DoesNotContain(PostgresTargetProvider.ManagedMaintenanceDatabase, enumerated);
+            Assert.DoesNotContain(ManagedMaintenanceDatabase, enumerated);
 
             /* And took nothing else with it. `postgres` is a genuine collection target on a managed
                instance — pg_extension_availability returns rows in it — and is what a "screen the
@@ -105,7 +118,7 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
 
             if (weCreatedRdsadmin)
             {
-                await DropAsync(cs!, PostgresTargetProvider.ManagedMaintenanceDatabase);
+                await DropAsync(cs!, ManagedMaintenanceDatabase);
             }
         }
     }
