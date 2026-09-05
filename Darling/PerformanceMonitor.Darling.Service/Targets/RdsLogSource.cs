@@ -98,11 +98,6 @@ public sealed class RdsLogSource
 
         var newest = await NewestLogFileAsync(client, instanceId, cancellationToken);
 
-        if (newest is null)
-        {
-            return new LogChunk(string.Empty, false);
-        }
-
         var key = instanceId + "|" + newest;
         _markers.TryGetValue(key, out var marker);
 
@@ -165,15 +160,19 @@ public sealed class RdsLogSource
     /// upgrade and other logs, and sorted by last-written rather than by name — the filename embeds a
     /// timestamp, but sorting text would order 2026-08-9 after 2026-08-10.
     ///
-    /// <para><b>An instance that lists no PostgreSQL log file raises rather than answering "nothing".</b>
-    /// A caller can act on two outcomes — the log was opened and held nothing new, or no log was opened —
-    /// and only the first licenses the "no new … in the RDS log window" note the runner stamps on a
-    /// zero-row cycle, which is a claim about the log's CONTENTS. Answering an absent file list with a
-    /// silent empty read is the #2633 confusion arriving by a second route. A stopped instance, one still
-    /// being created, and one whose logs have just rotated all answer this way, so the message says it is
-    /// worth retrying rather than sending anyone to look for a grant.</para>
+    /// <para><b>An instance with no openable PostgreSQL log file raises rather than answering
+    /// "nothing".</b> A caller can act on two outcomes — the log was opened and held nothing new, or no log
+    /// was opened — and only the first licenses the "no new … in the RDS log window" note the runner stamps
+    /// on a zero-row cycle, which is a claim about the log's CONTENTS. Answering with a silent empty read
+    /// is the #2633 confusion arriving by a second route. A stopped instance, one still being created, and
+    /// one whose logs have just rotated all answer this way, so the message says it is worth retrying
+    /// rather than sending anyone to look for a grant.</para>
+    ///
+    /// <para>Total, therefore, rather than nullable: an empty list, an omitted one, and a newest entry
+    /// carrying no filename are one fact — there is nothing here to open — and a null return would have the
+    /// caller decide that again, which is where the silent empty read came from.</para>
     /// </summary>
-    private static async Task<string?> NewestLogFileAsync(
+    private static async Task<string> NewestLogFileAsync(
         IAmazonRDS client, string instanceId, CancellationToken cancellationToken)
     {
         var files = await client.DescribeDBLogFilesAsync(
@@ -184,23 +183,22 @@ public sealed class RdsLogSource
             },
             cancellationToken);
 
-        /* Absent and empty are the same fact here, and both have to be caught BEFORE the LINQ: the SDK
-           omits the collection entirely on an answer that carried no file, so ordering a null throws
-           ArgumentNullException and buries this branch behind "Value cannot be null. (Parameter
-           'source')". */
-        if (files.DescribeDBLogFiles is not { Count: > 0 })
-        {
-            throw new InvalidOperationException(
-                $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
-                + "filtered on 'postgresql' returned nothing. NO LOG WAS OPENED this cycle, so this is not "
-                + "an empty log — whatever this window held is unread. An instance that is stopped, still "
-                + "being created, or has just rotated its logs answers this way, so it is worth retrying "
-                + "rather than treating as a configuration error.");
-        }
+        /* The null test comes BEFORE the LINQ because it has to: the SDK omits the collection entirely on
+           an answer that carried no file, so ordering a null raises ArgumentNullException and buries this
+           branch behind "Value cannot be null. (Parameter 'source')". */
+        var newest = files.DescribeDBLogFiles is null
+            ? null
+            : files.DescribeDBLogFiles
+                .OrderByDescending(f => f.LastWritten)
+                .Select(f => f.LogFileName)
+                .FirstOrDefault(name => !string.IsNullOrEmpty(name));
 
-        return files.DescribeDBLogFiles
-            .OrderByDescending(f => f.LastWritten)
-            .Select(f => f.LogFileName)
-            .FirstOrDefault();
+        return newest
+            ?? throw new InvalidOperationException(
+                $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
+                + "filtered on 'postgresql' returned nothing it could name. NO LOG WAS OPENED this cycle, "
+                + "so this is not an empty log — whatever this window held is unread. An instance that is "
+                + "stopped, still being created, or has just rotated its logs answers this way, so it is "
+                + "worth retrying rather than treating as a configuration error.");
     }
 }

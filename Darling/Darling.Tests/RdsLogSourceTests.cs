@@ -44,11 +44,11 @@ public class RdsLogSourceTests
            production fleet past a green suite (#2996). */
         public bool OmitClusters { get; init; }
         public bool OmitClusterMembers { get; init; }
-        public bool OmitLogFiles { get; init; }
 
-        /// <summary>An empty-but-present list, which is the same FACT as an absent one and has to reach the
-        /// same named branch — pre-#2996 the two diverged, one crashing and one answering silently.</summary>
-        public bool EmptyLogFiles { get; init; }
+        /// <summary>Which of the three "nothing here to open" shapes the log-file list comes back in.
+        /// Absent, empty and present-but-unnamed are one fact and have to reach one named branch; they used
+        /// to diverge, the first crashing and the other two answering silently (#2996).</summary>
+        public string? LogFileShape { get; init; }
 
         public override Task<DescribeDBClustersResponse> DescribeDBClustersAsync(
             DescribeDBClustersRequest request, CancellationToken cancellationToken = default)
@@ -75,15 +75,17 @@ public class RdsLogSourceTests
             DescribeDBLogFilesRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new DescribeDBLogFilesResponse
             {
-                DescribeDBLogFiles = OmitLogFiles
-                    ? null
-                    : EmptyLogFiles
-                        ? new List<DescribeDBLogFilesDetails>()
-                        : new List<DescribeDBLogFilesDetails>
-                        {
-                            new() { LogFileName = "error/postgresql.log.2026-08-09-01", LastWritten = 1000 },
-                            new() { LogFileName = LogName, LastWritten = 9999 },
-                        },
+                DescribeDBLogFiles = LogFileShape switch
+                {
+                    "absent" => null,
+                    "empty" => new List<DescribeDBLogFilesDetails>(),
+                    "unnamed" => new List<DescribeDBLogFilesDetails> { new() { LastWritten = 9999 } },
+                    _ => new List<DescribeDBLogFilesDetails>
+                    {
+                        new() { LogFileName = "error/postgresql.log.2026-08-09-01", LastWritten = 1000 },
+                        new() { LogFileName = LogName, LastWritten = 9999 },
+                    },
+                },
             });
 
         public override Task<DownloadDBLogFilePortionResponse> DownloadDBLogFilePortionAsync(
@@ -197,17 +199,20 @@ public class RdsLogSourceTests
     }
 
     /// <summary>
-    /// An instance that lists no PostgreSQL log file is NAMED, whether the SDK omitted the collection or
-    /// handed back an empty one. Both mean no log was opened, and neither may reach the runner as
-    /// <c>Value cannot be null. (Parameter 'source')</c> — the whole message the null form produced on a
-    /// live fleet, which names no call, no branch and no instance (#2996).
+    /// An instance with no openable PostgreSQL log file is NAMED, in all three shapes the answer arrives
+    /// in: the SDK omitted the collection, it came back empty, or its newest entry carries no filename.
+    /// All three mean no log was opened, and none may reach the runner as <c>Value cannot be null.
+    /// (Parameter 'source')</c> — the whole message the absent form produced on a live fleet, which names
+    /// no call, no branch and no instance (#2996) — nor as a silent empty read, which the runner stamps
+    /// with a sentence about a log's contents.
     /// </summary>
     [Theory]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public async Task AnInstanceListingNoPostgresLogFileIsNamed(bool omit, bool empty)
+    [InlineData("absent")]
+    [InlineData("empty")]
+    [InlineData("unnamed")]
+    public async Task AnInstanceListingNoPostgresLogFileIsNamed(string shape)
     {
-        var (source, client) = Build(new FakeRds { OmitLogFiles = omit, EmptyLogFiles = empty });
+        var (source, client) = Build(new FakeRds { LogFileShape = shape });
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com"));
