@@ -1424,29 +1424,41 @@ public partial class MainWindow : Window
 
         var service = _dataService;
         var nowUtc = DateTime.UtcNow;
-        /* Width is the fleet size, passed raw — see the inventory overlay in FinOpsTab.Loaders. */
-        using var readFanOut = ViewerReadFanOut.Of(list.Count);
+        /* #3016: pool-many lanes, not fleet-many reads — see the inventory overlay in FinOpsTab.Loaders.
+           A fleet wider than the pool used to render SHORT here rather than slowly: the per-server catch
+           below turned each pool-exhaustion failure into an absent card, so the panel a fleet is watched
+           from silently dropped every server past the permits whenever the store was slow enough for the
+           first ten to hold their slots for ConnectionTimeoutSeconds. Lanes are contiguous, so
+           concatenating them in lane order restores the fleet order this used to read in. */
+        var lanes = ViewerReadFanOut.Lanes(list);
+        using var readFanOut = ViewerReadFanOut.Of(lanes.Count);
 
-        var summaries = await Task.WhenAll(list.Select(async server =>
+        var perLane = await Task.WhenAll(lanes.Select(async lane =>
         {
-            try
+            var found = new List<ServerSummaryItem>(lane.Count);
+
+            foreach (var server in lane)
             {
-                var summary = await service.GetServerSummaryAsync(server.ServerId, server.DisplayName);
-                summary.ServerName = server.ServerName;
-                summary.ApplyFreshness(nowUtc);
-                return summary;
+                try
+                {
+                    var summary = await service.GetServerSummaryAsync(server.ServerId, server.DisplayName);
+                    summary.ServerName = server.ServerName;
+                    summary.ApplyFreshness(nowUtc);
+                    found.Add(summary);
+                }
+                catch
+                {
+                    /* A per-server read failure shouldn't blank the whole grid (Lite logs + continues). */
+                }
             }
-            catch
-            {
-                /* A per-server read failure shouldn't blank the whole grid (Lite logs + continues). */
-                return null;
-            }
+
+            return found;
         }));
 
         /* The per-server reads are done; the fleet-totals read below does not contend with them. */
         readFanOut.Release();
 
-        var built = summaries.OfType<ServerSummaryItem>().ToList();
+        var built = perLane.SelectMany(lane => lane).ToList();
         StampTagPills(built);
 
         var cards = ServerOverviewSort.Order(

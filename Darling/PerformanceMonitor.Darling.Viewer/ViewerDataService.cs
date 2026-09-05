@@ -386,6 +386,14 @@ public sealed partial class ViewerDataService : IAsyncDisposable
         var effectiveConnectionString = connectionTimeoutSeconds is int seconds
             ? ApplyConnectionTimeout(connectionString, seconds)
             : connectionString;
+
+        /* #3016: the read-deadline family and the fan-out bound both need the pool size this seat really
+           gets, and the managed constant is only one of the two strings the viewer can be handed. Published
+           from the EFFECTIVE string, here, because this is the line that decides how many permits exist —
+           a call site could be added later that forgets, and there is nowhere else the two can be kept
+           from disagreeing. */
+        ViewerStorePool.Publish(effectiveConnectionString);
+
         _dataSource = NpgsqlDataSource.Create(effectiveConnectionString);
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
     }
