@@ -318,8 +318,17 @@ public class BaselineSupplyTests
         /* And the coverage side is read RAW, never clamped: it is the thing being measured, not a bound. */
         Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStatsBaselineView}) AS coverage_oldest", sql, StringComparison.Ordinal);
 
-        /* The need is bounded by this tier's own retention, not by anything shorter. */
-        Assert.Contains($"INTERVAL '{TimescaleSupport.BaselineRetentionInterval}'", sql, StringComparison.Ordinal);
+        /* The need is bounded by this tier's own retention, and the bound arrives as a PARAMETER. It used to
+           be spelled `now()::timestamp - INTERVAL '35 days'` here, which is LOCALTIMESTAMP arithmetic: the
+           horizon rendered in the store session's zone, clamped by GREATEST against a naive-UTC
+           min(collection_time). The caller passes BaselineRetentionSpan off the service clock instead, so
+           what this can still assert about the SQL is that the local clock is gone and the bound is bound.
+           The horizon's VALUE stays pinned by BaselineRetention_CoversTheBaselineWindow_OrNumber1757Returns
+           (which holds the string and the TimeSpan equal), and the absence of a bare clock in any store
+           predicate by StoreSqlClockDisciplineTests. */
+        Assert.Contains("$1)) AS need_from", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("now()", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("LOCALTIMESTAMP", sql, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

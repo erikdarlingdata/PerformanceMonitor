@@ -500,8 +500,14 @@ WITH NO DATA";
                 DateTime? coverageOldest = null;
                 DateTime? needFrom = null;
                 using (var probe = new NpgsqlCommand(probeSql, connection) { CommandTimeout = SetupTimeoutSeconds })
-                await using (var reader = await probe.ExecuteReaderAsync(cancellationToken))
                 {
+                    /* Kind-Unspecified so Npgsql sends `timestamp`, not `timestamptz`: the horizon is
+                       compared against collection_time, which is naive UTC. */
+                    probe.Parameters.AddWithValue(
+                        DateTime.SpecifyKind(DateTime.UtcNow - BaselineRetentionSpan, DateTimeKind.Unspecified));
+
+                    await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+
                     if (await reader.ReadAsync(cancellationToken))
                     {
                         sourceOldest = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
@@ -735,6 +741,16 @@ WITH NO DATA";
     /// <para>This is the same predicate shape the retention arming uses (<c>MeasureRetentionCoverageAsync</c>) over
     /// the same pair of relations, deliberately: what we backfill and what unblocks arming cannot be allowed
     /// to drift apart.</para>
+    ///
+    /// <para>THE HORIZON IS BOUND AS <c>$1</c>, not computed in the SQL. <c>now()::timestamp</c> is
+    /// effectively <c>LOCALTIMESTAMP</c> — it renders the clock in the store session's TimeZone, which
+    /// initdb takes from the host OS — while <c>min(collection_time)</c> is naive UTC. Both sides are
+    /// <c>timestamp</c>, so PostgreSQL raises nothing and <c>GREATEST</c> simply picks between two values on
+    /// different clocks: on a store whose host sits east of UTC the horizon moves LATER and the gate
+    /// under-asks for coverage, leaving the baseline tier permanently short of the window #1757 needs, and
+    /// west of UTC it over-asks and materializes buckets the tier's own retention policy then drops. The
+    /// caller passes <see cref="BaselineRetentionSpan"/> off the service clock, the same clock that stamped
+    /// every <c>collection_time</c> it is compared against.</para>
     /// </summary>
     public static string BaselineBackfillProbeSql(string view, string source)
         => $@"
@@ -743,7 +759,7 @@ SELECT
     (SELECT min(bucket) FROM collect.{view}) AS coverage_oldest,
     time_bucket('1 hour', GREATEST(
         (SELECT min(collection_time) FROM collect.{source}),
-        now()::timestamp - INTERVAL '{BaselineRetentionInterval}')) AS need_from";
+        $1)) AS need_from";
 
     /// <summary>
     /// Drops a baseline relation ONLY when it is a plain fallback view and NOT a continuous aggregate — the

@@ -220,6 +220,38 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
+    /// The v9 session-time-zone block: the belt behind
+    /// <c>StoreSqlClockDisciplineTests</c>. The store's timestamp columns hold naive UTC while initdb takes
+    /// <c>timezone</c> from the host OS, so on a Windows box outside UTC every comparison of a naive column
+    /// against <c>now()</c> has the naive side converted at the machine's local zone. Pinning UTC makes that
+    /// conversion the identity — for MANAGED stores only, which is why it is a backstop and not the fix.
+    ///
+    /// <para>Nothing else may ride in this block: it is appended after the v8 hardware check, whose
+    /// staleness test keys on the last fingerprint line in the text read before any of these appends. A
+    /// sizing line here would be both invisible to that check and able to override it.</para>
+    /// </summary>
+    [Fact]
+    public void TimeZoneConfAppend_PinsV9Marker_AndCarriesNothingButTheZone()
+    {
+        var block = DarlingManagedPostgres.BuildTimeZoneConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV9, block, StringComparison.Ordinal);
+        Assert.Contains("timezone = 'UTC'", block, StringComparison.Ordinal);
+
+        /* No fingerprint line, or the v8 staleness check silently stops checking. */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+
+        /* The blocks compose, they don't compete. */
+        Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("maintenance_work_mem", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("max_worker_processes", block, StringComparison.Ordinal);
+
+        /* `timezone`, not `log_timezone`: the session zone is what resolves a mixed timestamp/timestamptz
+           comparison. Setting only the log zone would change what the log says and nothing about the data. */
+        Assert.DoesNotContain("log_timezone", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The v7 compression-memory override (#1777) — the PROPAGATION half of the raised floor, and the only
     /// reason an EXISTING store adopts it. A store provisioned before #1777 carries a v3 block whose
     /// maintenance_work_mem was written under the old min(5% RAM, 1 GB) rule: on a 16 GB host that is the
