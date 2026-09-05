@@ -2606,16 +2606,20 @@ LIMIT 1", connection))
     }
 
     /// <summary>
-    /// The converge really CALLS the phase-setting statement, read out of the IL — because the pure suite
-    /// cannot see it any other way.
+    /// The converge really references the phase-setting statement, read out of the IL — because a string pin
+    /// asserts what a statement SAYS and never that anything runs it.
     ///
-    /// <para><b>This gap was found by a control, not reasoned about.</b> Mutating
-    /// <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync"/> so an owned hypertable takes the
-    /// cadence-only branch — so the phase never reaches a deployed store at all — left the entire pure suite
-    /// GREEN. Every string pin above still passed, because a string pin asserts what a statement SAYS and
-    /// never that anything runs it, and that is the inert-fix-with-a-passing-suite shape rather than a milder
-    /// version of a red one. The live converge test catches it, but only in CI's PostgreSQL job; this catches
-    /// the wiring on every build.</para>
+    /// <para><b>What this catches, measured rather than assumed.</b> It goes red when the phased branch is
+    /// wired to the cadence-only statement — the phase computed, selected on, logged, and never written —
+    /// which is the shape where the whole feature is inert and every other pin in this file stays green.
+    /// That was proven by mutation.</para>
+    ///
+    /// <para><b>And what it does NOT catch, which matters more than what it does.</b> Making the branch
+    /// GUARD always false leaves this pin green: the call is still emitted into the unreachable branch, so
+    /// its presence in the IL says the statement is wired, not that the branch is taken. Reachability
+    /// through that guard is only covered by the live converge test, which runs in CI's PostgreSQL job
+    /// alone. Both of those were run; this comment records the boundary rather than implying there
+    /// isn't one.</para>
     ///
     /// <para>Scanned inside the compiler-generated state machine, because an async method's body lives there
     /// after compilation and not in the source method. The cadence-only statement is the control: it has to
@@ -2623,7 +2627,7 @@ LIMIT 1", connection))
     /// the state-machine name is asserted present first, for the same reason.</para>
     /// </summary>
     [Fact]
-    public void ConvergeCompressionSchedule_ActuallyCallsThePhaseStatement_NotOnlyTheCadenceOne()
+    public void ConvergeCompressionSchedule_ReferencesThePhaseStatement_NotOnlyTheCadenceOne()
     {
         const string Machine = "<ConvergeCompressionScheduleAsync>d__";
         const string Phase = "get_SetCompressionSchedulePhaseSql";
