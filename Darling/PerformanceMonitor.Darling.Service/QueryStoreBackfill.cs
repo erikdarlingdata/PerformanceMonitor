@@ -402,6 +402,10 @@ public sealed class QueryStoreBackfill
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 ORDER BY database_name", connection);
+            /* #2874: the enclosing BackfillSliceDeadline ABANDONS rather than cancels, so this is the only
+               bound that reaches the statement. CandidateWindow is wider than raw retention, which makes the
+               collection_time predicate inert — this read is unbounded across every chunk that exists. */
+            command.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow - CandidateWindow, DateTimeKind.Unspecified));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -431,6 +435,10 @@ public sealed class QueryStoreBackfill
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT MIN(last_execution_time) FROM query_store_stats WHERE server_id = $1 AND database_name = $2", connection);
+            /* #2874: unbounded by construction — the derived ceiling IS the oldest stored row, so the
+               collection_time floor #2344 and #2795 gave the MAX siblings would hide what this looks for.
+               The deadline is the whole bound, and the enclosing budget abandons rather than cancels. */
+            command.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(databaseName);
             var result = await command.ExecuteScalarAsync(cancellationToken);
