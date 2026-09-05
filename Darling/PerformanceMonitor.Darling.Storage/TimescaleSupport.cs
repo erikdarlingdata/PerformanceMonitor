@@ -902,8 +902,6 @@ $do$";
         _ => throw new ArgumentOutOfRangeException(nameof(view), view, "not a baseline aggregate"),
     };
 
-    /// <summary>The seven baseline-tier aggregates in creation order (nine until #2007 retired the unread CPU/IO pair). Named ONCE so the ensure sweep, the
-    /// retention list and the tests read one list rather than three hand-kept copies.</summary>
     /// <summary>
     /// The non-baseline HOURLY continuous aggregates, in CREATION order, paired with their CREATE SQL.
     ///
@@ -929,6 +927,8 @@ $do$";
         (CreateQueryStoreStatsCorrectedHourlySql, QueryStoreStatsCorrectedHourlyView),
     };
 
+    /// <summary>The seven baseline-tier aggregates in creation order (nine until #2007 retired the unread CPU/IO pair). Named ONCE so the ensure sweep, the
+    /// retention list and the tests read one list rather than three hand-kept copies.</summary>
     public static readonly (string CreateSql, string View)[] BaselineAggregates =
     {
         (CreatePerfmonBaselineSql,        PerfmonBaselineView),
