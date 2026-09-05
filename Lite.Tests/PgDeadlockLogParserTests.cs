@@ -147,8 +147,9 @@ public sealed class PgDeadlockLogParserTests
     }
 
     /// <summary>
-    /// The hash is identity across the overlapping reads the collector makes on purpose: the same report is
-    /// seen every cycle while it stays in the log tail, and must be stored once. Two DIFFERENT deadlocks
+    /// The hash is identity across repeated reads: on the <c>pg_read_file</c> route the same report is
+    /// seen every cycle while it stays in the log tail, and on the consume-once RDS route it comes back
+    /// after a restart or a write that did not land. Either way it is stored once. Two DIFFERENT deadlocks
     /// must not collide — verified on the rig, where a repeat of the same query pair produced a different
     /// hash because the process IDs differed.
     /// </summary>

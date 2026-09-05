@@ -29,9 +29,14 @@ namespace PerformanceMonitor.Collectors;
 /// established and <c>pg_plan_capture_readiness</c> already reports on.</para>
 ///
 /// <para>Reads the same bounded tail of the same file as plan capture, by the same two routes: this
-/// definition where there is a filesystem, and the RDS log API at a managed target, chosen at dispatch. The
-/// window OVERLAPS between cycles on purpose — a report cut in half at the edge of one read is whole in the
-/// next — which is why every row carries a hash of its graph and the store dedupes on it.</para>
+/// definition where there is a filesystem, and the RDS log API at a managed target, chosen at dispatch.
+/// Every row carries a hash of its graph and the store dedupes on it, because both routes hand the same
+/// report over more than once — but NOT by the same mechanism, and the difference decides what a
+/// truncated report costs. This definition's window OVERLAPS between cycles on purpose, so a report cut
+/// in half at the edge of one read is whole in the next. The RDS route is consume-once: its resume marker
+/// advances past whatever a successful cycle stored, so a report cut at one of its chunk boundaries is
+/// not completed, and its own repeats come from a restart discarding that in-process marker or from a
+/// write that did not land (#3008, #3009).</para>
 /// </summary>
 public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDeadlocksCollector.Row>
 {
@@ -128,8 +133,9 @@ LIMIT 500";
            one whose application saw an error - which is usually the only end anybody notices. */
         new CollectorColumn("victim_pid", CollectorColumnType.Integer),
         new CollectorColumn("participant_count", CollectorColumnType.Integer),
-        /* Identity across overlapping reads. The tail is re-read every cycle, so without this the same
-           deadlock is stored once per cycle for as long as it stays inside the window. */
+        /* Identity across repeated reads. This route re-reads the tail every cycle, so without this the
+           same deadlock is stored once per cycle for as long as it stays inside the window; the RDS route
+           repeats for its own reasons rather than by overlapping (see the class remarks). */
         new CollectorColumn("deadlock_hash", CollectorColumnType.Varchar),
         new CollectorColumn("lock_modes", CollectorColumnType.Varchar),
         new CollectorColumn("resources", CollectorColumnType.Varchar),

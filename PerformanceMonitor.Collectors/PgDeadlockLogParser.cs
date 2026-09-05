@@ -108,8 +108,9 @@ public static class PgDeadlockLogParser
     /// next and skipping it costs nothing. The RDS log-API route is CONSUME-ONCE: <c>RdsLogSource</c>
     /// holds a resume marker per (instance, file) and <c>DownloadDBLogFilePortion</c> starts the next call
     /// where the last one stopped, so there is no overlap and no next pass, and a report straddling a
-    /// chunk boundary is never completed. The paragraph above is not a recovery guarantee — it says
-    /// truncation is expected on both transports, not that it clears itself on both.</para>
+    /// chunk boundary is not completed for the life of that marker. The paragraph above is not a recovery
+    /// guarantee — it says truncation is expected on both transports, not that it clears itself on
+    /// both.</para>
     ///
     /// <para><b>Two shapes on that route, and the second is the dangerous one.</b> A chunk ending before
     /// <c>DETAIL:</c> matches nothing, because the pattern requires that group, and the report is lost
@@ -132,14 +133,19 @@ public static class PgDeadlockLogParser
     /// the data marking what is missing — the reader could not then tell a quiet server from a
     /// half-collected one. A whole-read refusal says one thing, and the runner's row says it.</para>
     ///
-    /// <para><b>What that costs is NOT the same on the two transports, and the difference is the read, not
-    /// this method.</b> <see cref="PgDeadlocksCollector"/> re-reads an overlapping byte-window tail every
-    /// cycle, so a straddled window there loses nothing permanently — the same text arrives again next
-    /// cycle, and once the non-UTC lines age out of the window the readable siblings store. The RDS
-    /// log-API route is CONSUME-ONCE: <c>RdsLogSource.ReadNewestAsync</c> advances and persists its resume
-    /// marker as a side effect of the fetch, before this parser is reached, so text abandoned here is not
-    /// re-fetched for the life of that marker and the readable siblings in it are lost. Do not describe
-    /// this refusal as bounded without saying which transport is meant.</para>
+    /// <para><b>What that refusal costs is the same on both transports, and it is #3008 that made it so
+    /// rather than anything here.</b> <see cref="PgDeadlocksCollector"/> re-reads an overlapping
+    /// byte-window tail every cycle, so a straddled window there loses nothing permanently — the same
+    /// text arrives again next cycle, and once the non-UTC lines age out of the window the readable
+    /// siblings store. On the RDS log-API route the throw leaves the ingestor WITHOUT its resume marker
+    /// being committed, because that commit sits after the write rather than inside the fetch, so the
+    /// next cycle asks for the same window and the readable siblings survive there too.</para>
+    ///
+    /// <para><b>Which is why the truncation above is a different problem, and not one the
+    /// marker-ordering fix closed.</b> A refusal FAILS, so the marker is withheld and the bytes come
+    /// back. A truncated block parses, stores and commits, so the marker advances past the fragment on
+    /// the strength of a cycle that succeeded by every signal the ingestor has. Do not read #3008 as
+    /// covering both.</para>
     /// </summary>
     public static List<ParsedDeadlock> Extract(string? logBody)
     {

@@ -2641,10 +2641,13 @@ CREATE INDEX IF NOT EXISTS idx_collector_cost_lookup
     /// generated schema and would silently not have it. Putting it in its own rung gives BOTH populations
     /// the index, which is what was actually wanted.</para>
     ///
-    /// <para><b>Why the index earns its place.</b> The collector re-reads an OVERLAPPING tail of the server
-    /// log every cycle, deliberately, so a report cut in half at one edge is whole in the next. Every read
-    /// therefore groups or filters on <c>deadlock_hash</c> to answer once per deadlock rather than once per
-    /// sighting, and the detail read looks a report up by hash directly.</para>
+    /// <para><b>Why the index earns its place.</b> The <c>pg_read_file</c> route re-reads an OVERLAPPING
+    /// tail of the server log every cycle, deliberately, so a report cut in half at one edge is whole in
+    /// the next and one deadlock lands many times. Every read therefore groups or filters on
+    /// <c>deadlock_hash</c> to answer once per deadlock rather than once per sighting, and the detail read
+    /// looks a report up by hash directly. The consume-once RDS route repeats less often and for other
+    /// reasons (#3008, #3009), which changes how many sightings a row has rather than what the reads
+    /// do.</para>
     ///
     /// <para><b>Not UNIQUE.</b> Two servers legitimately produce identical graph text — the same query pair
     /// deadlocking with the same process ids on two hosts is not impossible — and a unique constraint would
