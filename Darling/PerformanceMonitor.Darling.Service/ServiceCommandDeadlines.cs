@@ -38,9 +38,19 @@ public static class ServiceCommandDeadlines
     /// 200 runs was <b>1.53 s</b> — <c>query_store</c> writing 11,614 rows as a per-database batch
     /// sequence. Fleet-wide, the per-run store-write average across all 39 collectors on both
     /// production stores tops out at <b>1,511 ms</b> (<c>index_object_stats</c>, ~21,090 rows/run) with
-    /// most collectors in the single-digit-to-low-tens ms. On top of that sits store connection
-    /// acquisition, measured at <b>673-893 ms</b> in #2819. So ~2.4 s covers the worst thing actually
-    /// observed, and 10 s keeps ~4x headroom over it.</para>
+    /// most collectors in the single-digit-to-low-tens ms. So <b>1.53 s</b> is the worst thing actually
+    /// observed, and 10 s keeps ~6.5x headroom over it.</para>
+    ///
+    /// <para><b>Store connection acquisition is NOT in this floor</b>, and the reason is what
+    /// <c>CommandTimeout</c> actually bounds. #2819 measured acquisition at 673-893 ms, and an earlier
+    /// derivation of this constant added it to the store write to reach a ~2.4 s floor. It does not
+    /// belong there: <c>CommandTimeout</c> starts when the command EXECUTES on an already-open
+    /// connection, while the connect phase is tracked by the connection string's <c>Timeout</c>. That is
+    /// measured rather than reasoned — with <c>Timeout=2</c> a connect failure lands at 2.0 s whether
+    /// <c>CommandTimeout</c> is 1 or 60. Folding an acquisition figure into a <c>CommandTimeout</c>
+    /// floor credits this knob with bounding a phase it cannot reach. The 673-893 ms is real and still
+    /// binds where it belongs — pool pressure, in <c>DarlingManagedPostgres</c> and
+    /// <c>DarlingCollectorRunner</c> — just not here.</para>
     ///
     /// <para><b>BELOW the point where the deadline costs more than it saves</b>, and the bound is the
     /// 60 s watchdog rather than a cadence, because the body runs its due collectors SEQUENTIALLY. Real
@@ -59,8 +69,8 @@ public static class ServiceCommandDeadlines
     /// connection-seconds from retention, alerting and observability. At the 30 s default and C = 8 that
     /// is 8 of 24 connections held for 30 s, a third of the pool, against a sixth at C = 4. So the
     /// floor above was doubled before the headroom was taken — 1.53 s of measured store write projected
-    /// to ~3.1 s if write latency scaled linearly with twice the concurrent writers, plus ~0.9 s of
-    /// acquisition, is the ~4.0 s that 10 s is set to clear. <b>The value is correct at 8 and at 16;
+    /// to <b>~3.1 s</b> if write latency scaled linearly with twice the concurrent writers is what 10 s
+    /// is set to clear, and it clears it by ~3.2x. <b>The value is correct at 8 and at 16;
     /// it was chosen so that raising the knob does not invalidate it.</b></para>
     ///
     /// <para><b>What this is NOT derived from.</b> Not the 120 s <c>PerItemWallClockBudget</c>
