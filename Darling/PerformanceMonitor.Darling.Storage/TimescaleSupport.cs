@@ -904,6 +904,31 @@ $do$";
 
     /// <summary>The seven baseline-tier aggregates in creation order (nine until #2007 retired the unread CPU/IO pair). Named ONCE so the ensure sweep, the
     /// retention list and the tests read one list rather than three hand-kept copies.</summary>
+    /// <summary>
+    /// The non-baseline HOURLY continuous aggregates, in CREATION order, paired with their CREATE SQL.
+    ///
+    /// <para>Order is load-bearing twice over. <see cref="EnsureContinuousAggregatesAsync"/> builds them in
+    /// this sequence because <see cref="CreateQueryStoreStatsCorrectedHourlySql"/> is hierarchical from
+    /// <see cref="CreateQueryStoreStatsIntervalHourlySql"/> and a hierarchical aggregate cannot precede its
+    /// source. And <see cref="HourlyRefreshPhaseOrder"/> derives each view's slot on the phase grid from its
+    /// position here, so a reordering moves phases — which is why the collision guard checks the RESULT rather
+    /// than trusting the list.</para>
+    ///
+    /// <para>Hoisted out of the ensure sweep (#3012) so that sweep, the phase order and the collision guard
+    /// all read ONE list. Restating it in the guard would let the guard pass while the sweep drifted.</para>
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] HourlyAggregates =
+    {
+        (CreateQueryStatsHourlySql,      QueryStatsHourlyView),
+        (CreateProcedureStatsHourlySql,  ProcedureStatsHourlyView),
+        (CreateQueryStoreStatsHourlySql, QueryStoreStatsHourlyView),
+        (CreateQueryStatsDbHourlySql,    QueryStatsDbHourlyView),
+        /* The corrected Query Store rollups (#1849): L1 is raw-sourced and MUST precede the corrected view,
+           which is hierarchical from it. */
+        (CreateQueryStoreStatsIntervalHourlySql,  QueryStoreStatsIntervalHourlyView),
+        (CreateQueryStoreStatsCorrectedHourlySql, QueryStoreStatsCorrectedHourlyView),
+    };
+
     public static readonly (string CreateSql, string View)[] BaselineAggregates =
     {
         (CreatePerfmonBaselineSql,        PerfmonBaselineView),
@@ -1605,17 +1630,22 @@ WITH NO DATA";
     /// this list and that one cannot drift apart.</para>
     /// </summary>
     public static readonly IReadOnlyList<string> HourlyRefreshPhaseOrder =
-        new[]
-        {
-            QueryStatsHourlyView,
-            ProcedureStatsHourlyView,
-            QueryStoreStatsHourlyView,
-            QueryStatsDbHourlyView,
-            QueryStoreStatsIntervalHourlyView,
-            QueryStoreStatsCorrectedHourlyView,
-        }
-        .Concat(BaselineAggregates.Select(a => a.View))
-        .ToArray();
+        HourlyAggregates.Concat(BaselineAggregates).Select(a => a.View).ToArray();
+
+    /// <summary>
+    /// Every hourly continuous aggregate paired with the CREATE that defines it —
+    /// <see cref="HourlyAggregates"/> then <see cref="BaselineAggregates"/>, in the same order
+    /// <see cref="HourlyRefreshPhaseOrder"/> derives from.
+    ///
+    /// <para>Exists so the phase grid's real invariant can be checked against the SHIPPED DEFINITIONS rather
+    /// than a second hand-written map. What the grid has to guarantee is that policies CONTENDING FOR THE SAME
+    /// RELATION start at different minutes — that is the lock adjacency the convoy formed on — and a view's
+    /// contended relation is whatever its own CREATE selects <c>FROM</c>. Recovering it from this text means a
+    /// new aggregate is covered the moment it is registered, and a map that drifted from the definitions
+    /// cannot report a false all-clear.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<(string CreateSql, string View)> HourlyRefreshDefinitions =
+        HourlyAggregates.Concat(BaselineAggregates).ToArray();
 
     /// <summary>
     /// Which minute of the hour <paramref name="view"/>'s hourly refresh policy starts on.
@@ -1815,18 +1845,16 @@ WITH NO DATA";
         // Hourly CAGGs FIRST (the two delta tables + query_store_stats), THEN the daily tier — the daily CAGGs are
         // hierarchical (sourced from the hourly CAGGs), so the hourly ones must be created earlier in this ordered
         // sweep. Daily policies use the 1-day end-offset/schedule; the hourly ones take the helper's defaults.
-        var aggregates = new[]
+        /* The hourly tier comes from HourlyAggregates rather than being restated here (#3012): the phase grid
+           and its collision guard derive from that same list, and a second copy could drift from it. The
+           corrected Query Store rollups' ordering requirement lives with the list — L1 is raw-sourced and must
+           precede the corrected view, which is hierarchical from it. (The corrected DAILY is L1's SIBLING, not
+           the hourly's child: an identity-width hierarchical CAGG is a leaf — see
+           CreateQueryStoreStatsCorrectedDailySql.) */
+        var aggregates = HourlyAggregates
+            .Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true))
+            .Concat(new[]
         {
-            (CreateSql: CreateQueryStatsHourlySql,      View: QueryStatsHourlyView,      Hourly: true),
-            (CreateSql: CreateProcedureStatsHourlySql,  View: ProcedureStatsHourlyView,  Hourly: true),
-            (CreateSql: CreateQueryStoreStatsHourlySql, View: QueryStoreStatsHourlyView, Hourly: true),
-            (CreateSql: CreateQueryStatsDbHourlySql,    View: QueryStatsDbHourlyView,    Hourly: true),
-            /* The corrected Query Store rollups (#1849). L1 is raw-sourced and MUST precede both corrected
-               views, which are hierarchical from it — the same ordering requirement the daily tier has. Both
-               corrected views read L1 (the daily is its SIBLING, not the hourly's child: an identity-width
-               hierarchical CAGG is a leaf — see CreateQueryStoreStatsCorrectedDailySql). */
-            (CreateSql: CreateQueryStoreStatsIntervalHourlySql,  View: QueryStoreStatsIntervalHourlyView,  Hourly: true),
-            (CreateSql: CreateQueryStoreStatsCorrectedHourlySql, View: QueryStoreStatsCorrectedHourlyView, Hourly: true),
             (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       Hourly: false),
             (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   Hourly: false),
             (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  Hourly: false),
@@ -1837,7 +1865,7 @@ WITH NO DATA";
                gives — the same requirement the daily tier has, one level longer. */
             (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, Hourly: false),
             (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, Hourly: false),
-        }
+        })
         /* The seven baseline-tier aggregates (#1757; nine until #2007) ride the HOURLY tier: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
            requirement against the daily tier. Appended from the single BaselineAggregates list so this sweep

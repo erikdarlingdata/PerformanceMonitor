@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -202,8 +204,8 @@ public sealed class TimescaleContinuousAggregateTests
                 StringComparison.Ordinal);
         }
 
-        /* The lock adjacency the convoy actually formed on: the hourly policies over the query_store_stats
-           family must not be coincident with each other. */
+        /* The lock adjacency the convoy actually formed on, named explicitly because it is the group the
+           production measurements were taken against. Generalized below; kept here as the measured case. */
         var family = new[]
         {
             TimescaleSupport.QueryStoreStatsHourlyView,
@@ -219,6 +221,77 @@ public sealed class TimescaleContinuousAggregateTests
         var anchored = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.QueryStatsHourlyView);
         Assert.Contains("now() AT TIME ZONE 'UTC'", anchored, StringComparison.Ordinal);
         Assert.DoesNotContain("date_trunc('hour', now())", anchored, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The grid's actual invariant, over EVERY contended relation rather than the one family the incident
+    /// evidence named.
+    ///
+    /// <para><b>Why the family-only check was not enough.</b> <c>collect.query_stats</c> — the other dominant
+    /// table — feeds THREE hourly policies: the query-grain rollup, the per-database rollup, and the
+    /// query_stats baseline. Their phases land on distinct minutes today, but only because of where they
+    /// happen to sit in <see cref="TimescaleSupport.HourlyRefreshPhaseOrder"/>. Phases collide whenever two
+    /// positions differ by a multiple of <see cref="TimescaleSupport.RefreshPhaseSlots"/>, so inserting one
+    /// aggregate ahead of the per-database rollup would silently put two <c>query_stats</c> refreshes back on
+    /// the same minute — the exact lock-queue adjacency this change exists to remove — and the family-only
+    /// assertion would have stayed green. Raised by review rather than found here.</para>
+    ///
+    /// <para><b>Contended relation, not source table.</b> Two hourly refreshes contend when one SELECTs from
+    /// what the other WRITES, so the group key is a view's immediate <c>FROM collect.&lt;x&gt;</c> — and a view
+    /// that is itself a source joins the group of its own consumers, because refreshing it writes the
+    /// materialization hypertable they read. That is why the corrected Query Store rollup and the interval
+    /// layer it reads are checked against each other and not merely against raw.</para>
+    ///
+    /// <para><b>Derived from the shipped CREATE text</b>, via
+    /// <see cref="TimescaleSupport.HourlyRefreshDefinitions"/>, so a new aggregate is covered the moment it is
+    /// registered. The extraction is asserted non-empty per view first: a regex that matched nothing would
+    /// group every view under "no source" and report a clean sweep for having checked nothing, which is the
+    /// failure mode a guard proving an absence has to rule out before its result means anything.</para>
+    /// </summary>
+    [Fact]
+    public void HourlyRefreshPhases_AreDistinctForEveryRelationTwoPoliciesContendFor()
+    {
+        var definitions = TimescaleSupport.HourlyRefreshDefinitions;
+        Assert.Equal(TimescaleSupport.HourlyRefreshPhaseOrder.Count, definitions.Count);
+
+        /* view -> the relation its own CREATE selects FROM. */
+        var sourceOf = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (createSql, view) in definitions)
+        {
+            var match = Regex.Match(createSql, @"FROM\s+collect\.(\w+)", RegexOptions.IgnoreCase);
+            Assert.True(match.Success,
+                $"could not recover a source relation from {view}'s CREATE — the guard would group every view under one bucket and report a clean sweep having checked nothing");
+            sourceOf[view] = match.Groups[1].Value;
+        }
+
+        /* Positive control on the extraction itself, in the identical form: the two relations whose
+           multi-consumer shape this test exists for must both come back with the consumers we know they have.
+           A control that only proved "some regex matched something" would not exercise the case at issue. */
+        Assert.Equal(3, sourceOf.Count(kv => string.Equals(kv.Value, "query_stats", StringComparison.Ordinal)));
+        Assert.Equal(2, sourceOf.Count(kv => string.Equals(kv.Value, "query_store_stats", StringComparison.Ordinal)));
+
+        var views = new HashSet<string>(definitions.Select(a => a.View), StringComparer.Ordinal);
+
+        foreach (var relation in sourceOf.Values.Distinct(StringComparer.Ordinal))
+        {
+            /* Everything that reads the relation, plus the relation itself when it is an hourly view —
+               refreshing it WRITES what its consumers read. */
+            var contenders = sourceOf.Where(kv => string.Equals(kv.Value, relation, StringComparison.Ordinal))
+                .Select(kv => kv.Key)
+                .ToList();
+
+            if (views.Contains(relation))
+            {
+                contenders.Add(relation);
+            }
+
+            var phases = contenders.Select(TimescaleSupport.RefreshPhaseMinutesFor).ToArray();
+
+            Assert.True(
+                phases.Length == phases.Distinct().Count(),
+                $"two hourly refresh policies contending for collect.{relation} start on the same minute: "
+                + string.Join(", ", contenders.Zip(phases, (v, m) => $"{v}=:{m.ToString("00", CultureInfo.InvariantCulture)}")));
+        }
     }
 
     /// <summary>
