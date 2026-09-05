@@ -1629,16 +1629,18 @@ WITH NO DATA";
     /// </summary>
     public static int RefreshPhaseMinutesFor(string view)
     {
-        var index = HourlyRefreshPhaseOrder.ToList().IndexOf(view);
-        if (index < 0)
+        for (var index = 0; index < HourlyRefreshPhaseOrder.Count; index++)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(view),
-                view,
-                "not an hourly continuous aggregate — register it in TimescaleSupport.HourlyRefreshPhaseOrder before giving it an hourly refresh policy");
+            if (string.Equals(HourlyRefreshPhaseOrder[index], view, StringComparison.Ordinal))
+            {
+                return index % RefreshPhaseSlots * RefreshPhaseStepMinutes;
+            }
         }
 
-        return index % RefreshPhaseSlots * RefreshPhaseStepMinutes;
+        throw new ArgumentOutOfRangeException(
+            nameof(view),
+            view,
+            "not an hourly continuous aggregate — register it in TimescaleSupport.HourlyRefreshPhaseOrder before giving it an hourly refresh policy");
     }
 
     /// <summary>
