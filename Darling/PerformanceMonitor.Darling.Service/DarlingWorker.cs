@@ -6290,8 +6290,14 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        /* #2997: the database is read off the EXCEPTION first, falling back to the runtime's own. #2638
+           added the database name to the ObjectMissing sentence precisely so an operator would not go
+           looking in the wrong one - and for a RunsPerDatabase collector the runtime's field is the wrong
+           one, because it holds whatever database the initial probe landed on rather than the database
+           this fault came from. See CollectorFaultDatabase. */
         catch (PostgresException ex) when (
-            PostgresFaultOutcome(ex, collectorName, runtime.ConnectedDatabase) is { Status: not "ERROR" } outcome)
+            PostgresFaultOutcome(ex, collectorName, CollectorFaultDatabase.For(ex, runtime.ConnectedDatabase))
+                is { Status: not "ERROR" } outcome)
         {
             /* PostgreSQL faults classified by SQLSTATE through the same ITargetProvider.Classify the
                engine seam already exposes, so the runner and the provider cannot disagree about what an
@@ -6357,7 +6363,13 @@ LIMIT 1";
             var elapsedMs = runClock.ElapsedMilliseconds;
             var serverCancelled = ex is PostgresException { SqlState: "57014" };
             var explanation = PostgresTimeoutExplanation(
-                collectorName, runtime.ConnectedDatabase, elapsedMs, serverCancelled);
+                collectorName,
+                /* Off the exception, not the runtime: pg_index_bloat fans out per database and opens its
+                   own connection for each, so the runtime's initial-probe database is not the one that
+                   ran out of time. Naming the wrong database confidently is worse than naming none. */
+                CollectorFaultDatabase.For(ex, runtime.ConnectedDatabase),
+                elapsedMs,
+                serverCancelled);
 
             _logger.LogError("  [{Server}] {Collector} => ERROR (timeout): {Message}",
                 server.Config.DisplayName, collectorName, explanation);

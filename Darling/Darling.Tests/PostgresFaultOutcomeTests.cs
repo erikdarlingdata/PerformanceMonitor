@@ -346,6 +346,105 @@ public class PostgresFaultOutcomeTests
             PostgresTargetProvider.Instance.Classify(dead, yieldsOnLockTimeout: false));
     }
 
+    /// <summary>
+    /// The fault's database is read off the EXCEPTION, not off the runtime, at both PostgreSQL fault arms.
+    ///
+    /// <para><b>The defect this pins.</b> <c>ServerRuntime.ConnectedDatabase</c> is <c>init</c>-only and
+    /// stamped once during the initial connect-and-probe, from whatever database the probe landed on. A
+    /// <c>RunsPerDatabase</c> collector never uses that connection — the per-database loop opens one per
+    /// database — and when every database fails it rethrows the first failure BARE. So a handler reading
+    /// the runtime's field names a database that had nothing to do with the fault, confidently. Seven
+    /// collectors fan out that way, <c>pg_index_bloat</c> among them, which makes it the wrong database
+    /// for the exact collector and target #2997 is about, and for #2638's
+    /// "run CREATE EXTENSION in database X" sentence on every permission-degraded target.</para>
+    ///
+    /// <para>A wiring invariant, pinned in source: the value is assembled inside a live sweep from a
+    /// rethrow three call frames up, so no pure test reaches it, and the defect is which expression a
+    /// call site passes rather than any logic. Both arms must go through the helper — an arm that reverts
+    /// to <c>runtime.ConnectedDatabase</c> compiles, runs, and lies.</para>
+    /// </summary>
+    [Fact]
+    public void BothPostgresFaultArmsTakeTheDatabaseFromTheException()
+    {
+        var worker = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        /* Exactly two fault arms name a database, and both read it through the helper. */
+        Assert.Equal(2, Regex.Matches(
+            worker, @"CollectorFaultDatabase\.For\(ex, runtime\.ConnectedDatabase\)").Count);
+
+        /* And neither passes the runtime's field straight into a fault message. These are the two
+           expressions the arms used before, and they are what a revert would restore. */
+        Assert.DoesNotContain(
+            "PostgresFaultOutcome(ex, collectorName, runtime.ConnectedDatabase)", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "collectorName, runtime.ConnectedDatabase, elapsedMs", worker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The per-database loop is what puts the name there, on both of its failure arms — the budget-expiry
+    /// one and the generic one. A stamp on only one of them would leave whichever arm lost the race
+    /// falling back silently.
+    /// </summary>
+    [Fact]
+    public void ThePerDatabaseLoopStampsTheDatabaseOnItsFailures()
+    {
+        var runner = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+
+        Assert.Equal(2, Regex.Matches(
+            runner, @"CollectorFaultDatabase\.Stamp\((?:budgetFailure|ex), databaseName\);").Count);
+
+        /* Stamped BEFORE firstFailure is captured, or the exception that actually gets rethrown is the
+           one that missed the stamp. */
+        Assert.Equal(2, Regex.Matches(
+            runner,
+            @"CollectorFaultDatabase\.Stamp\((?:budgetFailure|ex), databaseName\);[\s\S]{0,600}?firstFailure \?\?=").Count);
+    }
+
+    /// <summary>
+    /// Reading is total, because most collectors never fan out and must behave exactly as they did: an
+    /// unstamped exception, a non-string payload, or a blank name all fall back to the caller's value.
+    /// </summary>
+    [Fact]
+    public void TheFaultDatabaseReadFallsBackRatherThanInventingAName()
+    {
+        Assert.Equal("probe-db", CollectorFaultDatabase.For(new InvalidOperationException(), "probe-db"));
+        Assert.Null(CollectorFaultDatabase.For(new InvalidOperationException(), null));
+
+        var stamped = new InvalidOperationException();
+        CollectorFaultDatabase.Stamp(stamped, "appdb");
+        Assert.Equal("appdb", CollectorFaultDatabase.For(stamped, "probe-db"));
+
+        /* A blank name is not a name; stamping one must not shadow the fallback. */
+        var blank = new InvalidOperationException();
+        CollectorFaultDatabase.Stamp(blank, "   ");
+        Assert.Equal("probe-db", CollectorFaultDatabase.For(blank, "probe-db"));
+
+        var wrongType = new InvalidOperationException();
+        wrongType.Data[CollectorFaultDatabase.DataKey] = 42;
+        Assert.Equal("probe-db", CollectorFaultDatabase.For(wrongType, "probe-db"));
+    }
+
+    /// <summary>
+    /// The stamp rides on <see cref="Exception.Data"/> and therefore cannot change what the classifier
+    /// sees. That is the whole reason it is not a wrapper exception: every arm of
+    /// <c>PostgresTargetProvider.Classify</c> keys on the exception's TYPE, so wrapping the failure would
+    /// silently re-route the fault to a different handler in order to improve a sentence.
+    /// </summary>
+    [Fact]
+    public void StampingDoesNotChangeHowTheFaultClassifies()
+    {
+        var timeout = new NpgsqlException("Exception while reading from stream", new TimeoutException());
+        var before = PostgresTargetProvider.Instance.Classify(timeout, yieldsOnLockTimeout: false);
+
+        CollectorFaultDatabase.Stamp(timeout, "appdb");
+
+        Assert.Equal(before, PostgresTargetProvider.Instance.Classify(timeout, yieldsOnLockTimeout: false));
+        Assert.Equal(CollectorTargetFault.CommandTimeout, before);
+        Assert.IsType<NpgsqlException>(timeout);
+    }
+
     private static string ReadSource(string relativePath)
     {
         var dir = AppContext.BaseDirectory;
