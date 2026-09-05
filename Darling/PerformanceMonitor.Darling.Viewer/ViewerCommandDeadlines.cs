@@ -80,8 +80,14 @@ public static class ViewerCommandDeadlines
     /// does NOT read as a network fault — measured against Npgsql 10.0.3, correcting the earlier claim
     /// here that it misattributed a slow store to the network. What it does misattribute is nothing: on
     /// the fleet overview those failures are caught per server and the card is simply absent, so a fleet
-    /// wider than the pool rendered short with no error at all. Both per-server fan-outs are bounded at
-    /// the permit count since #3016, so the state is no longer reachable from a shipped panel.</para>
+    /// wider than the pool rendered short with no error at all.</para>
+    ///
+    /// <para>The two fleet-wide fan-outs cannot reach that state since #3016 — they run pool-many lanes
+    /// rather than fleet-many reads. The literal-width sites can still reach it, but only on a
+    /// bring-your-own store the operator configured with FEWER permits than
+    /// <see cref="MeasuredFanOutWidth"/>: their widths are two to ten, which a managed seat serves without
+    /// a queue. <c>ViewerCommandTimeoutTests</c> holds every literal width at or under that bound, so the
+    /// residual cannot widen without someone deciding to widen it.</para>
     ///
     /// <para><b>This value bounds a read issued ALONE, and only that</b> (#3004). The permit argument
     /// above says a concurrent fan-out is the state worth protecting the pool from; it does not say a
