@@ -132,8 +132,15 @@ public sealed class RdsCpuIngestor
                 },
                 cancellationToken);
 
-            dataPoints = response.MetricList
-                .SelectMany(m => m.DataPoints)
+            /* Absent and empty mean the same thing coming out of PI — no sample in this window — and the
+               caller already names that outcome ("no new Performance Insights CPU samples this cycle"), so
+               an empty sequence is the honest reading of a null here. It is NOT the honest reading of an
+               absent RDS log-file list, where "no file" means nothing was opened at all; see
+               RdsLogSource.NewestLogFileAsync for why that branch raises instead. Both collections are null
+               rather than empty when the service omits them, and LINQ over either raises
+               ArgumentNullException whose whole message is "Value cannot be null. (Parameter 'source')". */
+            dataPoints = (response.MetricList ?? [])
+                .SelectMany(m => m.DataPoints ?? [])
                 /* PI returns a data point with a null Value for a period it has no sample for — nothing to
                    store, and Value.HasValue is required below so the row is never null-cast. */
                 .Where(p => p.Timestamp.HasValue && p.Value.HasValue
@@ -166,20 +173,24 @@ public sealed class RdsCpuIngestor
     /// <summary>Identical resolution to <see cref="RdsLogSource"/>'s own — kept as a separate copy rather
     /// than shared, matching this codebase's existing precedent of each RDS-API ingestor owning its own
     /// AWS calls end to end (see <see cref="RdsDeadlockIngestor"/>'s doc comment on why it holds its own
-    /// <see cref="RdsLogSource"/> rather than sharing one).</summary>
+    /// <see cref="RdsLogSource"/> rather than sharing one). That includes the null tests: a response
+    /// collection the service omitted arrives as null, and LINQ over one raises an ArgumentNullException
+    /// naming only "source", so each null goes into the message describing its own branch.</summary>
     private static async Task<string> ResolveWriterAsync(
         IAmazonRDS client, string clusterId, CancellationToken cancellationToken)
     {
         var clusters = await client.DescribeDBClustersAsync(
             new DescribeDBClustersRequest { DBClusterIdentifier = clusterId }, cancellationToken);
 
-        var cluster = clusters.DBClusters.FirstOrDefault()
-            ?? throw new InvalidOperationException($"Aurora cluster '{clusterId}' was not found.");
-
-        var writer = cluster.DBClusterMembers.FirstOrDefault(m => m.IsClusterWriter == true)
+        var cluster = clusters.DBClusters?.FirstOrDefault()
             ?? throw new InvalidOperationException(
-                $"Aurora cluster '{clusterId}' reports no writer. That is a real state during a failover, "
-                + "so this is worth retrying rather than treating as a configuration error.");
+                $"Aurora cluster '{clusterId}' was not found: DescribeDBClusters returned no cluster for it.");
+
+        var writer = cluster.DBClusterMembers?.FirstOrDefault(m => m.IsClusterWriter == true)
+            ?? throw new InvalidOperationException(
+                $"Aurora cluster '{clusterId}' reports no writer among its members. That is a real state "
+                + "during a failover, so this is worth retrying rather than treating as a configuration "
+                + "error.");
 
         return writer.DBInstanceIdentifier;
     }
@@ -195,8 +206,10 @@ public sealed class RdsCpuIngestor
         var instances = await client.DescribeDBInstancesAsync(
             new DescribeDBInstancesRequest { DBInstanceIdentifier = instanceId }, cancellationToken);
 
-        var instance = instances.DBInstances.FirstOrDefault()
-            ?? throw new InvalidOperationException($"RDS/Aurora instance '{instanceId}' was not found.");
+        var instance = instances.DBInstances?.FirstOrDefault()
+            ?? throw new InvalidOperationException(
+                $"RDS/Aurora instance '{instanceId}' was not found: DescribeDBInstances returned no "
+                + "instance for it.");
 
         return instance.DbiResourceId
             ?? throw new InvalidOperationException($"RDS/Aurora instance '{instanceId}' reports no DbiResourceId.");

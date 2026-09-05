@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Amazon.RDS;
+using Amazon.RDS.Model;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
@@ -69,5 +71,81 @@ public class RdsCpuIngestorTests
             () => ingestor.IngestAsync(1, "srv", host));
 
         Assert.Contains("does not resolve to a stable instance", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Its copy of <see cref="RdsLogSource"/>'s writer/instance resolution carries the same three named
+    /// branches, and reaches the runner with the branch in the message rather than the SDK's
+    /// <c>Value cannot be null. (Parameter 'source')</c> (#2996). Wrapped in
+    /// <see cref="PiMetricsUnavailableException"/> because <c>IngestAsync</c>'s tolerant catch owns
+    /// everything from the first AWS call onwards — which is exactly why the inner message has to be the
+    /// classified one: it is what the runner stores.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false, false, "DescribeDBClusters returned no cluster")]
+    [InlineData(false, true, false, "reports no writer among its members")]
+    [InlineData(false, false, true, "DescribeDBInstances returned no instance")]
+    public async Task EachAbsentResolutionCollectionNamesItsOwnBranch(
+        bool omitClusters, bool omitMembers, bool omitInstances, string expected)
+    {
+        var ingestor = new RdsCpuIngestor(
+            UnusedDataSource(),
+            rdsClientFactory: _ => new FakeRds
+            {
+                OmitClusters = omitClusters,
+                OmitClusterMembers = omitMembers,
+                OmitInstances = omitInstances,
+            });
+
+        var ex = await Assert.ThrowsAsync<PiMetricsUnavailableException>(
+            () => ingestor.IngestAsync(1, "srv", "shared.cluster-abc123.us-east-1.rds.amazonaws.com"));
+
+        Assert.Contains(expected, ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Value cannot be null", ex.Message, StringComparison.Ordinal);
+        Assert.False(ex.IsAuthorizationFailure);
+    }
+
+    /* Only the RDS half is faked: every case above throws inside ResolveWriterAsync or
+       ResolveDbiResourceIdAsync, both of which run before the watermark read, so no PI client and no store
+       connection are ever reached. The PI leg (an omitted MetricList, which means "no sample in this
+       window" and is coalesced to empty rather than raised) needs a real store for the watermark read and
+       is not covered here — the same gap this file's class comment already records for the write path. */
+    private sealed class FakeRds : AmazonRDSClient
+    {
+        public FakeRds() : base(new Amazon.Runtime.BasicAWSCredentials("a", "b"),
+            Amazon.RegionEndpoint.USEast1) { }
+
+        public bool OmitClusters { get; init; }
+        public bool OmitClusterMembers { get; init; }
+        public bool OmitInstances { get; init; }
+
+        public override Task<DescribeDBClustersResponse> DescribeDBClustersAsync(
+            DescribeDBClustersRequest request, CancellationToken cancellationToken = default)
+            => Task.FromResult(new DescribeDBClustersResponse
+            {
+                DBClusters = OmitClusters
+                    ? null
+                    : new List<DBCluster>
+                    {
+                        new()
+                        {
+                            DBClusterMembers = OmitClusterMembers
+                                ? null
+                                : new List<DBClusterMember>
+                                {
+                                    new() { DBInstanceIdentifier = "writer-1", IsClusterWriter = true },
+                                },
+                        },
+                    },
+            });
+
+        public override Task<DescribeDBInstancesResponse> DescribeDBInstancesAsync(
+            DescribeDBInstancesRequest request, CancellationToken cancellationToken = default)
+            => Task.FromResult(new DescribeDBInstancesResponse
+            {
+                DBInstances = OmitInstances
+                    ? null
+                    : new List<DBInstance> { new() { DbiResourceId = "db-EXAMPLE" } },
+            });
     }
 }
