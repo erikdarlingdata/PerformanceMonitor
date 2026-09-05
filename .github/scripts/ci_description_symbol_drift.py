@@ -14,13 +14,14 @@ WHAT THIS DOES AND DOES NOT CATCH, measured over 110 real merged PRs from this r
 
   So the verdict is NOT "some named symbol is absent" (31% of real PRs, still unusable). It is
   "NOTHING the description names is anywhere in the diff" -- the description is not about this
-  change at all. That fires on 2.7% of real merged PRs (3 of 110), catches 65% of body/diff
-  mismatches and 85% of effectively-empty diffs.
+  change at all. That fires on 0 of those 110, abstains on 6, catches 60% of body/diff
+  mismatches and 99% of effectively-empty diffs. Zero is 0/110, i.e. below this corpus's
+  resolution, not a promise: read it as low, not as none.
 
   It is close to BLIND to partial drift, which is what both motivating near-misses were: with a
-  quarter of a PR's files removed it fires on 15% against a 3% floor. A rule that catches those
-  reliably does not exist at a tolerable flag rate -- see the issue. This check earns its place
-  on the wholesale case only, and its annotation says so rather than implying broader cover.
+  quarter of a PR's files removed it fires on 8%. A rule that catches those reliably does not
+  exist at a tolerable flag rate -- see the issue. This check earns its place on the wholesale
+  case only, and its annotation says so rather than implying broader cover.
 
 Advisory, always exit 0, and it must never be marked a required check.
 """
@@ -56,12 +57,21 @@ ABSENT_HEADING = re.compile(
     r"alternativ | rejected | considered"
 )
 
-# How far past the lead prose to read. The claim about what a PR does lives in its opening
-# paragraphs and its first substantive section; every section after that is elaboration, and
-# elaboration is where absent symbols cluster. Measured on 110 merged PRs: lead alone abstains
-# on 14 of 40 bodies for want of any symbol, lead+1 abstains on 1 and scores the same power,
-# lead+all drops power from 48% to 34% by giving accidental matches more chances to land.
-AFFIRMATIVE_SECTIONS = 1
+# How far past the lead prose to read, counted in affirmative sections. Reading DEEPER lowers
+# the flag rate monotonically -- more symbols in scope means a higher chance one of them lands
+# in the diff -- while power peaks in the middle and then decays, because a body whose every
+# section is in scope almost always matches something. Measured over the same 110 merged PRs
+# (flag rate / abstains / wholesale-mismatch power / empty-diff power):
+#
+#   lead only  0.9%  74  28%  33%      <- abstains on two thirds of PRs, no verdict to read
+#   lead+1     2.7%  21  63%  84%
+#   lead+2     1.8%   6  67%  98%      <- peak power
+#   lead+3     0.9%   5  62%  99%      <- the knee: half the flags, power within noise of peak
+#   lead+all   0.9%   5  58%  99%
+#
+# Three is the knee. Going deeper buys nothing and costs power; stopping shorter triples the
+# flag rate or abandons two thirds of PRs undecided.
+AFFIRMATIVE_SECTIONS = 3
 
 
 def strip_noise(body):
@@ -152,6 +162,14 @@ def described_symbols(body, sections=AFFIRMATIVE_SECTIONS):
 
 # ---------------------------------------------------------------- what the diff touches
 TOKEN = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+# A dependency bump's diff is a version string. Its description talks about the PACKAGE -- the
+# decoder it fixed, the type whose behaviour changed -- and every one of those names lives
+# inside the upgraded package, so it cannot appear in the diff by definition. These files
+# therefore contribute no vocabulary a description could match, and counting them as code turns
+# every bump into a warning. This is the same reasoning as `json`'s absence from CODE_EXT below,
+# applied to the two manifests that ARE on it.
+DEPENDENCY_MANIFEST = re.compile(
+    r'(packages\.lock\.json|Directory\.Packages\.props|nuget\.config|packages\.config)$', re.I)
 # Narrower than SOURCE_EXT on purpose, and `json` is the gap that matters: a description may
 # legitimately name `darling.json`, so json belongs on the DESCRIBED side, but a diff of only
 # json is usually a dependency bump whose lock file shares no vocabulary with any prose. Such a
@@ -190,9 +208,13 @@ def diff_symbols(files):
 
 def assess(body, files):
     """-> (verdict, missing, hit) where verdict is 'warn', 'clear' or 'abstain'."""
-    if not files or not any((f.get('filename') or '').lower().endswith(CODE_EXT) for f in files):
-        # A docs-or-config-only diff contributes no identifiers to intersect against, so any
-        # verdict would be an artifact of the diff having nothing to say.
+    codeish = [f for f in files
+               if (f.get('filename') or '').lower().endswith(CODE_EXT)
+               and not DEPENDENCY_MANIFEST.search(f.get('filename') or '')]
+    if not codeish:
+        # A docs-only, config-only or dependency-bump diff contributes no identifiers to
+        # intersect against, so any verdict would be an artifact of the diff having nothing
+        # to say. Abstaining is the honest answer, and it is never a warning.
         return 'abstain', [], []
     paths, basenames, idents = diff_symbols(files)
     hit, missing = [], []
@@ -249,10 +271,13 @@ def self_test():
     # AFFIRMATIVE_SECTIONS is a tuned window, not a free parameter: widening it costs power
     # (48% -> 34%) by giving accidental matches more chances to land, so pin how far it reads.
     # Without this, changing the constant moves the flag rate and no assertion notices.
-    check('only the first affirmative section is read',
-          not any(span == 'SprocketCache' for span in described_symbols(
-              '`WidgetReader` changes.\n\n## The fix\n\n`StoreDeadlines` moves.\n\n'
-              '## The shape\n\n`SprocketCache` is the sibling.').values()))
+    deep = ('`WidgetReader` changes.\n\n## The fix\n\n`StoreDeadlines` moves.\n\n'
+            '## The shape\n\n`GadgetPool` is one sibling.\n\n## The other shape\n\n'
+            '`DoodadStore` is another.\n\n## Further out\n\n`SprocketCache` is context.')
+    check('the third affirmative section is still read',
+          any(span == 'DoodadStore' for span in described_symbols(deep).values()))
+    check('the fourth affirmative section is not read',
+          not any(span == 'SprocketCache' for span in described_symbols(deep).values()))
     # Fenced code, blockquotes and measurement tables are not claims.
     for label, body in (('fenced code', '```\n`SprocketCache`\n```\n'),
                         ('blockquote', '> `SprocketCache` per review\n'),
@@ -282,11 +307,18 @@ def self_test():
     # abstains instead of warning about a type that lives inside the upgraded package. Pinned
     # because the asymmetry reads like an oversight and the corpus holds no json-only PR to
     # catch a well-meant widening.
-    check('lock-file-only diff abstains rather than warning',
+    check('config-json-only diff abstains (json is described-side only)',
+          assess('`SprocketCache` now evicts on write.',
+                 [{'filename': 'Lite/config/collection_schedule.json',
+                   'patch': '@@ -1,3 +1,3 @@\n-  "IntervalSeconds": 60,\n'
+                            '+  "IntervalSeconds": 30,'}])[0] == 'abstain')
+    # Directory.Packages.props IS in CODE_EXT, so only DEPENDENCY_MANIFEST keeps a bump quiet.
+    # Pinned separately from the json row above, or one exclusion covers for the other's removal.
+    check('dependency-bump-only diff abstains rather than warning',
           assess('Takes the same build `WidgetHost` shipped, for the `GadgetOutput` decoder fix.',
-                 [{'filename': 'Darling/Darling.Tests/packages.lock.json',
-                   'patch': '@@ -1,3 +1,3 @@\n-      "resolved": "0.2.0",\n'
-                            '+      "resolved": "0.2.1",'}])[0] == 'abstain')
+                 [{'filename': 'Directory.Packages.props',
+                   'patch': '@@ -1,3 +1,3 @@\n-    <PackageVersion Include="A" Version="0.2.0" />\n'
+                            '+    <PackageVersion Include="A" Version="0.2.1" />'}])[0] == 'abstain')
     check('empty body abstains', assess('', FIXTURE_DIFF)[0] == 'abstain')
 
     failed = [n for n, ok in cases if not ok]
