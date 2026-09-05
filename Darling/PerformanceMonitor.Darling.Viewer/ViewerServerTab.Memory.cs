@@ -94,6 +94,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(6);
+
         var latestTask = _dataService.GetLatestMemoryStatsAsync(_server.ServerId);
         var trendTask = _dataService.GetMemoryTrendAsync(_server.ServerId, startUtc, endUtc);
         var grantTrendTask = _dataService.GetMemoryGrantTrendAsync(_server.ServerId, startUtc, endUtc);

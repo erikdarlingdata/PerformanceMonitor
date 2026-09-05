@@ -230,7 +230,7 @@ public sealed partial class ViewerDataService
         int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(LatestMemoryStatsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -261,7 +261,7 @@ public sealed partial class ViewerDataService
         var items = new List<MemoryGrantTrendPoint>();
 
         await using var command = _dataSource.CreateCommand(MemoryGrantTrendSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -291,7 +291,7 @@ public sealed partial class ViewerDataService
         var items = new List<string>();
 
         await using var command = _dataSource.CreateCommand(DistinctMemoryClerkTypesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -323,7 +323,7 @@ public sealed partial class ViewerDataService
         }
 
         await using var command = _dataSource.CreateCommand(MemoryClerkTrendsSql(clerkTypes.Count));
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -364,7 +364,7 @@ public sealed partial class ViewerDataService
         var items = new List<MemoryGrantChartPoint>();
 
         await using var command = _dataSource.CreateCommand(MemoryGrantChartDataSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -403,7 +403,7 @@ public sealed partial class ViewerDataService
         var items = new List<MemoryPressureEventRow>();
 
         await using var command = _dataSource.CreateCommand(MemoryPressureEventsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {

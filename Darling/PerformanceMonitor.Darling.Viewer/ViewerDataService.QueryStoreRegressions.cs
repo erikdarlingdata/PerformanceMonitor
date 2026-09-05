@@ -226,7 +226,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerQueryStoreRegressionRow>();
 
         await using var command = _dataSource.CreateCommand(QueryStoreRegressionsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

@@ -84,7 +84,7 @@ public sealed partial class ViewerDataService
         var result = new List<SessionStatsPoint>();
 
         await using var command = _dataSource.CreateCommand(SessionStatsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

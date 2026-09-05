@@ -102,7 +102,7 @@ LEFT JOIN grants g ON true";
         var cutoff = DateTime.UtcNow.AddHours(-24);
 
         await using var command = _dataSource.CreateCommand(UtilizationEfficiencySql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
 
@@ -211,7 +211,7 @@ ORDER BY c.day";
         var cutoff = DateTime.UtcNow.AddDays(-7);
 
         await using var command = _dataSource.CreateCommand(ProvisioningTrendSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
 
@@ -272,7 +272,7 @@ ORDER BY CAST(collection_time AS DATE)";
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         await using var command = _dataSource.CreateCommand(MemoryGrantEfficiencySql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
 

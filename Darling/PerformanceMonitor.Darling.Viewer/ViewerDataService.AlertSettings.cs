@@ -150,7 +150,7 @@ ON CONFLICT (id) DO UPDATE SET
     public async Task<AlertSettingsRow?> GetAlertSettingsAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(AlertSettingsSelectSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadAlertSettingsRow(reader) : null;
     }
@@ -162,7 +162,7 @@ ON CONFLICT (id) DO UPDATE SET
         ArgumentNullException.ThrowIfNull(row);
 
         await using var command = _dataSource.CreateCommand(AlertSettingsUpsertSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindAlertSettings(command, row);
         await ExecuteWriteAsync(command, cancellationToken);
     }

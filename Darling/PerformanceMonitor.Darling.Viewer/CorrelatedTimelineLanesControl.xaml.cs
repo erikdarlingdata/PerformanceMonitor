@@ -143,9 +143,14 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
-    /// Refreshes all lane data for the given time range. The viewer's Overview always passes a fixed
-    /// 24-hour window (hoursBack = 24, fromDate/toDate null); the fromDate/toDate branch is kept for a
-    /// future custom-range picker. Reads run against explicit naive-UTC windows derived here.
+    /// Refreshes all lane data for the given time range. The Overview passes the toolbar's window —
+    /// hours-back for a preset, or the custom From/To when one is picked
+    /// (<c>ViewerServerTab.LoadOverviewChartsAsync</c>), so the widest range the picker offers reaches these
+    /// reads. Reads run against explicit naive-UTC windows derived here.
+    ///
+    /// <para>Ten reads go out at once against a ten-permit pool, which is why the fan-out width is declared
+    /// below: at a 30-day range these were measured at 24.4-64.1 s EACH, and a deadline derived from one read
+    /// in isolation is not a bound on that (#3004).</para>
     /// </summary>
     public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
@@ -163,6 +168,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             /* Reads run concurrently — NpgsqlDataSource pools a connection for each; genuinely async so
                no Task.Run wrap (matches the W1a/W1c viewer ports). CPU reuses W1a's raw-sample read;
                blocking/deadlock/file-IO reuse W1c's trend reads; total-wait + memory are new (W1d). */
+            /* Ten reads, one pool of ten permits: each one contends with the other nine, so each one
+               needs the deadline a ten-wide batch was measured to cost rather than a solo read's.
+               Declared here, before the first task, so every one of the ten inherits it. */
+            using var readFanOut = ViewerReadFanOut.Of(10);
+
             var cpuTask = _dataService.GetCpuUtilizationAsync(_serverId, startUtc);
             var waitTask = _dataService.GetTotalWaitTrendAsync(_serverId, startUtc, endUtc);
             var blockingTask = _dataService.GetBlockingTrendAsync(_serverId, startUtc, endUtc);

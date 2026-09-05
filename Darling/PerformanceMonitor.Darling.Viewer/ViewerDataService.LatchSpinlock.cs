@@ -193,7 +193,7 @@ public sealed partial class ViewerDataService
         var result = new List<LatchStatsTrendPoint>();
 
         await using var command = _dataSource.CreateCommand(LatchTrendSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -214,7 +214,7 @@ public sealed partial class ViewerDataService
         var result = new List<LatchStatsSnapshotRow>();
 
         await using var command = _dataSource.CreateCommand(LatchSnapshotSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -238,7 +238,7 @@ public sealed partial class ViewerDataService
         var result = new List<SpinlockStatsTrendPoint>();
 
         await using var command = _dataSource.CreateCommand(SpinlockTrendSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -259,7 +259,7 @@ public sealed partial class ViewerDataService
         var result = new List<SpinlockStatsSnapshotRow>();
 
         await using var command = _dataSource.CreateCommand(SpinlockSnapshotSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

@@ -135,7 +135,7 @@ LIMIT $2";
         var rows = new List<ViewerAlertRow>();
 
         await using var command = _dataSource.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
             TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified),
@@ -233,7 +233,7 @@ AND    dismissed = FALSE";
         }
 
         await using var command = _dataSource.CreateCommand(DismissAlertsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter { Value = times });
         command.Parameters.Add(new NpgsqlParameter { Value = ids });
         command.Parameters.Add(new NpgsqlParameter { Value = metrics });
@@ -251,7 +251,7 @@ AND    dismissed = FALSE";
     {
         await using var command = _dataSource.CreateCommand(
             serverId.HasValue ? DismissAllAlertsForServerSql : DismissAllAlertsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
             TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified),

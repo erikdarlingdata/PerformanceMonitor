@@ -85,7 +85,7 @@ public sealed partial class ViewerDataService
         var items = new List<BlockingDurationStatsPoint>();
 
         await using var command = _dataSource.CreateCommand(BlockingDurationStatsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -149,7 +149,7 @@ public sealed partial class ViewerDataService
         var graphs = new List<(DateTime? DeadlockTime, string? Xml)>();
 
         await using var command = _dataSource.CreateCommand(DeadlockSeverityGraphsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
