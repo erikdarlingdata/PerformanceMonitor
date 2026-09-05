@@ -6149,6 +6149,33 @@ LIMIT 1";
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        catch (PgLogTimezoneUnsupportedException ex)
+        {
+            /* #2993: this target's log_timezone is not UTC, so the deadlock reports in its server log are
+               stamped in local time and occurred_at cannot be filled from them.
+
+               PERMISSIONS for the same reason the PostgresException FeatureDisabled arm below is: none of
+               the store's five statuses means "this target is configured in a way this source cannot be
+               read under", so the non-fatal degradation bucket carries it and the MESSAGE is where the
+               truth goes. It also earns that bucket on the merits — the cause is a setting on the
+               monitored server, an operator can clear it, and CollectorRuntimePrecondition's PERMISSIONS
+               arm already frames the condition as satisfiable and re-derives it on every read.
+
+               Not ERROR: nothing is broken on the monitoring side, and a parameter group does not change
+               because we shouted about it once a minute. Not a SUCCESS row with zero rows, which is what
+               dropping the unusable blocks quietly would have produced — a target whose log is in the
+               wrong zone reading as a target with no deadlocks.
+
+               Both transports arrive here: the pg_read_file route throws out of the collector's ReadAsync,
+               the RDS log-API route out of the ingestor's Extract. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the server log is stamped '{Zone}', not UTC",
+                server.Config.DisplayName, collectorName, ex.ObservedZone);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
         {
             /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside

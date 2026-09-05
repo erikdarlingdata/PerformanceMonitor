@@ -56,9 +56,19 @@ public static class PgDeadlockLogParser
        The DETAIL block is the first line plus every TAB-INDENTED line after it. It ends at the next line
        carrying a log prefix, which is what (?:\t[^\n]*\n)* expresses: a statement inside the block can
        itself contain newlines, and each continuation arrives tab-indented, so a line-count rule or a
-       blank-line rule would truncate multi-line SQL silently. */
+       blank-line rule would truncate multi-line SQL silently.
+
+       The zone is captured and READ (#2993). PostgreSQL renders %m in log_timezone and prints that zone's
+       abbreviation beside the stamp, so this token is the setting's own rendered value for THIS line, and
+       it is what decides whether the naive timestamp next to it is already UTC. See IsZeroOffsetLogZone
+       for why that question is answerable from an abbreviation when "which zone is this" is not.
+
+       [^ \n]+ for it rather than \w+: a zone with no abbreviation renders as a numeric offset (+07,
+       -03:30) and \w+ matches neither the sign nor the colon, so the whole block failed to match and the
+       server reported no deadlocks at all — the same silent nothing the [^\n]* trap above avoids, and the
+       one shape that would have slipped past the zone check by never reaching it. */
     private static readonly Regex s_deadlockBlock = new(
-        @"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) (?<zone>\w+) \[(?<pid>\d+)\][^\n]*ERROR:  deadlock detected\s*\n"
+        @"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) (?<zone>[^ \n]+) \[(?<pid>\d+)\][^\n]*ERROR:  deadlock detected\s*\n"
         + @"[^\n]*DETAIL:  (?<detail>(?:[^\n]*\n)(?:\t[^\n]*\n)*)",
         RegexOptions.Compiled | RegexOptions.Multiline);
 
@@ -68,6 +78,12 @@ public static class PgDeadlockLogParser
        enumeration would silently drop the shapes it did not anticipate. */
     private static readonly Regex s_edge = new(
         @"Process (?<waiter>\d+) waits for (?<mode>[A-Za-z ]+) on (?<resource>[^;]+); blocked by process (?<blocker>\d+)\.",
+        RegexOptions.Compiled);
+
+    /* A numeric log-prefix offset that is zero: +00, -00, +00:00, -0000. Anchored, so a non-zero offset
+       sharing a prefix with a zero one (+0030) cannot match part of itself and pass. */
+    private static readonly Regex s_zeroOffset = new(
+        @"^[+-]0+(?::0+)*$",
         RegexOptions.Compiled);
 
     /* `Process 1549: ` then the statement, which runs to the next such header or the end of the block. */
@@ -82,6 +98,9 @@ public static class PgDeadlockLogParser
     /// <see cref="PgPlanLogParser"/>: both transports read a bounded window, so a report cut in half at the
     /// edge is an ordinary consequence of not reading the whole file rather than a fault worth surfacing
     /// every cycle. It will be read whole on the next pass, because the window overlaps.</para>
+    ///
+    /// <para>The one exception is a log stamped in a non-UTC zone, which throws
+    /// <see cref="PgLogTimezoneUnsupportedException"/> instead: see <see cref="FromBlock"/>.</para>
     /// </summary>
     public static List<ParsedDeadlock> Extract(string? logBody)
     {
@@ -96,6 +115,7 @@ public static class PgDeadlockLogParser
         {
             var parsed = FromBlock(
                 match.Groups[1].Value,
+                match.Groups["zone"].Value,
                 match.Groups["pid"].Value,
                 match.Groups["detail"].Value);
 
@@ -109,14 +129,31 @@ public static class PgDeadlockLogParser
     }
 
     /// <summary>
-    /// One report, from its timestamp, victim pid and DETAIL block. Null when the block carries no wait
-    /// edge, which is the one thing that makes it a deadlock report rather than some other DETAIL.
+    /// One report, from its log-prefix timestamp and zone, its victim pid and its DETAIL block. Null when
+    /// the block carries no wait edge, which is the one thing that makes it a deadlock report rather than
+    /// some other DETAIL.
     /// </summary>
-    public static ParsedDeadlock? FromBlock(string timestampText, string victimPidText, string? detail)
+    /// <param name="zoneText">The zone token from the log prefix, which is <c>log_timezone</c> as the
+    /// server rendered it for this line. Required, and required to mean an offset of zero.</param>
+    /// <exception cref="PgLogTimezoneUnsupportedException">The prefix zone is not a zero-offset one, so the
+    /// timestamp beside it is local rather than UTC and the report cannot be stored (#2993).</exception>
+    public static ParsedDeadlock? FromBlock(string timestampText, string zoneText, string victimPidText, string? detail)
     {
         if (string.IsNullOrWhiteSpace(detail))
         {
             return null;
+        }
+
+        /* THROWN rather than skipped, and it is the only thing in this parser that is not tolerant.
+           Everything else a block can be wrong about is read again on the next overlapping pass, so
+           skipping it costs nothing. This one neither clears itself nor announces itself: the timestamp
+           below parses PERFECTLY under a non-UTC prefix, AssumeUniversal takes it for UTC, and the row
+           lands in the wrong hour with nothing anywhere disagreeing. Returning null instead would store no
+           deadlocks and read as a server that has none, which is the same silent-wrong one layer up. A
+           refusal the runner can classify is the only outcome that names the setting. */
+        if (!IsZeroOffsetLogZone(zoneText))
+        {
+            throw new PgLogTimezoneUnsupportedException(zoneText);
         }
 
         if (!DateTime.TryParse(
@@ -178,6 +215,53 @@ public static class PgDeadlockLogParser
             Resources: resources.Count > 0 ? string.Join(", ", resources) : null,
             VictimStatement: victimStatement,
             GraphText: graph);
+    }
+
+    /// <summary>
+    /// Whether a log-prefix zone token means an offset of exactly zero, so the naive timestamp printed
+    /// beside it is already UTC and needs no conversion.
+    ///
+    /// <para><b>Detection, never conversion.</b> An abbreviation cannot be converted from — <c>CST</c> is
+    /// US Central, China Standard and Cuba Standard — and that is the good reason the captured zone was
+    /// never wired up. But "is this offset zero" is a far weaker question than "which zone is this", and
+    /// the token answers it exactly: three abbreviations are zero by definition, a numeric offset says so
+    /// arithmetically, and everything else either has an offset or is ambiguous about having one, which for
+    /// this purpose is the same answer.</para>
+    ///
+    /// <para><b>Per LINE rather than per server, which is why <c>log_timezone</c> is not read from the
+    /// target.</b> <c>current_setting('log_timezone')</c> describes the collector's connection now; this
+    /// token was written by the server into the line being parsed, under whatever the setting was then, so
+    /// it is the better witness of the two for the row it is attached to. On <c>Europe/London</c> they
+    /// disagree for half the year — winter lines are stamped <c>GMT</c> and really are UTC, and a GUC read
+    /// would refuse them — and on the managed transport there is no connection to ask at all, because that
+    /// route receives log TEXT and runs no SQL.</para>
+    /// </summary>
+    public static bool IsZeroOffsetLogZone(string? zone)
+    {
+        if (string.IsNullOrWhiteSpace(zone))
+        {
+            /* Nothing said the timestamp was UTC. Unreachable through Extract, whose pattern requires
+               the token, and reachable through the collector, which reads the zone from a result column
+               that can come back NULL. */
+            return false;
+        }
+
+        var token = zone.Trim();
+
+        /* UT is deliberately absent: it is not a zone PostgreSQL renders, and an over-long allowlist is
+           the same silent-wrong defect as no check at all, arriving one entry at a time. */
+        if (string.Equals(token, "UTC", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(token, "GMT", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(token, "UCT", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        /* A zone with no abbreviation renders as a numeric offset, and a numerically zero one is UTC by
+           another spelling. Matched as a SHAPE rather than enumerated, because the rendering carries only
+           as much precision as the offset needs (+00, +00:00, -0000) and an allowlist that missed a form
+           would refuse a server that is perfectly UTC. */
+        return s_zeroOffset.IsMatch(token);
     }
 
     /// <summary>

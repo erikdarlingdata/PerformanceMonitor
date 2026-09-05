@@ -70,8 +70,14 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
          participant's statement is arbitrary user SQL that can contain newlines, each arriving
          tab-indented. A blank-line or line-count rule truncates multi-line SQL silently.
 
+         ([^ \n]+) for the prefix's ZONE, returned as its own column (#2993). It was matched and discarded
+         here, and the parser could then only assume the stamp beside it was UTC. [^ \n]+ rather than \w+
+         because a zone with no abbreviation renders as a numeric offset (+07) that \w+ cannot match, so
+         the block matched nothing and the server reported no deadlocks.
+
        The 'n' flag makes ^ match at line starts. Parsing of the block itself is C#, in
-       PgDeadlockLogParser, so the RDS transport — which receives log TEXT and runs no SQL — shares it. */
+       PgDeadlockLogParser, so the RDS transport — which receives log TEXT and runs no SQL — shares it, and
+       both routes get the same zone refusal from the same code. */
     private const string QueryText = @"
 WITH newest AS (
     SELECT name, size
@@ -88,12 +94,13 @@ tail AS (
 )
 SELECT
     m[1]    AS occurred_at_text,
-    m[2]    AS victim_pid_text,
-    m[3]    AS detail_body
+    m[2]    AS log_zone_text,
+    m[3]    AS victim_pid_text,
+    m[4]    AS detail_body
 FROM tail,
      regexp_matches(
          tail.body,
-         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) \w+ \[(\d+)\][^\n]*ERROR:  deadlock detected\s*\n[^\n]*DETAIL:  ((?:[^\n]*\n)(?:\t[^\n]*\n)*)',
+         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) ([^ \n]+) \[(\d+)\][^\n]*ERROR:  deadlock detected\s*\n[^\n]*DETAIL:  ((?:[^\n]*\n)(?:\t[^\n]*\n)*)',
          'gn') AS m
 LIMIT 500";
 
@@ -138,10 +145,15 @@ LIMIT 500";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* Ordinals track the query's four columns: stamp, zone, victim pid, DETAIL. The zone is
+               ordinal 1 and reaching the parser is what makes the stamp's meaning checked rather than
+               assumed; a non-zero-offset one throws out of here, and the worker records the refusal
+               against log_timezone instead of storing a shifted occurred_at. */
             var parsed = PgDeadlockLogParser.FromBlock(
                 reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
                 reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2));
+                reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3));
 
             /* A block that will not parse is skipped rather than reported. The window is bounded, so a
                report cut in half at its edge is ordinary and is read whole on the next overlapping pass. */
