@@ -51,6 +51,19 @@ namespace Darling.Tests;
 /// summary. Widening the rule this way found exactly one offender in the whole tree, the one it was written
 /// for, which is the measurement that says it is a sharpened rule rather than a looser one.</para>
 ///
+/// <para><b>Balance, not just count (#2940).</b> Counting openings is the right shape for a DISPLACED
+/// block — two summaries where one belongs — but a run with ZERO openings and a stray
+/// <c>&lt;/summary&gt;</c> satisfies that rule vacuously, and that is precisely the shape a merge
+/// produces. Where several branches append to one file, each group's block continues a
+/// <c>&lt;summary&gt;</c> its predecessor opened above the conflict hunk, so a keep-both-sides resolution
+/// leaves the second block with a closing tag and no opening one. It reached dev in #2940 on
+/// <c>ServiceCommandDeadlines.cs</c> — 8 openings against 9 closings — and was found by hand on a later
+/// merge rather than by this suite. Nothing in the build could have caught it either: no project sets
+/// <c>GenerateDocumentationFile</c>, so no documentation XML is emitted and CS1570 never fires.
+/// Requiring openings to EQUAL closings per run catches both directions, and catches one shape a
+/// per-FILE tag count cannot — an unclosed run and an unopened one in the same file, whose counts
+/// cancel.</para>
+///
 /// <para><b>Coverage limit, stated rather than assumed.</b> CI path filters are per-project, so this runs on
 /// any pull request that trips the <c>darling</c> or <c>core</c> filter, and on every nightly and release
 /// build — but a change touching ONLY Lite or Installer will not run it, and would be caught on the next
@@ -69,34 +82,29 @@ public sealed class DocCommentHygieneTests
     /// </summary>
     private static readonly Regex SummaryOpening = new(@"<summary\s*>", RegexOptions.Compiled);
 
+    /// <summary>
+    /// One <c>&lt;/summary&gt;</c> CLOSING tag, counted per run against <see cref="SummaryOpening"/>. Kept
+    /// as its own pattern rather than reusing the opening one with an optional slash, because the two are
+    /// asked different questions and a single pattern that matched both would make the imbalance it exists
+    /// to find invisible. Escaped mentions in prose (<c>&amp;lt;/summary&amp;gt;</c>) are not closings,
+    /// exactly as they are not openings.
+    /// </summary>
+    private static readonly Regex SummaryClosing = new(@"</summary\s*>", RegexOptions.Compiled);
+
     [Fact]
     public void NoMemberCarriesTwoStackedSummaryBlocks()
     {
-        var root = FindRepoRoot();
-
-        /* FAIL rather than skip when the tree cannot be found. A guard that silently skips is a guard that
-           silently stops guarding, which is the failure this whole rule exists to prevent — if the output
-           layout ever changes, this should go red and get fixed, not evaporate. */
-        Assert.True(root is not null,
-            "Could not locate the repository root (walked up from the test binary looking for " +
-            "PerformanceMonitor.sln). This test scans the source tree, so it cannot run without it — fix the " +
-            "walk-up rather than skipping, or the rule stops being enforced without anyone noticing.");
+        var root = RepoRootOrFail();
 
         var offenders = new List<string>();
-        foreach (var file in Directory.EnumerateFiles(root!, "*.cs", SearchOption.AllDirectories))
+        foreach (var file in SourceFiles(root))
         {
-            if (file.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase)
-                || file.Contains(@"\obj\", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
             foreach (var run in StackedSummaryRuns(File.ReadAllLines(file)))
             {
                 /* Name the run's first line — somewhere you can actually open — and every opening in it, since
                    the second one is usually the insertion point that caused the stacking. */
                 offenders.Add(
-                    $"{Path.GetRelativePath(root!, file)}:{run.Start} " +
+                    $"{Path.GetRelativePath(root, file)}:{run.Start} " +
                     $"(<summary> openings at lines {string.Join(", ", run.Openings)})");
             }
         }
@@ -115,6 +123,58 @@ public sealed class DocCommentHygieneTests
             "re-documented in place. If it has, the stray text is a stranded HEAD rather than the whole block, " +
             "and moving it back would create the very duplicate this rule forbids — confirm sentence by " +
             "sentence that nothing is lost, then delete it (#2190).\n\n" +
+            string.Join("\n", offenders));
+    }
+
+    /// <summary>
+    /// Every doc run closes exactly the <c>&lt;summary&gt;</c> elements it opens (#2940).
+    ///
+    /// <para><b>Why this is a second rule and not a widening of the first.</b>
+    /// <see cref="NoMemberCarriesTwoStackedSummaryBlocks"/> fails a run at two or more openings, so it is
+    /// blind by construction to a run with NONE — the stray <c>&lt;/summary&gt;</c> a merge leaves when it
+    /// resolves away an opening tag. The two rules read the same runs from <see cref="DocRuns"/> so they
+    /// cannot disagree about which lines document which member; they disagree only about what is wrong with
+    /// a run, and neither subsumes the other. A stacked-but-balanced pair is the first rule's alone, and an
+    /// unopened block is this one's.</para>
+    ///
+    /// <para><b>Per RUN, not per file.</b> A file-level tag count is the obvious form and it has a blind
+    /// spot the run-level one does not: an unclosed run and an unopened run in the same file balance each
+    /// other, so the count comes back equal while two members are documented wrongly.</para>
+    /// </summary>
+    [Fact]
+    public void EveryDocRunClosesTheSummariesItOpens()
+    {
+        var root = RepoRootOrFail();
+
+        var offenders = new List<string>();
+        foreach (var file in SourceFiles(root))
+        {
+            foreach (var run in UnbalancedSummaryRuns(File.ReadAllLines(file)))
+            {
+                /* Both tag lists, not just the counts: which tag is missing is the whole of what the reader
+                   has to decide, and the run's first line is where they have to look to decide it. */
+                offenders.Add(
+                    $"{Path.GetRelativePath(root, file)}:{run.Start} " +
+                    $"(opens={run.Openings.Count} closes={run.Closings.Count}; " +
+                    $"<summary> at [{string.Join(", ", run.Openings)}], " +
+                    $"</summary> at [{string.Join(", ", run.Closings)}])");
+            }
+        }
+
+        Assert.True(offenders.Count == 0,
+            "Unbalanced <summary> elements found. Each is one doc run that opens and closes a different " +
+            "number of <summary> elements — the artifact a keep-both-sides merge produces on a file several " +
+            "branches append to, where the second block keeps a closing tag whose opening tag was resolved " +
+            "away.\n\n" +
+            "MORE CLOSINGS than openings: the run lost its opening tag. Put the <summary> line back — do NOT " +
+            "delete the closing tag to balance it, which would quietly demote a documented block to a loose " +
+            "comment and lose nothing visibly. Read the run's first line before you do: if it starts " +
+            "mid-sentence, the merge took the block's opening prose along with the tag and that sentence has " +
+            "to be written back too (#2940).\n\n" +
+            "MORE OPENINGS than closings: the run lost its closing tag, so every member below it in the run " +
+            "is swallowed by the open element.\n\n" +
+            "This is not caught by the stacked-summary rule above, which counts openings and fails at two or " +
+            "more: a run with zero openings satisfies it vacuously.\n\n" +
             string.Join("\n", offenders));
     }
 
@@ -167,22 +227,66 @@ public sealed class DocCommentHygieneTests
     }
 
     /// <summary>
-    /// Every run of <c>///</c> lines carrying more than one <c>&lt;summary&gt;</c> opening, as the run's first
-    /// line and the line of each opening. A run ends at the first line that is neither a doc comment nor an
-    /// attribute, which is what ties it to exactly one member: the declaration itself terminates it.
+    /// The balance rule's own self-test, for the same reason the stacked rule has one: #2190 was a blind
+    /// spot in the DETECTOR rather than in anyone's reading of the tree, and the #2940 artifact was a
+    /// second. The first case below is that artifact reduced to its essentials, and it is the case the
+    /// stacked rule returns GREEN on — which is what makes these two rules independent, not redundant.
+    /// </summary>
+    [Theory]
+    /* The #2940 shape: a block whose opening tag a merge resolved away, closing tag intact. ZERO openings,
+       which is exactly why counting openings and failing at two cannot see it. */
+    [InlineData(1, "/// the prose the merge left beginning mid-sentence.\n/// </summary>\npublic const int X = 1;")]
+    /* The mirror — an opening with no closing, which swallows the member below it. */
+    [InlineData(1, "/// <summary>\n/// A.\npublic const int X = 1;")]
+    /* Both faults in one file, in DIFFERENT runs. A per-FILE tag count reports this as balanced (one of
+       each); per run it is two offenders. This is the case that says the rule belongs at run scope. */
+    [InlineData(2, "/// <summary>\n/// A.\nint A;\n/// B.\n/// </summary>\nint B;")]
+    /* An attribute does not end a run (#2445), so a block that lost its opening tag BELOW an attribute is
+       part of the run above it: one offender, reported once, rather than two runs of one tag each. The
+       stacked rule is green here too — one opening, not two. */
+    [InlineData(1, "/// <summary>\n/// A.\n/// </summary>\n[Fact]\n/// B.\n/// </summary>\nvoid M();")]
+    /* One summary, closed. */
+    [InlineData(0, "/// <summary>\n/// A.\n/// </summary>\nvoid M();")]
+    /* Single-line summary: the opening and closing sit on one line and must both be counted. */
+    [InlineData(0, "/// <summary>A.</summary>\nvoid M();")]
+    /* A stacked pair that is nonetheless BALANCED. Pinned to keep the two rules disjoint: this one must not
+       double-report what the stacked rule already catches. */
+    [InlineData(0, "/// <summary>\n/// A.\n/// </summary>\n/// <summary>\n/// B.\n/// </summary>\nvoid M();")]
+    /* A doc run with no summary at all — <inheritdoc/>, or a run of <param> tags — balances at 0 == 0. */
+    [InlineData(0, "/// <inheritdoc/>\nvoid M();")]
+    /* Escaped mentions in prose are neither openings nor closings, as throughout this very file. */
+    [InlineData(0, "/// <summary>\n/// A &lt;summary&gt; and a &lt;/summary&gt; named in prose.\n/// </summary>\nvoid M();")]
+    public void DetectorBalancesSummaryTagsPerDocRun(int expected, string source)
+    {
+        var runs = UnbalancedSummaryRuns(source.Split('\n'));
+
+        Assert.True(
+            runs.Count == expected,
+            $"Expected {expected} unbalanced run(s), found {runs.Count}, in:\n{source}");
+    }
+
+    /// <summary>
+    /// Every contiguous run of <c>///</c> lines, as the run's first line and the line of each
+    /// <c>&lt;summary&gt;</c> opening and closing tag in it. A run ends at the first line that is neither a
+    /// doc comment nor an attribute, which is what ties it to exactly one member: the declaration itself
+    /// terminates it.
     /// <para>Attributes are inside the run rather than ending it (#2445) because they document the member
     /// BELOW them, so <c>/// … [Attr] /// …</c> is one member with two summaries. They cannot OPEN a run: an
     /// attribute reached while <c>start == 0</c> falls through to the terminator branch, which is a no-op
     /// there, so an attribute written above a doc block leaves that block as the run's first opening.</para>
+    /// <para>Both rules in this class read their runs from here rather than scanning separately, so they
+    /// cannot come to disagree about which lines document which member — the question #2190 and #2445 each
+    /// re-answered, and the one a second scanner would eventually get wrong on its own.</para>
     /// </summary>
-    private static List<(int Start, List<int> Openings)> StackedSummaryRuns(string[] lines)
+    private static List<(int Start, List<int> Openings, List<int> Closings)> DocRuns(string[] lines)
     {
-        var runs = new List<(int Start, List<int> Openings)>();
+        var runs = new List<(int Start, List<int> Openings, List<int> Closings)>();
 
         /* 0 means "not currently inside a run"; line numbers reported to a human are 1-based. Iterating one
            past the end closes a run that reaches EOF rather than dropping it. */
         var start = 0;
         var openings = new List<int>();
+        var closings = new List<int>();
 
         for (var i = 0; i <= lines.Length; i++)
         {
@@ -193,9 +297,11 @@ public sealed class DocCommentHygieneTests
                 {
                     start = i + 1;
                     openings = new List<int>();
+                    closings = new List<int>();
                 }
 
                 openings.AddRange(Enumerable.Repeat(i + 1, SummaryOpening.Matches(lines[i]).Count));
+                closings.AddRange(Enumerable.Repeat(i + 1, SummaryClosing.Matches(lines[i]).Count));
             }
             else if (start != 0 && trimmed.StartsWith("[", StringComparison.Ordinal))
             {
@@ -203,16 +309,67 @@ public sealed class DocCommentHygieneTests
             }
             else if (start != 0)
             {
-                if (openings.Count > 1)
-                {
-                    runs.Add((start, openings));
-                }
-
+                runs.Add((start, openings, closings));
                 start = 0;
             }
         }
 
         return runs;
+    }
+
+    /// <summary>
+    /// The runs carrying more than one <c>&lt;summary&gt;</c> opening — a member with two summaries,
+    /// whether or not either is closed (#2190).
+    /// </summary>
+    private static List<(int Start, List<int> Openings)> StackedSummaryRuns(string[] lines) =>
+        DocRuns(lines)
+            .Where(run => run.Openings.Count > 1)
+            .Select(run => (run.Start, run.Openings))
+            .ToList();
+
+    /// <summary>
+    /// The runs that do not close every <c>&lt;summary&gt;</c> they open, in either direction (#2940).
+    /// </summary>
+    private static List<(int Start, List<int> Openings, List<int> Closings)> UnbalancedSummaryRuns(
+        string[] lines) =>
+        DocRuns(lines)
+            .Where(run => run.Openings.Count != run.Closings.Count)
+            .ToList();
+
+    /// <summary>
+    /// The repo root, or a failed assertion naming the walk-up that could not find it.
+    /// <para>FAIL rather than skip when the tree cannot be found. A guard that silently skips is a guard
+    /// that silently stops guarding, which is the failure this whole class exists to prevent — if the
+    /// output layout ever changes, this should go red and get fixed, not evaporate.</para>
+    /// </summary>
+    private static string RepoRootOrFail()
+    {
+        var root = FindRepoRoot();
+
+        Assert.True(root is not null,
+            "Could not locate the repository root (walked up from the test binary looking for " +
+            "PerformanceMonitor.sln). This test scans the source tree, so it cannot run without it — fix the " +
+            "walk-up rather than skipping, or the rule stops being enforced without anyone noticing.");
+
+        return root!;
+    }
+
+    /// <summary>
+    /// Every <c>.cs</c> file under <paramref name="root"/> that is a source file rather than a build
+    /// output. Both rules scan the same set, so a path either rule should ignore is excluded in one place.
+    /// </summary>
+    private static IEnumerable<string> SourceFiles(string root)
+    {
+        foreach (var file in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+        {
+            if (file.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase)
+                || file.Contains(@"\obj\", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            yield return file;
+        }
     }
 
     /// <summary>

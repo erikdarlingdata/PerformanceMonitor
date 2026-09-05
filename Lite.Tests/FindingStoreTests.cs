@@ -653,6 +653,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             FactCount = 1
         };
 
+    /// <summary>
     /// #2455: two FindingStore instances must never issue the same id.
     ///
     /// <para>The filed defect was that <c>_nextId++</c> ran under a lock that admits concurrent
