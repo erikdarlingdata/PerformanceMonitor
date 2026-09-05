@@ -458,9 +458,24 @@ public sealed class AlertReadFailureSurfaceTests
 
         /* And the SHIPPED note has to describe the inventory it now has, or the surface states a pass count
            that stopped being true the moment a third pass was added — which is how this defect reached
-           review in the first place. */
-        Assert.Contains("runs three", AlertReadFailureCounter.WindowNote, StringComparison.Ordinal);
-        Assert.Contains("NOT across engines", AlertReadFailureCounter.WindowNote, StringComparison.Ordinal);
+           review in the first place.
+
+           All three arms of the inventory are asserted SEPARATELY and not by one phrase. A first draft
+           of this pin checked only that "runs three" appeared, and red-proofing found it green against a
+           note whose SQL Server arm had been broken — one true clause is not a true inventory. Each arm
+           is a distinct claim and each has to survive on its own. */
+        foreach (var arm in new[]
+        {
+            "SQL Server target runs two",
+            "PostgreSQL target runs three",
+            "Lite sweep runs one",
+            "NOT across engines",
+        })
+        {
+            Assert.Contains(arm, AlertReadFailureCounter.WindowNote, StringComparison.Ordinal);
+        }
+
+        /* The superseded claim, named so it cannot come back by a revert. */
         Assert.DoesNotContain(
             "Darling runs two passes per sweep where Lite runs one",
             AlertReadFailureCounter.WindowNote,
