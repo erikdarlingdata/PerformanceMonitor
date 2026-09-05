@@ -1391,6 +1391,23 @@ public sealed class ViewerCommandTimeoutTests
             ViewerSettings.ManagedMaxPoolSize,
             ViewerStorePool.MaxPoolSizeOf("this is not a connection string at all"));
 
+        /* Two unparseable shapes, because Npgsql raises two different exception types for them and a
+           narrower catch would let one escape a constructor whose call site does not catch — the fallback
+           would then REPLACE the connect-time error it exists to defer to. Measured at 10.0.3: a bad value
+           for a recognised keyword is ArgumentException; this one is KeyNotFoundException, which does not
+           derive from it. Found in review on #3034. */
+        Assert.Equal(
+            ViewerSettings.ManagedMaxPoolSize,
+            ViewerStorePool.MaxPoolSizeOf("Host=127.0.0.1;Database=darling;MaxPoolSize=not-a-number"));
+
+        Assert.Equal(ViewerSettings.ManagedMaxPoolSize, ViewerStorePool.MaxPoolSizeOf("====="));
+
+        /* A pool size of zero PARSES — Npgsql validates it at connect, not at the builder — so the floor
+           below one is what keeps a zero out of the lane arithmetic rather than the catch above. */
+        Assert.Equal(
+            ViewerSettings.ManagedMaxPoolSize,
+            ViewerStorePool.MaxPoolSizeOf("Host=127.0.0.1;Database=darling;MaxPoolSize=0"));
+
         Assert.True(
             ViewerStorePool.NpgsqlDefaultMaxPoolSize > ViewerSettings.ManagedMaxPoolSize,
             $"Npgsql's default pool ({ViewerStorePool.NpgsqlDefaultMaxPoolSize}) is no longer larger than the "

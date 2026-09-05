@@ -89,7 +89,15 @@ public static class ViewerStorePool
     ///
     /// <para>An unusable string falls back rather than throwing: this feeds a deadline computation, and a
     /// string Npgsql cannot parse fails at <c>NpgsqlDataSource.Create</c> with a message about the string —
-    /// which is the error the operator needs, not a second one from a timeout calculation.</para>
+    /// which is the error the operator needs, not a second one from a timeout calculation. This runs one
+    /// statement ahead of that <c>Create</c>, inside a constructor whose call site does not catch, so the
+    /// fallback has to be unconditional or it would replace that error rather than defer to it.</para>
+    ///
+    /// <para><b>Caught broadly, matching the three other sites that wrap this constructor</b>
+    /// (<c>ViewerConfigDiagnostics</c>, <c>ViewerCertificateAnchor</c>, <c>StoreConnectionSelfTest</c>),
+    /// whose own comments say why: Npgsql's parse failures are not one exception type. Measured at 10.0.3 —
+    /// a bad value for a recognised keyword raises <c>ArgumentException</c>, but <c>"====="</c> raises
+    /// <c>KeyNotFoundException</c>, which does not derive from it. Both are pinned.</para>
     /// </summary>
     public static int MaxPoolSizeOf(string? connectionString)
     {
@@ -104,7 +112,7 @@ public static class ViewerStorePool
 
             return configured < 1 ? ViewerSettings.ManagedMaxPoolSize : configured;
         }
-        catch (ArgumentException)
+        catch (Exception)
         {
             return ViewerSettings.ManagedMaxPoolSize;
         }
