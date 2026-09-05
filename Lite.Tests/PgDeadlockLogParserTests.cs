@@ -174,9 +174,9 @@ public sealed class PgDeadlockLogParserTests
     /// Skipped, never thrown.
     ///
     /// <para>Recovered on only one of them. The <c>pg_read_file</c> route re-reads an overlapping tail, so
-    /// the cut report is whole on the next pass; the RDS log-API route is consume-once, so it never is
-    /// (#3009). The two pins below carry what the skip costs there, and they are separate tests because
-    /// the two cut positions fail in opposite directions.</para>
+    /// the cut report is whole on the next pass; the RDS log-API route is consume-once, so it is not for
+    /// the life of its resume marker (#3009). The two pins below carry what the skip costs there, and they
+    /// are separate tests because the two cut positions fail in opposite directions.</para>
     /// </summary>
     [Fact]
     public void SkipsWhatItCannotParse_RatherThanThrowing()
@@ -195,9 +195,9 @@ public sealed class PgDeadlockLogParserTests
     /// <para>The <c>ERROR:  deadlock detected</c> line is present and complete, and nothing comes out —
     /// the pattern requires the DETAIL group, so there is no partial match to salvage. On the
     /// <c>pg_read_file</c> route the next overlapping read carries the report whole and this costs
-    /// nothing. On the RDS route <c>DownloadDBLogFilePortion</c> has already handed those bytes out and
-    /// will not again, so this deadlock is simply gone, and gone in the shape that reads as a server
-    /// which had none.</para>
+    /// nothing. On the RDS route the resume marker has already advanced past those bytes, so nothing
+    /// re-requests them while that marker lives, and the deadlock is gone in the shape that reads as a
+    /// server which had none.</para>
     ///
     /// <para>Asserted with the uncut slab beside it rather than alone: an <c>Assert.Empty</c> on a fixture
     /// that never parsed in the first place would pass for the wrong reason, and that is the failure mode

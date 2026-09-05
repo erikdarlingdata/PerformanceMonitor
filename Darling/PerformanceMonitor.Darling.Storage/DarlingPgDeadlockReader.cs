@@ -64,7 +64,8 @@ public static class DarlingPgDeadlockReader
                genuinely recurred carries a DIFFERENT hash each time because the pids differ, and being
                told apart from that is what this is surfaced for. On the pg_read_file route it is a
                property of the overlapping read window; on the consume-once RDS route there is no such
-               window and this is 1 for good (#3009). */
+               window, so it is normally 1 and a low value is the ordinary state rather than a partial
+               count -- see the class remarks for the two ways it can still exceed 1 there (#3009). */
             COUNT(*)::int               AS times_seen
         FROM pg_deadlocks AS d
         WHERE d.server_id = $1
