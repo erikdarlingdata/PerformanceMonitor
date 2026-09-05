@@ -303,12 +303,23 @@ public sealed class AlertPassCommandTimeoutTests
         "var command = _postgres.CreateCommand(Sql);\n"
         + "await command.ExecuteNonQueryAsync();\n",
         false)]
+    /* A comment that NAMES a deadline is not one. This case was green before the value regex moved onto
+       the stripped span: the construction match excluded comments while the deadline test did not, so
+       prose could satisfy it. False-negative direction - it reported success on the defect. */
+    [InlineData(
+        "var command = new NpgsqlCommand(Sql, connection);\n"
+        + "/* no deadline needed here; CommandTimeout = 10 is applied by the caller. */\n"
+        + "await command.ExecuteNonQueryAsync();\n",
+        false)]
     public void TheScanner_SeesADeadlineThroughCommentsAndVerbatimSql(string source, bool expectedTimed)
     {
-        var ctor = s_commandCtor.Match(source);
+        /* Stripped, exactly as ScanForUntimedCommands does it - a fixture that walked the raw text would
+           pass while the shipped scan failed, which is how this defect survived its own theory. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var ctor = s_commandCtor.Match(code);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
+        var span = CSharpSourceWalker.StatementSpanFrom(code, ctor.Index, statements: 2);
 
         Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
     }
@@ -458,17 +469,33 @@ public sealed class AlertPassCommandTimeoutTests
     {
         var total = 0;
 
-        foreach (Match ctor in s_commandCtor.Matches(CSharpSourceWalker.StripCommentsAndStrings(text)))
+        /* ONE stripped copy, used for the construction match AND for the deadline test.
+
+           The value regex used to run over a span cut from the RAW text while the construction regex ran
+           over stripped output - half stripped, half not, in one method - so a comment was excluded from
+           inventing a SITE but not from satisfying a DEADLINE. a comment reading "no deadline here; CommandTimeout = 10 is set
+           by the caller" made an untimed command read clean, which is the false-negative
+           direction: it reports success on the defect. Found by #2874's group D in its own pin and
+           confirmed here; it masks nothing on the current tree (46 alert-pass sites, 0 affected, measured)
+           and is fixed because the next one would be invisible.
+
+           Stripping literal TEXT as well as comments is safe for THIS regex and only for this one: the
+           deadline is always code (`CommandTimeout = <expr>`), never a value inside a string. A pin whose
+           value regex must see literal contents would be broken by this line, so it is not a change to
+           make family-wide by reflex. Line numbers survive because the strip preserves newlines. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+        foreach (Match ctor in s_commandCtor.Matches(code))
         {
             total++;
 
-            var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
+            var span = CSharpSourceWalker.StatementSpanFrom(code, ctor.Index, statements: 2);
 
             if (!s_setsTimeout.IsMatch(span))
             {
                 /* Reported as the line in the FILE, not an offset into the scanned region, so a member
                    scope's offender is as navigable as a whole-file scope's. */
-                offenders.Add($"{label}:{firstLine + LineOf(text, ctor.Index) - 1}");
+                offenders.Add($"{label}:{firstLine + LineOf(code, ctor.Index) - 1}");
             }
         }
 

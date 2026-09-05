@@ -53,6 +53,17 @@ public partial class RecommendationsTab : UserControl
     private int _hoursBack = 24;
     private bool _isBusy;
 
+    /* #2933: the one site in Lite that a generation token cannot help. _isBusy makes two loads of this
+       card list mutually exclusive, so there is no interleave to order — what goes wrong here is the
+       opposite: the operator switches server during a Generate now, ServerSelector_SelectionChanged's
+       RefreshDataAsync bounces off _isBusy and is DROPPED, and the generate then paints the previous
+       server's advice under a selector naming the new one, with nothing left to correct it. A drop-based
+       mechanism can only make that worse. So this flag is the Darling viewer's replay companion
+       (RefreshVisibleAsync's _refreshRequested, ViewerServerTab.RefreshActiveInnerTabAsync's): a request
+       that arrives mid-load is remembered instead of discarded, and the holder re-runs once it is free,
+       re-reading the selected server at the re-entered load's own entry. */
+    private bool _reloadRequested;
+
     public RecommendationsTab()
     {
         InitializeComponent();
@@ -129,26 +140,41 @@ public partial class RecommendationsTab : UserControl
     /// </summary>
     public async Task RefreshDataAsync()
     {
-        if (_reader is null || _isBusy)
+        if (_reader is null)
             return;
 
-        if (ServerSelector.SelectedItem is not ServerConnection server)
+        if (_isBusy)
         {
-            ApplyViewModel(LiteRecommendationsViewModel.FromItems(Array.Empty<LiteRecommendationItem>()));
+            /* Remembered, not dropped: whoever holds the flag re-runs below and re-reads the selector. */
+            _reloadRequested = true;
             return;
         }
 
         _isBusy = true;
         try
         {
-            ApplyViewModel(LiteRecommendationsViewModel.Loading());
+            /* Re-read the selector on every pass, so a request that arrived mid-load is answered for the
+               server selected NOW rather than the one selected when this call started. */
+            do
+            {
+                _reloadRequested = false;
 
-            var serverId = GetSelectedServerId();
-            var serverName = server.DisplayNameWithIntent;
+                if (ServerSelector.SelectedItem is not ServerConnection server)
+                {
+                    ApplyViewModel(LiteRecommendationsViewModel.FromItems(Array.Empty<LiteRecommendationItem>()));
+                    continue;
+                }
 
-            var items = await Task.Run(() => _reader.GetRecommendationsAsync(serverId, serverName, _hoursBack));
+                ApplyViewModel(LiteRecommendationsViewModel.Loading());
 
-            ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, ServerTimeHelper.UtcOffsetMinutes));
+                var serverId = GetSelectedServerId();
+                var serverName = server.DisplayNameWithIntent;
+
+                var items = await Task.Run(() => _reader.GetRecommendationsAsync(serverId, serverName, _hoursBack));
+
+                ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, ServerTimeHelper.UtcOffsetMinutes));
+            }
+            while (_reloadRequested);
         }
         catch (Exception ex)
         {
@@ -170,8 +196,14 @@ public partial class RecommendationsTab : UserControl
     /// </summary>
     private async void GenerateNowButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_duckDb is null || _serverManager is null || _isBusy)
+        if (_duckDb is null || _serverManager is null)
             return;
+
+        if (_isBusy)
+        {
+            _reloadRequested = true;
+            return;
+        }
 
         if (ServerSelector.SelectedItem is not ServerConnection server)
             return;
@@ -223,6 +255,16 @@ public partial class RecommendationsTab : UserControl
         finally
         {
             _isBusy = false;
+
+            /* A server switch during the generate bounced off _isBusy above. Honour it here rather than
+               leave the freshly-generated advice for the PREVIOUS server sitting under the new server's
+               name. In the finally and not below the try, because the insufficient-data branch returns
+               from inside it and would skip a trailing block. The generate itself is one-shot and is
+               never replayed; only the read that was refused is. */
+            if (_reloadRequested)
+            {
+                await RefreshDataAsync();
+            }
         }
     }
 

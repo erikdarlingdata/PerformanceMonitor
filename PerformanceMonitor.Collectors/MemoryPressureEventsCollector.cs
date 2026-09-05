@@ -36,10 +36,19 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
     @ms_ticks bigint,
-    /* SYSUTCDATETIME(), not SYSDATETIME() -- see CpuUtilizationCollector's identical fix for the full
-       explanation: @now is the base for a STORED sample_time, and every naive timestamp in the store is
-       UTC, so the local-time version sat one UTC offset behind the collection_time written by the same
-       run. Same defect, same ring-buffer arithmetic, same fix. */
+    /* SYSUTCDATETIME(), not SYSDATETIME(): @now is the base for a STORED sample_time, and both readers of
+       memory_pressure_events.sample_time treat it as naive UTC -- Darling passes it to
+       ViewerTimeHelper.ForDisplay, which takes naive-UTC input, and Lite windows it with the UTC-based
+       GetTimeRange and adds UtcOffsetMinutes when plotting. A local clock here therefore put the whole
+       memory-pressure series one UTC offset away from every other lane: measured at exactly 4h behind the
+       collection_time written by the same collector run, on 42 of 42 us-east-2 servers, with the collector
+       reporting SUCCESS throughout (#2932).
+
+       Not the same answer as CpuUtilizationCollector, which shares this ring-buffer arithmetic and
+       deliberately KEEPS SYSDATETIME(): its sample_time is documented as the monitored server's local wall
+       clock and #1262 de-skews it in SQL per collection batch, so UTC there would break that correction and
+       Lite's server-local window. The frame is a property of each column's readers, not of the store, and
+       CollectorTimestampFrameTests pins both directions. */
     @now datetime2(7) = SYSUTCDATETIME();
 
 SELECT @ms_ticks = dosi.ms_ticks FROM sys.dm_os_sys_info AS dosi;

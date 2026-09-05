@@ -706,16 +706,46 @@ public sealed class DarlingWorker : BackgroundService
 
         DarlingConfig config;
         string configPath;
-        try
+        /* #2936: same triage as the store-migrate block below, same classifier, same budget. Load() is
+           File.Exists then ReadAllText then deserialize, so a sharing violation on a darling.json that an
+           installer, the Viewer's Settings save or a config-management tool is mid-write is transient and
+           self-heals; a malformed file, an ACL problem, or a file that simply is not there never will.
+           The old bare catch could not tell those apart and killed collection for the process lifetime for
+           all of them. #2038 already reached this conclusion for the MCP and web hosts, whose supervisors
+           retry a failed Load() on a 30 s backoff and whose comments point HERE for the critical case;
+           this is that case learning the same lesson. StartupFailureTriage.IsRetryable keeps
+           FileNotFoundException terminal even though it is an IOException, which on a first install is the
+           likeliest way this ever fails.
+           The terminal arm stays a bare catch (Exception), OperationCanceledException included, exactly as
+           before — shutdown during Load() still reports the same way it always has. */
+        var configRetryBudget = System.Diagnostics.Stopwatch.StartNew();
+        for (var attempt = 1; ; attempt++)
         {
-            configPath = DarlingConfig.ResolveConfigPath();
-            config = DarlingConfig.Load();
-            _logger.LogInformation("Loaded configuration from {Path}: {ServerCount} server(s)", configPath, config.Servers.Count);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogCritical("Cannot load configuration: {Message}", ex.Message);
-            return;
+            try
+            {
+                configPath = DarlingConfig.ResolveConfigPath();
+                config = DarlingConfig.Load();
+                _logger.LogInformation("Loaded configuration from {Path}: {ServerCount} server(s)", configPath, config.Servers.Count);
+                break;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && attempt < StartupFailureTriage.Attempts
+                && configRetryBudget.Elapsed < StartupFailureTriage.RetryBudget
+                && StartupFailureTriage.IsRetryable(ex))
+            {
+                _logger.LogWarning(
+                    "Cannot load configuration yet ({Message}) — attempt {Attempt} of {Total}, retrying in " +
+                    "{Delay}s. A file another process is mid-write recovers on its own; a missing, malformed " +
+                    "or unreadable one does not and is not retried.",
+                    ex.Message, attempt, StartupFailureTriage.Attempts,
+                    (int)StartupFailureTriage.RetryDelay.TotalSeconds);
+                await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogCritical("Cannot load configuration: {Message}", ex.Message);
+                return;
+            }
         }
 
         if (OperatingSystem.IsWindows())
@@ -781,19 +811,55 @@ public sealed class DarlingWorker : BackgroundService
             }
 
             managedPostgres = new DarlingManagedPostgres(config.Postgres, _logger);
-            try
+            /* #2936: the sharpest of the three sites, because the judgment already existed and was being
+               thrown away. EnsureDatabaseAsync inside this bootstrap classifies transient connection
+               faults and retries 6 times 2 s apart — and when that runs out it throws, and this catch
+               discarded the fact that the failure had been RULED transient. Re-classifying here is what
+               makes that verdict mean something.
+               StartupFailureTriage is deliberately WIDER than the inner IsTransientConnectionFault, which
+               rules that a PostgresException means the server replied and so is never transient. That is
+               right at its own site and wrong one layer up: 57P01 and 57P03 are the server replying "going
+               down" and "not up yet", which is how a store restart and a crash-recovering store present.
+               So a bootstrap the inner layer gave up on can still be retried here, correctly.
+               Safe to re-enter: the class documents it and the body shows it — EnsureRuntimeAsync unpacks
+               only what is missing, initdb runs only without PG_VERSION, the conf append is
+               marker-guarded, and an already-running postmaster is adopted rather than restarted, so "a
+               second EnsureRunningAsync against an initialized, running cluster does no initdb, no
+               restart, no credential rewrite".
+               NOTE this refines a contract DarlingManagedPostgres' own comments still state as
+               "throw => service-exit": for a classified-transient throw it is now retry-then-service-exit.
+               Terminal throws behave exactly as before. */
+            var bootstrapRetryBudget = System.Diagnostics.Stopwatch.StartNew();
+            for (var attempt = 1; ; attempt++)
             {
-                storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
-                storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogCritical("Managed Postgres bootstrap failed: {Message}", ex.Message);
-                return;
+                try
+                {
+                    storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
+                    storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
+                    break;
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (Exception ex) when (attempt < StartupFailureTriage.Attempts
+                    && bootstrapRetryBudget.Elapsed < StartupFailureTriage.RetryBudget
+                    && StartupFailureTriage.IsRetryable(ex))
+                {
+                    _logger.LogWarning(
+                        "Managed Postgres bootstrap failed, retrying ({Message}) — attempt {Attempt} of " +
+                        "{Total}, retrying in {Delay}s. A transiently locked file or a store still coming " +
+                        "up recovers on its own; a broken package or a stale credential does not and is " +
+                        "not retried.",
+                        ex.Message, attempt, StartupFailureTriage.Attempts,
+                        (int)StartupFailureTriage.RetryDelay.TotalSeconds);
+                    await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogCritical("Managed Postgres bootstrap failed: {Message}", ex.Message);
+                    return;
+                }
             }
         }
 
@@ -1004,7 +1070,7 @@ public sealed class DarlingWorker : BackgroundService
         /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
            a moment — restarting, failing over, still coming up alongside this service — and a sibling
            instance holding the migration advisory lock both succeed seconds later; a rung that cannot
-           apply against this store never will. StoreStartupFailureTriage decides which arrived and carries
+           apply against this store never will. StartupFailureTriage decides which arrived and carries
            the reasoning for where that boundary sits, including why anything it cannot place positively
            stays terminal. This block is the ONLY step of the collection loop's start that kills collection,
            so the degrade-vs-kill question the next block answers out loud is answered here too: a
@@ -1026,7 +1092,7 @@ public sealed class DarlingWorker : BackgroundService
            inside the transaction and left, after ROLLBACK, a plain table with every row, no chunks, no
            job and no reloptions. No rung uses CREATE INDEX CONCURRENTLY or any other statement that
            cannot be transacted. */
-        var retryBudget = System.Diagnostics.Stopwatch.StartNew();
+        var storeRetryBudget = System.Diagnostics.Stopwatch.StartNew();
         for (var attempt = 1; ; attempt++)
         {
             try
@@ -1042,9 +1108,9 @@ public sealed class DarlingWorker : BackgroundService
                 break;
             }
             catch (Exception ex) when (ex is not OperationCanceledException
-                && attempt < StoreStartupFailureTriage.MigrateAttempts
-                && retryBudget.Elapsed < StoreStartupFailureTriage.MigrateRetryBudget
-                && StoreStartupFailureTriage.IsRetryable(ex))
+                && attempt < StartupFailureTriage.Attempts
+                && storeRetryBudget.Elapsed < StartupFailureTriage.RetryBudget
+                && StartupFailureTriage.IsRetryable(ex))
             {
                 /* Every placeholder appears ONCE. A repeated name is not a duplicate here, it is an extra
                    positional slot: LogValuesFormatter numbers placeholders by occurrence, so a template
@@ -1056,9 +1122,9 @@ public sealed class DarlingWorker : BackgroundService
                     "{Total}, retrying in {Delay}s. A store that is restarting, failing over or still " +
                     "coming up recovers on its own; after the last attempt this becomes a critical line " +
                     "and collection does not start.",
-                    ex.Message, attempt, StoreStartupFailureTriage.MigrateAttempts,
-                    (int)StoreStartupFailureTriage.MigrateRetryDelay.TotalSeconds);
-                await Task.Delay(StoreStartupFailureTriage.MigrateRetryDelay, stoppingToken);
+                    ex.Message, attempt, StartupFailureTriage.Attempts,
+                    (int)StartupFailureTriage.RetryDelay.TotalSeconds);
+                await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1469,12 +1535,46 @@ public sealed class DarlingWorker : BackgroundService
             var configVersion = await configProvider.ReadConfigVersionAsync(stoppingToken);
             if (configVersion.HasValue && configVersion.Value != _lastConfigVersion)
             {
-                _lastConfigVersion = configVersion.Value;
-                await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+                /* The watermark advances AFTER the reload applies, not on detecting the bump. Assigning it
+                   first meant a reload whose store read failed had already recorded the version as applied:
+                   the operator's change stayed live in the store, absent from this process, and unreported
+                   until some LATER write bumped config_version again. Nothing retried it, because the
+                   beacon's next tick compared equal.
 
-                /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe here
-                   by construction — top of the sweep, and narrowing never preempts a running body. */
-                ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
+                   That ordering is why a deadline on this thread is not merely a delay — it DISCARDS the
+                   change — which is the asymmetry ServiceCommandDeadlines.SerialLoopSeconds is floored
+                   against. Fixing the bound without fixing the ordering would have left the silent-loss
+                   path intact and only made it rarer.
+
+                   Failing to apply now leaves the watermark behind, so the very next tick re-detects the
+                   same bump and retries. That is right for the transient case this guards (a store restart,
+                   a failover, a blip) and is bounded work — one single-row beacon read plus one view read
+                   per 15 s tick. StoreConfigProvider rate-limits its own failure log across the streak so a
+                   PERSISTENTLY unreachable store does not turn the retry into a log flood.
+
+                   Deliberately NOT a retry POLICY: #2936 owns that question for the adjacent migrate path,
+                   where it is a real design decision (which failures are retryable, bounded or forever,
+                   re-enter or resume) because that path has no loop of its own and its failure is terminal.
+                   This path already re-runs every tick by construction and its failure is recoverable, so
+                   the only defect here was the ordering. */
+                /* Stamped from the version the reload ACTUALLY applied, not from the beacon's own earlier
+                   read. ReloadFromStoreAsync re-reads config_version inside LoadViewAsync, so a write
+                   landing in the window between the two makes the applied view NEWER than
+                   configVersion.Value — and recording the older number would leave the watermark behind a
+                   config that is already live, costing one redundant idempotent re-apply on the next tick.
+                   Self-healing rather than lossy, but it is the same class of imprecision as the defect
+                   above ("the version recorded as applied must be the version that was applied"), and the
+                   startup path at :1179 already does it this way. */
+                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+                if (appliedVersion.HasValue)
+                {
+                    _lastConfigVersion = appliedVersion.Value;
+
+                    /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe
+                       here by construction — top of the sweep, and narrowing never preempts a running body.
+                       Inside the success branch because a reload that applied nothing changed no knob. */
+                    ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
+                }
             }
 
             /* Stage 2 pause gate (Lite's IsPaused): while paused, skip ALL collection/alert/analysis/purge
@@ -2209,11 +2309,16 @@ public sealed class DarlingWorker : BackgroundService
                    abandoned (loudly) and quarantined until its task actually dies, while every other
                    server's backfill continues. The deadline is a generous multiple of a healthy slice
                    (statement timeout 60s + store writes), so an abandonment is a defect signal. */
-                /* #2165: the other half of the gate. Held for the WHOLE slice, and taken outside the
-                   AbandonableStep so an abandoned-but-still-wedged slice keeps the gate closed — the tick must
-                   keep yielding while that statement is genuinely still running on the server, which is exactly
-                   the case the abandonment leaves behind. Zero-wait, so a tick already collecting simply defers
-                   this server's slice to the next five-minute cycle. */
+                /* #2165: the other half of the gate. Held for the WHOLE slice — which has to mean PAST an
+                   abandonment, because that is the one outcome where the statement is genuinely still running
+                   on the server and the tick must keep yielding to it. So the lease is HANDED to the step
+                   (holdUntilStepEnds) rather than scoped here: a `using` in this loop body releases at the end
+                   of the ITERATION, which opened the gate the instant the deadline handed control back and let
+                   the tick start its own Query Store collection beside the still-running slice — the #2165
+                   overlap, restored by the one case #2148 exists to survive. The step disposes the lease
+                   exactly once on every outcome, the moment its own in-flight guard clears, so the gate and
+                   the quarantine now open together. Zero-wait, so a tick already collecting simply defers this
+                   server's slice to the next five-minute cycle. */
                 var gate = _queryStoreGates.GetOrAdd(runtime.ServerId, static _ => new QueryStoreServerGate()).TryAcquire();
                 if (gate is null)
                 {
@@ -2223,8 +2328,6 @@ public sealed class DarlingWorker : BackgroundService
                     continue;
                 }
 
-                using var backfillGate = gate;
-
                 var step = _backfillSliceSteps.GetOrAdd(runtime.ServerId, static _ => new AbandonableStep());
                 var result = await step.RunAsync(
                     () => backfill.RunServerSliceAsync(runtime, stoppingToken),
@@ -2232,6 +2335,7 @@ public sealed class DarlingWorker : BackgroundService
                     onLateFault: ex => _logger.LogError(ex,
                         "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
                         runtime.Config.DisplayName),
+                    holdUntilStepEnds: gate,
                     cancellationToken: stoppingToken);
 
                 switch (result.Outcome)
@@ -2254,6 +2358,10 @@ public sealed class DarlingWorker : BackgroundService
                             runtime.Config.DisplayName, (int)BackfillSliceDeadline.TotalSeconds);
                         break;
                     case AbandonableStepOutcome.SkippedStillRunning:
+                        /* Defence in depth since the gate started outliving abandonment: the guard is only
+                           ever held by a run whose lease has not been released yet, so the acquire above
+                           refuses first and this loop no longer reaches here. Kept because it is the honest
+                           report if that ever stops being true. */
                         _logger.LogError(
                             "query_store backfill slice on '{Server}' skipped — a previously-abandoned slice is still wedged (#2148).",
                             runtime.Config.DisplayName);
@@ -2509,15 +2617,32 @@ public sealed class DarlingWorker : BackgroundService
     /// reconciles the monitored-server set, recomputes each connected server's NextDue from the fresh
     /// schedule overrides, and reloads the mute-rule cache (F16). Store-unreachable is a no-op — the current
     /// live config stands, never worse than before.
+    ///
+    /// <para><b>Returns the <c>config_version</c> that was APPLIED</b>, or null when nothing was, so the
+    /// caller can both hold the watermark back on a failure and stamp the version the store actually
+    /// served rather than the one its own earlier beacon read saw. The line between applied and not is
+    /// <c>LoadViewAsync</c>, and it is the right line because that call is the atomic gate: it reads
+    /// all five <c>config</c> rows under one try/catch and returns null if any of them throws, so either
+    /// nothing was read or <c>ApplyToConfig</c> below has already swapped the whole view into the live
+    /// config — a swap that cannot un-happen and that makes the version genuinely applied.</para>
+    ///
+    /// <para>Everything after that swap is PROPAGATION, and each piece carries its own isolation rather
+    /// than relying on this return value: <c>ReassertComposeStatementTimeoutAsync</c> is non-throwing and
+    /// advances <c>_appliedComposeStatementTimeoutSeconds</c> only on success, so it self-heals on the next
+    /// reload, and <c>SyncServerEnabledStatesAsync</c> catches everything and logs at Debug. A propagation
+    /// step that did throw would leave the watermark behind too — the assignment is after the await — and
+    /// the retry re-applies idempotently, so the residual window is "applied in memory, not yet mirrored",
+    /// which is narrower than the version-discarding one this replaces rather than a new instance of
+    /// it.</para>
     /// </summary>
-    private async Task ReloadFromStoreAsync(
+    private async Task<long?> ReloadFromStoreAsync(
         StoreConfigProvider provider, DarlingConfig config, List<ServerLoopState> servers,
         MuteRuleService muteRuleService, CancellationToken cancellationToken)
     {
         var view = await provider.LoadViewAsync(config, cancellationToken);
         if (view is null)
         {
-            return;
+            return null;
         }
 
         StoreConfigProvider.ApplyToConfig(config, view);
@@ -2572,9 +2697,15 @@ public sealed class DarlingWorker : BackgroundService
 
         await muteRuleService.LoadAsync();
 
+        /* view.ConfigVersion rather than _lastConfigVersion: the caller has not advanced the watermark yet
+           (it advances from this method's RETURN value), so the field still holds the PREVIOUS version
+           here — and the returned version is this same one, so the log line and the watermark can never
+           disagree about what was applied. */
         _logger.LogInformation(
             "Control-plane reload applied (config_version {Version}, {Servers} monitored server(s), paused: {Paused})",
-            _lastConfigVersion, servers.Count, _paused);
+            view.ConfigVersion, servers.Count, _paused);
+
+        return view.ConfigVersion;
     }
 
     /// <summary>
@@ -4015,7 +4146,7 @@ LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassComman
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand("SELECT pg_database_size(current_database())", connection);
+            using var command = new NpgsqlCommand("SELECT pg_database_size(current_database())", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             var result = await command.ExecuteScalarAsync(cancellationToken);
             return result is null || result == DBNull.Value ? null : Convert.ToInt64(result, CultureInfo.InvariantCulture);
         }
