@@ -331,15 +331,17 @@ public class CollectionLogDrainForensicsStoreTests
 
         /* drain STAYS null on those arms: nothing was drained, so there is nothing to describe.
 
-           Eight since #2997 added the authored PostgreSQL command-timeout arm, which is an early-return
-           fault arm like the rest and drained nothing either. The count is what makes that visible: a new
-           arm has to come through this pin and state which of the two it is. */
-        Assert.Equal(8, Regex.Matches(worker, @"drain: null").Count);
+           Nine, and the count is exactly why it is counted: #2993's log_timezone PERMISSIONS arm and
+           #2997's authored PostgreSQL command-timeout arm were developed in parallel and each landed one.
+           Both are early-return fault arms that drained nothing, so both belong here - but neither lane
+           could see the other, and each independently moved this literal from 7 to 8. The pin is what
+           turned that into a merge conflict to resolve rather than a wrong number nobody noticed. */
+        Assert.Equal(9, Regex.Matches(worker, @"drain: null").Count);
 
-        /* And V110's fetch sums stay null on the same eight arms and for the same reason: no item completed,
+        /* And V110's fetch sums stay null on those same nine arms and for the same reason: no item completed,
            so no fetch was performed. Counted rather than merely present, so an arm that starts passing a
            real value - which would mean attributing another run's fetch to a failure row - is a red. */
-        Assert.Equal(8, Regex.Matches(worker, @"fetchPhases: null").Count);
+        Assert.Equal(9, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     /// <summary>
