@@ -65,7 +65,7 @@ public static class QueryStoreOpenIntervalState
     /// recorded rationale beats a knob nobody can reason about.
     ///
     /// <para>Moved from 15 to 30 (#2759) because the #2312 yardstick it was tuned against — multi-53 at
-    /// ~50 s/run — stopped holding. Measured live on <c><host></c> (2026-09-01, 3-hour
+    /// ~50 s/run — stopped holding. Measured live on <c>&lt;host&gt;</c> (2026-09-01, 3-hour
     /// window of <c>collection_log</c>): open-interval-inclusive runs cost 110–133 s each (2–2.5x the
     /// original yardstick), landing every 12–19 minutes — the 15-minute skip window was already firing as
     /// designed, spacing the expensive runs out, but each one had grown too large for that spacing to be
