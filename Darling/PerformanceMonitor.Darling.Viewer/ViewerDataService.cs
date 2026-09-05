@@ -1546,7 +1546,7 @@ SELECT
         var servers = new List<DarlingServer>();
 
         await using var command = _dataSource.CreateCommand(ServersSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1602,7 +1602,7 @@ LIMIT 1";
     public async Task<int?> GetServerUtcOffsetMinutesAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerUtcOffsetSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is null or DBNull

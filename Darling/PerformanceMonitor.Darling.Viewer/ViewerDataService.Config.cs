@@ -87,7 +87,7 @@ public sealed partial class ViewerDataService
         var items = new List<ServerConfigRow>();
 
         await using var command = _dataSource.CreateCommand(ServerConfigSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -111,7 +111,7 @@ public sealed partial class ViewerDataService
         var items = new List<DatabaseConfigRow>();
 
         await using var command = _dataSource.CreateCommand(DatabaseConfigSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -162,7 +162,7 @@ public sealed partial class ViewerDataService
         var items = new List<DatabaseScopedConfigRow>();
 
         await using var command = _dataSource.CreateCommand(DatabaseScopedConfigSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -187,7 +187,7 @@ public sealed partial class ViewerDataService
         var items = new List<QueryStoreHealthRow>();
 
         await using var command = _dataSource.CreateCommand(QueryStoreHealthSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -217,7 +217,7 @@ public sealed partial class ViewerDataService
         var items = new List<TraceFlagRow>();
 
         await using var command = _dataSource.CreateCommand(TraceFlagsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

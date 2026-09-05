@@ -85,7 +85,7 @@ ORDER BY p.database_name, p.collection_time";
         int serverId, DateTime sinceUtc, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(PvsTrendSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
 
@@ -106,7 +106,7 @@ ORDER BY p.database_name, p.collection_time";
     public async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(PvsStatsLatestSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
         var items = new List<PvsStatsRow>();

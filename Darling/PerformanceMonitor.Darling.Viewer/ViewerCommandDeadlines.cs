@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
@@ -67,14 +69,22 @@ public static class ViewerCommandDeadlines
     /// <c>SemaphoreSlim</c>, no <c>WaitAsync</c>, and no request timeout, because the viewer is a WPF
     /// <c>WinExe</c> and hosts no web endpoint — so this deadline IS the budget, the same finding
     /// #2882 and #2888 both made, and the same reason both erred short. What it competes for is the
-    /// ten-connection pool: <c>CorrelatedTimelineLanesControl</c> awaits one <c>Task.WhenAll</c> over
-    /// exactly ten reads, so a single panel can hold every permit, and while they are held the sidebar
-    /// freshness dots, the alert poll and every other panel get nothing — read eleven waits
+    /// ten-connection pool (<see cref="ViewerSettings.ManagedMaxPoolSize"/>), and while permits are held
+    /// the sidebar freshness dots, the alert poll and every other panel get nothing — read eleven waits
     /// <c>ConnectionTimeoutSeconds</c> (default 5) for a slot and then throws a CONNECT error, which
-    /// misattributes a slow store to the network. Halving the inherited 30 s halves that worst-case
-    /// hold. Ten concurrent 30-day reads on the rig above measured 24.4-64.1 s, six of them past the
-    /// silent default they used to inherit; cutting each at 15 s returns permits sooner, which is the
-    /// outcome to want in that state.</para>
+    /// misattributes a slow store to the network. Fifteen seconds is half the inherited 30 s, which
+    /// halves that worst-case hold.</para>
+    ///
+    /// <para><b>This value bounds a read issued ALONE, and only that</b> (#3004). The permit argument
+    /// above says a concurrent fan-out is the state worth protecting the pool from; it does not say a
+    /// solo read's ceiling can bound one. On the same rig, ten concurrent 30-day reads measured
+    /// 24.4-64.1 s EACH against 3.01 s solo — ten-way contention costs 8-21x, and running the ten
+    /// together cost 64.1 s of wall clock against 30.1 s of serial work, so concurrency is net negative
+    /// on this store rather than merely crowded. Fifteen seconds is below the whole of that band, so it
+    /// is not a ceiling a ten-wide batch can finish under and applying it to one would fail every read in
+    /// it on every attempt, auto-refresh included. A read that is part of a fan-out therefore takes
+    /// <see cref="FanOutReadSeconds"/>, derived from that concurrent measurement, and the two are the
+    /// same number for any width the pool can serve without contention worth pricing.</para>
     ///
     /// <para>The asymmetry, worked out for this surface rather than assumed: too short and one panel
     /// shows an error the user can retry — and the auto-refresh timer retries it within 30 s anyway,
@@ -82,6 +92,72 @@ public static class ViewerCommandDeadlines
     /// the failure mode that cannot be diagnosed from the UI. Erring short is right here.</para>
     /// </summary>
     public const int InteractiveReadSeconds = 15;
+
+    /// <summary>
+    /// The per-lane contention allowance a concurrent read is granted on top of
+    /// <see cref="InteractiveReadSeconds"/>, and the only number here derived from a CONCURRENT
+    /// measurement rather than a solo one.
+    ///
+    /// <para>The derivation is one division. #2901's rig — a store stood up by the product's own
+    /// <c>PgMigrations.MigrateAsync</c> at V109 with TimescaleDB, seeded to exact production per-server
+    /// density across the collector's full 30-day retention horizon — measured ten concurrent 30-day
+    /// reads at 24.4-64.1 s each. The worst read in that batch is what a deadline has to cover, and the
+    /// width that produced it is ten: 64.1 / 10 = 6.41 s of allowance per lane, rounded UP to 7 so the
+    /// rounding falls on the side that does not fail a legitimate panel. At the full pool width that is
+    /// 70 s, about 9% over the worst read actually measured there.</para>
+    ///
+    /// <para><b>Why per-lane and not one wider constant.</b> A single number big enough for the ten-wide
+    /// case would hand 70 s to a read with no contention at all, which is the same error as handing 15 s
+    /// to a read with nine siblings — the wrong population, in the other direction. Scaling by the width
+    /// the caller declares is what keeps a solo read on its own measured floor.</para>
+    ///
+    /// <para><b>Nothing enclosing this is smaller.</b> The per-tab auto-refresh timer floors at 30 s and
+    /// the fleet timer at 10 s, but neither bounds a read: the fan-out those timers fire is single-flight
+    /// (<c>_isRefreshing</c> in <see cref="CorrelatedTimelineLanesControl"/>, and #2907 for the unawaited
+    /// pair), so a read outliving its own tick is not joined by the next one. A cadence shorter than the
+    /// deadline would matter only if a slow read could be re-entered, and it cannot.</para>
+    /// </summary>
+    public const int FanOutLaneSeconds = 7;
+
+    /// <summary>
+    /// The deadline for a read issued as one of <paramref name="concurrentReads"/> reads running
+    /// together — the ceiling that has to cover contention with its siblings rather than a solo read's.
+    ///
+    /// <para>Clamped at <see cref="ViewerSettings.ManagedMaxPoolSize"/> because contention stops growing
+    /// where the permits run out: an eleventh concurrent read against a ten-connection pool is not an
+    /// eleventh contender, it is a read waiting on <c>ConnectionTimeoutSeconds</c> for a slot. That is
+    /// what lets the two unbounded per-server fan-outs declare their raw fleet count and still get a
+    /// bounded answer.</para>
+    ///
+    /// <para>Floored at <see cref="InteractiveReadSeconds"/> so this can only ever grant a read MORE time
+    /// than a solo read gets, never less. A width the pool serves without contention worth pricing lands
+    /// on the floor and is indistinguishable from an unscoped read, which is the correct outcome: two
+    /// concurrent reads are not the state the concurrent measurement describes.</para>
+    /// </summary>
+    public static int FanOutReadSeconds(int concurrentReads)
+    {
+        var lanes = Math.Clamp(concurrentReads, 1, ViewerSettings.ManagedMaxPoolSize);
+
+        return Math.Max(InteractiveReadSeconds, FanOutLaneSeconds * lanes);
+    }
+
+    /// <summary>
+    /// What all 187 interactive command sites stamp: <see cref="FanOutReadSeconds"/> for the width the
+    /// enclosing fan-out site declared through <see cref="ViewerReadFanOut"/>, or
+    /// <see cref="InteractiveReadSeconds"/> when nothing declared one.
+    ///
+    /// <para>Read at command construction, which is what makes it correct: the width is already in the
+    /// task's execution context by then, and the value is frozen onto that one command rather than shared
+    /// with any other read in flight.</para>
+    ///
+    /// <para>The sites take this instead of <see cref="InteractiveReadSeconds"/> uniformly, including the
+    /// reads no fan-out currently reaches. A read outside a scope gets the same number either way, so
+    /// there is no behavioural difference to weigh — what uniformity buys is that a future
+    /// <c>Task.WhenAll</c> over any of them is bounded the day it is written instead of silently
+    /// inheriting a solo read's ceiling, which is the trap this whole constant family exists to close.
+    /// <c>ViewerCommandTimeoutTests</c> holds that uniformity as a pin.</para>
+    /// </summary>
+    public static int CurrentInteractiveReadSeconds => FanOutReadSeconds(ViewerReadFanOut.CurrentWidth);
 
     /// <summary>
     /// The store&lt;-&gt;service command plane — the three commands in

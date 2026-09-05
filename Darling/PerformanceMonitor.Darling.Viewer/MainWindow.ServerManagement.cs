@@ -96,10 +96,11 @@ public partial class MainWindow
     /// <para><b>Single-flight</b>, because both fleet timers fire this unawaited on an interval an operator can
     /// dial down to 10s (<see cref="ViewerAppSettings.NocRefreshIntervalSeconds"/>) and nothing else bounds it.
     /// One pass is TWO store reads — the freshness query plus <see cref="UpdateCollectorHealthTextAsync"/>'s own
-    /// — each capped at <see cref="ViewerCommandDeadlines.InteractiveReadSeconds"/> (15), so an unguarded pass
-    /// could hold a permit for 30s against a pool of ten (<c>MaxPoolSize = 10</c> on the managed-derived string
-    /// in <c>ViewerSettings</c>) while the next tick started another. The deadline #2901 added caps how long one
-    /// stacked read holds a permit; it cannot stop the stacking, which is what this does.</para>
+    /// — each capped at <see cref="ViewerCommandDeadlines.CurrentInteractiveReadSeconds"/>, which is the solo
+    /// 15 s when this is called on its own and the wider figure when a caller has declared a fan-out around it
+    /// (both fleet-timer callers do). So an unguarded pass could hold a permit for twice that against a pool of
+    /// <see cref="ViewerSettings.ManagedMaxPoolSize"/> while the next tick started another. A deadline caps how
+    /// long one stacked read holds a permit; it cannot stop the stacking, which is what this does.</para>
     ///
     /// <para><paramref name="replayIfBusy"/> is why this is not <c>_alertPollInFlight</c>'s plain drop. A
     /// PERIODIC caller drops, because the next tick IS its retry and replaying one would delete the interval's
@@ -231,7 +232,7 @@ public partial class MainWindow
     /// <para><b>The scope is captured before the read and verified after it</b> (#2924). One field carries
     /// every scope's answer, so an answer read for a scope that has since left the screen must be dropped
     /// rather than painted: the operator can change tab during the read, which is one store read bounded at
-    /// <see cref="ViewerCommandDeadlines.InteractiveReadSeconds"/> by #2901.</para>
+    /// <see cref="ViewerCommandDeadlines.CurrentInteractiveReadSeconds"/>.</para>
     ///
     /// <para><b>A drop is right here, where <see cref="RefreshServerStatusAsync"/> needs a replay</b>, and
     /// the difference is whether anything else is going to ask. The event that invalidates the scope IS a

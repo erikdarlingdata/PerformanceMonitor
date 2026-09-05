@@ -94,6 +94,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(6);
+
         var latestTask = _dataService.GetLatestMemoryStatsAsync(_server.ServerId);
         var trendTask = _dataService.GetMemoryTrendAsync(_server.ServerId, startUtc, endUtc);
         var grantTrendTask = _dataService.GetMemoryGrantTrendAsync(_server.ServerId, startUtc, endUtc);
@@ -102,6 +104,11 @@ public partial class ViewerServerTab
         var pressureTask = _dataService.GetMemoryPressureEventsAsync(_server.ServerId, startUtc, endUtc);
 
         await Task.WhenAll(latestTask, trendTask, grantTrendTask, clerkTypesTask, grantChartTask, pressureTask);
+
+        /* The six are done, and this method reads the store twice more below — the clerk chart and the
+           whole Plan Cache sub-tab, which declares its own fan-out. Release here or those inherit this
+           width and the nested one multiplies against a contention count that no longer exists. */
+        readFanOut.Release();
 
         RenderMemorySummary(latestTask.Result);
         RenderMemoryChart(trendTask.Result, grantTrendTask.Result, startUtc, endUtc);

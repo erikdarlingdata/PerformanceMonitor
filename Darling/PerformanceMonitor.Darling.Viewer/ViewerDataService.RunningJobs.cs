@@ -72,7 +72,7 @@ public sealed partial class ViewerDataService
         var items = new List<RunningJobRow>();
 
         await using var command = _dataSource.CreateCommand(RunningJobsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -103,7 +103,7 @@ public sealed partial class ViewerDataService
     public async Task<string?> GetLatestRunningJobsCollectorStatusAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(RunningJobsCollectorStatusSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result as string;

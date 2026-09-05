@@ -321,7 +321,7 @@ public sealed partial class ViewerDataService
         var map = new Dictionary<int, string>();
 
         await using var command = _dataSource.CreateCommand(DatabaseNameMapSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -350,7 +350,7 @@ public sealed partial class ViewerDataService
         var xmls = new List<string>();
 
         await using var command = _dataSource.CreateCommand(SystemHealthEventsByTypeSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddSystemEventParameters(command, serverId, startUtc, endUtc, eventType);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -653,7 +653,7 @@ public sealed partial class ViewerDataService
         var rows = new List<DefaultTraceEventRow>();
 
         await using var command = _dataSource.CreateCommand(DefaultTraceEventsByWindowSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });

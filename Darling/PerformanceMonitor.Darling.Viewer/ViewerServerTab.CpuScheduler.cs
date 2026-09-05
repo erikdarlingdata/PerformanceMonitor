@@ -48,6 +48,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(2);
+
         var trendTask = _dataService.GetCpuSchedulerTrendAsync(_server.ServerId, startUtc, endUtc);
         var snapshotTask = _dataService.GetCpuSchedulerSnapshotAsync(_server.ServerId, startUtc, endUtc);
         await Task.WhenAll(trendTask, snapshotTask);

@@ -121,7 +121,7 @@ WHERE id = $1";
         var rules = new List<MuteRule>();
 
         await using var command = _dataSource.CreateCommand(MuteRulesSelectSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -153,7 +153,7 @@ WHERE id = $1";
         }
 
         await using var command = _dataSource.CreateCommand(MuteRuleInsertSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = rule.Id });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = rule.Enabled });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = Naive(rule.CreatedAtUtc) });
@@ -178,7 +178,7 @@ WHERE id = $1";
         }
 
         await using var command = _dataSource.CreateCommand(MuteRuleUpdateSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = rule.Id });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = rule.Enabled });
         AddNullableTimestamp(command, rule.ExpiresAtUtc);
@@ -197,7 +197,7 @@ WHERE id = $1";
     public async Task SetMuteRuleEnabledAsync(string ruleId, bool enabled, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(MuteRuleSetEnabledSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = ruleId });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });
         await ExecuteWriteAsync(command, cancellationToken);
@@ -216,7 +216,7 @@ WHERE id = $1";
     private async Task DeleteMuteRuleRawAsync(string ruleId, CancellationToken cancellationToken)
     {
         await using var command = _dataSource.CreateCommand(MuteRuleDeleteSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = ruleId });
         await ExecuteWriteAsync(command, cancellationToken);
     }
