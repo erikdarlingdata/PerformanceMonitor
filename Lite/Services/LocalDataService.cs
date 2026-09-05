@@ -137,11 +137,18 @@ public partial class LocalDataService
     /// <summary>
     /// Gets the time range in server local time (for tables like cpu_utilization_stats.sample_time).
     /// </summary>
-    private static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc = null)
+    /// <param name="utcOffsetMinutes">
+    /// The UTC offset of the server whose rows this window will select — the same server as the
+    /// <c>server_id</c> in the predicate beside it. REQUIRED rather than defaulted: an offset and a
+    /// server_id are two halves of one question, and taking the offset from ambient state is how they came
+    /// to name two different servers. A caller with no server-specific offset to give has to say so at the
+    /// call site instead of inheriting one silently.
+    /// </param>
+    private static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, int utcOffsetMinutes)
     {
         /* The anchor arrives in UTC (see GetTimeRange) and is carried into server-local here, so both
            families answer the same instant even though they window on differently-based columns. */
-        var serverNow = (asOfUtc ?? DateTime.UtcNow).AddMinutes(ServerTimeHelper.UtcOffsetMinutes);
+        var serverNow = (asOfUtc ?? DateTime.UtcNow).AddMinutes(utcOffsetMinutes);
 
         if (fromDate.HasValue && toDate.HasValue)
         {

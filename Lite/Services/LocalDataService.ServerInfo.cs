@@ -58,6 +58,40 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// One server's OWN UTC offset in minutes, for the reads whose window is expressed in that server's
+    /// local wall clock (<c>cpu_utilization_stats.sample_time</c>, <c>default_trace_events.event_time</c>).
+    /// <c>null</c> when the store holds no offset for it.
+    ///
+    /// <para><b>Why the STORE and not the live probe.</b> <c>ServerManager</c> also learns an offset — its
+    /// detection query selects <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — but that value only
+    /// exists once something has opened a connection to that server, and is keyed by the registry's own
+    /// string id. <c>server_properties.utc_offset_minutes</c> is the same fact, collected, keyed by the
+    /// numeric <c>server_id</c> these reads already filter on, and available to a caller that has connected
+    /// to nothing.</para>
+    ///
+    /// <para>Skips NULL offsets rather than taking the newest row blindly: the column arrived in schema v42
+    /// and is nullable, so a store migrated from earlier holds pre-v42 snapshots that predate it. Ordering
+    /// by <c>collection_time DESC</c> alone would let one of those mask an offset the store does have.</para>
+    /// </summary>
+    public async Task<int?> GetServerUtcOffsetMinutesAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT utc_offset_minutes
+FROM v_server_properties
+WHERE server_id = $1
+AND   utc_offset_minutes IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        var scalar = await command.ExecuteScalarAsync();
+        return scalar is null or DBNull ? null : Convert.ToInt32(scalar);
+    }
+
+    /// <summary>
     /// Gets the latest database size stats (file sizes, volume space).
     /// </summary>
     public async Task<List<DatabaseSizeStatsRow>> GetLatestDatabaseSizeStatsAsync(int serverId)

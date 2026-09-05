@@ -19,13 +19,21 @@ public partial class LocalDataService
     /// Gets CPU utilization data for charting.
     /// Note: sample_time is stored in server local time (from SYSDATETIME()), not UTC.
     /// </summary>
-    public async Task<List<CpuUtilizationRow>> GetCpuUtilizationAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    /// <param name="utcOffsetMinutes">
+    /// <paramref name="serverId"/>'s OWN UTC offset, which is what the server-local window has to be
+    /// expressed in. <c>null</c> means "use the desktop UI's selected-tab offset"
+    /// (<see cref="ServerTimeHelper.UtcOffsetMinutes"/>) — correct for the WPF tab that set it and for
+    /// nobody else. Any caller that picks its own <paramref name="serverId"/> (every MCP tool does) must
+    /// pass that server's offset, or the window and the server_id name two different servers and the read
+    /// comes back shifted or empty with no error.
+    /// </param>
+    public async Task<List<CpuUtilizationRow>> GetCpuUtilizationAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, int? utcOffsetMinutes = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         /* sample_time is in server local time, not UTC */
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc, utcOffsetMinutes ?? ServerTimeHelper.UtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT

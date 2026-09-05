@@ -25,7 +25,14 @@ public sealed class McpCpuTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetCpuUtilizationAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            /* sample_time is THIS server's local wall clock (#1262), so the window needs THIS server's
+               offset — not the desktop tab's. See McpServerLocalWindow. */
+            var (utcOffsetMinutes, offsetError) =
+                await McpServerLocalWindow.OffsetOrErrorAsync(dataService, resolved.ServerId, resolved.ServerName);
+            if (offsetError != null) return offsetError;
+
+            var rows = await dataService.GetCpuUtilizationAsync(
+                resolved.ServerId, hours_back, asOfUtc: windowEnd, utcOffsetMinutes: utcOffsetMinutes);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "cpu_utilization")
