@@ -1207,8 +1207,8 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>22 columns since #3010 (16 at #2460, plus #2472's four fan-out columns, #2804's
-    /// abandoned_count and #3010's last_denied_time) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// <para>24 columns since #3017 (16 at #2460, plus #2472's four fan-out columns, #2804's
+    /// abandoned_count, #3010's last_denied_time and #3017's rows_stored/runs_with_rows) — every addition APPENDED, never inserted, because both MCP surfaces read
     /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
@@ -1334,7 +1334,34 @@ internal static class DarlingDataReader
             -- POSITIONALLY and Lite's DuckDB read mirrors these ordinals, so a mid-list insert would
             -- silently re-map every column after it in whichever surface was not edited in the same
             -- breath.
-            MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time
+            MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time,
+            -- #3017: what the spend BOUGHT. Every other statistic on a health row describes cost --
+            -- total_runs, the three durations, and the sweep-pressure roll-up built from them -- and the
+            -- rows figure lived on get_collector_cost, a different tool over a different (hourly, fleet-
+            -- wide) series. Correlating spend against output was a join a reader had to know to make.
+            -- Measured: pg_deadlocks was the dearest collector on a managed store, 49,258,335 ms over
+            -- 79,333 runs in seven days, and stored zero rows.
+            --
+            -- Read from THIS query's own window so cost and output cannot describe different runs. That
+            -- is the same reason #3010's two instants come out of one aggregate: a rows figure taken
+            -- from one window beside a duration taken from another composes into a ratio describing no
+            -- collector that ever ran.
+            --
+            -- COALESCE so a zero is unambiguous at the STORE. Without it a collector whose every
+            -- rows_collected is NULL returns NULL here, which a reader would have to guess between "this
+            -- read did not measure output" and "it stored nothing" -- and the whole point of the column
+            -- is that the second of those becomes a fact rather than an absence.
+            COALESCE(SUM(rows_collected), 0) AS rows_stored,
+            -- The DENOMINATOR's partner, and the honest half of a cost/output pair: 12 rows over 3 of
+            -- 79,333 runs is a different collector from 12 rows over all of them. get_pg_blocking already
+            -- reports captures_with_blocking beside captures_total for exactly this reason, off this same
+            -- rows_collected > 0 test. total_runs above is the denominator; this is the numerator.
+            --
+            -- APPENDED, like every column since #2472: both MCP surfaces read this result set
+            -- POSITIONALLY and Lite's DuckDB read mirrors these ordinals, so a mid-list insert would
+            -- silently re-map every column after it in whichever surface was not edited in the same
+            -- breath.
+            SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1432,6 +1459,9 @@ internal static class DarlingDataReader
                 AbandonedCount = reader.IsDBNull(20) ? 0 : Convert.ToInt64(reader.GetValue(20)),
                 /* Appended (#3010), for the same reason every column before it was. */
                 LastDeniedTime = reader.IsDBNull(21) ? null : reader.GetDateTime(21),
+                /* Appended (#3017), for the same reason every column before it was. */
+                RowsStored = reader.IsDBNull(22) ? 0 : Convert.ToInt64(reader.GetValue(22)),
+                RunsWithRows = reader.IsDBNull(23) ? 0 : Convert.ToInt64(reader.GetValue(23)),
             });
         }
 
@@ -2042,6 +2072,49 @@ internal sealed class CollectorHealth
     /// </summary>
     public bool DeniedSinceLastSuccess => CollectorHealthClassifier.DeniedSinceLastSuccess(
         PermissionDeniedCount, ErrorCount, LastSuccessTime, LastDeniedTime);
+
+    /* ── What the spend bought (#3017) ──────────────────────────────────────────────────────────────
+       Populated by the per-server health read ALONE. The fleet rollup builds its own CollectorHealth
+       from FleetCollectionHealthSql to band it, and deliberately leaves these at their default 0 —
+       which is why nothing but get_collection_health's own tool row is allowed to render them. A
+       defaulted zero reaching a surface as "stored nothing" is the #2804 hazard exactly. */
+
+    /// <summary>
+    /// Rows the window's runs stored (<c>rows_stored</c>) — the output half of the cost/output pair, over
+    /// the SAME window as <see cref="TotalRuns"/> and the durations. Never <c>get_collector_cost</c>'s
+    /// <c>total_rows</c>, which is a separate hourly series over the caller's own window and across every
+    /// server: see <see cref="CollectorHealthClassifier.OutputWindowNote"/>.
+    /// </summary>
+    public long RowsStored { get; set; }
+
+    /// <summary>
+    /// How many of <see cref="TotalRuns"/> stored anything (<c>runs_with_rows</c>). The numerator whose
+    /// denominator is <see cref="TotalRuns"/>, on <c>get_pg_blocking</c>'s
+    /// <c>captures_with_blocking</c>/<c>captures_total</c> pattern: a rows total with no run count behind
+    /// it cannot tell a collector that is productive occasionally from one that is productive throughout.
+    /// </summary>
+    public long RunsWithRows { get; set; }
+
+    /// <summary>Share of runs that stored anything. 0 with a large <see cref="TotalRuns"/> is the reading
+    /// #3017 exists to surface; 0 runs gives 0 rather than a divide, matching every sibling rate here.</summary>
+    public double ProductiveRunPercent => TotalRuns > 0 ? (double)RunsWithRows / TotalRuns * 100 : 0;
+
+    /// <summary>
+    /// The sentence a collector that spent and stored NOTHING gets, or null when it stored something
+    /// (#3017). Its own member rather than an expression at the call site for the reason
+    /// <see cref="DeniedSinceLastSuccess"/> is one: both SKUs' tools compose it from the one shared
+    /// formatter instead of each writing the branch out, so the two cannot answer differently.
+    ///
+    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term. Zero output with
+    /// a current denial is a collector that could not read; zero output alone is one that read and found
+    /// nothing. The predicate is READ here and still not banded — <c>HealthStatus</c> does not call this,
+    /// and this returns display text.</para>
+    /// </summary>
+    public string? OutputFinding =>
+        CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess)
+            is { Length: > 0 } finding
+            ? finding
+            : null;
 
     /// <summary>
     /// Share of runs the #2673 budget abandoned (#2804). Its own rate rather than part of

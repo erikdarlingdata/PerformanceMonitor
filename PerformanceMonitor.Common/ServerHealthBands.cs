@@ -982,6 +982,96 @@ namespace PerformanceMonitor.Common
                 ? string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs, {2})", lastNote, totalRuns, HasUserDatabasesQualifier)
                 : string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs)", lastNote, totalRuns);
         }
+
+        /// <summary>
+        /// What <c>get_collection_health</c>'s output figures are measured over, and — the load-bearing
+        /// half — what they are NOT (#3017).
+        ///
+        /// <para><b>Both windows named, because only one of them was read here.</b> <c>rows</c> and
+        /// <c>runs_with_rows</c> come out of the SAME aggregate over the SAME fixed trailing seven days as
+        /// <c>total_runs</c> and the duration statistics beside them, so cost and output on one row always
+        /// describe one set of runs. <c>get_collector_cost</c>'s <c>total_rows</c> is a different
+        /// measurement entirely — a separate hourly series, summed over the caller's own <c>days_back</c>,
+        /// across every server at once — and this note disclaims it outright rather than letting a reader
+        /// assume the two reconcile. That is #3027's discipline one level down: a surface must not assert a
+        /// scope it did not measure.</para>
+        ///
+        /// <para><b>And the third thing it is not.</b> <c>rows</c> counts what a run STORED. Nothing on
+        /// this surface reads what the monitored engine COUNTED, so a zero here cannot separate a
+        /// genuinely quiet source from a reader that is capturing nothing off a busy one. Engine-counter
+        /// against rows-stored is a YIELD instrument and a different piece of work; saying so is what
+        /// stops this figure being read as one.</para>
+        /// </summary>
+        public const string OutputWindowNote =
+            "rows and runs_with_rows are counted over the SAME fixed trailing seven days as total_runs and "
+            + "the duration statistics beside them - one aggregate over one window, so cost and output on a "
+            + "collector row always describe the same runs. They are NOT get_collector_cost's total_rows: "
+            + "that tool reads a separate hourly series, over the caller's own days_back and across every "
+            + "server at once, and these figures make no claim about what it reports. rows is also what a "
+            + "run STORED, never what the monitored engine counted - so a zero cannot tell a genuinely "
+            + "quiet source apart from a reader capturing nothing off a busy one, and nothing on this "
+            + "surface measures that.";
+
+        /// <summary>
+        /// The sentence a collector that SPENT and STORED NOTHING gets, and the two readings it has to keep
+        /// apart (#3017).
+        ///
+        /// <para><b>Why this is a sentence and not a band.</b> <c>pg_deadlocks</c> was the dearest collector
+        /// on a managed store — 49,258,335 ms over 79,333 runs in seven days — and stored zero rows. That
+        /// zero was CORRECT: the reader was working on all 50 targets and there were no deadlocks to find.
+        /// A verdict keyed on cost-plus-zero-rows fires on the healthy quiet install, which is the
+        /// cry-wolf failure <see cref="HasUserDatabasesQualifier"/> (#1852) exists to prevent. So this puts
+        /// the fact beside the cost and names what would tell the two apart, exactly as #1852 states a fact
+        /// about the TARGET beside a persistently empty enumeration instead of banding it.</para>
+        ///
+        /// <para><b>The third term, and the one thing it must not become.</b> Zero output WITH a current
+        /// denial is a collector that could not read; zero output alone is one that read and found nothing.
+        /// <see cref="DeniedSinceLastSuccess"/> is what separates them, and it is READ here in exactly the
+        /// way its own doc comment permits — reported, never banded. This method returns display text and
+        /// <see cref="Classify"/> never calls it, so consuming the predicate here cannot widen a band.</para>
+        ///
+        /// <para><b>Empty on the productive case, deliberately.</b> Like
+        /// <see cref="SweepPressureClassifier.FormatPeakCycleNote"/>: a note that fires when nothing is
+        /// wrong is how a signal teaches people to ignore it. The numbers on the row already say
+        /// "expensive and productive" when <paramref name="rowsStored"/> is positive.</para>
+        ///
+        /// <para><b>Scoped to zero output, also deliberately.</b> A collector that stored rows earlier in
+        /// the window and is being denied right now gets no finding from here — that is
+        /// <c>denied_since_last_success</c>'s own job on the same row, and firing a second time for it
+        /// would make this a duplicate denial alarm rather than a cost/output instrument.</para>
+        /// </summary>
+        /// <param name="rowsStored">Rows the window's runs stored (<c>rows_stored</c>). Positive = silent.</param>
+        /// <param name="totalRuns">Runs in the window (<c>total_runs</c>) — the spend this qualifies.</param>
+        /// <param name="deniedSinceLastSuccess">
+        /// <see cref="DeniedSinceLastSuccess"/> for the same row. The third term: it is what turns "stored
+        /// nothing" from an ambiguity into one of two named readings.
+        /// </param>
+        public static string FormatOutputFinding(long rowsStored, long totalRuns, bool deniedSinceLastSuccess)
+        {
+            if (rowsStored > 0 || totalRuns <= 0)
+            {
+                return string.Empty;
+            }
+
+            return deniedSinceLastSuccess
+                ? string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Stored 0 rows across {0:N0} runs, and denied_since_last_success is true - the newest "
+                    + "denial postdates the newest success, so this collector is being refused NOW and the "
+                    + "spend bought nothing because nothing could be read. That is a grant, not a collector "
+                    + "repair.",
+                    totalRuns)
+                : string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Stored 0 rows across {0:N0} runs with no current denial (denied_since_last_success is "
+                    + "false), so this collector read and found nothing rather than being unable to read. "
+                    + "For one that stores a row only when an event occurs - a deadlock, a blocked-process "
+                    + "report, a blocking chain, a held xmin - zero is the correct resting state on a "
+                    + "well-behaved target and needs no action. What this cannot tell you is whether the "
+                    + "source really was empty: it counts rows stored, never what the monitored engine "
+                    + "counted.",
+                    totalRuns);
+        }
     }
 
     /// <summary>
