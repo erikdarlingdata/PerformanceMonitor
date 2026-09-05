@@ -71,6 +71,17 @@ public sealed class ViewerCommandTimeoutTests
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
+    /// The lane split a fan-out whose work is fleet-many routes through, so that the width it declares is a
+    /// concurrency it really has rather than a queue of reads that can only wait for a permit and fail
+    /// (#3016). Captures the local it is assigned to, because
+    /// <see cref="NoDeclaredFanOutWidth_OutrunsThePermitsOrTheMeasurement"/> has to tie a
+    /// <c>&lt;name&gt;.Count</c> width back to the split that bounded it.
+    /// </summary>
+    private static readonly Regex s_laneSplit = new(
+        @"(?:var|IReadOnlyList\s*<[^;={}]*>)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*ViewerReadFanOut\s*\.\s*Lanes\s*\(",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
     /// A fire-and-forget call — <c>_ = SomethingAsync();</c>. Two of them in one member is a fan-out; ONE
     /// is this project's ordinary single-flight-guarded refresh and is not.
     ///
@@ -1162,7 +1173,11 @@ public sealed class ViewerCommandTimeoutTests
     public void TheFanOutDeadline_IsDerivedFromTheConcurrentBand_NotTheSoloOne()
     {
         var solo = ViewerCommandDeadlines.InteractiveReadSeconds;
-        var widest = ViewerCommandDeadlines.FanOutReadSeconds(ViewerSettings.ManagedMaxPoolSize);
+
+        /* The EXPLICIT pool, not the process-published one (#3016): this asserts the derivation, and a
+           derivation asserted against whatever another test class last published is asserting less. */
+        var widest = ViewerCommandDeadlines.FanOutReadSeconds(
+            ViewerCommandDeadlines.MeasuredFanOutWidth, ViewerSettings.ManagedMaxPoolSize);
 
         Assert.True(
             solo < 24,
@@ -1176,43 +1191,109 @@ public sealed class ViewerCommandTimeoutTests
             + "measured for ten concurrent 30-day reads on a store at production density. A ceiling under the "
             + "measurement it is supposed to bound fails every read in the widest fan-out on every attempt, "
             + "auto-refresh included — a deadline nothing can finish under is not a deadline");
+
+        /* The band has ONE measurement in it, at ten wide. A bring-your-own store with Npgsql's default
+           hundred-connection pool must not be handed ten times the allowance on the strength of that one
+           point — 700 s is not a deadline anybody has measured or would wait for. */
+        Assert.Equal(
+            widest,
+            ViewerCommandDeadlines.FanOutReadSeconds(
+                ViewerCommandDeadlines.MeasuredFanOutWidth, ViewerStorePool.NpgsqlDefaultMaxPoolSize));
+
+        Assert.True(
+            ViewerCommandDeadlines.MeasuredFanOutWidth <= ViewerSettings.ManagedMaxPoolSize,
+            $"the measured fan-out width {ViewerCommandDeadlines.MeasuredFanOutWidth} exceeds the managed pool "
+            + $"{ViewerSettings.ManagedMaxPoolSize}, so the shipped seat can no longer reach the width the "
+            + "per-lane allowance was divided out of — the allowance is then an extrapolation on the default "
+            + "install, not only on a BYO one");
     }
 
     /// <summary>
-    /// The fan-out ceiling can only ever grant MORE time than a solo read gets, and it stops growing where
-    /// the permits run out. The clamp is what lets the two unbounded per-server fan-outs
-    /// (<c>FinOpsTab.Loaders</c>'s inventory overlay, <c>MainWindow</c>'s overview cards) hand over a raw
-    /// fleet count instead of a hand-capped guess, so it is load-bearing rather than defensive.
+    /// The fan-out ceiling can only ever grant MORE time than a solo read gets, and it stops growing at the
+    /// smaller of two bounds: the permits this seat has, and the width the per-lane allowance was measured
+    /// at. Swept across POOL SIZES as well as widths (#3016) — the pool used to be a compile-time constant
+    /// and a sweep over widths alone could not tell a threaded pool size from a hardcoded one.
+    ///
+    /// <para>Three of the pool sizes carry a specific claim. At <c>ManagedMaxPoolSize</c> nothing about the
+    /// shipped seat may move. At <c>NpgsqlDefaultMaxPoolSize</c> — a bring-your-own string that names no
+    /// pool size — the answer must be the SAME as at ten, because the extra permits buy contention nobody
+    /// has priced. Below ten it must be strictly SMALLER, which is the half a hardcoded constant got wrong
+    /// in the expensive direction: a pool of three cannot produce ten-way contention, so a ten-lane
+    /// allowance there is 49 s of a stalled panel holding permits nothing else can have.</para>
     /// </summary>
     [Fact]
     public void TheFanOutDeadline_IsMonotonicAndClampedAtThePool()
     {
-        var pool = ViewerSettings.ManagedMaxPoolSize;
-        var previous = 0;
-
-        for (var width = -3; width <= pool * 4; width++)
+        var measured = ViewerCommandDeadlines.MeasuredFanOutWidth;
+        var pools = new[]
         {
-            var seconds = ViewerCommandDeadlines.FanOutReadSeconds(width);
+            1, 2, 3, ViewerSettings.ManagedMaxPoolSize, ViewerStorePool.NpgsqlDefaultMaxPoolSize, int.MaxValue,
+        };
 
-            Assert.True(
-                seconds >= ViewerCommandDeadlines.InteractiveReadSeconds,
-                $"width {width} yields {seconds}s, under the solo floor — a declared fan-out must never buy a "
-                + "read LESS time than the same read issued alone");
+        foreach (var pool in pools)
+        {
+            var bound = System.Math.Min(pool, measured);
+            var previous = 0;
 
-            Assert.True(seconds >= previous, $"width {width} yields {seconds}s, below width {width - 1}'s {previous}s");
+            for (var width = -3; width <= bound * 4; width++)
+            {
+                var seconds = ViewerCommandDeadlines.FanOutReadSeconds(width, pool);
 
-            previous = seconds;
+                Assert.True(
+                    seconds >= ViewerCommandDeadlines.InteractiveReadSeconds,
+                    $"pool {pool} width {width} yields {seconds}s, under the solo floor — a declared fan-out "
+                    + "must never buy a read LESS time than the same read issued alone");
+
+                Assert.True(
+                    seconds >= previous,
+                    $"pool {pool} width {width} yields {seconds}s, below width {width - 1}'s {previous}s");
+
+                Assert.True(
+                    seconds <= ViewerCommandDeadlines.FanOutLaneSeconds * measured,
+                    $"pool {pool} width {width} yields {seconds}s, above the {measured}-lane allowance the "
+                    + "concurrent band was measured at — every second past it is extrapolated from a single "
+                    + "data point");
+
+                previous = seconds;
+            }
+
+            Assert.Equal(
+                ViewerCommandDeadlines.FanOutReadSeconds(bound, pool),
+                ViewerCommandDeadlines.FanOutReadSeconds(bound * 4, pool));
         }
 
         Assert.Equal(
-            ViewerCommandDeadlines.FanOutReadSeconds(pool),
-            ViewerCommandDeadlines.FanOutReadSeconds(pool * 4));
+            ViewerCommandDeadlines.FanOutReadSeconds(measured, ViewerSettings.ManagedMaxPoolSize),
+            ViewerCommandDeadlines.FanOutReadSeconds(measured, ViewerStorePool.NpgsqlDefaultMaxPoolSize));
+
+        Assert.True(
+            ViewerCommandDeadlines.FanOutReadSeconds(measured, 3)
+            < ViewerCommandDeadlines.FanOutReadSeconds(measured, ViewerSettings.ManagedMaxPoolSize),
+            "a three-permit pool is priced the same as a ten-permit one, so the deadline is not reading the "
+            + "pool size at all — it is reading a constant that only describes the managed derivation");
+
+        /* The overload the 187 command sites actually reach must agree with the pure one at the pool this
+           process published; otherwise the derivation above is pinned on a path nothing calls. */
+        for (var width = -3; width <= measured * 4; width++)
+        {
+            Assert.Equal(
+                ViewerCommandDeadlines.FanOutReadSeconds(width, ViewerStorePool.MaxPoolSize),
+                ViewerCommandDeadlines.FanOutReadSeconds(width));
+        }
     }
 
     /// <summary>
     /// The ambient width itself: one when nobody declared a fan-out (so an unscoped read keeps exactly the
     /// solo ceiling), the declared value inside a scope, the enclosing value again after it, and the PRODUCT
     /// when scopes nest — because a read two scopes deep really does contend with both widths.
+    ///
+    /// <para>The clamp is asserted against <see cref="ViewerReadFanOut.MaxConcurrentReads"/> rather than
+    /// against <c>ViewerSettings.ManagedMaxPoolSize</c> (#3016). The two are the same number on the shipped
+    /// managed seat, so this reads as a rename here and is not one: the bound is now the smaller of the
+    /// permits this seat has and the width the allowance was measured at, and pinning the constant would
+    /// pass identically whether or not the pool is read at all. <see cref="ViewerReadFanOut.ConcurrentReadsFor"/>
+    /// is swept below at pool sizes this process is not configured for, which is where the difference
+    /// shows.</para>
     /// </summary>
     [Fact]
     public void TheFanOutWidth_DefaultsToOne_AndNestsByMultiplying()
@@ -1233,16 +1314,134 @@ public sealed class ViewerCommandTimeoutTests
 
         Assert.Equal(1, ViewerReadFanOut.CurrentWidth);
 
-        /* A count from a runtime collection, which is what the two per-server fan-outs pass. */
-        using (ViewerReadFanOut.Of(ViewerSettings.ManagedMaxPoolSize * 7))
+        /* A count from a runtime collection — what the two per-server fan-outs pass through Lanes. */
+        using (ViewerReadFanOut.Of(ViewerReadFanOut.MaxConcurrentReads * 7))
         {
-            Assert.Equal(ViewerSettings.ManagedMaxPoolSize, ViewerReadFanOut.CurrentWidth);
+            Assert.Equal(ViewerReadFanOut.MaxConcurrentReads, ViewerReadFanOut.CurrentWidth);
         }
 
         using (ViewerReadFanOut.Of(0))
         {
             Assert.Equal(1, ViewerReadFanOut.CurrentWidth);
         }
+
+        /* The bound the clamp above uses, at pool sizes no test can publish without racing another class:
+           BELOW the measured width the pool wins, AT or ABOVE it the measurement does, and a nonsense pool
+           still leaves one lane rather than zero. */
+        Assert.Equal(
+            ViewerReadFanOut.ConcurrentReadsFor(ViewerStorePool.MaxPoolSize),
+            ViewerReadFanOut.MaxConcurrentReads);
+
+        Assert.Equal(1, ViewerReadFanOut.ConcurrentReadsFor(1));
+        Assert.Equal(3, ViewerReadFanOut.ConcurrentReadsFor(3));
+
+        Assert.Equal(
+            ViewerCommandDeadlines.MeasuredFanOutWidth,
+            ViewerReadFanOut.ConcurrentReadsFor(ViewerSettings.ManagedMaxPoolSize));
+
+        Assert.Equal(
+            ViewerCommandDeadlines.MeasuredFanOutWidth,
+            ViewerReadFanOut.ConcurrentReadsFor(ViewerStorePool.NpgsqlDefaultMaxPoolSize));
+
+        Assert.Equal(
+            ViewerCommandDeadlines.MeasuredFanOutWidth,
+            ViewerReadFanOut.ConcurrentReadsFor(int.MaxValue));
+
+        Assert.Equal(1, ViewerReadFanOut.ConcurrentReadsFor(0));
+        Assert.Equal(1, ViewerReadFanOut.ConcurrentReadsFor(-7));
+    }
+
+    /// <summary>
+    /// The effective pool size is read off the CONNECTION STRING, which is the fact both the deadline and
+    /// the concurrency bound were missing (#3016). <c>ManagedMaxPoolSize</c> is applied to exactly one of
+    /// the two strings the viewer can be handed — the managed derivation — and a bring-your-own
+    /// <c>postgres.connectionString</c> is used verbatim.
+    ///
+    /// <para><b>The hundred is Npgsql's, measured off its own builder at the pinned version rather than
+    /// quoted from its documentation</b>, and asserted here so a version bump that moves the default fails
+    /// a build instead of silently changing what a BYO store is assumed to have. The fallbacks go to the
+    /// managed constant rather than to the hundred: a string this cannot read is a string
+    /// <c>NpgsqlDataSource.Create</c> will reject, and the operator needs that error rather than a second
+    /// one invented by a timeout calculation.</para>
+    /// </summary>
+    [Fact]
+    public void TheEffectivePoolSize_ReadsTheStringNotTheManagedConstant()
+    {
+        Assert.Equal(
+            ViewerStorePool.NpgsqlDefaultMaxPoolSize,
+            ViewerStorePool.MaxPoolSizeOf("Host=127.0.0.1;Port=5432;Database=darling;Username=admin"));
+
+        Assert.Equal(
+            7,
+            ViewerStorePool.MaxPoolSizeOf("Host=127.0.0.1;Database=darling;MaxPoolSize=7"));
+
+        Assert.Equal(
+            7,
+            ViewerStorePool.MaxPoolSizeOf("Host=127.0.0.1;Database=darling;Maximum Pool Size=7"));
+
+        Assert.Equal(
+            ViewerSettings.ManagedMaxPoolSize,
+            ViewerStorePool.MaxPoolSizeOf(
+                $"Host=127.0.0.1;Database=darling;MaxPoolSize={ViewerSettings.ManagedMaxPoolSize}"));
+
+        Assert.Equal(ViewerSettings.ManagedMaxPoolSize, ViewerStorePool.MaxPoolSizeOf(null));
+        Assert.Equal(ViewerSettings.ManagedMaxPoolSize, ViewerStorePool.MaxPoolSizeOf(""));
+        Assert.Equal(ViewerSettings.ManagedMaxPoolSize, ViewerStorePool.MaxPoolSizeOf("   "));
+        Assert.Equal(
+            ViewerSettings.ManagedMaxPoolSize,
+            ViewerStorePool.MaxPoolSizeOf("this is not a connection string at all"));
+
+        Assert.True(
+            ViewerStorePool.NpgsqlDefaultMaxPoolSize > ViewerSettings.ManagedMaxPoolSize,
+            $"Npgsql's default pool ({ViewerStorePool.NpgsqlDefaultMaxPoolSize}) is no longer larger than the "
+            + $"managed seat's ({ViewerSettings.ManagedMaxPoolSize}), so the BYO half of #3016 — a fan-out "
+            + "handed more permits than the deadline was sized for — no longer describes anything, and this "
+            + "family's reasoning needs re-reading rather than this number nudging");
+    }
+
+    /// <summary>
+    /// The pool size has to be PUBLISHED for either consumer to see it, and the publish is a wiring fact no
+    /// behavioural assertion in this class can reach: the value is process-wide, xunit runs test classes in
+    /// parallel, and this project has ninety other <c>new ViewerDataService(...)</c> sites in its live-store
+    /// suites — a test that published a value and asserted it back would be asserting against whichever
+    /// class wrote last. Parsed from source for the same reason <c>HostHeaderGuardTests</c> parses the
+    /// Kestrel hosts: the defect being guarded is an OMISSION, and a logic test passes on the broken build.
+    ///
+    /// <para>Pinned on the EFFECTIVE string, not the parameter. The connect-timeout preference rewrites the
+    /// string before the data source is built, and publishing the pre-rewrite text would read a different
+    /// string than Npgsql enforces — same class of mistake as the constant this replaces, one step
+    /// downstream.</para>
+    /// </summary>
+    [Fact]
+    public void TheDataService_PublishesTheEffectivePoolSizeItBuildsThePoolOn()
+    {
+        var path = Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
+
+        Assert.True(File.Exists(path), $"the data service source is not where this pin looks: {path}");
+
+        var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
+
+        var publish = code.IndexOf("ViewerStorePool.Publish(effectiveConnectionString)", System.StringComparison.Ordinal);
+        var create = code.IndexOf("NpgsqlDataSource.Create(effectiveConnectionString)", System.StringComparison.Ordinal);
+
+        Assert.True(
+            create >= 0,
+            "ViewerDataService no longer builds its data source from a local named effectiveConnectionString, so "
+            + "this pin is reading a shape the file has stopped using — re-anchor it on whatever the constructor "
+            + "now hands to NpgsqlDataSource.Create, do not delete it");
+
+        Assert.True(
+            publish >= 0,
+            "ViewerDataService does not publish its pool size to ViewerStorePool, so ViewerCommandDeadlines and "
+            + "ViewerReadFanOut are both back on the managed constant — which is only the pool size on a managed "
+            + "install (#3016). Call ViewerStorePool.Publish(effectiveConnectionString) in the constructor");
+
+        Assert.True(
+            publish < create,
+            "the pool size is published AFTER the data source is created. Nothing reads it in between today, so "
+            + "this is an ordering pin rather than a live defect — but a read issued during construction would "
+            + "see the previous seat's pool, and the two lines are one statement apart");
     }
 
     /// <summary>
@@ -1295,6 +1494,224 @@ public sealed class ViewerCommandTimeoutTests
             + "issued ALONE; a site spelled this way is not bounded by any fan-out it is called inside. Use "
             + "ViewerCommandDeadlines.CurrentInteractiveReadSeconds: "
             + string.Join(", ", offenders));
+    }
+
+    /// <summary>
+    /// The two live members read the PUBLISHED pool, not the managed constant — the substitution no
+    /// behavioural assertion in this suite can see (#3016).
+    ///
+    /// <para>The managed seat publishes ten and <c>ManagedMaxPoolSize</c> is ten, so swapping one for the
+    /// other in <c>FanOutReadSeconds(int)</c> or <c>MaxConcurrentReads</c> changes no value this process
+    /// can produce: every arithmetic pin in this class would stay green over code that had stopped reading
+    /// the pool at all. The alternative — publishing a different pool and asserting it back — would put a
+    /// process-wide value under a class that xunit runs in parallel with ninety live-store
+    /// <c>new ViewerDataService(...)</c> sites, each of which publishes its own. So the wiring is read from
+    /// source, and the ONE legitimate mention of the constant is named exactly: the
+    /// <see cref="ViewerCommandDeadlines.MeasuredFanOutWidth"/> initializer, which is what deliberately
+    /// ties the measured width to the managed pool until a sweep unties them.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeadlineFamily_ReadsThePublishedPool_NotTheManagedConstant()
+    {
+        var viewer = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer");
+
+        var deadlines = CSharpSourceWalker.StripCommentsAndStrings(
+            File.ReadAllText(Path.Combine(viewer, "ViewerCommandDeadlines.cs")));
+
+        var fanOut = CSharpSourceWalker.StripCommentsAndStrings(
+            File.ReadAllText(Path.Combine(viewer, "ViewerReadFanOut.cs")));
+
+        Assert.Contains("ViewerStorePool.MaxPoolSize", deadlines, System.StringComparison.Ordinal);
+        Assert.Contains("ViewerStorePool.MaxPoolSize", fanOut, System.StringComparison.Ordinal);
+
+        Assert.Contains(
+            "MeasuredFanOutWidth = ViewerSettings.ManagedMaxPoolSize",
+            deadlines,
+            System.StringComparison.Ordinal);
+
+        var inDeadlines = deadlines.Split("ManagedMaxPoolSize").Length - 1;
+
+        Assert.True(
+            inDeadlines == 1,
+            $"ViewerCommandDeadlines mentions ManagedMaxPoolSize {inDeadlines} time(s) in code. Exactly one is "
+            + "correct — the MeasuredFanOutWidth initializer. A second is a pool size being read from the "
+            + "constant again, which is only the pool size on a managed install (#3016)");
+
+        var inFanOut = fanOut.Split("ManagedMaxPoolSize").Length - 1;
+
+        Assert.True(
+            inFanOut == 0,
+            $"ViewerReadFanOut mentions ManagedMaxPoolSize {inFanOut} time(s) in code. Its bound is the smaller "
+            + "of the published pool and ViewerCommandDeadlines.MeasuredFanOutWidth; the constant reaches it "
+            + "only through that name");
+    }
+
+    /// <summary>
+    /// The lane split every fleet-wide fan-out goes through: a partition of the input — every item once,
+    /// in order — into no more lanes than the seat has permits (#3016).
+    ///
+    /// <para><b>Contiguity is asserted, not incidental.</b> Both callers concatenate the lanes' results in
+    /// lane order and rely on that reproducing the input order: <c>MainWindow</c>'s overview re-sorts
+    /// afterwards, but the FinOps inventory overlay mutates the rows it was handed and hands the SAME list
+    /// to its filter manager, so a split that reordered anything would reorder the grid. A stride split
+    /// would satisfy every other assertion here and break that one, which is why it is spelled out.</para>
+    /// </summary>
+    [Fact]
+    public void TheLaneSplit_PartitionsInOrder_AndNeverExceedsThePermits()
+    {
+        var cap = ViewerReadFanOut.MaxConcurrentReads;
+
+        Assert.True(cap >= 1, $"the concurrency bound is {cap}; a fan-out cannot have fewer than one lane");
+        Assert.Empty(ViewerReadFanOut.Lanes(System.Array.Empty<int>()));
+
+        for (var count = 1; count <= cap * 4 + 3; count++)
+        {
+            var items = Enumerable.Range(0, count).ToArray();
+            var lanes = ViewerReadFanOut.Lanes(items);
+
+            Assert.True(
+                lanes.Count <= cap,
+                $"{count} items split into {lanes.Count} lanes, above the {cap} the pool can serve — the reads "
+                + "past the permits are not contenders, they are queued and failing");
+
+            Assert.Equal(System.Math.Min(count, cap), lanes.Count);
+
+            /* A partition: every item exactly once, and in input order when the lanes are concatenated. */
+            Assert.Equal(items, lanes.SelectMany(lane => lane).ToArray());
+
+            var shortest = lanes.Min(lane => lane.Count);
+            var longest = lanes.Max(lane => lane.Count);
+
+            Assert.True(
+                longest - shortest <= 1,
+                $"{count} items split into lanes of {shortest}..{longest} — an unbalanced split makes the whole "
+                + "fan-out as slow as its longest lane for no reason");
+        }
+    }
+
+    /// <summary>
+    /// No fan-out declares a width above what the seat can actually run concurrently (#3016). Two shapes,
+    /// and the pin has to reach both: a LITERAL width is checked against
+    /// <see cref="ViewerCommandDeadlines.MeasuredFanOutWidth"/>, and a RUNTIME width is required to be the
+    /// lane count of a <c>ViewerReadFanOut.Lanes</c> split in the same member.
+    ///
+    /// <para><b>The runtime half is the one that matters and the reason this is not a value assertion.</b>
+    /// The two per-server fan-outs used to pass their raw fleet count, on the stated reasoning that the
+    /// clamp inside <c>ViewerReadFanOut</c> made a hand-capped guess unnecessary. The clamp did bound the
+    /// DEADLINE, and nothing bounded the READS — so a fleet of forty-two started forty-two of them against
+    /// ten permits and thirty-two failed on <c>ConnectionTimeoutSeconds</c> without reaching a deadline at
+    /// all. A clamp cannot fix that from inside; only the site can, by not starting them. Re-spell either
+    /// site as <c>Of(servers.Count)</c> and this goes red.</para>
+    ///
+    /// <para>Both populations carry a floor, because a scan that matched neither shape would otherwise
+    /// report a clean sweep over nothing — this project has twenty-one literal declarations and two runtime
+    /// ones.</para>
+    /// </summary>
+    [Fact]
+    public void NoDeclaredFanOutWidth_OutrunsThePermitsOrTheMeasurement()
+    {
+        var offenders = new List<string>();
+        var literals = 0;
+        var derived = 0;
+
+        foreach (var path in ViewerSources())
+        {
+            var text = File.ReadAllText(path);
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+            var bodies = MemberBodies(code);
+
+            var splits = s_laneSplit.Matches(code)
+                .Select(m => (m.Index, Name: m.Groups["name"].Value))
+                .ToArray();
+
+            foreach (Match declaration in s_fanOutDeclaration.Matches(code))
+            {
+                var openParen = declaration.Index + declaration.Length - 1;
+                var argument = ParenthesisedArgument(code, openParen);
+                var where = $"{Path.GetFileName(path)}:{Line(text, declaration.Index)}";
+
+                if (argument is null)
+                {
+                    offenders.Add($"{where} (unbalanced parentheses)");
+                    continue;
+                }
+
+                var trimmed = argument.Trim();
+
+                if (int.TryParse(trimmed, System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out var width))
+                {
+                    literals++;
+
+                    if (width < 1 || width > ViewerCommandDeadlines.MeasuredFanOutWidth)
+                    {
+                        offenders.Add($"{where} (literal width {width})");
+                    }
+
+                    continue;
+                }
+
+                derived++;
+
+                var owner = Owner(bodies, declaration.Index);
+                var fromSplit = splits.Any(split =>
+                    trimmed == split.Name + ".Count"
+                    && split.Index < declaration.Index
+                    && owner is { } body
+                    && Owner(bodies, split.Index) is { } splitOwner
+                    && splitOwner.Start == body.Start);
+
+                if (!fromSplit)
+                {
+                    offenders.Add($"{where} (runtime width `{trimmed}` is not a Lanes split's lane count)");
+                }
+            }
+        }
+
+        Assert.True(
+            literals >= 15,
+            $"only {literals} literal fan-out width(s) were read — the argument scan is not seeing the project, "
+            + "so its clean result is about nothing");
+
+        Assert.True(
+            derived >= 2,
+            $"only {derived} runtime fan-out width(s) were read. The two per-server fan-outs are the whole "
+            + "reason this pin exists; a scan that no longer sees them cannot report on them");
+
+        Assert.True(
+            offenders.Count == 0,
+            $"{offenders.Count} fan-out(s) declare a width the seat cannot run concurrently. A literal must sit "
+            + $"within 1..{ViewerCommandDeadlines.MeasuredFanOutWidth}; a runtime count must be the lane count of "
+            + "a ViewerReadFanOut.Lanes split in the same member, so the reads started never exceed the permits: "
+            + string.Join(", ", offenders));
+    }
+
+    /// <summary>
+    /// The text between the <c>(</c> at <paramref name="openParen"/> and its match, or null when the
+    /// parentheses do not balance. Counts depth so a nested call in the argument cannot end it early.
+    /// </summary>
+    private static string? ParenthesisedArgument(string code, int openParen)
+    {
+        var depth = 0;
+
+        for (var i = openParen; i < code.Length; i++)
+        {
+            if (code[i] == '(')
+            {
+                depth++;
+            }
+            else if (code[i] == ')')
+            {
+                depth--;
+
+                if (depth == 0)
+                {
+                    return code[(openParen + 1)..i];
+                }
+            }
+        }
+
+        return null;
     }
 
     private static IEnumerable<string> ViewerSources()

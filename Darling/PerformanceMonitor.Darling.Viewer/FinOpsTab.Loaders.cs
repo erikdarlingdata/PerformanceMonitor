@@ -564,22 +564,28 @@ public partial class FinOpsTab
         /* Overlay each server's collected metrics + compute the health score (mirrors Lite's
            LoadServerInventoryAsync minus the live query). memScore/storScore use Lite's inventory-path
            defaults (buffer-pool ratio / file-level free space aren't in the inventory read). */
-        /* Width is the inventory size, passed raw: the clamp to the pool ceiling belongs to
-           ViewerReadFanOut, and a hand-capped guess here would be the copied-number mistake again. */
-        using var readFanOut = ViewerReadFanOut.Of(servers.Count);
+        /* #3016: the inventory size is not a contention count once it passes the pool — the reads past the
+           permits are queued in Npgsql and fail there on ConnectionTimeoutSeconds without ever reaching a
+           command deadline. Split into pool-many lanes and declare the lane count, so the width declared is
+           the concurrency this really has. */
+        var lanes = ViewerReadFanOut.Lanes(servers);
+        using var readFanOut = ViewerReadFanOut.Of(lanes.Count);
 
-        await Task.WhenAll(servers.Select(async item =>
+        await Task.WhenAll(lanes.Select(async lane =>
         {
-            var (avgCpu, storageGb, idleDbs, status) = await _dataService.GetServerMetricsAsync(item.ServerId);
-            if (avgCpu.HasValue) item.AvgCpuPct = avgCpu;
-            if (storageGb.HasValue) item.StorageTotalGb = storageGb;
-            if (idleDbs.HasValue) item.IdleDbCount = idleDbs;
-            if (status != null) item.ProvisioningStatus = status;
+            foreach (var item in lane)
+            {
+                var (avgCpu, storageGb, idleDbs, status) = await _dataService.GetServerMetricsAsync(item.ServerId);
+                if (avgCpu.HasValue) item.AvgCpuPct = avgCpu;
+                if (storageGb.HasValue) item.StorageTotalGb = storageGb;
+                if (idleDbs.HasValue) item.IdleDbCount = idleDbs;
+                if (status != null) item.ProvisioningStatus = status;
 
-            var cpuScore = FinOpsHealthCalculator.CpuScore(item.AvgCpuPct ?? 0m);
-            var memScore = 80;
-            var storScore = FinOpsHealthCalculator.StorageScore(50);
-            item.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
+                var cpuScore = FinOpsHealthCalculator.CpuScore(item.AvgCpuPct ?? 0m);
+                var memScore = 80;
+                var storScore = FinOpsHealthCalculator.StorageScore(50);
+                item.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
+            }
         }));
 
         _finopsServerInventoryFilterMgr!.UpdateData(servers);

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -36,17 +37,19 @@ namespace PerformanceMonitor.Darling.Viewer;
 ///
 /// <para><b>Nesting multiplies, it does not take the larger.</b> A read two scopes deep contends with the
 /// product of both widths, so that is what it is told. The product is clamped at
-/// <see cref="ViewerSettings.ManagedMaxPoolSize"/> going in, because a pool of ten cannot serve an
-/// eleventh read concurrently however many were asked for — which is also what makes the two unbounded
-/// per-server fan-outs (<c>FinOpsTab.Loaders.cs</c>'s inventory overlay and <c>MainWindow</c>'s overview
-/// cards) safe to declare with their raw fleet count rather than a hand-capped guess.</para>
+/// <see cref="MaxConcurrentReads"/> going in, because a pool cannot serve one more read concurrently than
+/// it has permits however many were asked for.</para>
 ///
-/// <para><b>What this does NOT do.</b> It does not throttle anything. The reads still all start at once and
-/// still all take a permit; this only stops the deadline cutting reads that the store was always going to
-/// take that long to serve. Bounding the fan-out itself is the better fix and is tracked on #3004 — it
-/// needs a concurrency sweep (per-read duration at width 1, 2, 4, 6, 8, 10) that does not exist yet,
-/// because the two data points available extrapolate to a cap of about two, and serializing every panel in
-/// the viewer on a two-point extrapolation is not a trade to make blind.</para>
+/// <para><b>What this does NOT do, and the one thing it now does</b> (#3016). It is still not a throttle:
+/// the reads inside a declared scope all start at once and all take a permit, and the width only stops the
+/// deadline cutting reads the store was always going to take that long to serve. What changed is that the
+/// two per-server fan-outs no longer hand over a raw fleet count — a count above
+/// <see cref="MaxConcurrentReads"/> was never a contention count, it was that many contenders plus a queue
+/// of reads that could only wait <c>ConnectionTimeoutSeconds</c> for a permit and fail. They split their
+/// work into <see cref="Lanes{T}"/> instead, so the width they declare is the concurrency they really
+/// have. A cap at the OPTIMUM concurrency — the two-point extrapolation #3004 declined to serialize every
+/// panel on — is still not attempted and still needs that sweep; this caps at the permit count, which is a
+/// resource fact rather than a performance one.</para>
 /// </summary>
 public static class ViewerReadFanOut
 {
@@ -55,6 +58,79 @@ public static class ViewerReadFanOut
     /// has touched — means "nobody declared a fan-out", which <see cref="CurrentWidth"/> reports as one.
     /// </summary>
     private static readonly AsyncLocal<int> s_width = new();
+
+    /// <summary>
+    /// The most reads this project will run against the store at once: the smaller of the permits this
+    /// seat actually has (<see cref="ViewerStorePool.MaxPoolSize"/>) and the width the per-lane contention
+    /// allowance was measured at (<see cref="ViewerCommandDeadlines.MeasuredFanOutWidth"/>).
+    ///
+    /// <para><b>Both bounds are load-bearing and neither implies the other</b> (#3016). Past the PERMITS a
+    /// read is not a contender at all — it is queued in Npgsql waiting <c>ConnectionTimeoutSeconds</c> for
+    /// a slot, and it fails there without ever reaching a command deadline. Past the MEASURED WIDTH the
+    /// deadline it would be handed is an extrapolation of a single ten-wide batch, which at Npgsql's
+    /// default hundred-connection pool would price a read at 700 s. On the shipped managed seat the two
+    /// are the same ten, so this changes nothing there; it is a bring-your-own store, where the operator
+    /// owns the pool size, that the old single constant described wrongly in both
+    /// directions.</para>
+    /// </summary>
+    public static int MaxConcurrentReads => ConcurrentReadsFor(ViewerStorePool.MaxPoolSize);
+
+    /// <summary>
+    /// <see cref="MaxConcurrentReads"/> against an EXPLICIT pool size — the pure form, so the bound can be
+    /// pinned at pool sizes this process is not configured for.
+    /// </summary>
+    public static int ConcurrentReadsFor(int maxPoolSize) =>
+        Math.Clamp(maxPoolSize, 1, ViewerCommandDeadlines.MeasuredFanOutWidth);
+
+    /// <summary>
+    /// Splits <paramref name="items"/> into at most <see cref="MaxConcurrentReads"/> lanes, so a caller
+    /// with fleet-many reads to issue can run one task per lane and walk its own lane sequentially — a
+    /// fan-out whose width is bounded by the pool instead of by the fleet (#3016).
+    ///
+    /// <para>Lanes are CONTIGUOUS and balanced to within one item. Contiguous because concatenating the
+    /// lanes' results in lane order then reproduces the input order, which is what lets a caller drop the
+    /// per-item ordering it had before; balanced because a lane holding two items while another holds
+    /// eight would make the fan-out as slow as the long lane for no reason.</para>
+    ///
+    /// <para>Returns no lanes for an empty input, so a caller's <c>Task.WhenAll</c> over the lanes is a
+    /// no-op rather than a lane that reads nothing. An empty result also means
+    /// <see cref="Of(int)"/> is handed zero, which reports a width of one — the honest answer for a
+    /// fan-out with no reads in it.</para>
+    /// </summary>
+    public static IReadOnlyList<IReadOnlyList<T>> Lanes<T>(IReadOnlyList<T> items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+
+        var count = items.Count;
+        if (count == 0)
+        {
+            return Array.Empty<IReadOnlyList<T>>();
+        }
+
+        var laneCount = Math.Min(count, MaxConcurrentReads);
+        var lanes = new List<IReadOnlyList<T>>(laneCount);
+
+        /* Balanced contiguous split: the first (count % laneCount) lanes take one extra item, so no lane
+           is ever more than one item longer than another and every item lands in exactly one lane. */
+        var quotient = count / laneCount;
+        var remainder = count % laneCount;
+        var next = 0;
+
+        for (var lane = 0; lane < laneCount; lane++)
+        {
+            var size = quotient + (lane < remainder ? 1 : 0);
+            var slice = new List<T>(size);
+
+            for (var i = 0; i < size; i++)
+            {
+                slice.Add(items[next++]);
+            }
+
+            lanes.Add(slice);
+        }
+
+        return lanes;
+    }
 
     /// <summary>
     /// How many concurrent reads the read being constructed right now is one of. One when no enclosing
@@ -76,10 +152,12 @@ public static class ViewerReadFanOut
     /// so each one's deadline has to cover contention with the other
     /// <paramref name="concurrentReads"/> - 1 of them.
     ///
-    /// <para>Pass the ACTUAL width, including a runtime count for a fan-out whose width is the fleet size;
-    /// the clamp to <see cref="ViewerSettings.ManagedMaxPoolSize"/> is this type's job, not the call
-    /// site's. Declaring a width the site does not really have is the one way to misuse this — it buys a
-    /// longer deadline for a read that has no contention to justify it.</para>
+    /// <para>Pass the ACTUAL width; the clamp to <see cref="MaxConcurrentReads"/> is this type's job, not
+    /// the call site's. Declaring a width the site does not really have is the one way to misuse this — it
+    /// buys a longer deadline for a read that has no contention to justify it, and a raw fleet count is
+    /// that misuse rather than a safe over-declaration, because the reads past the permits are not
+    /// contending, they are queued and failing (#3016). A fan-out whose work is fleet-many splits through
+    /// <see cref="Lanes{T}"/> first and declares the lane count.</para>
     /// </summary>
     public static Scope Of(int concurrentReads) => new(concurrentReads);
 
@@ -95,12 +173,14 @@ public static class ViewerReadFanOut
         {
             _restore = s_width.Value;
 
-            /* Both factors are clamped into 1..pool BEFORE the multiply, so the product cannot overflow
-               and cannot be dragged below 1 by a caller passing 0 or a negative count. */
-            var declared = Math.Clamp(concurrentReads, 1, ViewerSettings.ManagedMaxPoolSize);
-            var enclosing = Math.Clamp(_restore, 1, ViewerSettings.ManagedMaxPoolSize);
+            /* Both factors are clamped into 1..cap BEFORE the multiply, so the product cannot overflow
+               and cannot be dragged below 1 by a caller passing 0 or a negative count. The cap is read
+               once so a re-publish between the two reads cannot produce a product above either value. */
+            var cap = MaxConcurrentReads;
+            var declared = Math.Clamp(concurrentReads, 1, cap);
+            var enclosing = Math.Clamp(_restore, 1, cap);
 
-            s_width.Value = Math.Clamp(declared * enclosing, 1, ViewerSettings.ManagedMaxPoolSize);
+            s_width.Value = Math.Clamp(declared * enclosing, 1, cap);
         }
 
         /// <summary>

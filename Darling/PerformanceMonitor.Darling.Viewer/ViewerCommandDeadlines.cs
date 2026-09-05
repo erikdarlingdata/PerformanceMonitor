@@ -68,12 +68,20 @@ public static class ViewerCommandDeadlines
     /// argument rather than a budget one. Nothing encloses these reads — no <c>CancelAfter</c>, no
     /// <c>SemaphoreSlim</c>, no <c>WaitAsync</c>, and no request timeout, because the viewer is a WPF
     /// <c>WinExe</c> and hosts no web endpoint — so this deadline IS the budget, the same finding
-    /// #2882 and #2888 both made, and the same reason both erred short. What it competes for is the
-    /// ten-connection pool (<see cref="ViewerSettings.ManagedMaxPoolSize"/>), and while permits are held
-    /// the sidebar freshness dots, the alert poll and every other panel get nothing — read eleven waits
-    /// <c>ConnectionTimeoutSeconds</c> (default 5) for a slot and then throws a CONNECT error, which
-    /// misattributes a slow store to the network. Fifteen seconds is half the inherited 30 s, which
-    /// halves that worst-case hold.</para>
+    /// #2882 and #2888 both made, and the same reason both erred short. What it competes for is the store
+    /// connection pool (<see cref="ViewerStorePool.MaxPoolSize"/> — ten on a managed seat, the operator's
+    /// value on a bring-your-own one), and while permits are held the sidebar freshness dots, the alert
+    /// poll and every other panel get nothing. Fifteen seconds is half the inherited 30 s, which halves
+    /// that worst-case hold.</para>
+    ///
+    /// <para><b>A read that cannot get a permit never reaches this deadline, so it is not the thing that
+    /// bounds one</b> (#3016). It waits <c>ConnectionTimeoutSeconds</c> (default 5) for a slot and then
+    /// fails with Npgsql's own pool-exhaustion message, which names the exhausted pool and both knobs and
+    /// does NOT read as a network fault — measured against Npgsql 10.0.3, correcting the earlier claim
+    /// here that it misattributed a slow store to the network. What it does misattribute is nothing: on
+    /// the fleet overview those failures are caught per server and the card is simply absent, so a fleet
+    /// wider than the pool rendered short with no error at all. Both per-server fan-outs are bounded at
+    /// the permit count since #3016, so the state is no longer reachable from a shipped panel.</para>
     ///
     /// <para><b>This value bounds a read issued ALONE, and only that</b> (#3004). The permit argument
     /// above says a concurrent fan-out is the state worth protecting the pool from; it does not say a
@@ -120,23 +128,56 @@ public static class ViewerCommandDeadlines
     public const int FanOutLaneSeconds = 7;
 
     /// <summary>
+    /// The width <see cref="FanOutLaneSeconds"/> was measured at, and so the widest fan-out this family
+    /// can price from data rather than from extrapolation.
+    ///
+    /// <para>It equals <see cref="ViewerSettings.ManagedMaxPoolSize"/> because ten permits are what
+    /// BOUNDED #2901's rig — ten concurrent reads was the widest batch that store would serve at once —
+    /// not because a resource ceiling and a measurement width are the same kind of fact. They are two
+    /// facts that share a number today, named apart so a sweep at a different width can move one without
+    /// dragging the other (#3016). The sweep #3004 asked for (per-read duration at width 1, 2, 4, 6, 8,
+    /// 10) is what would let this exceed ten; until it exists, this is the honest edge of the
+    /// data.</para>
+    /// </summary>
+    public const int MeasuredFanOutWidth = ViewerSettings.ManagedMaxPoolSize;
+
+    /// <summary>
     /// The deadline for a read issued as one of <paramref name="concurrentReads"/> reads running
     /// together — the ceiling that has to cover contention with its siblings rather than a solo read's.
     ///
-    /// <para>Clamped at <see cref="ViewerSettings.ManagedMaxPoolSize"/> because contention stops growing
-    /// where the permits run out: an eleventh concurrent read against a ten-connection pool is not an
-    /// eleventh contender, it is a read waiting on <c>ConnectionTimeoutSeconds</c> for a slot. That is
-    /// what lets the two unbounded per-server fan-outs declare their raw fleet count and still get a
-    /// bounded answer.</para>
+    /// <para>Priced against the pool this seat actually has
+    /// (<see cref="ViewerStorePool.MaxPoolSize"/>) rather than the managed constant it used to read
+    /// (#3016). The constant is applied only to the managed derivation, so on a bring-your-own store it
+    /// was not the pool size but a guess about it.</para>
     ///
     /// <para>Floored at <see cref="InteractiveReadSeconds"/> so this can only ever grant a read MORE time
     /// than a solo read gets, never less. A width the pool serves without contention worth pricing lands
     /// on the floor and is indistinguishable from an unscoped read, which is the correct outcome: two
     /// concurrent reads are not the state the concurrent measurement describes.</para>
     /// </summary>
-    public static int FanOutReadSeconds(int concurrentReads)
+    public static int FanOutReadSeconds(int concurrentReads) =>
+        FanOutReadSeconds(concurrentReads, ViewerStorePool.MaxPoolSize);
+
+    /// <summary>
+    /// The same ceiling against an EXPLICIT pool size — the pure form, so the derivation can be pinned at
+    /// pool sizes this machine is not configured for rather than only at whatever the process published.
+    ///
+    /// <para><b>Two ceilings on the lane count, and the smaller wins, because they answer different
+    /// questions.</b> PERMITS (<paramref name="maxPoolSize"/>): contention stops growing where the slots
+    /// run out — an eleventh concurrent read against a ten-connection pool is not an eleventh contender,
+    /// it is a read waiting on <c>ConnectionTimeoutSeconds</c> for a slot, and a deadline cannot help it.
+    /// MEASUREMENT (<see cref="MeasuredFanOutWidth"/>): <see cref="FanOutLaneSeconds"/> is one division of
+    /// one measured batch, taken at ten wide, so a wider pool multiplies an allowance nothing has measured
+    /// — 100 permits would read as 700 s, a number no panel and no user has any relationship with. Holding
+    /// the lane count to the measured width keeps every value this returns inside the band it was derived
+    /// from, and <c>ViewerReadFanOut</c> holds the CONCURRENCY to the same bound so the two agree
+    /// (#3016).</para>
+    /// </summary>
+    public static int FanOutReadSeconds(int concurrentReads, int maxPoolSize)
     {
-        var lanes = Math.Clamp(concurrentReads, 1, ViewerSettings.ManagedMaxPoolSize);
+        var permits = Math.Max(1, maxPoolSize);
+        var priced = Math.Min(permits, MeasuredFanOutWidth);
+        var lanes = Math.Clamp(concurrentReads, 1, priced);
 
         return Math.Max(InteractiveReadSeconds, FanOutLaneSeconds * lanes);
     }
