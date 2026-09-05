@@ -164,14 +164,23 @@ public sealed class McpServerLocalOffsetTests : IClassFixture<SharedDuckDbFixtur
     }
 
     /// <summary>
-    /// A server whose offset the store does not hold is REFUSED, not answered against a guess. Both
-    /// candidate guesses (UTC, or the desktop static) would produce an answer indistinguishable from a
-    /// correct one, which is the failure the threading exists to remove — the same reasoning #2495 applied
-    /// to an unusable <c>as_of</c>. Rows ARE seeded for this server, so the refusal is provably about the
-    /// missing offset and not about missing data.
+    /// A server whose offset the store does not hold falls back to a FIXED POINT (UTC), never to the desktop
+    /// static. The distinction is the whole seam: 0 gives two identical MCP calls the same window whatever
+    /// the desktop is doing, while the static gives them whichever server a tab last selected.
+    ///
+    /// <para><b>Why a fallback rather than a refusal here.</b> A refusal would fire on the state every
+    /// server passes through on its first cycle — <c>server_properties</c> is an on-load collector — and it
+    /// would fire ahead of the read, pre-empting the two answers that outrank any window:
+    /// <c>not_collected</c> for an engine that cannot run the collector at all, and the read's own
+    /// <c>empty</c> when nothing has been collected. <c>EngineCapabilityMissTests</c> pins both and names
+    /// the failure mode: rendering "we do not know" as "this will never work" is the same defect wearing the
+    /// fix's clothes.</para>
+    ///
+    /// <para>Seeded AT UTC with the static parked on UTC+5:30, so the two candidate fallbacks disagree by
+    /// 5.5 hours and the row is only found by the right one.</para>
     /// </summary>
     [Fact]
-    public async Task AServerWithNoCollectedOffset_IsRefused_RatherThanWindowedOnAGuess()
+    public async Task AServerWithNoCollectedOffset_FallsBackToUtc_NotToTheDesktopStatic()
     {
         var savedOffset = ServerTimeHelper.UtcOffsetMinutes;
         try
@@ -179,24 +188,40 @@ public sealed class McpServerLocalOffsetTests : IClassFixture<SharedDuckDbFixtur
             ServerTimeHelper.UtcOffsetMinutes = IndiaOffset;
 
             var eventUtc = Truncate(DateTime.UtcNow.AddMinutes(-20));
-            await SeedCpuAsync(_noOffsetId, "UncollectedSrv", eventUtc.AddMinutes(IndiaOffset), IndiaCpu);
-            await SeedDefaultTraceAsync(_noOffsetId, "UncollectedSrv", eventUtc.AddMinutes(IndiaOffset), IndiaEventText);
+            await SeedCpuAsync(_noOffsetId, "UncollectedSrv", eventUtc, IndiaCpu);
+            await SeedDefaultTraceAsync(_noOffsetId, "UncollectedSrv", eventUtc, IndiaEventText);
 
             Assert.Null(await _dataService.GetServerUtcOffsetMinutesAsync(_noOffsetId));
 
             var cpu = await McpCpuTools.GetCpuUtilization(_dataService, _serverManager, "UncollectedSrv");
-            using (var doc = JsonDocument.Parse(cpu))
-            {
-                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
-                Assert.False(doc.RootElement.TryGetProperty("samples", out _));
-            }
+            Assert.Equal(new[] { IndiaCpu }, SqlCpuIn(cpu));
 
             var events = await McpDefaultTraceTools.GetDefaultTraceEvents(_dataService, _serverManager, "UncollectedSrv");
-            using (var doc = JsonDocument.Parse(events))
-            {
-                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
-                Assert.False(doc.RootElement.TryGetProperty("events", out _));
-            }
+            Assert.Equal(new[] { IndiaEventText }, EventTextIn(events));
+        }
+        finally
+        {
+            ServerTimeHelper.UtcOffsetMinutes = savedOffset;
+        }
+    }
+
+    /// <summary>
+    /// The fallback must not pre-empt the miss explanations that outrank it. A server with a registry row,
+    /// no collected offset and no server-local rows still reaches the read's own <c>empty</c> — the state
+    /// every server is in before its first collection completes. <c>EngineCapabilityMissTests</c> owns the
+    /// engine-edition half of this contract; this asserts the offset seam does not step in front of it.
+    /// </summary>
+    [Fact]
+    public async Task AServerWithNeitherOffsetNorRows_StillReachesTheReadsOwnMiss()
+    {
+        var savedOffset = ServerTimeHelper.UtcOffsetMinutes;
+        try
+        {
+            ServerTimeHelper.UtcOffsetMinutes = IndiaOffset;
+
+            var events = await McpDefaultTraceTools.GetDefaultTraceEvents(_dataService, _serverManager, "UncollectedSrv");
+            using var doc = JsonDocument.Parse(events);
+            Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
         }
         finally
         {
@@ -206,8 +231,8 @@ public sealed class McpServerLocalOffsetTests : IClassFixture<SharedDuckDbFixtur
 
     /// <summary>
     /// A NULL <c>utc_offset_minutes</c> from a pre-v42 snapshot must not mask a newer row that has one.
-    /// Ordering by <c>collection_time DESC</c> alone would take the NULL and refuse a server the store can
-    /// in fact place.
+    /// Ordering by <c>collection_time DESC</c> alone would take the NULL and fall back to UTC for a server
+    /// the store can in fact place — a skewed window built from data that was right there.
     /// </summary>
     [Fact]
     public async Task ANullOffsetOnANewerSnapshot_DoesNotMaskTheOffsetTheStoreHas()

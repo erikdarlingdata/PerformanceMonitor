@@ -27,9 +27,7 @@ public sealed class McpCpuTools
 
             /* sample_time is THIS server's local wall clock (#1262), so the window needs THIS server's
                offset — not the desktop tab's. See McpServerLocalWindow. */
-            var (utcOffsetMinutes, offsetError) =
-                await McpServerLocalWindow.OffsetOrErrorAsync(dataService, resolved.ServerId, resolved.ServerName);
-            if (offsetError != null) return offsetError;
+            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
 
             var rows = await dataService.GetCpuUtilizationAsync(
                 resolved.ServerId, hours_back, asOfUtc: windowEnd, utcOffsetMinutes: utcOffsetMinutes);

@@ -6,7 +6,6 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -28,31 +27,29 @@ namespace PerformanceMonitorLite.Mcp;
 internal static class McpServerLocalWindow
 {
     /// <summary>
-    /// This server's own offset, or a ready-to-return status when the store does not hold one. Mirrors
-    /// <see cref="ServerResolver.ResolveOrError"/>'s shape: <c>var (offset, error) = await ...; if (error
-    /// != null) return error;</c>. <c>OffsetMinutes</c> is not meaningful whenever <c>Error</c> is set.
+    /// This server's collected offset, or 0 when the store holds none.
     ///
-    /// <para><b>Why a status and not a fallback.</b> The two candidate fallbacks — 0, or the desktop
-    /// static — are both guesses about a real server's clock, and a guess here produces an answer that
-    /// cannot be told apart from a correct one. That is the same reasoning that made #2495 refuse an
-    /// unusable <c>as_of</c> instead of quietly answering as of now. <c>unavailable</c> rather than
-    /// <c>not_collected</c>: the offset IS collected on this engine — <c>server_properties</c> is enabled by
-    /// default and writes it on load — so the honest reading is "supported here, not retrievable yet", and
-    /// the message names the collector so an operator has somewhere to go.</para>
+    /// <para><b>Why 0 and not the desktop static.</b> 0 is a fixed point: two identical MCP calls get the
+    /// same window from it no matter what the desktop is doing, which is the property this whole seam exists
+    /// to restore. Falling back to the static would reinstate exactly the coupling being removed, and would
+    /// do it on the least visible path.</para>
+    ///
+    /// <para><b>Why a fallback and not a refusal.</b> A refusal here would fire on the state every server
+    /// passes through on its first cycle — <c>server_properties</c> is an on-load collector, so a server has
+    /// no stored offset until it has completed one — and it would fire BEFORE the read, pre-empting the two
+    /// answers that are more fundamental than any window: <c>not_collected</c> when the engine cannot run
+    /// this collector at all (#2511), and the read's own <c>empty</c> when nothing has been collected yet.
+    /// <c>EngineCapabilityMissTests</c> pins both, and names the failure mode precisely: rendering "we do not
+    /// know" as "this will never work" is the same defect wearing the fix's clothes. A server with no offset
+    /// almost always has no server-local rows either, so the read reaches those explanations on its own.</para>
+    ///
+    /// <para><b>The residual, stated rather than hidden.</b> A server that has server-local ROWS but no
+    /// stored offset — data collected before schema v42 added the column, with no <c>server_properties</c>
+    /// collection since — gets a UTC window over a server-local column, so its answer is skewed by the
+    /// server's true offset. That is the pre-existing behaviour for that server rather than a new one, it is
+    /// self-correcting on the next on-load collection, and it is no longer contingent on which tab the
+    /// desktop last had open.</para>
     /// </summary>
-    public static async Task<(int OffsetMinutes, string? Error)> OffsetOrErrorAsync(
-        LocalDataService dataService,
-        int serverId,
-        string serverName)
-    {
-        var offset = await dataService.GetServerUtcOffsetMinutesAsync(serverId);
-
-        return offset is { } minutes
-            ? (minutes, null)
-            : (0, McpHelpers.Status(
-                "unavailable",
-                $"No UTC offset has been collected for '{serverName}', and this read's window is expressed in that "
-                + "server's local wall clock, so it cannot be built. Run the server_properties collector for this "
-                + "server (it runs on load) and retry."));
-    }
+    public static async Task<int> OffsetForAsync(LocalDataService dataService, int serverId)
+        => await dataService.GetServerUtcOffsetMinutesAsync(serverId) ?? 0;
 }

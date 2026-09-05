@@ -60,7 +60,8 @@ LIMIT 1";
     /// <summary>
     /// One server's OWN UTC offset in minutes, for the reads whose window is expressed in that server's
     /// local wall clock (<c>cpu_utilization_stats.sample_time</c>, <c>default_trace_events.event_time</c>).
-    /// <c>null</c> when the store holds no offset for it.
+    /// <c>null</c> when the store holds no offset for it — callers decide what an unknown offset means, and
+    /// <see cref="Mcp.McpServerLocalWindow"/> holds that decision for the MCP surface.
     ///
     /// <para><b>Why the STORE and not the live probe.</b> <c>ServerManager</c> also learns an offset — its
     /// detection query selects <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — but that value only
