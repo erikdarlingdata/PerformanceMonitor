@@ -2081,14 +2081,15 @@ internal sealed class CollectorHealth
 
     /// <summary>
     /// Rows the window's runs stored (<c>rows_stored</c>) — the output half of the cost/output pair, over
-    /// the SAME window as <see cref="TotalRuns"/> and the durations. Never <c>get_collector_cost</c>'s
-    /// <c>total_rows</c>, which is a separate hourly series over the caller's own window and across every
-    /// server: see <see cref="CollectorHealthClassifier.OutputWindowNote"/>.
+    /// the SAME window as <see cref="TotalRuns"/> and the durations beside it. Never
+    /// <c>get_collector_cost</c>'s <c>total_rows</c>, which is Darling's own separate hourly series over
+    /// that caller's window and across every server: see
+    /// <see cref="CollectorHealthClassifier.OutputWindowNote"/> for what this figure is and is not.
     /// </summary>
     public long RowsStored { get; set; }
 
     /// <summary>
-    /// How many of <see cref="TotalRuns"/> stored anything (<c>runs_with_rows</c>). The numerator whose
+    /// How many of <see cref="TotalRuns"/> stored anything (<c>runs_with_rows</c>) — the numerator whose
     /// denominator is <see cref="TotalRuns"/>, on <c>get_pg_blocking</c>'s
     /// <c>captures_with_blocking</c>/<c>captures_total</c> pattern: a rows total with no run count behind
     /// it cannot tell a collector that is productive occasionally from one that is productive throughout.

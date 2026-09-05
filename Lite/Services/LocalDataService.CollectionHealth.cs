@@ -564,20 +564,23 @@ public class CollectorHealthRow
 
     /// <summary>
     /// Rows the window's runs stored (<c>rows_stored</c>) — the output half of the cost/output pair, over
-    /// the SAME window as <see cref="TotalRuns"/> and the durations beside it. See
-    /// <see cref="CollectorHealthClassifier.OutputWindowNote"/> for what it is not.
+    /// the SAME window as <see cref="TotalRuns"/> and the durations beside it. Never
+    /// <c>get_collector_cost</c>'s <c>total_rows</c>, which is Darling's own separate hourly series over
+    /// that caller's window and across every server: see
+    /// <see cref="CollectorHealthClassifier.OutputWindowNote"/> for what this figure is and is not.
     /// </summary>
     public long RowsStored { get; set; }
 
     /// <summary>
     /// How many of <see cref="TotalRuns"/> stored anything (<c>runs_with_rows</c>) — the numerator whose
     /// denominator is <see cref="TotalRuns"/>, on <c>get_pg_blocking</c>'s
-    /// <c>captures_with_blocking</c>/<c>captures_total</c> pattern.
+    /// <c>captures_with_blocking</c>/<c>captures_total</c> pattern: a rows total with no run count behind
+    /// it cannot tell a collector that is productive occasionally from one that is productive throughout.
     /// </summary>
     public long RunsWithRows { get; set; }
 
     /// <summary>Share of runs that stored anything. 0 with a large <see cref="TotalRuns"/> is the reading
-    /// #3017 exists to surface; 0 runs gives 0 rather than a divide, like every sibling rate here.</summary>
+    /// #3017 exists to surface; 0 runs gives 0 rather than a divide, matching every sibling rate here.</summary>
     public double ProductiveRunPercent => TotalRuns > 0 ? (double)RunsWithRows / TotalRuns * 100 : 0;
 
     /// <summary>

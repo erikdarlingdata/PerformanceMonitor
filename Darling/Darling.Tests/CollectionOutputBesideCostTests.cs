@@ -443,6 +443,57 @@ public sealed class CollectionOutputBesideCostTests
         }
     }
 
+    /// <summary>
+    /// The twin members' DOC COMMENTS, pinned identical across the SKUs.
+    ///
+    /// <para>The review on this change caught the two <c>RowsStored</c> comments wording the same caveat
+    /// differently and called it cosmetic, which it was. It is also the drift class this repo keeps being
+    /// bitten by, arriving in the one place nothing pins: the SQL, the tool descriptions and the shared
+    /// constants are all compared byte-for-byte, and the prose explaining them was not. A reader who learns
+    /// what a field means on one SKU must not be told something else on the other.</para>
+    ///
+    /// <para>Whitespace-collapsed, so the pin survives the different wrap points two files legitimately
+    /// have, rather than pinning one formatting of them.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("RowsStored")]
+    [InlineData("RunsWithRows")]
+    [InlineData("ProductiveRunPercent")]
+    public void BothSkusRowTypes_DocumentTheOutputMembers_Identically(string member)
+    {
+        var darling = DocComment(
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs"), member);
+        var lite = DocComment(
+            Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs"), member);
+
+        /* The precondition: an empty extraction on both sides would compare equal and prove nothing. */
+        Assert.True(darling.Length > 80, $"the Darling doc comment for {member} did not extract - this pin needs re-anchoring");
+        Assert.True(lite.Length > 80, $"the Lite doc comment for {member} did not extract - this pin needs re-anchoring");
+
+        Assert.Equal(darling, lite);
+    }
+
+    /// <summary>
+    /// The whitespace-collapsed doc comment immediately above a member's declaration. Anchored on the
+    /// member NAME rather than a line number, so a concurrent edit above it cannot move what this reads.
+    /// </summary>
+    private static string DocComment(string relativePath, string member)
+    {
+        var source = ReadRepoFile(relativePath);
+
+        /* The declaration, in either of the two shapes these members take: a stored property or an
+           expression-bodied one. */
+        var declaration = new[] { $"public long {member} {{ get; set; }}", $"public double {member} =>" }
+            .Select(d => source.IndexOf(d, StringComparison.Ordinal))
+            .FirstOrDefault(i => i > 0);
+        Assert.True(declaration > 0, $"{relativePath}: no declaration of {member} - this pin needs re-anchoring");
+
+        var summary = source.LastIndexOf("/// <summary>", declaration, StringComparison.Ordinal);
+        Assert.True(summary > 0, $"{relativePath}: {member} has no doc comment - this pin needs re-anchoring");
+
+        return Regex.Replace(source[summary..declaration], @"\s+", " ").Trim();
+    }
+
     private static readonly string[] ToolSources =
     [
         Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"),
