@@ -102,15 +102,21 @@ public static class PgDeadlockLogParser
     /// <para>The one exception is a log stamped in a non-UTC zone, which throws
     /// <see cref="PgLogTimezoneUnsupportedException"/> instead: see <see cref="FromBlock"/>.</para>
     ///
-    /// <para><b>That throw abandons the WHOLE read, siblings included, and that is the accepted trade
-    /// rather than an oversight.</b> One log has one <c>log_timezone</c> at any instant, so a window
-    /// holding both a non-UTC and a UTC stamp only happens while a change to that setting straddles the
-    /// tail. Storing the UTC half and refusing the rest would leave a partial history from a target we
-    /// have just declared unreadable, with nothing in the data marking what is missing — the reader could
-    /// not then tell a quiet server from a half-collected one. A whole-read refusal says one thing, and
-    /// the runner's row says it. The straddle is bounded by the log itself: both transports read the
-    /// NEWEST file only, so a rotation clears it, and until then every cycle records the refusal with the
-    /// setting named rather than going quiet.</para>
+    /// <para><b>That throw abandons the WHOLE read, siblings included.</b> One log has one
+    /// <c>log_timezone</c> at any instant, so a window holding both a non-UTC and a UTC stamp only
+    /// happens while a change to that setting straddles the read. Storing the UTC half and refusing the
+    /// rest would leave a partial history from a target we have just declared unreadable, with nothing in
+    /// the data marking what is missing — the reader could not then tell a quiet server from a
+    /// half-collected one. A whole-read refusal says one thing, and the runner's row says it.</para>
+    ///
+    /// <para><b>What that costs is NOT the same on the two transports, and the difference is the read, not
+    /// this method.</b> <see cref="PgDeadlocksCollector"/> re-reads an overlapping byte-window tail every
+    /// cycle, so a straddled window there loses nothing permanently — the same text arrives again next
+    /// cycle, and once the non-UTC lines age out of the window the readable siblings store. The RDS
+    /// log-API route is CONSUME-ONCE: <c>RdsLogSource.ReadNewestAsync</c> advances and persists its resume
+    /// marker as a side effect of the fetch, before this parser is reached, so text abandoned here is not
+    /// re-fetched for the life of that marker and the readable siblings in it are lost. Do not describe
+    /// this refusal as bounded without saying which transport is meant.</para>
     /// </summary>
     public static List<ParsedDeadlock> Extract(string? logBody)
     {
@@ -164,7 +170,8 @@ public static class PgDeadlockLogParser
 
            Per BLOCK, so it abandons the whole read from inside Extract's loop and the collector's row
            loop alike. See Extract's remarks for why losing the readable siblings is preferred to storing
-           a partial history nothing marks as partial. */
+           a partial history nothing marks as partial — and for why that trade is cheap on the
+           re-reading transport and NOT cheap on the consume-once one. */
         if (!IsZeroOffsetLogZone(zoneText))
         {
             throw new PgLogTimezoneUnsupportedException(zoneText);

@@ -23,8 +23,9 @@ namespace PerformanceMonitor.Collectors;
 /// </para>
 ///
 /// <para><b>And why it is not simply skipped.</b> The parser tolerates everything else a block can be wrong
-/// about, because both transports read an OVERLAPPING window and a report cut at its edge is whole on the
-/// next pass. This is different in both directions: it does not clear itself, and the block PARSES — the
+/// about, because the <c>pg_read_file</c> transport re-reads an overlapping window and a report cut at its
+/// edge is whole on the next pass. This is different in both directions: it does not clear itself, and the
+/// block PARSES — the
 /// timestamp is well formed, the graph is intact, and the only thing wrong with the row is the moment it
 /// claims. Stored, it puts every deadlock in the wrong trend bucket and misaligns it against every
 /// UTC-keyed collection beside it, with nothing erroring anywhere. Dropped silently, it reads as a server

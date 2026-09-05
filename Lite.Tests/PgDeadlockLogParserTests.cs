@@ -357,8 +357,10 @@ public sealed class PgDeadlockLogParserTests
     /// the accepted trade and this pins it as a DECISION rather than leaving it an accident - storing the
     /// UTC half would leave a partial history from a target just declared unreadable, with nothing in the
     /// data marking what is missing, and a reader could not then tell a quiet server from a
-    /// half-collected one. The straddle only arises while a <c>log_timezone</c> change crosses the tail,
-    /// and the transports read the newest file only, so a rotation clears it.</para>
+    /// half-collected one. The straddle only arises while a <c>log_timezone</c> change crosses the read.
+    /// What it costs differs by transport, which <see cref="PgDeadlockLogParser.Extract"/>'s remarks
+    /// state: the <c>pg_read_file</c> route re-reads an overlapping tail, while the RDS log-API route is
+    /// consume-once and loses the readable siblings for the life of its resume marker.</para>
     /// </summary>
     [Fact]
     public void AStraddledWindowRefusesTheWholeRead_NotJustTheOffendingBlock()
