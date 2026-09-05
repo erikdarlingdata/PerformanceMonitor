@@ -266,6 +266,115 @@ public sealed class DocCommentHygieneTests
     }
 
     /// <summary>
+    /// <see cref="HasBuildOutputSegment"/> reaches the same verdict for a path written with either
+    /// separator, so the set both rules read is a property of the tree and not of the machine that ran
+    /// them.
+    ///
+    /// <para><b>Why every path here is written out by hand.</b> <see cref="Path.Combine"/> emits the
+    /// HOST's separator, so a case built with it exercises whichever flavour the runner happens to use and
+    /// says nothing about the other — a filter recognising only <c>\</c> passes such a case on Windows
+    /// while scanning every generated file on a macOS or Linux run, which is the asymmetry this pin is for.
+    /// Each case below carries its separators literally and appears in both flavours, so whichever
+    /// platform runs this asserts both.</para>
+    ///
+    /// <para>The negatives are the other half of the claim: excluding by whole segment is what keeps a
+    /// directory merely NAMED like build output inside the scanned set.</para>
+    /// </summary>
+    [Theory]
+    /* Generated output, the reason the filter exists: .AssemblyInfo.cs and .g.cs land here during a build. */
+    [InlineData(true, "Darling/Darling.Tests/bin/Debug/net10.0/Darling.Tests.AssemblyInfo.cs")]
+    [InlineData(true, @"Darling\Darling.Tests\bin\Debug\net10.0\Darling.Tests.AssemblyInfo.cs")]
+    [InlineData(true, "Darling/Darling.Tests/obj/Debug/net10.0/Darling.Tests.g.cs")]
+    [InlineData(true, @"Darling\Darling.Tests\obj\Debug\net10.0\Darling.Tests.g.cs")]
+    /* Windows paths are case-insensitive and so is this rule. */
+    [InlineData(true, "Darling/Darling.Tests/BIN/Debug/Generated.cs")]
+    [InlineData(true, @"Darling\Darling.Tests\OBJ\Debug\Generated.cs")]
+    /* Ordinary source — the set the two rules exist to read. */
+    [InlineData(false, "Darling/Darling.Tests/DocCommentHygieneTests.cs")]
+    [InlineData(false, @"Darling\Darling.Tests\DocCommentHygieneTests.cs")]
+    /* Segments, not substrings: every one of these CONTAINS "bin" or "obj" and is source. */
+    [InlineData(false, "Darling/PerformanceMonitor.Darling.Viewer/mybin/Thing.cs")]
+    [InlineData(false, @"Darling\PerformanceMonitor.Darling.Viewer\mybin\Thing.cs")]
+    [InlineData(false, "Darling/PerformanceMonitor.Darling.Viewer/obj-cache/Thing.cs")]
+    [InlineData(false, @"Darling\PerformanceMonitor.Darling.Viewer\obj-cache\Thing.cs")]
+    [InlineData(false, "Darling/PerformanceMonitor.Darling.Viewer/Objects/ObjectBrowser.cs")]
+    [InlineData(false, @"Darling\PerformanceMonitor.Darling.Viewer\Objects\ObjectBrowser.cs")]
+    public void BuildOutputIsRecognisedThroughEitherSeparator(bool excluded, string path)
+    {
+        Assert.True(
+            HasBuildOutputSegment(path) == excluded,
+            $"'{path}' should{(excluded ? " " : " NOT ")}be treated as build output. The verdict cannot " +
+            "depend on which separator the path is written with: both rules in this class read whatever " +
+            "this admits, so a separator-specific filter hands them a different set of files on Windows " +
+            "than on macOS or Linux, and the same commit is then guarded differently depending on who ran " +
+            "it. Compare whole path SEGMENTS against both separator characters.");
+    }
+
+    /// <summary>
+    /// A <c>bin</c> or <c>obj</c> directory ABOVE the scanned root leaves the tree scanned, because
+    /// <see cref="IsBuildOutput"/> judges each path relative to the root it was handed.
+    ///
+    /// <para>The failure direction is the silent one. An absolute-path test would classify every file in a
+    /// repository checked out under, say, <c>/opt/bin/</c> as build output, and both rules would report no
+    /// offenders having read nothing at all — which is indistinguishable from a clean tree.</para>
+    /// </summary>
+    [Fact]
+    public void ABuildDirectoryAboveTheRootDoesNotExcludeTheWholeTree()
+    {
+        Assert.False(
+            IsBuildOutput("/opt/bin/repo", "/opt/bin/repo/Darling/Darling.Tests/DocCommentHygieneTests.cs"),
+            "A source file was read as build output because a directory ABOVE the scanned root is called " +
+            "'bin'. Every file in the tree is excluded on that reading and both rules pass having scanned " +
+            "nothing, which looks exactly like a clean tree.");
+
+        Assert.True(
+            IsBuildOutput("/opt/bin/repo", "/opt/bin/repo/Darling/Darling.Tests/obj/Debug/Generated.cs"),
+            "Build output UNDER the scanned root was admitted as source, so relativising the path has " +
+            "gone too far and dropped the exclusion the walk needs.");
+    }
+
+    /// <summary>
+    /// <see cref="SourceFiles"/> applies the filter, so a <c>bin</c> or <c>obj</c> directory under the
+    /// scanned root is never read.
+    ///
+    /// <para>Separate from the two pins above, which judge the predicate on paths that need not exist.
+    /// This one walks a REAL directory tree, so it is the one that fails if the exclusion is ever detached
+    /// from the enumeration: a predicate nothing calls leaves both rules reading everything, and they pass
+    /// either way on a tree whose generated files happen to carry no doc comments.</para>
+    /// </summary>
+    [Fact]
+    public void SourceFilesDoesNotReadBuildOutputUnderTheRoot()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-doc-hygiene-sourcefiles-");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root.FullName, "bin", "Debug"));
+            Directory.CreateDirectory(Path.Combine(root.FullName, "obj", "Debug"));
+            /* A directory merely NAMED like build output, which has to stay in the scanned set. */
+            Directory.CreateDirectory(Path.Combine(root.FullName, "Objects"));
+
+            File.WriteAllText(Path.Combine(root.FullName, "Source.cs"), "// source");
+            File.WriteAllText(Path.Combine(root.FullName, "Objects", "ObjectBrowser.cs"), "// source");
+            File.WriteAllText(
+                Path.Combine(root.FullName, "bin", "Debug", "Thing.AssemblyInfo.cs"), "// generated");
+            File.WriteAllText(Path.Combine(root.FullName, "obj", "Debug", "Thing.g.cs"), "// generated");
+
+            /* Separators normalised for the comparison only: what this pin asserts is WHICH files came
+               back, and the platform-independence of the filter itself is asserted above. */
+            var scanned = SourceFiles(root.FullName)
+                .Select(f => Path.GetRelativePath(root.FullName, f).Replace('\\', '/'))
+                .OrderBy(f => f, StringComparer.Ordinal)
+                .ToArray();
+
+            Assert.Equal(new[] { "Objects/ObjectBrowser.cs", "Source.cs" }, scanned);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
     /// Every contiguous run of <c>///</c> lines, as the run's first line and the line of each
     /// <c>&lt;summary&gt;</c> opening and closing tag in it. A run ends at the first line that is neither a
     /// doc comment nor an attribute, which is what ties it to exactly one member: the declaration itself
@@ -356,14 +465,14 @@ public sealed class DocCommentHygieneTests
 
     /// <summary>
     /// Every <c>.cs</c> file under <paramref name="root"/> that is a source file rather than a build
-    /// output. Both rules scan the same set, so a path either rule should ignore is excluded in one place.
+    /// output. Both rules scan the same set, so a path either rule should ignore is excluded in one
+    /// place — and the same set wherever they run, which is <see cref="HasBuildOutputSegment"/>'s job.
     /// </summary>
     private static IEnumerable<string> SourceFiles(string root)
     {
         foreach (var file in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
         {
-            if (file.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase)
-                || file.Contains(@"\obj\", StringComparison.OrdinalIgnoreCase))
+            if (IsBuildOutput(root, file))
             {
                 continue;
             }
@@ -371,6 +480,38 @@ public sealed class DocCommentHygieneTests
             yield return file;
         }
     }
+
+    /// <summary>
+    /// True when <paramref name="path"/> is generated build output rather than source.
+    ///
+    /// <para>Judged RELATIVE to <paramref name="root"/> rather than on the absolute path, because the scan
+    /// walks a whole repository from wherever it is checked out: a directory ABOVE the root called
+    /// <c>bin</c> would otherwise classify every file in the tree as build output, and both rules would
+    /// then report no offenders because they had read nothing.</para>
+    /// </summary>
+    private static bool IsBuildOutput(string root, string path) =>
+        HasBuildOutputSegment(Path.GetRelativePath(root, path));
+
+    /// <summary>
+    /// True when any whole SEGMENT of <paramref name="path"/> is <c>bin</c> or <c>obj</c>, reading both
+    /// separator characters on every platform.
+    ///
+    /// <para><b>Both separators, not the host's.</b> A substring test for <c>\bin\</c> matches nothing
+    /// where the separator is <c>/</c> — macOS and Linux — so the two rules above would read every
+    /// generated <c>.AssemblyInfo.cs</c> and <c>.g.cs</c> there and skip them on Windows, and a guard whose
+    /// scope depends on the host is two guards. Splitting on
+    /// <see cref="Path.DirectorySeparatorChar"/> alone relocates that asymmetry rather than removing it: it
+    /// answers NO to a Windows-shaped path off Windows, which leaves the platform-independence pin below
+    /// unstatable in a form that means one thing everywhere. Splitting on both makes the verdict a property
+    /// of the path.</para>
+    ///
+    /// <para><b>Whole segments, not a substring.</b> <c>Objects</c>, <c>obj-cache</c> and <c>mybin</c> are
+    /// source directories, and a <c>Contains("obj")</c> would quietly stop scanning them.</para>
+    /// </summary>
+    private static bool HasBuildOutputSegment(string path) =>
+        path.Split('/', '\\')
+            .Any(s => string.Equals(s, "bin", StringComparison.OrdinalIgnoreCase)
+                      || string.Equals(s, "obj", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Walks up from the test output directory to the repo root — the directory holding
