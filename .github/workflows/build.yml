@@ -1013,6 +1013,16 @@ jobs:
       # Names the arm that decided, out loud, either way. A job reporting success having quietly run
       # nothing is indistinguishable from one that ran everything, and that indistinguishability is
       # the whole reason this job exists.
+      #
+      # An EMPTY outcome is its own arm rather than part of the else. A job's declared outputs do not
+      # reach a downstream consumer when the producing job's conclusion is failure, so a build job
+      # that fails - at Lite.Tests, before ever reaching the Darling step, or at the Darling step
+      # itself - can leave this reading empty no matter what that step actually did. Folding that
+      # into the else would print "the suite has already run on this commit" for a commit where it
+      # may not have run at all, which is the same dishonest-log failure this job exists to close.
+      # Skipping is still right there: a red build blocks the merge on its own, and re-running the
+      # suite on a commit nothing can merge buys no decision and would cost three minutes on every
+      # failing build. So the arm skips and says why, and which log holds the real answer.
       - name: Decide whether the whole-tree guards run here
         id: gate
         shell: bash
@@ -1031,9 +1041,12 @@ jobs:
           elif [ "${WORKFLOW:-}" = "true" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "::notice title=Whole-tree guards running::build.yml changed, so this job's own gate is exercised by the gate."
+          elif [ -z "${DARLING_TESTS:-}" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Whole-tree guards not decided here::The build job published no outcome for its 'Run Darling tests' step, which is what a failed build job leaves behind - so whether the suite ran on this commit is not knowable from here. Read it off the build job's own log; that job is not green, so nothing merges on this result."
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Whole-tree guards skipped::The build job's 'Run Darling tests' step reported '${DARLING_TESTS:-<no result>}', so the suite has already run on this commit."
+            echo "::notice title=Whole-tree guards skipped::The build job's 'Run Darling tests' step reported '${DARLING_TESTS}', so the suite has already run on this commit."
           fi
 
       - name: Setup .NET 10.0
