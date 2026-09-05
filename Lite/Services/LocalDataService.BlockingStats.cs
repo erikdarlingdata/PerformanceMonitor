@@ -78,7 +78,7 @@ OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $3)";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* BPR per-minute severity buckets, falling back to the always-on DMV snapshot only when BPR has none
@@ -152,7 +152,7 @@ ORDER BY bucket";
         using (var connection = await OpenConnectionAsync())
         using (var command = connection.CreateCommand())
         {
-            var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+            var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
             command.CommandText = @"
 SELECT

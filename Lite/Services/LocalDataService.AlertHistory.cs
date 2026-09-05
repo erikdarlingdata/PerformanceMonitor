@@ -28,7 +28,7 @@ public partial class LocalDataService
         /* Both edges, not just the lower one: the row cap is applied by the database, so trimming
            after the read would spend the whole LIMIT on rows newer than an as_of anchor and hand back an
            empty window that looks exactly like a quiet one. */
-        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
 
         if (serverId.HasValue)
         {

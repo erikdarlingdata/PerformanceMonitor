@@ -57,7 +57,15 @@ public partial class ServerTab : UserControl
     /// window. A preset leaves from/to null (charts fall back to now − hoursBack); a valid custom range
     /// converts the local picker dates/times to server time.
     /// </summary>
-    private (int hoursBack, DateTime? fromDate, DateTime? toDate) GetCurrentWindow()
+    /// <param name="utcOffsetMinutes">
+    /// Whose server time the returned bounds are in. Every read given this window converts the bounds back
+    /// out to UTC using an offset of its own, and the two have to be the same server's or the pair stops
+    /// cancelling — so this argument is chosen to match the read being fed, not chosen once for the tab.
+    /// <c>ServerTimeHelper.UtcOffsetMinutes</c> for the sub-tab reads, which take their offset from the
+    /// selected tab; this tab's own <c>UtcOffsetMinutes</c> for the badge read, which takes its offset from
+    /// the server it names.
+    /// </param>
+    private (int hoursBack, DateTime? fromDate, DateTime? toDate) GetCurrentWindow(int utcOffsetMinutes)
     {
         var hoursBack = GetHoursBack();
 
@@ -69,8 +77,8 @@ public partial class ServerTab : UserControl
             var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
             if (fromLocal.HasValue && toLocal.HasValue)
             {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
+                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode, utcOffsetMinutes);
+                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode, utcOffsetMinutes);
             }
         }
 
@@ -82,7 +90,9 @@ public partial class ServerTab : UserControl
         if (_isRefreshing) return;
         _isRefreshing = true;
 
-        var (hoursBack, fromDate, toDate) = GetCurrentWindow();
+        /* The selected tab's offset, because the sub-tab reads below convert back out to UTC with that
+           same offset and the two applications have to name one server to cancel. */
+        var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.UtcOffsetMinutes);
 
         try
         {
@@ -99,9 +109,11 @@ public partial class ServerTab : UserControl
             {
                 _refreshPendingWhileHidden = true;
             }
-            /* Always keep alert badge current even when Blocking tab is not visible */
+            /* Always keep alert badge current even when Blocking tab is not visible. Deliberately not
+               given the window above: that one is in the SELECTED tab's server time, and this runs on
+               every tab's timer regardless of which is selected. It derives its own. */
             if (MainTabControl.SelectedIndex != 8)
-                await RefreshAlertCountsAsync(hoursBack, fromDate, toDate);
+                await RefreshAlertCountsAsync();
 
             /* #1591: same reasoning as the alert badge above — a permission-denied collector is only visible on
                the Collection Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
@@ -152,12 +164,21 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// Lightweight alert-only refresh — fetches blocking + deadlock counts and fires AlertCountsChanged.
     /// Runs on every timer tick when the Blocking tab is NOT visible so the tab badge stays current.
+    ///
+    /// <para>Derives its own window instead of taking the caller's, and derives it in THIS tab's
+    /// <c>UtcOffsetMinutes</c> rather than in the selected tab's. Every other windowed read here sits
+    /// behind the <c>IsVisible</c> gate, where this tab is the selected tab and the two offsets are the
+    /// same value; the badge is the one that runs for a background tab, whose server can be in a
+    /// different zone from the one on screen. The same offset goes into the picker conversion and into
+    /// <see cref="LocalDataService.GetAlertCountsAsync"/>, which is what keeps the two applications
+    /// cancelling in the UTC and Local display modes while leaving the ServerTime default correct.</para>
     /// </summary>
-    private async System.Threading.Tasks.Task RefreshAlertCountsAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private async System.Threading.Tasks.Task RefreshAlertCountsAsync()
     {
         try
         {
-            var (blockingCount, deadlockCount, latestEventTime) = await Task.Run(() => _dataService.GetAlertCountsAsync(_serverId, hoursBack, fromDate, toDate));
+            var (hoursBack, fromDate, toDate) = GetCurrentWindow(UtcOffsetMinutes);
+            var (blockingCount, deadlockCount, latestEventTime) = await Task.Run(() => _dataService.GetAlertCountsAsync(_serverId, hoursBack, fromDate, toDate, UtcOffsetMinutes));
             AlertCountsChanged?.Invoke(blockingCount, deadlockCount, latestEventTime);
         }
         catch (Exception ex)
@@ -521,7 +542,7 @@ public partial class ServerTab : UserControl
                         break;
                 }
                 /* Always keep alert badge current when Blocking tab is visible */
-                await RefreshAlertCountsAsync(hoursBack, fromDate, toDate);
+                await RefreshAlertCountsAsync();
                 return;
             }
 
