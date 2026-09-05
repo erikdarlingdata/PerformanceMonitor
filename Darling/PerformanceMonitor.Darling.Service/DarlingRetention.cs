@@ -28,8 +28,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// purge via hypertable <c>drop_chunks</c> instead, which detaches whole expired chunks in O(1)
 /// instead of scanning rows. collection_log — a hypertable since V23, though converted directly by the
 /// V23 migration rather than the catalog loop — purges the SAME way (drop_chunks with a DELETE fallback for
-/// a plain-PostgreSQL store). config_alert_log and config.config_command stay DELETE-based either way
-/// (never converted — plain config-side registry tables), as do the analysis tables
+/// a plain-PostgreSQL store). config_alert_log, config.config_command and collect.plan_force_actions stay
+/// DELETE-based either way (never converted — the first two are plain config-side registry tables, and the
+/// journal keeps an identity PRIMARY KEY its own rows reference), as do the analysis tables
 /// (PgFindingStore.CleanupOldFindingsAsync owns those). Retention horizons are the shared
 /// per-collector <see cref="CollectorScheduleDefaults"/> (identity-pinned to Lite's
 /// ScheduleManager table), so both SKUs keep the same data horizons out of the box. NOTE: Lite
