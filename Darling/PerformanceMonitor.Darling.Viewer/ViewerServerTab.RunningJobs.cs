@@ -30,6 +30,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadRunningJobsAsync()
     {
+        using var readFanOut = ViewerReadFanOut.Of(2);
         var jobsTask = _dataService.GetRunningJobsAsync(_server.ServerId);
         var statusTask = _dataService.GetLatestRunningJobsCollectorStatusAsync(_server.ServerId);
         var jobs = await jobsTask;
