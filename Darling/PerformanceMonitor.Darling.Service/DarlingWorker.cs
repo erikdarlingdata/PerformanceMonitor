@@ -1536,12 +1536,46 @@ public sealed class DarlingWorker : BackgroundService
             var configVersion = await configProvider.ReadConfigVersionAsync(stoppingToken);
             if (configVersion.HasValue && configVersion.Value != _lastConfigVersion)
             {
-                _lastConfigVersion = configVersion.Value;
-                await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+                /* The watermark advances AFTER the reload applies, not on detecting the bump. Assigning it
+                   first meant a reload whose store read failed had already recorded the version as applied:
+                   the operator's change stayed live in the store, absent from this process, and unreported
+                   until some LATER write bumped config_version again. Nothing retried it, because the
+                   beacon's next tick compared equal.
 
-                /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe here
-                   by construction — top of the sweep, and narrowing never preempts a running body. */
-                ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
+                   That ordering is why a deadline on this thread is not merely a delay — it DISCARDS the
+                   change — which is the asymmetry ServiceCommandDeadlines.SerialLoopSeconds is floored
+                   against. Fixing the bound without fixing the ordering would have left the silent-loss
+                   path intact and only made it rarer.
+
+                   Failing to apply now leaves the watermark behind, so the very next tick re-detects the
+                   same bump and retries. That is right for the transient case this guards (a store restart,
+                   a failover, a blip) and is bounded work — one single-row beacon read plus one view read
+                   per 15 s tick. StoreConfigProvider rate-limits its own failure log across the streak so a
+                   PERSISTENTLY unreachable store does not turn the retry into a log flood.
+
+                   Deliberately NOT a retry POLICY: #2936 owns that question for the adjacent migrate path,
+                   where it is a real design decision (which failures are retryable, bounded or forever,
+                   re-enter or resume) because that path has no loop of its own and its failure is terminal.
+                   This path already re-runs every tick by construction and its failure is recoverable, so
+                   the only defect here was the ordering. */
+                /* Stamped from the version the reload ACTUALLY applied, not from the beacon's own earlier
+                   read. ReloadFromStoreAsync re-reads config_version inside LoadViewAsync, so a write
+                   landing in the window between the two makes the applied view NEWER than
+                   configVersion.Value — and recording the older number would leave the watermark behind a
+                   config that is already live, costing one redundant idempotent re-apply on the next tick.
+                   Self-healing rather than lossy, but it is the same class of imprecision as the defect
+                   above ("the version recorded as applied must be the version that was applied"), and the
+                   startup path at :1179 already does it this way. */
+                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+                if (appliedVersion.HasValue)
+                {
+                    _lastConfigVersion = appliedVersion.Value;
+
+                    /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe
+                       here by construction — top of the sweep, and narrowing never preempts a running body.
+                       Inside the success branch because a reload that applied nothing changed no knob. */
+                    ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
+                }
             }
 
             /* Stage 2 pause gate (Lite's IsPaused): while paused, skip ALL collection/alert/analysis/purge
@@ -2276,11 +2310,16 @@ public sealed class DarlingWorker : BackgroundService
                    abandoned (loudly) and quarantined until its task actually dies, while every other
                    server's backfill continues. The deadline is a generous multiple of a healthy slice
                    (statement timeout 60s + store writes), so an abandonment is a defect signal. */
-                /* #2165: the other half of the gate. Held for the WHOLE slice, and taken outside the
-                   AbandonableStep so an abandoned-but-still-wedged slice keeps the gate closed — the tick must
-                   keep yielding while that statement is genuinely still running on the server, which is exactly
-                   the case the abandonment leaves behind. Zero-wait, so a tick already collecting simply defers
-                   this server's slice to the next five-minute cycle. */
+                /* #2165: the other half of the gate. Held for the WHOLE slice — which has to mean PAST an
+                   abandonment, because that is the one outcome where the statement is genuinely still running
+                   on the server and the tick must keep yielding to it. So the lease is HANDED to the step
+                   (holdUntilStepEnds) rather than scoped here: a `using` in this loop body releases at the end
+                   of the ITERATION, which opened the gate the instant the deadline handed control back and let
+                   the tick start its own Query Store collection beside the still-running slice — the #2165
+                   overlap, restored by the one case #2148 exists to survive. The step disposes the lease
+                   exactly once on every outcome, the moment its own in-flight guard clears, so the gate and
+                   the quarantine now open together. Zero-wait, so a tick already collecting simply defers this
+                   server's slice to the next five-minute cycle. */
                 var gate = _queryStoreGates.GetOrAdd(runtime.ServerId, static _ => new QueryStoreServerGate()).TryAcquire();
                 if (gate is null)
                 {
@@ -2290,8 +2329,6 @@ public sealed class DarlingWorker : BackgroundService
                     continue;
                 }
 
-                using var backfillGate = gate;
-
                 var step = _backfillSliceSteps.GetOrAdd(runtime.ServerId, static _ => new AbandonableStep());
                 var result = await step.RunAsync(
                     () => backfill.RunServerSliceAsync(runtime, stoppingToken),
@@ -2299,6 +2336,7 @@ public sealed class DarlingWorker : BackgroundService
                     onLateFault: ex => _logger.LogError(ex,
                         "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
                         runtime.Config.DisplayName),
+                    holdUntilStepEnds: gate,
                     cancellationToken: stoppingToken);
 
                 switch (result.Outcome)
@@ -2321,6 +2359,10 @@ public sealed class DarlingWorker : BackgroundService
                             runtime.Config.DisplayName, (int)BackfillSliceDeadline.TotalSeconds);
                         break;
                     case AbandonableStepOutcome.SkippedStillRunning:
+                        /* Defence in depth since the gate started outliving abandonment: the guard is only
+                           ever held by a run whose lease has not been released yet, so the acquire above
+                           refuses first and this loop no longer reaches here. Kept because it is the honest
+                           report if that ever stops being true. */
                         _logger.LogError(
                             "query_store backfill slice on '{Server}' skipped — a previously-abandoned slice is still wedged (#2148).",
                             runtime.Config.DisplayName);
@@ -2576,15 +2618,32 @@ public sealed class DarlingWorker : BackgroundService
     /// reconciles the monitored-server set, recomputes each connected server's NextDue from the fresh
     /// schedule overrides, and reloads the mute-rule cache (F16). Store-unreachable is a no-op — the current
     /// live config stands, never worse than before.
+    ///
+    /// <para><b>Returns the <c>config_version</c> that was APPLIED</b>, or null when nothing was, so the
+    /// caller can both hold the watermark back on a failure and stamp the version the store actually
+    /// served rather than the one its own earlier beacon read saw. The line between applied and not is
+    /// <c>LoadViewAsync</c>, and it is the right line because that call is the atomic gate: it reads
+    /// all five <c>config</c> rows under one try/catch and returns null if any of them throws, so either
+    /// nothing was read or <c>ApplyToConfig</c> below has already swapped the whole view into the live
+    /// config — a swap that cannot un-happen and that makes the version genuinely applied.</para>
+    ///
+    /// <para>Everything after that swap is PROPAGATION, and each piece carries its own isolation rather
+    /// than relying on this return value: <c>ReassertComposeStatementTimeoutAsync</c> is non-throwing and
+    /// advances <c>_appliedComposeStatementTimeoutSeconds</c> only on success, so it self-heals on the next
+    /// reload, and <c>SyncServerEnabledStatesAsync</c> catches everything and logs at Debug. A propagation
+    /// step that did throw would leave the watermark behind too — the assignment is after the await — and
+    /// the retry re-applies idempotently, so the residual window is "applied in memory, not yet mirrored",
+    /// which is narrower than the version-discarding one this replaces rather than a new instance of
+    /// it.</para>
     /// </summary>
-    private async Task ReloadFromStoreAsync(
+    private async Task<long?> ReloadFromStoreAsync(
         StoreConfigProvider provider, DarlingConfig config, List<ServerLoopState> servers,
         MuteRuleService muteRuleService, CancellationToken cancellationToken)
     {
         var view = await provider.LoadViewAsync(config, cancellationToken);
         if (view is null)
         {
-            return;
+            return null;
         }
 
         StoreConfigProvider.ApplyToConfig(config, view);
@@ -2639,9 +2698,15 @@ public sealed class DarlingWorker : BackgroundService
 
         await muteRuleService.LoadAsync();
 
+        /* view.ConfigVersion rather than _lastConfigVersion: the caller has not advanced the watermark yet
+           (it advances from this method's RETURN value), so the field still holds the PREVIOUS version
+           here — and the returned version is this same one, so the log line and the watermark can never
+           disagree about what was applied. */
         _logger.LogInformation(
             "Control-plane reload applied (config_version {Version}, {Servers} monitored server(s), paused: {Paused})",
-            _lastConfigVersion, servers.Count, _paused);
+            view.ConfigVersion, servers.Count, _paused);
+
+        return view.ConfigVersion;
     }
 
     /// <summary>
@@ -4082,7 +4147,7 @@ LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassComman
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand("SELECT pg_database_size(current_database())", connection);
+            using var command = new NpgsqlCommand("SELECT pg_database_size(current_database())", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             var result = await command.ExecuteScalarAsync(cancellationToken);
             return result is null || result == DBNull.Value ? null : Convert.ToInt64(result, CultureInfo.InvariantCulture);
         }

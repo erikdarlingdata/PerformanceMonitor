@@ -119,6 +119,25 @@ public sealed class McpReadCommandTimeoutTests
         + @"|new (?:Npgsql\.)?NpgsqlCommand\s*\([A-Za-z_][A-Za-z0-9_.]*\s*,\s*(?<![A-Za-z0-9_])connection\s*\)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// The two-statement window from a construction, with comments and literal TEXT blanked.
+    ///
+    /// <para><b>Blanked, and the witness below is why.</b> <see cref="CSharpSourceWalker.StatementSpanFrom"/>
+    /// cuts from the text it is HANDED, and every scan here finds its sites in the stripped text — so a
+    /// value regex matched over a RAW span reads a comment inside the window that happens to spell the
+    /// deadline as the deadline itself, and an untimed command reads as correctly timed. That is the
+    /// dangerous direction, and it is not hypothetical here: the two-statement window exists for the
+    /// <c>CreateCommand</c> shape, whose deadline is the statement AFTER the construction, and this
+    /// codebase's style actively encourages an explanatory comment in exactly that gap.</para>
+    ///
+    /// <para>The walk is already literal-aware and the stripper preserves LENGTH, so taking the same
+    /// offsets out of the stripped text costs nothing. Every value target in this file is CODE — an
+    /// assignment to <c>CommandTimeout</c> or to an importer's <c>Timeout</c> — and a command deadline can
+    /// never legitimately live inside a string literal, so no scan here needs the raw text.</para>
+    /// </summary>
+    private static string StatementSpan(string text, int index) =>
+        CSharpSourceWalker.StatementSpanFrom(CSharpSourceWalker.StripCommentsAndStrings(text), index, statements: 2);
+
     [Fact]
     public void EveryMcpAndWebReadCommand_SetsAnExplicitDeadline()
     {
@@ -134,7 +153,7 @@ public sealed class McpReadCommandTimeoutTests
             {
                 total++;
 
-                var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
+                var span = StatementSpan(text, ctor.Index);
 
                 if (!s_setsTimeout.IsMatch(span))
                 {
@@ -226,6 +245,15 @@ public sealed class McpReadCommandTimeoutTests
     /// <see cref="TheHandoffScan_ReadsCodeNotProse"/> and the commented-construction case in
     /// <see cref="TheScanner_JudgesTheSiteItself_NotItsNeighbours"/> are the positive controls, so these
     /// negatives cannot pass merely by matching nothing.</para>
+    ///
+    /// <para><b>The VALUE match reads the stripped text too, and that direction is the graver one.</b> The
+    /// scans locate their sites in stripped text but a span handed back from the raw text carries the
+    /// comments with it, so a comment inside the two-statement window that spells the deadline satisfies
+    /// the value regex and an untimed command reads as correctly TIMED — a false negative in a guard,
+    /// where the false positive above merely fails a build. <see cref="StatementSpan"/> is the one seam
+    /// every value match here goes through, and
+    /// <see cref="AValueSpanCutFromRawText_ReadsACommentedDeadlineAsADeadline"/> reads one source BOTH
+    /// ways so the green cannot be vacuous.</para>
     /// </summary>
     [Fact]
     public void NoCommandInScope_IsCreatedByABareMethodGroupHandoff()
@@ -268,7 +296,7 @@ public sealed class McpReadCommandTimeoutTests
 
             foreach (Match importer in s_binaryImporter.Matches(code))
             {
-                var span = CSharpSourceWalker.StatementSpanFrom(text, importer.Index, statements: 2);
+                var span = StatementSpan(text, importer.Index);
 
                 if (!span.Contains(".Timeout", StringComparison.Ordinal))
                 {
@@ -453,14 +481,92 @@ public sealed class McpReadCommandTimeoutTests
         + "    Sql);\n"
         + "command.CommandTimeout = McpCommandDeadlines.ReadSeconds;\n",
         true)]
+    /* A deadline written ONLY in a comment is not a deadline. Spelled WITH the receiver, the way this
+       codebase's comments quote code, so the witness cannot pass merely because the value regex wants
+       something the prose happens to omit. */
+    [InlineData(
+        "await using var command = postgres.CreateCommand(Sql);\n"
+        + "/* command.CommandTimeout = McpCommandDeadlines.ReadSeconds; */\n"
+        + "await using var reader = await command.ExecuteReaderAsync(cancellationToken);\n",
+        false)]
     public void TheScanner_JudgesTheSiteItself_NotItsNeighbours(string source, bool expectedTimed)
     {
         var ctor = s_commandCtor.Match(CSharpSourceWalker.StripCommentsAndStrings(source));
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
+        Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(StatementSpan(source, ctor.Index)));
 
-        Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
+        /* Every UNTIMED fixture read the way a raw span reads it, so the divergence this pin depends on
+           stays confined to the commented case and cannot quietly widen. */
+        var rawSpan = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
+
+        Assert.True(
+            expectedTimed
+            || !s_setsTimeout.IsMatch(rawSpan)
+            || source.Contains("/*", StringComparison.Ordinal),
+            "an untimed fixture read as timed over the raw span for a reason other than a comment — the "
+            + "stripped span is narrower than the gap it was written for");
+    }
+
+    /// <summary>
+    /// The two-sided witness: ONE source, read BOTH ways, with the verdicts pinned in both directions.
+    ///
+    /// <para><see cref="StatementSpan"/> closes a false NEGATIVE, and a fixture that merely expects the
+    /// right answer cannot demonstrate one — it would pass identically if the span were never stripped,
+    /// because almost every source reads the same either way. This asserts the DISAGREEMENT itself: the
+    /// raw span reads this untimed command as timed, the stripped span reports it. Take the strip away
+    /// and this fails on its second assertion instead of going quietly green; take the RAW read away and
+    /// it fails on its first, because a witness that no longer witnesses anything is worth as little as
+    /// the green it would otherwise report.</para>
+    /// </summary>
+    [Fact]
+    public void AValueSpanCutFromRawText_ReadsACommentedDeadlineAsADeadline()
+    {
+        const string Source =
+            "await using var command = postgres.CreateCommand(AlertHistorySql);\n"
+            + "/* command.CommandTimeout = McpCommandDeadlines.ReadSeconds; */\n"
+            + "DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);\n";
+
+        var ctor = s_commandCtor.Match(CSharpSourceWalker.StripCommentsAndStrings(Source));
+        Assert.True(ctor.Success, "the fixture did not contain a command construction");
+
+        Assert.True(
+            s_setsTimeout.IsMatch(CSharpSourceWalker.StatementSpanFrom(Source, ctor.Index, statements: 2)),
+            "the raw span no longer reads a commented deadline as a deadline, so this witness no longer "
+            + "witnesses anything — the walk or the value regex has moved and the pair must be re-derived");
+
+        Assert.False(
+            s_setsTimeout.IsMatch(StatementSpan(Source, ctor.Index)),
+            "a deadline written only inside a comment was accepted as this command's deadline, so an "
+            + "untimed command on this surface reads as correctly timed");
+    }
+
+    /// <summary>
+    /// The COPY writer's value check, both ways. Its target is <c>writer.Timeout =</c> in code, so the
+    /// commented-deadline gap applies to it identically. This scope has no importer today, which is
+    /// precisely why the check has to be right BEFORE one arrives rather than after — the first one added
+    /// here would otherwise be waved through by whatever the surrounding prose happens to say.
+    /// </summary>
+    [Fact]
+    public void TheImporterValueCheck_DoesNotAcceptACommentedTimeout()
+    {
+        const string Source =
+            "await using var writer = await connection.BeginBinaryImportAsync(CopySql, cancellationToken);\n"
+            + "/* writer.Timeout = McpCommandDeadlines.ReadSeconds; */\n"
+            + "await writer.CompleteAsync(cancellationToken);\n";
+
+        var importer = s_binaryImporter.Match(CSharpSourceWalker.StripCommentsAndStrings(Source));
+        Assert.True(importer.Success, "the fixture did not contain a COPY writer");
+
+        Assert.True(
+            CSharpSourceWalker.StatementSpanFrom(Source, importer.Index, statements: 2)
+                .Contains(".Timeout", StringComparison.Ordinal),
+            "the raw span no longer reads a commented importer deadline as one, so this witness no longer "
+            + "witnesses anything");
+
+        Assert.False(
+            StatementSpan(Source, importer.Index).Contains(".Timeout", StringComparison.Ordinal),
+            "an importer deadline written only inside a comment was accepted as the writer's deadline");
     }
 
     /// <summary>

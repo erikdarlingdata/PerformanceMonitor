@@ -43,9 +43,13 @@ public partial class FinOpsTab : UserControl
     private async Task PopulateLockingDbSelectorAsync(int serverId)
     {
         if (_dataService == null) return;
+
+        var gen = _loads.Claim(nameof(PopulateLockingDbSelectorAsync));
+
         try
         {
             var dbs = await Task.Run(() => _dataService.GetIndexLockingDatabasesAsync(serverId));
+            if (_loads.Superseded(nameof(PopulateLockingDbSelectorAsync), gen)) return;
             var items = new List<string> { "All databases" };
             items.AddRange(dbs);
 
@@ -67,10 +71,14 @@ public partial class FinOpsTab : UserControl
     private async Task LoadIndexLockingGridAsync(int serverId)
     {
         if (_dataService == null) return;
+
+        var gen = _loads.Claim(nameof(LoadIndexLockingGridAsync));
+
         try
         {
             var db = SelectedLockingDb();
             var data = await Task.Run(() => _dataService.GetIndexLockingAsync(serverId, 200, db));
+            if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
             ApplyLockingHeat(data);
             _indexLockingFilterMgr!.UpdateData(data);
             NoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;

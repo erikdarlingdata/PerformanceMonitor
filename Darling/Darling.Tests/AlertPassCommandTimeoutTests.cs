@@ -135,10 +135,6 @@ public sealed class AlertPassCommandTimeoutTests
         @"new\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*NpgsqlCommand\s*\(|\.CreateCommand\s*\(|\.CreateCommand\s*[,);]",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private static readonly Regex s_setsTimeout = new(
-        @"CommandTimeout\s*=",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
     /// <summary>
     /// A member name followed by an optional generic argument list and then its parameter list.
     ///
@@ -285,10 +281,16 @@ public sealed class AlertPassCommandTimeoutTests
     /// The scanner above is what forty-five sites' correctness is asserted through, so its own blind
     /// spots are worth pinning: a false positive here fails a green build on correct code.
     ///
-    /// <para>Both cases are shapes that actually occur. The first is the <c>CreateCommand</c> site
+    /// <para>The first three are shapes that actually occur. The first is the <c>CreateCommand</c> site
     /// with an interposed explanatory comment containing a semicolon — the exact gap where this
     /// codebase's style puts one. The second is the verbatim-SQL construction, where the deadline sits
     /// twenty-odd lines below the opening and past any fixed line window.</para>
+    ///
+    /// <para>The last three are the layouts a single two-statement window over RAW text cannot report: an
+    /// untimed command in a <c>using (...)</c> whose one-statement body lets the deadline behind the block
+    /// stand in, an untimed construction directly ahead of a timed one, and a deadline merely SPELLED in a
+    /// comment. The first two are why the initializer is read from the CONSTRUCTION and only an assignment
+    /// from the statement span; the third is why both are read from STRIPPED source.</para>
     /// </summary>
     [Theory]
     [InlineData(
@@ -303,14 +305,45 @@ public sealed class AlertPassCommandTimeoutTests
         "var command = _postgres.CreateCommand(Sql);\n"
         + "await command.ExecuteNonQueryAsync();\n",
         false)]
+    [InlineData(
+        "using (var untimed = new NpgsqlCommand(Sql, connection))\n"
+        + "{\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n"
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
+        false)]
+    [InlineData(
+        "using var untimed = new NpgsqlCommand(Sql, connection);\n"
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
+        false)]
+    /* A comment that NAMES a deadline is not one. This case was green before the value regex moved onto
+       the stripped span: the construction match excluded comments while the deadline test did not, so
+       prose could satisfy it. False-negative direction - it reported success on the defect. */
+    [InlineData(
+        "var command = new NpgsqlCommand(Sql, connection);\n"
+        + "/* no deadline needed here; CommandTimeout = 10 is applied by the caller. */\n"
+        + "await command.ExecuteNonQueryAsync();\n",
+        false)]
+    /* The sibling spelled as an ASSIGNMENT rather than an initializer. Every other sibling fixture in this
+       family used the initializer form, which has no leading dot and so never reached the assignment regex -
+       while the assignment spelling is the dominant one in this codebase. Found in review. */
+    [InlineData(
+        "using (var untimed = connection.CreateCommand())\n"
+        + "{\n"
+        + "    using var sibling = connection.CreateCommand();\n"
+        + "    sibling.CommandTimeout = 10;\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n",
+        false)]
     public void TheScanner_SeesADeadlineThroughCommentsAndVerbatimSql(string source, bool expectedTimed)
     {
-        var ctor = s_commandCtor.Match(source);
+        /* Stripped, exactly as ScanForUntimedCommands does it - a fixture that walked the raw text would
+           pass while the shipped scan failed, which is how this defect survived its own theory. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var ctor = s_commandCtor.Match(code);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
-
-        Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
+        Assert.Equal(expectedTimed, CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index));
     }
 
     /* The literal- and comment-aware walk this pin used to carry lives in CSharpSourceWalker as of
@@ -436,8 +469,9 @@ public sealed class AlertPassCommandTimeoutTests
     /// <para>Matched over <see cref="CSharpSourceWalker.StripCommentsAndStrings"/>'s output so a
     /// construction named in PROSE is not counted as a site — these files carry long explanatory
     /// comments about the commands beside them, and a mention would arrive as a false offender on
-    /// correct code. Spans are then cut from the ORIGINAL text, which is sound because the strip is
-    /// length-preserving; that is the same stripped-walk/raw-span split the shared walker uses.</para>
+    /// correct code. The DEADLINE is matched over that same stripped text rather than the original: a
+    /// deadline merely spelled in one of those explanatory comments is not a deadline, and reading raw text
+    /// there lets the comment about a deadline stand in for the deadline itself.</para>
     ///
     /// <para>Scan to the END OF THE STATEMENT, not a fixed number of lines. A line window cannot work
     /// here and the first draft of this pin proved it: these sites embed verbatim SQL, so the
@@ -458,17 +492,31 @@ public sealed class AlertPassCommandTimeoutTests
     {
         var total = 0;
 
-        foreach (Match ctor in s_commandCtor.Matches(CSharpSourceWalker.StripCommentsAndStrings(text)))
+        /* ONE stripped copy, used for the construction match AND for the deadline test.
+
+           The value regex used to run over a span cut from the RAW text while the construction regex ran
+           over stripped output - half stripped, half not, in one method - so a comment was excluded from
+           inventing a SITE but not from satisfying a DEADLINE. a comment reading "no deadline here; CommandTimeout = 10 is set
+           by the caller" made an untimed command read clean, which is the false-negative
+           direction: it reports success on the defect. Found by #2874's group D in its own pin and
+           confirmed here; it masks nothing on the current tree (46 alert-pass sites, 0 affected, measured)
+           and is fixed because the next one would be invisible.
+
+           Stripping literal TEXT as well as comments is safe for THIS regex and only for this one: the
+           deadline is always code (`CommandTimeout = <expr>`), never a value inside a string. A pin whose
+           value regex must see literal contents would be broken by this line, so it is not a change to
+           make family-wide by reflex. Line numbers survive because the strip preserves newlines. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+        foreach (Match ctor in s_commandCtor.Matches(code))
         {
             total++;
 
-            var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
-
-            if (!s_setsTimeout.IsMatch(span))
+            if (!CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
             {
                 /* Reported as the line in the FILE, not an offset into the scanned region, so a member
                    scope's offender is as navigable as a whole-file scope's. */
-                offenders.Add($"{label}:{firstLine + LineOf(text, ctor.Index) - 1}");
+                offenders.Add($"{label}:{firstLine + LineOf(code, ctor.Index) - 1}");
             }
         }
 

@@ -103,20 +103,36 @@ internal static class CSharpSourceWalker
     }
 
     /// <summary>
-    /// <para>The text from <paramref name="start"/> through the <paramref name="statements"/>'th <c>;</c>
-    /// that sits at bracket depth zero or below, or to the end of <paramref name="text"/> if there are
-    /// fewer. Only CODE characters are counted, so a semicolon or a bracket inside a comment or a literal
-    /// cannot end the span or unbalance the depth.</para>
+    /// <para>The text from <paramref name="start"/> through the <paramref name="statements"/>'th
+    /// statement-ending <c>;</c>, or through the end of the SCOPE that <paramref name="start"/> sits in,
+    /// whichever comes first. Only CODE characters are counted, so a semicolon or a bracket inside a
+    /// comment or a literal cannot end the span or unbalance the depth.</para>
     ///
-    /// <para>The span is cut from the ORIGINAL text rather than the stripped one, because the callers match
-    /// a value-bearing regex over it and want to see what is actually written there. It is the WALK that is
-    /// literal-aware, not the result.</para>
+    /// <para><b>The span is cut from whatever text it was handed, and every caller now hands it STRIPPED
+    /// source.</b> This once said the opposite - that the original was passed because a caller wants to see
+    /// what is actually written there - and that reasoning was wrong in the direction that matters. A caller
+    /// matching a value-bearing regex over a raw span accepts the value SPELLED in a comment: a site whose
+    /// deadline exists only in an explanatory note about the deadline reads as timed. Making the walk
+    /// literal-aware and then handing it raw text throws the awareness away at the last step.</para>
     ///
-    /// <para><b>Why depth <c>&lt;= 0</c> and not <c>== 0</c>.</b> An untimed command inside a
-    /// <c>using (...) { }</c> statement has the block's closing brace between it and the next command's
-    /// deadline. A depth counter that cannot go negative treats that <c>}</c> as still depth-zero, keeps
-    /// consuming past it, and reads the FOLLOWING command's deadline — calling the untimed site clean. That
-    /// is a false negative in a guard, and it is the shape this group's own tooling once got wrong.</para>
+    /// <para><b>A closing BRACE that was open before <paramref name="start"/> ends the span.</b> A statement
+    /// count alone cannot bound it. An untimed command inside a <c>using (...) { }</c> whose body holds a
+    /// single statement spends the two-statement window on that statement and on the statement AFTER the
+    /// block, so the FOLLOWING command's deadline satisfies the scan and the untimed site reads as clean;
+    /// the same leak runs out through the closing brace of any block a construction is the last statement of.
+    /// Both are false negatives in a guard, and a deadline written where the command is already out of scope
+    /// was never this command's deadline — so the scope, not a count, is what has to bound the span. A
+    /// parenthesis or a bracket is NOT a scope: it delimits an expression, and an expression that opened
+    /// before <paramref name="start"/> does not change which block the construction lives in.</para>
+    ///
+    /// <para><b>A statement header is followed into its embedded statement.</b> When the construction sits in
+    /// a <c>using (var command = ...)</c> header, the deadline is either in that header's initializer or in
+    /// the block the header governs — fourteen sites across the four projects these pins scan set it as the
+    /// block's first statement — and never after the block, where the command no longer exists. So the span
+    /// continues past the header's <c>)</c> into the embedded block and ends at its closing brace, counting
+    /// that block's own statements. Stopping at the header instead would report all fourteen as offenders.
+    /// When the header governs a BRACELESS single statement, that statement is the whole span for the same
+    /// reason: the scope ends with it.</para>
     ///
     /// <para>Comments are skipped for the mirror-image reason, and it is not hypothetical: the two-statement
     /// window exists for the <c>CreateCommand</c> shape, whose deadline is the statement AFTER the
@@ -133,6 +149,12 @@ internal static class CSharpSourceWalker
         var depth = 0;
         var seen = 0;
 
+        /* The depth the statements being counted live at: zero, or the embedded block's depth once a header
+           has been followed into one. `body` is that block's depth, and -1 until there is one. */
+        var floor = 0;
+        var body = -1;
+        var header = false;
+
         for (var i = start; i < text.Length; i++)
         {
             if (!code[i])
@@ -145,18 +167,197 @@ internal static class CSharpSourceWalker
             if (c is '(' or '[' or '{')
             {
                 depth++;
+
+                if (c == '{' && header && body < 0)
+                {
+                    body = depth;
+                    floor = depth;
+                }
+
+                continue;
             }
-            else if (c is ')' or ']' or '}')
+
+            if (c is ')' or ']' or '}')
             {
+                if (c == '}' && depth == body)
+                {
+                    return text[start..(i + 1)];
+                }
+
                 depth--;
+
+                if (depth >= 0)
+                {
+                    continue;
+                }
+
+                if (c == '}')
+                {
+                    return text[start..i];
+                }
+
+                /* A parenthesis or bracket that was open before `start` has closed. Neither ends the block, so
+                   the walk carries on at depth zero - but WHICH of the two it was decides how much further it
+                   may go, and the answer is in what comes next. A statement HEADER is followed by the statement
+                   it governs, so that statement is the rest of the span. An ARGUMENT LIST is followed by the
+                   rest of its own expression, and the construction it held is still an ordinary part of the
+                   statement it sits in, so the statement budget continues as normal. Conflating them costs a
+                   verdict either way: treat a header like an argument list and the span runs out of the scope
+                   the command lives in; treat an argument list like a header and a correctly-timed
+                   `Wrap(connection.CreateCommand())` is cut off before the assignment on the next line. */
+                depth = 0;
+                header = header || StartsAStatement(text, code, i + 1);
+
+                continue;
             }
-            else if (c == ';' && depth <= 0 && ++seen >= statements)
+
+            if (c != ';' || depth != floor)
+            {
+                continue;
+            }
+
+            if (header && body < 0)
+            {
+                /* A header whose embedded statement carries no braces - `using (...) await cmd.RunAsync();`.
+                   This semicolon ends that one statement, and the scope ends with it, so there is no next
+                   statement to look at. Without this the braced and braceless forms of the same `using` would
+                   be judged differently, which is the generality the brace stop above does not have on its
+                   own. */
+                return text[start..(i + 1)];
+            }
+
+            if (++seen >= statements)
             {
                 return text[start..(i + 1)];
             }
         }
 
         return text[start..];
+    }
+
+    /// <summary>
+    /// <para>The construction expression starting at <paramref name="start"/> — its argument list, and the
+    /// object or collection initializer attached to it, if there is one. Nothing else: this is the span that
+    /// belongs to the SITE rather than to its statement or to its scope.</para>
+    ///
+    /// <para><b>Why the scope bound on <see cref="StatementSpanFrom"/> is not enough on its own.</b> A scan
+    /// asking "was a deadline set here" over a span that reaches into the following statement — which the
+    /// <c>CreateCommand</c> shape needs, its deadline being an assignment rather than an initializer — will
+    /// accept the following construction's OWN initializer. So an untimed command directly followed by a
+    /// timed one reads as timed, and so does an untimed <c>using (...)</c> header whose block opens with a
+    /// timed sibling. That sibling is in the same scope and often in the very next statement, so neither a
+    /// statement count nor a scope bound can exclude it.</para>
+    ///
+    /// <para>Splitting the question is what excludes it. A value in a construction's initializer belongs to
+    /// THAT construction, so it is read from this span; a value assigned through a member access belongs to
+    /// whatever it was assigned to, so it is read from the surrounding statement span. Truncating the
+    /// statement span at the next construction instead is the tempting one-liner, and it is wrong: two
+    /// constructions can share one deadline, as the arms of the conditional in
+    /// <c>ViewerDataService.FinOps.Locking.cs</c> do, and truncating there reports the first arm as an
+    /// offender.</para>
+    /// </summary>
+    internal static string ConstructionSpanFrom(string text, int start)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        var code = CodeMask(text);
+        var open = start;
+
+        /* The argument list has to be ATTACHED to the reference at `start`, so the walk to it may only cross
+           what a construction's head is made of: the `new` keyword, a qualified type or member name, and any
+           generic argument list. A scan that just looked for the next `(` would run out of the statement
+           entirely for a match that has no argument list - a bare `.CreateCommand` METHOD GROUP, which two of
+           these pins match deliberately - and return the NEXT construction's span, initializer included, so a
+           hand-off with no deadline of its own read as timed. */
+        while (open < text.Length
+               && (!code[open] || char.IsWhiteSpace(text[open]) || char.IsLetterOrDigit(text[open])
+                   || text[open] is '_' or '.' or '<' or '>'))
+        {
+            open++;
+        }
+
+        if (open >= text.Length || text[open] != '(')
+        {
+            /* No argument list attached: the reference itself is the whole span, and it cannot carry a
+               deadline. */
+            return text[start..open];
+        }
+
+        var end = ClosingIndex(text, code, open, '(', ')');
+
+        if (end < 0)
+        {
+            return text[start..];
+        }
+
+        var next = end + 1;
+
+        while (next < text.Length && (!code[next] || char.IsWhiteSpace(text[next])))
+        {
+            next++;
+        }
+
+        if (next >= text.Length || text[next] != '{')
+        {
+            return text[start..(end + 1)];
+        }
+
+        var brace = ClosingIndex(text, code, next, '{', '}');
+
+        return brace < 0 ? text[start..] : text[start..(brace + 1)];
+    }
+
+    /// <summary>
+    /// Whether the next CODE character from <paramref name="i"/> begins a STATEMENT rather than continuing an
+    /// expression. Only used to tell a statement header apart from an argument list once the closing
+    /// parenthesis of one of them has been passed, where the two want different amounts of the text that
+    /// follows. A statement can begin with a block, an identifier or a keyword; an expression continues with
+    /// punctuation or an operator, and a bare <c>;</c> ends the statement the expression was part of.
+    /// </summary>
+    private static bool StartsAStatement(string text, bool[] code, int i)
+    {
+        while (i < text.Length && (!code[i] || char.IsWhiteSpace(text[i])))
+        {
+            i++;
+        }
+
+        return i < text.Length
+               && (text[i] == '{' || text[i] == '_' || text[i] == '@' || char.IsLetter(text[i]));
+    }
+
+    /// <summary>
+    /// The index of the <paramref name="close"/> matching the <paramref name="open"/> delimiter at
+    /// <paramref name="from"/>, or -1 when they never balance. Only CODE characters count, so a delimiter in
+    /// prose or in a literal cannot unbalance the match — the same contract <see cref="BraceBalanced"/> gets
+    /// by being handed already-stripped text, reached the other way so this one holds whatever it is handed.
+    /// </summary>
+    private static int ClosingIndex(string text, bool[] code, int from, char open, char close)
+    {
+        var depth = 0;
+
+        for (var i = from; i < text.Length; i++)
+        {
+            if (!code[i])
+            {
+                continue;
+            }
+
+            if (text[i] == open)
+            {
+                depth++;
+            }
+            else if (text[i] == close)
+            {
+                depth--;
+
+                if (depth == 0)
+                {
+                    return i;
+                }
+            }
+        }
+
+        return -1;
     }
 
     /// <summary>

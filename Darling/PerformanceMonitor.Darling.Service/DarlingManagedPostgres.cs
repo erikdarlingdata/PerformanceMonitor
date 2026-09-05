@@ -1800,7 +1800,7 @@ public sealed class DarlingManagedPostgres
         await using var connection = new NpgsqlConnection(builder.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
-        using (var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection))
+        using (var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds })
         {
             if (await exists.ExecuteScalarAsync(cancellationToken) is not null)
             {
@@ -1813,7 +1813,7 @@ public sealed class DarlingManagedPostgres
         /* Identifier from the class constant, never from input — same interpolation reasoning
            as TimescaleSupport/DarlingRetention. CREATE DATABASE cannot run in a transaction;
            plain ExecuteNonQuery is the correct shape. */
-        using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection);
+        using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds };
         await create.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1829,8 +1829,8 @@ public sealed class DarlingManagedPostgres
     /// exactly what a freshly upgraded cluster produced here while the server itself was demonstrably
     /// healthy and stayed up for minutes afterwards.</para>
     /// </summary>
-    private const int FirstConnectionAttempts = 6;
-    private static readonly TimeSpan s_firstConnectionRetryDelay = TimeSpan.FromSeconds(2);
+    internal const int FirstConnectionAttempts = 6;
+    internal static readonly TimeSpan s_firstConnectionRetryDelay = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// Whether an exception is a transport-level fault worth retrying (socket reset, stream write failure,
@@ -2478,7 +2478,7 @@ public sealed class DarlingManagedPostgres
             await connection.OpenAsync(cancellationToken);
 
             await using (var errors = new NpgsqlCommand(
-                "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL", connection))
+                "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
             {
                 var errorCount = Convert.ToInt64(await errors.ExecuteScalarAsync(cancellationToken) ?? 0L);
                 if (errorCount > 0)
@@ -2506,7 +2506,7 @@ public sealed class DarlingManagedPostgres
                 await using var command = new NpgsqlCommand(
                     "SELECT count(DISTINCT u) FROM pg_hba_file_rules AS r, unnest(r.user_name) AS u "
                     + "WHERE r.type = 'hostssl' AND $1 = ANY(r.database) AND u = ANY($2::text[])",
-                    connection);
+                    connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 command.Parameters.AddWithValue(DatabaseName);
                 command.Parameters.AddWithValue(plan.Roles!.ToArray());
                 present = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
@@ -2528,7 +2528,7 @@ public sealed class DarlingManagedPostgres
                 /* Disable: no Darling-managed hostssl rule (darling database, viewer/admin) should remain. */
                 await using var command = new NpgsqlCommand(
                     "SELECT count(*) FROM pg_hba_file_rules WHERE type = 'hostssl' AND $1 = ANY(database) AND (user_name && ARRAY['viewer','admin'])",
-                    connection);
+                    connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 command.Parameters.AddWithValue(DatabaseName);
                 present = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
 
@@ -2568,7 +2568,7 @@ public sealed class DarlingManagedPostgres
         {
             await using var connection = new NpgsqlConnection(ownerConnectionString);
             await connection.OpenAsync(cancellationToken);
-            await using var command = new NpgsqlCommand("SHOW listen_addresses", connection);
+            await using var command = new NpgsqlCommand("SHOW listen_addresses", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var liveListen = await command.ExecuteScalarAsync(cancellationToken) as string ?? string.Empty;
 
             if (plan.Mode == NetworkMode.Exposed)
