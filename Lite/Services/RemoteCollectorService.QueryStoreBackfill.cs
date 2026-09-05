@@ -81,9 +81,13 @@ public partial class RemoteCollectorService
                 return;
             }
 
-            /* #2165: the other half of the gate. Taken OUTSIDE the AbandonableStep on purpose — an
-               abandoned-but-still-wedged slice keeps the gate closed, which is right, because the statement
-               is genuinely still running on the monitored server and the tick must keep yielding to it. */
+            /* #2165: the other half of the gate, and it has to stay closed PAST an abandonment — that is
+               the one outcome where the statement is genuinely still running on the monitored server and the
+               tick must keep yielding to it. So the lease is HANDED to the step (holdUntilStepEnds) rather
+               than scoped here: a `using` in this loop body releases at the end of the ITERATION, which
+               opened the gate the instant the deadline handed control back and let the tick collect beside
+               the still-running slice. The step disposes the lease exactly once on every outcome, the moment
+               its own in-flight guard clears, so the gate and the quarantine open together. */
             var gate = _queryStoreGates
                 .GetOrAdd(server.Id, static _ => new QueryStoreServerGate())
                 .TryAcquire();
@@ -96,8 +100,6 @@ public partial class RemoteCollectorService
                 continue;
             }
 
-            using var backfillGate = gate;
-
             var step = _backfillSliceSteps.GetOrAdd(server.Id, static _ => new AbandonableStep());
             var result = await step.RunAsync(
                 () => RunQueryStoreBackfillSliceAsync(server, cancellationToken),
@@ -105,6 +107,7 @@ public partial class RemoteCollectorService
                 onLateFault: ex => _logger?.LogError(ex,
                     "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
                     server.DisplayName),
+                holdUntilStepEnds: gate,
                 cancellationToken: cancellationToken);
 
             switch (result.Outcome)
@@ -125,6 +128,9 @@ public partial class RemoteCollectorService
                         server.DisplayName, (int)BackfillSliceDeadline.TotalSeconds);
                     break;
                 case AbandonableStepOutcome.SkippedStillRunning:
+                    /* Defence in depth since the gate started outliving abandonment: the guard is only ever
+                       held by a run whose lease has not been released yet, so the acquire above refuses
+                       first and this tick no longer reaches here. */
                     _logger?.LogError(
                         "query_store backfill slice on '{Server}' skipped — a previously-abandoned slice is still wedged (#2148).",
                         server.DisplayName);

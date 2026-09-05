@@ -2309,11 +2309,16 @@ public sealed class DarlingWorker : BackgroundService
                    abandoned (loudly) and quarantined until its task actually dies, while every other
                    server's backfill continues. The deadline is a generous multiple of a healthy slice
                    (statement timeout 60s + store writes), so an abandonment is a defect signal. */
-                /* #2165: the other half of the gate. Held for the WHOLE slice, and taken outside the
-                   AbandonableStep so an abandoned-but-still-wedged slice keeps the gate closed — the tick must
-                   keep yielding while that statement is genuinely still running on the server, which is exactly
-                   the case the abandonment leaves behind. Zero-wait, so a tick already collecting simply defers
-                   this server's slice to the next five-minute cycle. */
+                /* #2165: the other half of the gate. Held for the WHOLE slice — which has to mean PAST an
+                   abandonment, because that is the one outcome where the statement is genuinely still running
+                   on the server and the tick must keep yielding to it. So the lease is HANDED to the step
+                   (holdUntilStepEnds) rather than scoped here: a `using` in this loop body releases at the end
+                   of the ITERATION, which opened the gate the instant the deadline handed control back and let
+                   the tick start its own Query Store collection beside the still-running slice — the #2165
+                   overlap, restored by the one case #2148 exists to survive. The step disposes the lease
+                   exactly once on every outcome, the moment its own in-flight guard clears, so the gate and
+                   the quarantine now open together. Zero-wait, so a tick already collecting simply defers this
+                   server's slice to the next five-minute cycle. */
                 var gate = _queryStoreGates.GetOrAdd(runtime.ServerId, static _ => new QueryStoreServerGate()).TryAcquire();
                 if (gate is null)
                 {
@@ -2323,8 +2328,6 @@ public sealed class DarlingWorker : BackgroundService
                     continue;
                 }
 
-                using var backfillGate = gate;
-
                 var step = _backfillSliceSteps.GetOrAdd(runtime.ServerId, static _ => new AbandonableStep());
                 var result = await step.RunAsync(
                     () => backfill.RunServerSliceAsync(runtime, stoppingToken),
@@ -2332,6 +2335,7 @@ public sealed class DarlingWorker : BackgroundService
                     onLateFault: ex => _logger.LogError(ex,
                         "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
                         runtime.Config.DisplayName),
+                    holdUntilStepEnds: gate,
                     cancellationToken: stoppingToken);
 
                 switch (result.Outcome)
@@ -2354,6 +2358,10 @@ public sealed class DarlingWorker : BackgroundService
                             runtime.Config.DisplayName, (int)BackfillSliceDeadline.TotalSeconds);
                         break;
                     case AbandonableStepOutcome.SkippedStillRunning:
+                        /* Defence in depth since the gate started outliving abandonment: the guard is only
+                           ever held by a run whose lease has not been released yet, so the acquire above
+                           refuses first and this loop no longer reaches here. Kept because it is the honest
+                           report if that ever stops being true. */
                         _logger.LogError(
                             "query_store backfill slice on '{Server}' skipped — a previously-abandoned slice is still wedged (#2148).",
                             runtime.Config.DisplayName);
