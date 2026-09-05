@@ -3261,6 +3261,14 @@ AND   j.hypertable_name = '{relation}'";
     /// <para>The phase comes back as a minute-of-hour already converted to UTC. A bare
     /// <c>EXTRACT(MINUTE FROM initial_start)</c> would read the SESSION time zone, which on any of the
     /// half-hour and quarter-hour zones is a store-wide silent skew rather than a local oddity.</para>
+    ///
+    /// <para><b><c>hypertable_schema</c> is selected because a bare name is not an identity.</b>
+    /// <see cref="CompressionPhaseOrder"/> holds bare table names, so a bring-your-own store carrying its own
+    /// <c>wait_stats</c> hypertable in another schema would otherwise match one of ours and be given a minute
+    /// this code has no basis for choosing. The cadence converge stays deliberately unscoped — that is
+    /// #1778's reach and narrowing it would be a behaviour change — so the schema gates the PHASE only.
+    /// Appended rather than inserted, so every ordinal the reader already uses keeps its position: an ordinal
+    /// shift in a column list is a defect nothing but a live store can see.</para>
     /// </summary>
     public const string CompressionPolicyStateSql = @"
 SELECT
@@ -3272,7 +3280,8 @@ SELECT
     CASE
         WHEN j.initial_start IS NULL THEN NULL
         ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
-    END AS phase_minutes
+    END AS phase_minutes,
+    j.hypertable_schema
 FROM timescaledb_information.jobs AS j
 WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
 
@@ -3380,7 +3389,12 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                 var fixedSchedule = !reader.IsDBNull(4) && reader.GetBoolean(4);
                 var wasPhase = reader.IsDBNull(5) ? (int?)null : reader.GetInt32(5);
 
-                int? phase = hypertable is not null && TryCompressionPhaseMinutesFor(hypertable, out var slot)
+                /* Schema-exact, because CompressionPhaseOrder holds BARE names: a foreign hypertable
+                   named like one of ours must not inherit its minute. */
+                var ours = !reader.IsDBNull(6)
+                    && string.Equals(reader.GetString(6), PgSchemaGenerator.CollectSchema, StringComparison.Ordinal);
+
+                int? phase = ours && hypertable is not null && TryCompressionPhaseMinutesFor(hypertable, out var slot)
                     ? slot
                     : null;
 

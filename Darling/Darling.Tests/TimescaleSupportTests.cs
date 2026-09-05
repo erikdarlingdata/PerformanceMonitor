@@ -2459,6 +2459,30 @@ LIMIT 1", connection))
            be filtered out before the caller ever saw it. */
         Assert.DoesNotContain("IS DISTINCT FROM", read, StringComparison.Ordinal);
 
+        /* THE ORDINAL CONTRACT. The reader positions its columns by index, and hypertable_schema was
+           APPENDED rather than inserted precisely so no existing index moved — an ordinal shift in a column
+           list is a defect only a live store can see, and it would silently read a phase out of a boolean.
+           So the schema is asserted to be the LAST of exactly seven selected columns, which is the property
+           the C# index depends on. */
+        var selected = read[(read.IndexOf("SELECT", StringComparison.Ordinal) + "SELECT".Length)
+                ..read.IndexOf("FROM timescaledb_information.jobs", StringComparison.Ordinal)]
+            .Split(',')
+            .Select(part => part.Trim().Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal))
+            .Where(part => part.Length > 0)
+            .ToArray();
+
+        /* Control on the split itself: a CASE expression carries no top-level comma, so seven parts is the
+           column count and not an artifact of splitting inside one. */
+        Assert.Equal(7, selected.Length);
+        Assert.StartsWith("j.job_id", selected[0], StringComparison.Ordinal);
+        Assert.Equal("j.hypertable_schema", selected[6]);
+
+        /* And the phase is gated on it: CompressionPhaseOrder holds BARE names, so a foreign hypertable
+           called like one of ours must not inherit its minute. The cadence converge stays unscoped on
+           purpose — that is #1778's reach. */
+        Assert.Contains("j.hypertable_schema", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("hypertable_schema = ", read, StringComparison.Ordinal);
+
         var phased = TimescaleSupport.SetCompressionSchedulePhaseSql;
 
         Assert.Contains("$1::integer", phased, StringComparison.Ordinal);
