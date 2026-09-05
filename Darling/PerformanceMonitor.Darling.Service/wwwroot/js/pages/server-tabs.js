@@ -1298,6 +1298,12 @@ export const SERVER_TABS = [
          heaviest query three times to open it. */
       ...fanout("get_collection_health", { server }, [
         { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
+        /* #3013: the alerting layer's own store reads, which appear on no other health surface. Its own
+           panel rather than a tile on Sweep Pressure specifically because of the SUBTITLE: these figures are
+           in-memory counts since the service started, and inheriting "trailing 7 days" would have made the
+           panel assert a window it did not measure. Shared const so the SQL Server and PostgreSQL tabs cannot
+           drift apart on it. */
+        ALERT_READ_PANEL,
         {
           title: "Collectors",
           subtitle: "trailing 7 days",
@@ -1438,6 +1444,12 @@ export const POSTGRES_TABS = [
          three panels, for the reason fanout exists. */
       ...fanout("get_collection_health", { server }, [
         { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
+        /* #3013: the alerting layer's own store reads, which appear on no other health surface. Its own
+           panel rather than a tile on Sweep Pressure specifically because of the SUBTITLE: these figures are
+           in-memory counts since the service started, and inheriting "trailing 7 days" would have made the
+           panel assert a window it did not measure. Shared const so the SQL Server and PostgreSQL tabs cannot
+           drift apart on it. */
+        ALERT_READ_PANEL,
         {
           title: "Collectors",
           subtitle: "trailing 7 days",
@@ -2180,6 +2192,31 @@ const SESSION_STATS = [
   { key: "summary.distinct_applications", label: "Applications", format: "int" },
   { key: "collection_time", label: "Collected", format: "reltime", small: true },
 ];
+
+/* #3013: the alerting subsystem's own swallowed store reads. Its own panel object (not just a stats array)
+   because the WINDOW is the point: every other panel on this tab is the trailing seven days, and this one is
+   an in-memory count since the service process started, which a restart takes to zero. The subtitle says so,
+   because a reader who assumed otherwise would read a zero as seven quiet days.
+
+   Deliberately carries no severity hint and feeds no band: a threshold here would have to guess how many
+   blind reads make alerting unhealthy, and on this surface a wrong guess fails by saying nothing is wrong.
+   "Newest" beside the counts for the same reason the Last Error column has a timestamp - the count never
+   ages out of a window, so a nonzero value with an old stamp is a healed episode. */
+const ALERT_READ_STATS = [
+  { key: "alert_read_health.server_read_failures", label: "Blind reads (server)", format: "int" },
+  { key: "alert_read_health.server_alert_passes", label: "Alert passes", format: "int" },
+  { key: "alert_read_health.instance_read_failures", label: "Blind reads (service)", format: "int" },
+  { key: "alert_read_health.last_failure_read", label: "Which read", format: "text", small: true },
+  { key: "alert_read_health.last_failure_at", label: "Newest", format: "reltime", small: true },
+  { key: "alert_read_health.counting_since", label: "Counting since", format: "reltime", small: true },
+];
+
+const ALERT_READ_PANEL = {
+  title: "Alerting Reads",
+  subtitle: "since this service started \u2014 NOT the trailing 7 days",
+  viz: "stat",
+  stats: ALERT_READ_STATS,
+};
 
 const SWEEP_STATS = [
   { key: "sweep_pressure.verdict", label: "Verdict", format: "text", small: true },

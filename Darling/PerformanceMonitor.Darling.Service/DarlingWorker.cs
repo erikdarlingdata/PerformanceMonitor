@@ -544,6 +544,12 @@ public sealed class DarlingWorker : BackgroundService
        encrypted_password SELECT-carve fails that whole read). */
     private readonly MonitoredServerRegistryState _registryState;
 
+    /// <summary>#3013: the process counter this worker's own swallowed alert reads are tallied on —
+    /// the alert pass entry point, the six PostgreSQL predictor passes, and the store background-job
+    /// health reads behind the fleet-scoped self-alerts. The same instance the engine and the
+    /// self-alert evaluator are constructed with.</summary>
+    private readonly AlertReadFailureCounter _readFailures = AlertReadFailureCounter.Shared;
+
     /* #2953: the collector's own startup verdict, published to the web host so /api/ping can report whether
        collection is actually running WITHOUT reading the store. The other three seams carry control-plane
        values the store is the authority for; this one carries the one fact the store cannot be asked about,
@@ -1472,7 +1478,10 @@ public sealed class DarlingWorker : BackgroundService
             agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes,
             /* #2136: the cadence warning threshold, read live like the AG seams (clamped on the property). */
-            storeJobCadenceWarnPercent: () => alertSettings.StoreJobCadenceWarnPercent);
+            storeJobCadenceWarnPercent: () => alertSettings.StoreJobCadenceWarnPercent,
+            /* #3013: the same process counter the shared engine tallies on, so one number covers both
+               halves of a server's alert work. */
+            readFailures: AlertReadFailureCounter.Shared);
 
         /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
            through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so
@@ -3141,7 +3150,10 @@ public sealed class DarlingWorker : BackgroundService
                    never break the sweep. */
                 await historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution));
             },
-            logger: _logger);
+            logger: _logger,
+            /* #3013: the process counter every swallowed condition read is tallied on. Passed explicitly
+               rather than defaulted inside the engine so a test constructs its own and cannot pollute it. */
+            readFailures: AlertReadFailureCounter.Shared);
     }
 
     /// <summary>
@@ -3161,9 +3173,45 @@ public sealed class DarlingWorker : BackgroundService
             return;
         }
 
+        /* #3013: the latest-CPU read is isolated from the sweep it feeds, for TWO reasons that point the
+           same way.
+
+           Correctness of the instrument: this read runs on AlertPassCommandTimeoutSeconds and is the
+           first store read of the pass, so under the contention #3013 measures it is the first to fail.
+           Inside the sweep's try it took engine.EvaluateServerAsync down with it, which meant
+           AlertEngine.EvaluateCoreAsync never ran and never recorded its pass - while the catch below
+           still recorded a read failure. Numerator up, denominator unchanged, worst exactly when the
+           counter matters most. That is a third route to the same defect the PostgreSQL predictor group
+           had: not omission and not placement, but REACHABILITY - a pass site that is real and
+           correctly placed and simply never entered.
+
+           Correctness of the ALERTING, which is the bigger half: a single failed CPU read aborted the
+           whole shared sweep for this server this tick, so blocking, deadlocks, poison waits,
+           long-running queries, TempDB, low disk, PVS, file growth, jobs, database state and forced
+           plans were none of them evaluated. The snapshot already documents a null CPU pair as a normal
+           input ("null when no SQL sample") and CheckCpuAsync gates on alertCpuValue.HasValue, so
+           degrading to (null, null) costs this tick its CPU alert and nothing else. */
+        double? sqlCpu = null;
+        double? totalCpu = null;
+
         try
         {
-            var (sqlCpu, totalCpu) = await ReadLatestCpuAsync(runtime.ServerId, cancellationToken);
+            (sqlCpu, totalCpu) = await ReadLatestCpuAsync(runtime.ServerId, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("[{Server}] Latest-CPU read for the alert pass failed: {Message}",
+                server.Config.DisplayName, ex.Message);
+            _readFailures.RecordReadFailure(
+                runtime.ServerId.ToString(CultureInfo.InvariantCulture), "latest-CPU read");
+        }
+
+        try
+        {
             var snapshot = new AlertServerSnapshot(
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                 runtime.Config.DisplayName,
@@ -3192,6 +3240,9 @@ public sealed class DarlingWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError("[{Server}] Alert sweep failed: {Message}", server.Config.DisplayName, ex.Message);
+            _readFailures.RecordReadFailure(
+                runtime.ServerId.ToString(CultureInfo.InvariantCulture),
+                "shared engine sweep");
         }
     }
 
@@ -3209,6 +3260,25 @@ public sealed class DarlingWorker : BackgroundService
         {
             return;
         }
+
+        /* #3013: the PostgreSQL predictor group is a THIRD alert evaluation pass, and it has to say so
+           or a PostgreSQL target's denominator reports two passes for three. One pass for the whole
+           group, not one per check: the six checks below are independently failure-isolated exactly as
+           AlertEngine's fourteen Check*Async calls are, and those fourteen are one pass. Isolation
+           granularity is not pass granularity. Recorded after the guard above because a pass that cannot
+           reach the store is not one.
+
+           NOT parity with the other two sites, and an earlier version of this comment wrongly claimed it
+           was. The shared engine records its pass after AlertEngine.EvaluateServerAsync's
+           !_settings.AlertsEnabled early return, and DarlingSelfAlertEvaluator.EvaluateStoreAlertsAsync
+           returns before recording on the same check. This path has no master-switch gate at all —
+           DarlingWorker holds no reference to AlertsEnabled anywhere — so with alerting switched off the
+           PostgreSQL predictors still read, still evaluate and still reach _alertDeliverer, and this
+           counts the pass that really did run. That gap pre-dates this counter and is a question about
+           whether the Tier 0 predictors are deliberately exempt from the switch, not something to settle
+           by gating a denominator: gating only this line would make the count deny passes that happened
+           and alerts that fired. The count stays truthful and the gap stays named. */
+        _readFailures.RecordPass(snapshot.ServerKey);
 
         try
         {
@@ -3307,6 +3377,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL outage-predictor reads");
         }
 
         /* #2711/#2719: Deadlocks, Blocking, Long-Running Query, Poison Wait and High CPU, each
@@ -3408,6 +3479,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL CPU alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL CPU alert read");
         }
     }
 
@@ -3521,6 +3593,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL deadlock alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL deadlock alert read");
         }
     }
 
@@ -3631,6 +3704,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL blocking alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read");
         }
     }
 
@@ -3747,6 +3821,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL long-running-query alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL long-running-query alert read");
         }
     }
 
@@ -3949,6 +4024,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL poison wait alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL poison wait alert read");
         }
     }
 
@@ -3982,6 +4058,7 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: a history WRITE, not a condition read. */
             _logger.LogWarning("Could not record Postgres alert resolution for {Server}/{Metric}: {Message}",
                 serverName, metricName, ex.Message);
         }
@@ -4224,6 +4301,8 @@ LIMIT 1";
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* Best-effort: an unreadable drive just means no disk signal this tick. */
+                /* NOT counted by #3013's swallowed-read counter: a local filesystem read, not a store read. #3013's
+                   mechanism is store latency crossing the alert pass's deadline, which has no bearing on DriveInfo. */
                 _logger.LogDebug("Store disk-pressure check: could not read the store volume free space: {Message}", ex.Message);
             }
         }
@@ -4251,6 +4330,9 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* NOT counted by #3013's swallowed-read counter: this read is CONTEXT for the alert text, not the
+               evidence the alert is judged on - that is freeBytes/totalBytes above. Losing it costs the message a
+               number; it does not make the condition unjudgeable. */
             _logger.LogDebug("Store disk-pressure check: could not read pg_database_size: {Message}", ex.Message);
             return null;
         }
@@ -4314,6 +4396,8 @@ LIMIT 1";
         catch (Exception ex)
         {
             _logger.LogError("Compression-job health check failed: {Message}", ex.Message);
+            _readFailures.RecordReadFailure(
+                null, "store background-job health reads (compression, job cadence, retention holds)");
         }
     }
 
@@ -4359,6 +4443,9 @@ LIMIT 1";
                self-heal on the next tick. The budget CTS surfaces as OperationCanceledException — with
                the SERVICE token untripped that can only be the sweep budget, so it takes the timeout
                arm too. */
+            /* NOT counted by #3013's swallowed-read counter, in either arm: this sweep WRITES the
+               self-metrics series. No alert is judged on its result — the store self-alerts read their own
+               evidence in EvaluateCompressionJobHealthAsync, which IS counted. */
             if (PgBaselineProvider.IsCommandTimeout(ex) || (ex is OperationCanceledException && budget.IsCancellationRequested))
             {
                 _logger.LogError(
@@ -4898,6 +4985,10 @@ LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: this reads the MONITORED SERVER's msdb over its own
+               connection and its own timeout, not the store over the alert pass's deadline. It is a swallowed alert
+               read, but not one #3013's mechanism can produce, and pooling the two would put a target-side outage
+               in a number the operator reads as store contention. */
             _logger.LogWarning("[{Server}] Recently-failed-job check errored: {Message}",
                 runtime.Config.DisplayName, ex.Message);
             return new List<FailedJobInfo>();

@@ -29,6 +29,7 @@ using PerformanceMonitor.Ui;
 /* Type alias (not a namespace import) so PerformanceMonitor.Alerting's CpuAlertMode enum can never
    collide with this app's own CpuAlertMode. */
 using AlertEngine = PerformanceMonitor.Alerting.AlertEngine;
+using AlertReadFailureCounter = PerformanceMonitor.Alerting.AlertReadFailureCounter;
 
 namespace PerformanceMonitorLite;
 
@@ -262,7 +263,14 @@ public partial class MainWindow : Window
                 _muteRuleService.IsAlertMuted,
                 failedJobsFetcher: FetchFailedJobsForAlertAsync,
                 resolutionCallback: ShowAlertResolutionToastAsync,
-                logger: new AppLoggerAdapter<AlertEngine>());
+                logger: new AppLoggerAdapter<AlertEngine>(),
+                /* #3013: the process counter every swallowed condition read is tallied on, which
+                   get_collection_health's alert_read_health block reads back. Lite's alert reads hit the
+                   local DuckDB store rather than a Postgres one, so the deadline mechanism #3013 measured
+                   does not apply here — but the SURFACE gap does: a swallowed read reached no health read
+                   on this SKU either. Passed explicitly rather than defaulted inside the engine so a test
+                   constructs its own and cannot pollute this one. */
+                readFailures: AlertReadFailureCounter.Shared);
 
             // Load mute rules from database
             await _muteRuleService.LoadAsync();

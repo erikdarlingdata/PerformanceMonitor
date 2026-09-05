@@ -359,7 +359,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<int>? agLagAlertSeconds = null,
         Func<long>? agRedoQueueAlertKb = null,
         Func<int>? agDisconnectRefireMinutes = null,
-        Func<int>? storeJobCadenceWarnPercent = null)
+        Func<int>? storeJobCadenceWarnPercent = null,
+        AlertReadFailureCounter? readFailures = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -379,7 +380,16 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Unsupplied falls back to the V57 DDL default, so an evaluator built without the seam behaves
            like a store at its shipped defaults (the AG-seam discipline). */
         _storeJobCadenceWarnPercent = storeJobCadenceWarnPercent ?? (() => 25);
+        _readFailures = readFailures;
     }
+
+    /// <summary>
+    /// Where a SWALLOWED self-alert store read is counted (#3013), or null when nothing is counting.
+    /// Only the conditions that READ the store here increment it; the fleet-scoped conditions are handed
+    /// their evidence as parameters, so their reads are counted at their own sites in
+    /// <c>DarlingWorker</c> — see the exemption notes at each catch.
+    /// </summary>
+    private readonly AlertReadFailureCounter? _readFailures;
 
     private enum ConnectionState
     {
@@ -408,6 +418,10 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
+        /* #3013: this server's second alert pass of the sweep, counted after the master-switch return so a
+           pass that never looked at the store is not in the denominator. */
+        _readFailures?.RecordPass(Key(serverId));
+
         /* Only judge collection-stopped once the service has actually collected from this server this run
            (see _hasBeenOnline) — otherwise pre-restart / pre-re-add stale rows would false-alarm before the
            first fresh collection lands. */
@@ -431,6 +445,7 @@ internal sealed class DarlingSelfAlertEvaluator
             catch (Exception ex)
             {
                 _logger?.LogError("[{Server}] Collection-health self-alert failed: {Message}", serverName, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), "collection-health self-alert");
             }
         }
 
@@ -451,6 +466,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             _logger?.LogError("[{Server}] Capture-down self-alert failed: {Message}", serverName, ex.Message);
+            _readFailures?.RecordReadFailure(Key(serverId), "capture-down self-alert");
         }
 
         try
@@ -492,6 +508,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             _logger?.LogError("[{Server}] Agent-not-running self-alert failed: {Message}", serverName, ex.Message);
+            _readFailures?.RecordReadFailure(Key(serverId), "agent-not-running self-alert");
         }
 
         /* Availability Group health (#991). Skipped entirely when the master AG switch is off, so a fleet that
@@ -527,6 +544,7 @@ internal sealed class DarlingSelfAlertEvaluator
             catch (Exception ex)
             {
                 _logger?.LogError("[{Server}] Availability-Group self-alert failed: {Message}", serverName, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), "Availability-Group self-alert");
             }
         }
 
@@ -682,6 +700,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             /* A self-alert read that fails must not take the loop down — it is best-effort telemetry. */
             _logger?.LogDebug(ex, "collector-cost regression evaluation failed");
+            _readFailures?.RecordReadFailure(null, "collector-cost regression self-alert");
             return;
         }
 
@@ -942,6 +961,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: the DELIVERY path, not a condition read. */
             _logger?.LogError("[{Server}] Connection-change self-alert delivery failed: {Message}", serverName, ex.Message);
         }
     }
@@ -1359,6 +1379,9 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: this method is handed its evidence as parameters and
+               performs no store read — the catch covers the apply/deliver half. The reads that FEED it are counted
+               at their own sites in DarlingWorker. */
             _logger?.LogError("Store disk-pressure self-alert failed: {Message}", ex.Message);
         }
     }
@@ -1557,6 +1580,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
             _logger?.LogError("Store runtime upgrade self-alert failed: {Message}", ex.Message);
         }
     }
@@ -1583,6 +1607,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: the stuck-job list is a parameter; the read that
+               produces it is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
             _logger?.LogError("Compression-job health self-alert failed: {Message}", ex.Message);
         }
     }
@@ -1605,6 +1631,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: the readings are a parameter; the read that produces
+               them is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
             _logger?.LogError("Store-job cadence self-alert failed: {Message}", ex.Message);
         }
     }
@@ -1701,6 +1729,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: the policies are a parameter; the read that produces
+               them is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
             _logger?.LogError("Retention-held self-alert failed: {Message}", ex.Message);
         }
     }
@@ -2350,6 +2380,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         {
             /* An audit-row write must never break the loop (RecordAlertAsync is already failure-isolated;
                this is belt-and-suspenders for any other IAlertHistoryStore). */
+            /* NOT counted by #3013's swallowed-read counter: an audit-row WRITE, not a condition read. */
             _logger?.LogError("Failed to record resolution '{Title}': {Message}", resolution.Title, ex.Message);
         }
     }
