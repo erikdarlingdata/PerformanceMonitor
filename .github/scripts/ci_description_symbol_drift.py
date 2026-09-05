@@ -122,13 +122,17 @@ FILENAME = re.compile(r'^(?:[A-Za-z0-9_.+-]+/)*([A-Za-z0-9_.+-]+)\.([A-Za-z0-9]+
 TRAILING_LINENO = re.compile(r':\d+(?:-\d+)?$')
 # Any of these means the span is not a bare symbol: a regex, a build command, an attribute, a
 # glob, an assignment, an HTML/generic type, a shell flag. All appear backticked in real bodies.
-# CR and LF are in here as a structural invariant, not because a newline looks unlike a symbol:
-# the double-backtick branch of BACKTICK matches across lines, an accepted span is printed into
-# a `::warning` workflow command, and a workflow command is single-line. Every acceptance path
-# below happens to reject an embedded newline already, by anchoring with ^...$ and never setting
-# DOTALL -- but that is emergent, and it would stop holding the moment one of those patterns is
-# loosened. Rejecting the character outright is what makes "no author-controlled newline reaches
-# a workflow command line" true by construction. Rate-neutral on the 110-PR corpus, as expected.
+# CR and LF are in here as defence in depth, and they have NO behavioural witness today: the
+# `.strip()` above removes a trailing newline, and an interior one already fails every
+# acceptance path below, since each anchors with ^...$ and none sets DOTALL. Removing these two
+# characters changes no verdict and fails no assertion -- measured, not assumed.
+#
+# They stay because the property is emergent rather than structural. The double-backtick branch
+# of BACKTICK matches across lines, an accepted span is printed into a `::warning` workflow
+# command, and a workflow command is single-line -- so "no author-controlled newline reaches a
+# workflow command line" rests entirely on those patterns staying strict. This makes it rest on
+# nothing. The presence of the characters is asserted directly, because no behaviour test can
+# distinguish a redundant guard from a missing one.
 REJECT_CHARS = set(' \t\r\n=*[]<>\\#%$|+?{}@"\'!;,~^&()')
 
 
@@ -340,9 +344,14 @@ def self_test():
     # BACKTICK matches across lines, which is what makes this reachable at all.
     check('a double-backticked span carrying a newline yields no symbol',
           not described_symbols('``WidgetReader\nSprocketCache`` moves.'))
-    check('an interior newline is rejected outright, not merely unmatched',
+    check('an interior newline yields no symbol',
           classify('Widget\nReader') is None and classify('Widget\rReader') is None)
-    # A TRAILING newline is stripped rather than rejected, which is correct -- so the invariant
+    # Asserted on the MECHANISM, not on behaviour. The two characters are redundant with the
+    # anchored acceptance patterns, so every behavioural test passes with or without them --
+    # which is exactly why their presence has to be stated to be kept.
+    check('CR and LF are rejected explicitly, not only emergently',
+          {'\r', '\n'} <= REJECT_CHARS)
+    # A TRAILING newline is stripped rather than rejected, which is correct -- so the property
     # to hold is about the accepted VALUE, not about rejection: nothing that reaches the
     # annotation may contain a line break, whichever way the span was spelled.
     check('no accepted symbol carries a line break',
