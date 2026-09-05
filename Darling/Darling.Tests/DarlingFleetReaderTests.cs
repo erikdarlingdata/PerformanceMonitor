@@ -381,7 +381,7 @@ public sealed class DarlingFleetDeadlockCoverageTests
     public void ADeadlockReaderThatWorked_Counts_EvenDegraded(string band)
         => Assert.Equal(
             FleetDeadlockSource.Read,
-            DarlingFleetReader.ClassifyDeadlockSource(isPostgres: false, band));
+            FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: false, band));
 
     /// <summary>
     /// The excluded bands, each attributed to the cause that names its fix. STOPPED, NEVER_RUN and a null
@@ -396,7 +396,7 @@ public sealed class DarlingFleetDeadlockCoverageTests
     [InlineData(CollectorHealthClassifier.NoPermissions, FleetDeadlockSource.CollectorDenied)]
     public void ADeadlockReaderThatReadNothing_DoesNotCount_AndNamesItsCause(
         string? band, FleetDeadlockSource expected)
-        => Assert.Equal(expected, DarlingFleetReader.ClassifyDeadlockSource(isPostgres: false, band));
+        => Assert.Equal(expected, FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: false, band));
 
     /// <summary>
     /// The issue's own case: a PostgreSQL target is never covered, and its collector's band cannot change
@@ -411,7 +411,7 @@ public sealed class DarlingFleetDeadlockCoverageTests
     public void APostgresTarget_IsNeverCovered_WhateverItsCollectorSays(string? band)
         => Assert.Equal(
             FleetDeadlockSource.PostgresTarget,
-            DarlingFleetReader.ClassifyDeadlockSource(isPostgres: true, band));
+            FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: true, band));
 
     /// <summary>
     /// A card that sets nothing reads as UNCOVERED, and that is the load-bearing default. <c>DeadlockSource</c>

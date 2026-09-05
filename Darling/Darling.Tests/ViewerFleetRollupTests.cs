@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
@@ -622,5 +624,527 @@ public sealed class ViewerFleetRollupLivePostgresTests
                 $"DELETE FROM {table} WHERE server_id IN ({XeServerId}, {DmvServerId});", connection);
             await cleanup.ExecuteNonQueryAsync(ct);
         }
+    }
+}
+
+/// <summary>
+/// The denominator beside the Overview's deadlock total (#3029). <c>FleetTotalsSql</c>'s
+/// <c>SELECT COUNT(*) FROM v_deadlocks</c> reads the SQL Server extended-event capture and nothing else —
+/// a PostgreSQL target's deadlocks go to <c>pg_deadlocks</c>, which nothing joins in — so on a PostgreSQL
+/// fleet that total is structurally zero forever. Zero is also exactly what a genuinely quiet SQL Server
+/// fleet reports, so the reading that needs no action and the reading that does not cover the fleet had the
+/// same character, and the tile could not tell an operator which one they were looking at.
+///
+/// <para><b>Both directions, deliberately.</b> The failure mode of a coverage figure is over-exclusion: a
+/// denominator that quietly shrinks reads as a smaller fleet, which is a new wrong number rather than a fix.
+/// So every test asserting a band is EXCLUDED sits beside one asserting the degraded-but-reading bands are
+/// INCLUDED.</para>
+///
+/// <para>The classification itself is <see cref="FleetDeadlockCoverage.ClassifyDeadlockSource"/> in
+/// PerformanceMonitor.Common, shared with the service's fleet reader, so these assertions and
+/// <c>DarlingFleetDeadlockCoverageTests</c> are pinning ONE decision from two surfaces rather than two
+/// look-alikes.</para>
+/// </summary>
+public sealed class ViewerFleetDeadlockCoverageTests
+{
+    private static readonly FleetTotals NoTotals = new();
+
+    private static ServerSummaryItem Card(int id, bool isPostgres = false, string? band = null) =>
+        new()
+        {
+            ServerId = id,
+            DisplayName = "target-" + id.ToString(CultureInfo.InvariantCulture),
+            IsOnline = true,
+            IsPostgres = isPostgres,
+            DeadlockCollectorBand = band,
+        };
+
+    // ── The card's own reading of whether its deadlock count read anything ──────────────────────────
+
+    /* Every band a collector that DID read can be in. Their rows are in the total, so all four count as
+       covered — including FAILING, which is loud on its own surfaces (the card's Collectors row, the
+       roll-up's collection-failures line) and does not need to be hidden inside a coverage number to be
+       seen. */
+    [Theory]
+    [InlineData(CollectorHealthClassifier.Healthy)]
+    [InlineData(CollectorHealthClassifier.Warning)]
+    [InlineData(CollectorHealthClassifier.Stale)]
+    [InlineData(CollectorHealthClassifier.Failing)]
+    public void ADeadlockReaderThatWorked_Counts_EvenDegraded(string band)
+        => Assert.Equal(FleetDeadlockSource.Read, Card(1, band: band).DeadlockSource);
+
+    /// <summary>
+    /// The excluded bands, each attributed to the cause that names its fix. STOPPED, NEVER_RUN and a null
+    /// band (the <c>deadlocks</c> collector left no row in the health window at all) are one bucket because
+    /// they take one action — look at the collector. NO_PERMISSIONS is its own, because a grant is the fix
+    /// and no amount of looking at the collector produces one.
+    /// </summary>
+    [Theory]
+    [InlineData(CollectorHealthClassifier.Stopped, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(CollectorHealthClassifier.NeverRun, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(null, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(CollectorHealthClassifier.NoPermissions, FleetDeadlockSource.CollectorDenied)]
+    public void ADeadlockReaderThatReadNothing_DoesNotCount_AndNamesItsCause(string? band, FleetDeadlockSource expected)
+        => Assert.Equal(expected, Card(1, band: band).DeadlockSource);
+
+    /// <summary>
+    /// The issue's own case: a PostgreSQL target is never covered, and its collector's band cannot change
+    /// that. <c>pg_deadlocks</c> can be perfectly HEALTHY on all fifty targets and this total still counts
+    /// none of it — the rows are in a different table. That is why PostgreSQL is asked before any band.
+    /// </summary>
+    [Theory]
+    [InlineData(CollectorHealthClassifier.Healthy)]
+    [InlineData(CollectorHealthClassifier.NoPermissions)]
+    [InlineData(CollectorHealthClassifier.Stopped)]
+    [InlineData(null)]
+    public void APostgresTarget_IsNeverCovered_WhateverItsCollectorSays(string? band)
+        => Assert.Equal(FleetDeadlockSource.PostgresTarget, Card(1, isPostgres: true, band: band).DeadlockSource);
+
+    /// <summary>
+    /// A card that sets nothing reads as UNCOVERED, and that is the load-bearing default.
+    /// <see cref="ServerSummaryItem.DeadlockSource"/> is derived rather than assigned precisely so a card
+    /// built by a path nobody re-reads cannot sit at an enum default meaning "read" and inflate the fleet's
+    /// coverage — a defect that would COMPILE, because the default is silent.
+    /// </summary>
+    [Fact]
+    public void ACardThatMakesNoClaim_IsUncovered_NotCovered()
+    {
+        var card = new ServerSummaryItem { ServerId = 1, DisplayName = "target-a" };
+
+        Assert.Equal(FleetDeadlockSource.CollectorSilent, card.DeadlockSource);
+        Assert.NotEqual(FleetDeadlockSource.Read, card.DeadlockSource);
+
+        var rollup = FleetRollup.Build(new[] { card }, NoTotals);
+
+        Assert.Equal(0, rollup.DeadlockCoverage.ServersRead);
+        Assert.Equal(1, rollup.DeadlockCoverage.ServersTotal);
+    }
+
+    // ── The reduction ──────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Over one card of every kind: the coverage comes from the same cards every other count in the roll-up
+    /// comes from, so the denominator and the number it qualifies reconcile by construction rather than by
+    /// two reads agreeing.
+    /// </summary>
+    [Fact]
+    public void Build_ReducesCoverageFromTheCards_WithEveryCauseAttributed()
+    {
+        var rollup = FleetRollup.Build(
+            new[]
+            {
+                Card(1, band: CollectorHealthClassifier.Healthy),
+                Card(2, band: CollectorHealthClassifier.Failing),
+                Card(3, isPostgres: true),
+                Card(4, isPostgres: true),
+                Card(5, band: CollectorHealthClassifier.Stopped),
+                Card(6, band: CollectorHealthClassifier.NoPermissions),
+                Card(7, band: null),
+            },
+            NoTotals);
+
+        var coverage = rollup.DeadlockCoverage;
+
+        Assert.Equal(2, coverage.ServersRead);
+        Assert.Equal(7, coverage.ServersTotal);
+        Assert.Equal(2, coverage.PostgresServers);
+        Assert.Equal(2, coverage.ServersCollectorSilent);   // STOPPED + the null band
+        Assert.Equal(1, coverage.ServersCollectorDenied);
+
+        /* With every registered server loaded, the four causes account for the fleet exactly once — an
+           unattributed server would mean coverage reporting a gap it cannot explain, which is the same
+           shape as a total reporting no denominator. */
+        Assert.Equal(
+            coverage.ServersTotal,
+            coverage.ServersRead + coverage.PostgresServers
+                + coverage.ServersCollectorSilent + coverage.ServersCollectorDenied);
+
+        /* And it agrees with the count the panel already shows beside it. */
+        Assert.Equal(rollup.TotalServers, coverage.ServersTotal);
+        Assert.Equal(0, rollup.UnknownCount);
+    }
+
+    /// <summary>
+    /// <b>The denominator is the REGISTERED fleet, not whatever loaded this cycle.</b> The deadlock total is
+    /// a cross-server COUNT over the whole store, so the population it covers is every registered server;
+    /// a denominator that shrank to the loaded subset would report a smaller fleet than exists — the
+    /// "quietly shrinking denominator" failure this figure exists to prevent, arriving through the #2753
+    /// transient-read-failure path instead of through a band.
+    ///
+    /// <para>The shortfall is <see cref="FleetRollup.UnknownCount"/>, so the arithmetic still closes: read
+    /// plus the three causes plus the unreported equals the registered fleet.</para>
+    /// </summary>
+    [Fact]
+    public void Build_CoverageDenominator_IsTheRegisteredFleet_AndTheShortfallIsTheUnreportedCount()
+    {
+        var loaded = new[]
+        {
+            Card(1, band: CollectorHealthClassifier.Healthy),
+            Card(2, isPostgres: true),
+        };
+
+        var rollup = FleetRollup.Build(loaded, NoTotals, totalServerCount: 5);
+        var coverage = rollup.DeadlockCoverage;
+
+        Assert.Equal(5, coverage.ServersTotal);
+        Assert.NotEqual(loaded.Length, coverage.ServersTotal);
+        Assert.Equal(1, coverage.ServersRead);
+        Assert.Equal(1, coverage.PostgresServers);
+        Assert.Equal(3, rollup.UnknownCount);
+
+        /* The three unreported servers are attributed to NO cause — none was measured for them. */
+        Assert.Equal(0, coverage.ServersCollectorSilent);
+        Assert.Equal(0, coverage.ServersCollectorDenied);
+
+        Assert.Equal(
+            coverage.ServersTotal,
+            coverage.ServersRead + coverage.PostgresServers + coverage.ServersCollectorSilent
+                + coverage.ServersCollectorDenied + rollup.UnknownCount);
+    }
+
+    /// <summary>
+    /// An empty fleet with servers registered still reports a denominator: nothing loaded, so nothing was
+    /// read, and "read 0 of 5" is the honest reading. <see cref="FleetRollup.Build"/> returns early on an
+    /// empty summary list, and a coverage object left at its default on that path would report the fleet as
+    /// having no denominator at all.
+    /// </summary>
+    [Fact]
+    public void Build_WithNoSummariesLoaded_StillReportsTheRegisteredDenominator()
+    {
+        var rollup = FleetRollup.Build(Array.Empty<ServerSummaryItem>(), NoTotals, totalServerCount: 5);
+
+        Assert.Equal(5, rollup.DeadlockCoverage.ServersTotal);
+        Assert.Equal(0, rollup.DeadlockCoverage.ServersRead);
+        Assert.True(rollup.HasDeadlockCoverage);
+        Assert.True(rollup.DeadlockCoverageIsPartial);
+        Assert.Equal("Deadlock coverage: read 0 of 5 servers", rollup.DeadlockCoverageText);
+    }
+
+    /// <summary>
+    /// A fleet with nothing registered has nothing for a coverage figure to qualify, so the line goes —
+    /// the ONE case it is hidden, and the whole roll-up panel is collapsed there anyway. It is never hidden
+    /// as a way of not saying that coverage is complete.
+    /// </summary>
+    [Fact]
+    public void Build_WithNoFleetAtAll_HasNothingToQualify()
+    {
+        var rollup = FleetRollup.Build(Array.Empty<ServerSummaryItem>(), NoTotals);
+
+        Assert.Equal(0, rollup.TotalServers);
+        Assert.False(rollup.HasDeadlockCoverage);
+        Assert.False(FleetRollup.Empty.HasDeadlockCoverage);
+    }
+
+    /// <summary>
+    /// <b>Only <see cref="FleetDeadlockSource.Read"/> counts as read, and the enum cannot grow unnoticed.</b>
+    /// Reflected off the type rather than listed by hand: a pin that enumerates the kinds by hand cannot see
+    /// the set grow, and a source kind added later that landed in the read bucket by default would restore
+    /// exactly the defect this figure exists to fix. If this count moves, whoever moved it decides here.
+    /// </summary>
+    [Fact]
+    public void EverySourceKind_IsProducible_AndOnlyReadCountsAsRead()
+    {
+        var kinds = Enum.GetValues<FleetDeadlockSource>();
+        Assert.Equal(4, kinds.Length);
+
+        /* Every kind is reachable through the shared classifier — a kind nothing can produce is a bucket
+           nothing can land in, which is a decision table with a hole in it rather than a spare arm. */
+        var producible = new[]
+        {
+            (IsPostgres: false, Band: (string?)CollectorHealthClassifier.Healthy),
+            (IsPostgres: true, Band: (string?)null),
+            (IsPostgres: false, Band: (string?)CollectorHealthClassifier.Stopped),
+            (IsPostgres: false, Band: (string?)CollectorHealthClassifier.NoPermissions),
+        }
+            .Select(c => FleetDeadlockCoverage.ClassifyDeadlockSource(c.IsPostgres, c.Band))
+            .ToHashSet();
+
+        Assert.Equal(kinds.Length, producible.Count);
+        Assert.All(kinds, k => Assert.Contains(k, producible));
+
+        /* And the reducer counts exactly one of them as read: one card of each kind, ServersRead == 1. */
+        var coverage = FleetRollup.ReduceDeadlockCoverage(
+            new[]
+            {
+                Card(1, band: CollectorHealthClassifier.Healthy),
+                Card(2, isPostgres: true),
+                Card(3, band: CollectorHealthClassifier.Stopped),
+                Card(4, band: CollectorHealthClassifier.NoPermissions),
+            },
+            registeredTotal: 4);
+
+        Assert.Equal(1, coverage.ServersRead);
+    }
+
+    // ── What the panel actually renders ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// <b>The line reads at FULL coverage too.</b> One that appeared only on a partial read would make its
+    /// ABSENCE the load-bearing signal — which a reader has to already know the rule to interpret — and it
+    /// would leave "zero, whole fleet measured" indistinguishable from "zero, from a build that reports no
+    /// coverage at all", the same defect one step out. The web fleet page's tile made the same call for the
+    /// same reason; this is that decision matched rather than a second convention.
+    /// </summary>
+    [Fact]
+    public void TheCoverageLine_ReadsAtFullCoverage_AndIsNotPaintedAsAProblem()
+    {
+        var rollup = FleetRollup.Build(
+            new[]
+            {
+                Card(1, band: CollectorHealthClassifier.Healthy),
+                Card(2, band: CollectorHealthClassifier.Failing),
+            },
+            new FleetTotals { TotalDeadlocks = 0 });
+
+        Assert.True(rollup.HasDeadlockCoverage);
+        Assert.False(rollup.DeadlockCoverageIsPartial);
+        Assert.Equal("Deadlock coverage: read all 2 servers", rollup.DeadlockCoverageText);
+    }
+
+    /// <summary>
+    /// A large deadlock count with complete coverage still reads as complete: the line's own state tracks
+    /// COVERAGE, not the count's severity. "read all 2 servers" beside a bad number is good news about a
+    /// bad number and must not be painted as part of the alarm.
+    /// </summary>
+    [Fact]
+    public void TheCoverageLine_TracksCoverage_NotTheDeadlockCount()
+    {
+        var rollup = FleetRollup.Build(
+            new[] { Card(1, band: CollectorHealthClassifier.Healthy), Card(2, band: CollectorHealthClassifier.Healthy) },
+            new FleetTotals { TotalDeadlocks = 900 });
+
+        Assert.False(rollup.DeadlockCoverageIsPartial);
+        Assert.Equal("Deadlock coverage: read all 2 servers", rollup.DeadlockCoverageText);
+    }
+
+    /// <summary>The issue's measured case: a PostgreSQL-only fleet reporting zero, now saying so.</summary>
+    [Fact]
+    public void APostgresOnlyFleet_ReportsZeroCoverage_AndNamesWhereThoseDeadlocksAre()
+    {
+        var rollup = FleetRollup.Build(
+            new[] { Card(1, isPostgres: true), Card(2, isPostgres: true), Card(3, isPostgres: true) },
+            new FleetTotals { TotalDeadlocks = 0 });
+
+        Assert.Equal(0, rollup.TotalDeadlocks);
+        Assert.Equal(0, rollup.DeadlockCoverage.ServersRead);
+        Assert.Equal(3, rollup.DeadlockCoverage.PostgresServers);
+        Assert.True(rollup.DeadlockCoverageIsPartial);
+        Assert.Equal("Deadlock coverage: read 0 of 3 servers", rollup.DeadlockCoverageText);
+        Assert.Contains(FleetRollup.DeadlockPostgresCause, rollup.DeadlockCoverageTooltip, StringComparison.Ordinal);
+    }
+
+    /// <summary>A one-server fleet says "server", not "servers" — both ways round.</summary>
+    [Fact]
+    public void TheCoverageLine_AgreesWithItselfOnNumber()
+    {
+        Assert.Equal(
+            "Deadlock coverage: read all 1 server",
+            FleetRollup.Build(new[] { Card(1, band: CollectorHealthClassifier.Healthy) }, NoTotals).DeadlockCoverageText);
+
+        Assert.Equal(
+            "Deadlock coverage: read 0 of 1 server",
+            FleetRollup.Build(new[] { Card(1, isPostgres: true) }, NoTotals).DeadlockCoverageText);
+    }
+
+    /// <summary>
+    /// <b>The sentence this whole issue turns on.</b> The two windows genuinely diverge — the deadlock total
+    /// is counted over the last hour, while coverage is banded over a FIXED trailing seven days of
+    /// collection health — and that divergence is correct: whether a reader works is a durable fact, and the
+    /// banding thresholds are themselves defined in DAYS, so an hour-wide health window could not produce a
+    /// band at all.
+    ///
+    /// <para>But a note claiming both were read in the same window would be the same defect one level up: a
+    /// surface asserting a scope it did not measure. So the tooltip names each window against the figure it
+    /// belongs to, and says outright that coverage makes no claim about the hour the total covers.</para>
+    /// </summary>
+    [Fact]
+    public void TheTooltip_NamesEachWindow_AndClaimsNeitherForTheOther()
+    {
+        var tooltip = FleetRollup.Build(
+            new[] { Card(1, band: CollectorHealthClassifier.Healthy) }, NoTotals).DeadlockCoverageTooltip;
+
+        /* The coverage figure's own window, named as fixed and as seven days. */
+        Assert.Contains("fixed trailing seven days of collection health", tooltip, StringComparison.Ordinal);
+
+        /* The total's window, named as the only thing bounded by it. */
+        Assert.Contains("deadlock total counts only the last hour", tooltip, StringComparison.Ordinal);
+
+        /* And the disclaimer that keeps the first from being read as the second. */
+        Assert.Contains("makes no claim about what was read in the last hour", tooltip, StringComparison.Ordinal);
+
+        /* What the total is assembled from — the fact that makes a PostgreSQL zero structural. */
+        Assert.Contains("SQL Server extended-event capture and nothing else", tooltip, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Only the causes that actually apply, so a reader is not handed four actions when one is called for.
+    /// </summary>
+    [Fact]
+    public void TheTooltip_CarriesOnlyTheCausesThatApply()
+    {
+        var tooltip = FleetRollup.Build(
+            new[] { Card(1, isPostgres: true), Card(2, band: CollectorHealthClassifier.Healthy) },
+            NoTotals).DeadlockCoverageTooltip;
+
+        Assert.Contains("1 server: " + FleetRollup.DeadlockPostgresCause, tooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain(FleetRollup.DeadlockCollectorSilentCause, tooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain(FleetRollup.DeadlockCollectorDeniedCause, tooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain(FleetRollup.DeadlockUnreportedCause, tooltip, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Each cause carries the noun its own count needs, both ways round. An "N are PostgreSQL targets"
+    /// shape prints "1 are PostgreSQL targets" the moment a fleet has exactly one of something, which is
+    /// the common case for the denied and silent arms — so the causes are verb-free noun phrases and the
+    /// count is turned into words in ONE place rather than once per arm.
+    /// </summary>
+    [Fact]
+    public void TheTooltip_AgreesWithItselfOnNumber_ForEveryCause()
+    {
+        var singular = FleetRollup.Build(
+            new[]
+            {
+                Card(1, isPostgres: true),
+                Card(2, band: CollectorHealthClassifier.Stopped),
+                Card(3, band: CollectorHealthClassifier.NoPermissions),
+            },
+            NoTotals, totalServerCount: 4).DeadlockCoverageTooltip;
+
+        Assert.Contains("1 server: " + FleetRollup.DeadlockPostgresCause, singular, StringComparison.Ordinal);
+        Assert.Contains("1 server: " + FleetRollup.DeadlockCollectorSilentCause, singular, StringComparison.Ordinal);
+        Assert.Contains("1 server: " + FleetRollup.DeadlockCollectorDeniedCause, singular, StringComparison.Ordinal);
+        Assert.Contains("1 server: " + FleetRollup.DeadlockUnreportedCause, singular, StringComparison.Ordinal);
+        Assert.DoesNotContain("1 servers", singular, StringComparison.Ordinal);
+
+        var plural = FleetRollup.Build(
+            new[]
+            {
+                Card(1, isPostgres: true), Card(2, isPostgres: true),
+                Card(3, band: CollectorHealthClassifier.Stopped), Card(4, band: CollectorHealthClassifier.NeverRun),
+                Card(5, band: CollectorHealthClassifier.NoPermissions), Card(6, band: CollectorHealthClassifier.NoPermissions),
+            },
+            NoTotals, totalServerCount: 8).DeadlockCoverageTooltip;
+
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockPostgresCause, plural, StringComparison.Ordinal);
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockCollectorSilentCause, plural, StringComparison.Ordinal);
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockCollectorDeniedCause, plural, StringComparison.Ordinal);
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockUnreportedCause, plural, StringComparison.Ordinal);
+        Assert.DoesNotContain("2 server:", plural, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The arm the service's fleet reader has no equivalent of. A registered server with no summary this
+    /// cycle is uncovered — nothing was read FOR it — but it must NOT be attributed to the silent-collector
+    /// cause: that one sends the reader to a collector, and this one is the viewer's own read having failed,
+    /// which is a different thing to go and look at. Naming it as "the collector has stopped being invoked"
+    /// would be a confidently wrong instruction, which is worse than the bare number was.
+    /// </summary>
+    [Fact]
+    public void TheTooltip_NamesAnUnreportedServer_WithoutBlamingItsCollector()
+    {
+        var rollup = FleetRollup.Build(
+            new[] { Card(1, band: CollectorHealthClassifier.Healthy) }, NoTotals, totalServerCount: 3);
+
+        var tooltip = rollup.DeadlockCoverageTooltip;
+
+        Assert.Equal(2, rollup.UnknownCount);
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockUnreportedCause, tooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain(FleetRollup.DeadlockCollectorSilentCause, tooltip, StringComparison.Ordinal);
+        Assert.Equal(0, rollup.DeadlockCoverage.ServersCollectorSilent);
+
+        /* And the gap keeps the line it already had, rather than only living inside a tooltip. */
+        Assert.Equal("2 servers didn't report this cycle", rollup.UnknownStatusText);
+    }
+
+    // ── The two seams a pure reduction cannot reach ────────────────────────────────────────────────
+
+    /// <summary>
+    /// The Overview's roll-up row renders the coverage BESIDE the total it qualifies, not somewhere else in
+    /// the panel and not only as a hover. Scoped to the fleet-totals <c>WrapPanel</c> itself rather than to
+    /// the whole file, so a binding that existed anywhere in <c>MainWindow.xaml</c> could not satisfy it.
+    /// </summary>
+    [Fact]
+    public void TheOverviewRow_RendersTheCoverageBesideTheDeadlockTotal()
+    {
+        var xaml = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/MainWindow.xaml");
+
+        var start = xaml.IndexOf("Text=\"Last hour:\"", StringComparison.Ordinal);
+        Assert.True(start > 0, "the fleet-totals row's own label was not found");
+        var end = xaml.IndexOf("</WrapPanel>", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the fleet-totals row did not close");
+
+        var row = xaml[start..end];
+
+        /* The total is still there, and the coverage is in the same row. */
+        Assert.Contains("{Binding TotalDeadlocks, StringFormat='Deadlocks: {0}'}", row, StringComparison.Ordinal);
+        Assert.Contains("{Binding DeadlockCoverageText}", row, StringComparison.Ordinal);
+
+        /* Visible without hovering: the text is bound to Text, and the detail hangs off BOTH the count and
+           the coverage line so either gesture reaches it. */
+        Assert.Contains("Text=\"{Binding DeadlockCoverageText}\"", row, StringComparison.Ordinal);
+        Assert.Equal(2, CountOccurrences(row, "ToolTip=\"{Binding DeadlockCoverageTooltip}\""));
+
+        /* And its colour tracks coverage rather than being a fixed brush. */
+        Assert.Contains("{Binding DeadlockCoverageIsPartial}", row, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The per-server summary read retains the <c>deadlocks</c> collector's own band out of the collection-
+    /// health rows it already enumerates, matched from the collector's OWN name rather than a spelled
+    /// literal — a rename against a literal leaves the match silently finding nothing, which reports every
+    /// server uncovered and looks exactly like a PostgreSQL fleet.
+    ///
+    /// <para>Neither collector TALLY can stand in for the band, which is why it has to be carried at all:
+    /// STOPPED, NEVER_RUN and NO_PERMISSIONS are none of them FAILING, so a server reading nothing at all
+    /// shows up in both counts as a zero.</para>
+    /// </summary>
+    [Fact]
+    public void TheSummaryRead_RetainsTheDeadlockCollectorsBand_MatchedFromItsOwnName()
+    {
+        var source = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Overview.cs");
+
+        /* Anchored on the DECLARATION, which is itself the shape being pinned: the helper hands the band
+           back beside the tallies rather than returning a pair the caller has to re-read the store for. */
+        var start = source.IndexOf(
+            "private async Task<(int Healthy, int Failing, string? DeadlockBand)> GetCollectorHealthCountsAsync",
+            StringComparison.Ordinal);
+        Assert.True(start > 0, "the collector-health helper does not hand back the deadlock band");
+        var end = source.IndexOf("private static int? MinutesAgo", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the collector-health helper's body did not end where expected");
+
+        var body = source[start..end];
+
+        Assert.Contains("DeadlocksCollector.Instance.Name", body, StringComparison.Ordinal);
+
+        /* The literal is the shape a careless match takes, and it is what the collector name is TODAY —
+           so this is a real trap rather than a hypothetical one. */
+        Assert.DoesNotContain("\"deadlocks\"", body, StringComparison.Ordinal);
+        Assert.Equal("deadlocks", DeadlocksCollector.Instance.Name);
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+        return count;
+    }
+
+    private static string ReadRepoFile(string relative) =>
+        File.ReadAllText(Path.Combine(RepoRoot(), relative));
+
+    private static string RepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? throw new InvalidOperationException("PerformanceMonitor.sln not found above the test output directory.");
     }
 }

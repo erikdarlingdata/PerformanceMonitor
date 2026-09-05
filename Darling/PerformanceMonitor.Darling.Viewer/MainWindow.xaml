@@ -866,14 +866,40 @@
 
                                 <!-- (2) Fleet totals: the cross-server aggregate over the last hour (the
                                      same window the per-server cards use, so these reconcile with the card
-                                     counts). -->
+                                     counts), plus the denominator the deadlock total is only readable
+                                     against (#3029 - see DeadlockCoverageText). -->
                                 <WrapPanel Margin="0,0,0,12">
                                     <TextBlock Text="Last hour:" FontSize="11" FontWeight="SemiBold"
                                                Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,10,0" VerticalAlignment="Center"/>
                                     <TextBlock FontSize="11" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0" VerticalAlignment="Center"
                                                Text="{Binding TotalBlockingEvents, StringFormat='Blocking events: {0}'}"/>
                                     <TextBlock FontSize="11" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0" VerticalAlignment="Center"
-                                               Text="{Binding TotalDeadlocks, StringFormat='Deadlocks: {0}'}"/>
+                                               Text="{Binding TotalDeadlocks, StringFormat='Deadlocks: {0}'}"
+                                               ToolTip="{Binding DeadlockCoverageTooltip}"/>
+                                    <!-- #3029: how much of the fleet the deadlock total beside it actually
+                                         read. v_deadlocks is the SQL Server extended-event capture and
+                                         nothing else, so on a PostgreSQL fleet that total is structurally
+                                         zero forever - and zero is also what a genuinely quiet SQL Server
+                                         fleet reports, which is what made the bare number unreadable.
+                                         Shown whenever there is a fleet, INCLUDING at full coverage: a line
+                                         that appeared only when short would make its absence the signal.
+                                         Its colour tracks COVERAGE, not the count's severity - "read all 12
+                                         servers" beside a large count is good news about a bad number. -->
+                                    <TextBlock FontSize="11" Margin="0,0,16,0" VerticalAlignment="Center"
+                                               Text="{Binding DeadlockCoverageText}"
+                                               ToolTip="{Binding DeadlockCoverageTooltip}"
+                                               Visibility="{Binding HasDeadlockCoverage, Converter={StaticResource BoolToVisibility}}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="{DynamicResource ForegroundMutedBrush}"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding DeadlockCoverageIsPartial}" Value="True">
+                                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
                                     <TextBlock FontSize="11" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0" VerticalAlignment="Center"
                                                Text="{Binding CollectionFailuresText, StringFormat='Collection failures: {0}'}"/>
                                 </WrapPanel>
