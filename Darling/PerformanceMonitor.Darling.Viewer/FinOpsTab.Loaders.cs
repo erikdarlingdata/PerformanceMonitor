@@ -571,6 +571,10 @@ public partial class FinOpsTab
         var lanes = ViewerReadFanOut.Lanes(servers);
         using var readFanOut = ViewerReadFanOut.Of(lanes.Count);
 
+        /* A lane is walked sequentially, so a read that throws abandons the rest of ITS lane while the
+           other lanes finish. That is the same visible outcome as attempting every row: this loader is
+           all-or-nothing either way — RunFinOpsLoad catches the join's exception and never reaches
+           UpdateData, so a partial overlay is never rendered. */
         await Task.WhenAll(lanes.Select(async lane =>
         {
             foreach (var item in lane)
