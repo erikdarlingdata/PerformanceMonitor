@@ -34,9 +34,12 @@ public static class PgDeadlockLogParser
     /// <param name="GraphText">The DETAIL block verbatim, tabs stripped. Stored losslessly because the
     /// parsed fields are an interpretation and the raw block is the evidence: a shape this parser does not
     /// recognise today is still readable by a person.</param>
-    /// <param name="DeadlockHash">Identity across overlapping log reads. Both transports read a bounded
-    /// TAIL of the log on a schedule, so the same deadlock is seen again on the next cycle and must not be
-    /// stored twice.</param>
+    /// <param name="DeadlockHash">Identity across repeated log reads, needed on both transports but for
+    /// different reasons. The <c>pg_read_file</c> route re-reads a bounded TAIL every cycle, so the same
+    /// deadlock arrives on every cycle it stays inside the window. The RDS route is consume-once and does
+    /// NOT re-offer it cycle to cycle — its repeats come from a restart discarding the in-process resume
+    /// marker, or from #3008 leaving that marker in place after a write that did not land. Either way the
+    /// report must not be stored twice.</param>
     public readonly record struct ParsedDeadlock(
         DateTime OccurredAtUtc,
         int VictimPid,
@@ -97,7 +100,27 @@ public static class PgDeadlockLogParser
     /// <para>A block that will not parse is skipped rather than reported, matching
     /// <see cref="PgPlanLogParser"/>: both transports read a bounded window, so a report cut in half at the
     /// edge is an ordinary consequence of not reading the whole file rather than a fault worth surfacing
-    /// every cycle. It will be read whole on the next pass, because the window overlaps.</para>
+    /// every cycle.</para>
+    ///
+    /// <para><b>Whether that skip is ever recovered depends on the transport, and on the managed one it is
+    /// not (#3009).</b> <see cref="PgDeadlocksCollector"/>'s <c>pg_read_file</c> route re-reads an
+    /// overlapping byte-window tail every cycle, so a report cut at one read's edge arrives whole in the
+    /// next and skipping it costs nothing. The RDS log-API route is CONSUME-ONCE: <c>RdsLogSource</c>
+    /// holds a resume marker per (instance, file) and <c>DownloadDBLogFilePortion</c> starts the next call
+    /// where the last one stopped, so there is no overlap and no next pass, and a report straddling a
+    /// chunk boundary is never completed. The paragraph above is not a recovery guarantee — it says
+    /// truncation is expected on both transports, not that it clears itself on both.</para>
+    ///
+    /// <para><b>Two shapes on that route, and the second is the dangerous one.</b> A chunk ending before
+    /// <c>DETAIL:</c> matches nothing, because the pattern requires that group, and the report is lost
+    /// whole. A chunk ending mid-DETAIL still MATCHES — <c>(?:\t[^\n]*\n)*</c> takes however many
+    /// continuation lines arrived, including none — so <see cref="FromBlock"/> finds a wait edge and
+    /// stores a row carrying only the participants, resources and statements that were inside the chunk.
+    /// That row is indistinguishable from a genuinely smaller deadlock, which is worse than the absence.
+    /// It cannot be checked against its own graph either: <c>ParticipantCount</c> is derived from the same
+    /// edges <c>GraphText</c> holds, so those two agree by construction. What a fragment does leave is an
+    /// edge list that is not a CYCLE — a whole report carries one edge per participant, so a participant
+    /// count EXCEEDING the edge count is a shape the server never writes.</para>
     ///
     /// <para>The one exception is a log stamped in a non-UTC zone, which throws
     /// <see cref="PgLogTimezoneUnsupportedException"/> instead: see <see cref="FromBlock"/>.</para>
@@ -161,8 +184,10 @@ public static class PgDeadlockLogParser
         }
 
         /* THROWN rather than skipped, and it is the only thing in this parser that is not tolerant.
-           Everything else a block can be wrong about is read again on the next overlapping pass, so
-           skipping it costs nothing. This one neither clears itself nor announces itself: the timestamp
+           Everything else a block can be wrong about is tolerated because the pg_read_file route reads it
+           again on the next overlapping pass, so skipping it costs nothing THERE. The consume-once RDS
+           route has no such pass, so a skip on it is permanent — see Extract's remarks and #3009.
+           This one neither clears itself nor announces itself: the timestamp
            below parses PERFECTLY under a non-UTC prefix, AssumeUniversal takes it for UTC, and the row
            lands in the wrong hour with nothing anywhere disagreeing. Returning null instead would store no
            deadlocks and read as a server that has none, which is the same silent-wrong one layer up. A
@@ -322,9 +347,11 @@ public static class PgDeadlockLogParser
     }
 
     /// <summary>
-    /// Identity for a report, over the graph text. Both transports read a bounded TAIL on a schedule, so the
-    /// same deadlock appears in consecutive reads and would otherwise be stored once per cycle for as long
-    /// as it stays inside the window.
+    /// Identity for a report, over the graph text. The same report reaches this more than once on either
+    /// transport and must be stored once, though not for the same reason: the <c>pg_read_file</c> route
+    /// re-reads a bounded TAIL on a schedule, so a report inside the window arrives every cycle, while the
+    /// consume-once RDS route re-offers only a window whose write did not land (#3008) or whose
+    /// in-process marker a restart discarded. See the <c>DeadlockHash</c> parameter above.
     ///
     /// <para>Over the graph rather than over (timestamp, pid): two deadlocks in the same millisecond with
     /// the same victim pid are vanishingly unlikely, but the graph is what actually distinguishes them, and
