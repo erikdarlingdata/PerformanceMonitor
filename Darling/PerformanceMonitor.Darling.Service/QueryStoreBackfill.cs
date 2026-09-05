@@ -97,8 +97,10 @@ public sealed class QueryStoreBackfill
     /// the refresh term, which is exactly the coupling that made the refresh expensive. The hourly window is
     /// now chosen against its own cadence (<see cref="TimescaleSupport.HourlyRefreshStartOffset"/>), so the
     /// two terms differ and the smaller one is the real horizon. The cost is stated rather than hidden: this
-    /// horizon narrows from 3 days to 23 hours, so post-outage catch-up and first-contact tail recovery reach
-    /// less far back per store. Digging deeper than the refresh window is a separate stage that would have to
+    /// horizon narrows from three days to one day minus a refresh interval, so post-outage catch-up and
+    /// first-contact tail recovery reach less far back per store. The figure itself stays in the constants
+    /// this derives from — <c>QueryStoreBackfillTests</c> pins it — rather than being restated here where it
+    /// would go stale. Digging deeper than the refresh window is a separate stage that would have to
     /// refresh the buckets it wrote — which is a decision about running
     /// <c>refresh_continuous_aggregate</c> off the backfill loop, not a constant.</para>
     /// </summary>
