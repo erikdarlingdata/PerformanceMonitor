@@ -237,6 +237,11 @@ public sealed class TimescaleContinuousAggregateTests
 
         Assert.Contains("j.proc_name = 'policy_refresh_continuous_aggregate'", read, StringComparison.Ordinal);
         Assert.Contains("ca.view_name", read, StringComparison.Ordinal);
+        /* BOTH identities, because timescaledb_information.jobs resolves a continuous-aggregate job back to
+           its USER VIEW rather than reporting the materialization hypertable the bgw_job row actually carries.
+           The materialization-only form read back nothing at all against a live store, so matching only the
+           name the catalog columns imply is the shape that already failed once. */
+        Assert.Contains("ca.view_name = j.hypertable_name", read, StringComparison.Ordinal);
         Assert.Contains("ca.materialization_hypertable_name = j.hypertable_name", read, StringComparison.Ordinal);
         Assert.Contains("ca.view_schema = 'collect'", read, StringComparison.Ordinal);
 

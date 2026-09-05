@@ -1902,12 +1902,19 @@ WITH NO DATA";
     /// made of: the window it re-materializes, whether it is on a fixed schedule, and which minute of the hour
     /// it starts on.
     ///
-    /// <para><b>Keyed on the VIEW, which takes a join to get.</b> A refresh job's own
-    /// <c>hypertable_name</c> is the aggregate's MATERIALIZATION hypertable
-    /// (<c>_materialized_hypertable_N</c>), a per-deployment name that says nothing about which rollup it
-    /// belongs to — so this joins <c>continuous_aggregates</c> to recover <c>view_name</c>, and the caller
-    /// decides what each view should look like from <see cref="HourlyRefreshPhaseOrder"/>. Nothing here or in
-    /// the caller reads a job id for anything except passing it back to <c>alter_job</c>.</para>
+    /// <para><b>Keyed on the VIEW, and the join matches EITHER identity on purpose.</b> The caller decides
+    /// what each view should look like from <see cref="HourlyRefreshPhaseOrder"/>, so this has to hand it a
+    /// <c>view_name</c>; nothing here or in the caller reads a job id for anything except passing it back to
+    /// <c>alter_job</c>. What the join cannot assume is WHICH name a refresh job reports. The underlying
+    /// <c>bgw_job</c> row carries the aggregate's MATERIALIZATION hypertable id, so the obvious form joins on
+    /// <c>materialization_hypertable_schema/name</c> — and that form is measured to find NOTHING, because
+    /// <c>timescaledb_information.jobs</c> already resolves a continuous-aggregate job back to its USER VIEW
+    /// and reports <c>collect</c> / <c>&lt;view&gt;</c>. Matching either identity is therefore not
+    /// belt-and-braces for its own sake: it is one measured behaviour plus the one the catalog columns imply,
+    /// and it cannot double-count, because a user view lives in <c>collect</c> while a materialization
+    /// hypertable lives in <c>_timescaledb_internal</c> — disjoint, so at most one row can match per job.
+    /// This was a real defect caught by the live test rather than a hypothetical: the materialization-only
+    /// form shipped first and read back nothing at all.</para>
     ///
     /// <para>Emitted as NUMBERS, not text: <c>start_offset</c> comes back as seconds so a C# comparison cannot
     /// be fooled by <c>1 day</c> / <c>1 day 00:00:00</c> / <c>24:00:00</c> all meaning the same interval, and
@@ -1928,8 +1935,8 @@ SELECT
     END AS phase_minutes
 FROM timescaledb_information.jobs AS j
 JOIN timescaledb_information.continuous_aggregates AS ca
-  ON  ca.materialization_hypertable_schema = j.hypertable_schema
-  AND ca.materialization_hypertable_name = j.hypertable_name
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
 WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
 AND   ca.view_schema = 'collect'";
 

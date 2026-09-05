@@ -1104,6 +1104,14 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
             await ExecAsync(connection,
                 $"SELECT add_continuous_aggregate_policy('collect.{Hourly}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
 
+            /* Counted a SECOND way, on nothing but proc_name, before the view-keyed read is trusted. The
+               view-keyed read and the shipped converge share a join, so a wrong join makes both of them find
+               nothing and a bare Assert.NotNull below would report "no policy" for a store that has one. That
+               is not hypothetical: the materialization-hypertable-only join shipped first and did exactly
+               this, and this counter is what tells the two apart. */
+            Assert.True(await RefreshPolicyCountAsync(connection, ct) > 0,
+                "no continuous-aggregate refresh job exists at all — the fixture did not build the aggregates");
+
             var legacy = await RefreshPolicyStateAsync(connection, Hourly, ct);
             Assert.NotNull(legacy);
             Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, legacy!.StartOffsetSeconds);
@@ -1172,8 +1180,8 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
                 $@"SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{{start_offset}}', to_jsonb('3 days'::text)))
 FROM timescaledb_information.jobs AS j
 JOIN timescaledb_information.continuous_aggregates AS ca
-  ON  ca.materialization_hypertable_schema = j.hypertable_schema
-  AND ca.materialization_hypertable_name = j.hypertable_name
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
 WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
 AND   ca.view_schema = 'collect'
 AND   ca.view_name = '{Daily}'", ct);
@@ -1196,6 +1204,16 @@ AND   ca.view_name = '{Daily}'", ct);
     /// through the materialization-hypertable join, never by job id.</summary>
     private sealed record RefreshPolicyState(double StartOffsetSeconds, bool FixedSchedule, int? PhaseMinutes, TimeSpan? EndOffset);
 
+    /// <summary>How many continuous-aggregate refresh jobs the store has, keyed on nothing but
+    /// <c>proc_name</c> — deliberately sharing no join with the read under test, so "the policy is missing"
+    /// and "the read cannot find the policy" are distinguishable.</summary>
+    private static async Task<long> RefreshPolicyCountAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT COUNT(*) FROM timescaledb_information.jobs WHERE proc_name = 'policy_refresh_continuous_aggregate'", connection);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
     private static async Task<RefreshPolicyState?> RefreshPolicyStateAsync(
         NpgsqlConnection connection, string view, System.Threading.CancellationToken ct)
     {
@@ -1210,8 +1228,8 @@ SELECT
     (j.config->>'end_offset')::interval
 FROM timescaledb_information.jobs AS j
 JOIN timescaledb_information.continuous_aggregates AS ca
-  ON  ca.materialization_hypertable_schema = j.hypertable_schema
-  AND ca.materialization_hypertable_name = j.hypertable_name
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
 WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
 AND   ca.view_schema = 'collect'
 AND   ca.view_name = '{view}'", connection);
