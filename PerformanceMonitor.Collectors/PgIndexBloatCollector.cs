@@ -156,7 +156,14 @@ WITH candidates AS (
 
    Ranked by size and measured largest-first, because bloat that matters is concentrated in big
    indexes - a small index at 40% density is worth kilobytes. Everything past the budget is still
-   RETURNED, with a reason, so the read never mistakes unmeasured for healthy. */
+   RETURNED, with a reason, so the read never mistakes unmeasured for healthy.
+
+   TWO budgets now, and the BYTE one is what actually bounds the work (#2997). A count bounds pages
+   only where count correlates with bytes; on the first production target it did not, and the 200
+   largest sub-ceiling indexes admitted 286 GB in this one statement - so every run for the
+   collector's whole life died on the 300-second deadline having measured nothing, exactly as
+   described above but one dimension up. The count survives because it is legible, not because it
+   bounds anything: see CycleMeasureBudgetBytes for which of the two is load-bearing. */
 ranked AS (
     SELECT
         k.*,
