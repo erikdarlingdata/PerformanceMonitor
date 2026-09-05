@@ -329,19 +329,23 @@ public sealed class FleetRollup
         + "therefore makes no claim about what was read in the last hour.";
 
     /// <summary>What to do about the PostgreSQL arm, appended after its count. Names no tab, because a
-    /// PostgreSQL target's deadlock grid is reached through that server's own tab rather than from here.</summary>
+    /// PostgreSQL target's deadlock grid is reached through that server's own tab rather than from here.
+    ///
+    /// <para>Every cause here is a VERB-FREE noun phrase, so one form reads correctly after both "1 server:"
+    /// and "4 servers:" — an "N are ..." shape needs a second string the moment N is one, and the surface
+    /// that forgets it prints "1 are PostgreSQL targets".</para></summary>
     public const string DeadlockPostgresCause =
-        "are PostgreSQL targets, whose deadlocks this total cannot count at all - they are collected "
-        + "separately and show on that target's own server tab.";
+        "PostgreSQL targets, whose deadlocks this total cannot count at all - collected separately, and "
+        + "shown on that target's own server tab.";
 
     /// <summary>What to do about the silent arm, appended after its count.</summary>
     public const string DeadlockCollectorSilentCause =
-        "have no current deadlock collection - the collector has stopped being invoked, or has never run; "
-        + "that server's Collection Health tab shows which.";
+        "no current deadlock collection - the collector has stopped being invoked, or has never run; the "
+        + "server's Collection Health tab shows which.";
 
     /// <summary>What to do about the denied arm, appended after its count.</summary>
     public const string DeadlockCollectorDeniedCause =
-        "had every deadlock-collector attempt refused for permissions - those need a grant.";
+        "every deadlock-collector attempt refused for permissions - needs a grant.";
 
     /// <summary>
     /// The arm the service's fleet reader has no equivalent of: a registered server whose per-server
@@ -352,8 +356,8 @@ public sealed class FleetRollup
     /// the viewer's own read having failed, which is a different thing to go and look at.
     /// </summary>
     public const string DeadlockUnreportedCause =
-        "did not report a summary this cycle, so whether their deadlock collection works could not be "
-        + "classified either way.";
+        "no summary this cycle, so whether the deadlock collection works could not be classified either "
+        + "way.";
 
     /// <summary>Whether there is a fleet for the coverage figure to qualify. False only on an empty fleet,
     /// where the whole roll-up panel is collapsed anyway — never as a way of hiding a complete reading.</summary>
@@ -410,29 +414,32 @@ public sealed class FleetRollup
                 .Append(' ')
                 .Append(DeadlockCoverageWindowNote);
 
-            if (DeadlockCoverage.PostgresServers > 0)
-            {
-                note.Append(' ').Append(DeadlockCoverage.PostgresServers).Append(' ').Append(DeadlockPostgresCause);
-            }
-
-            if (DeadlockCoverage.ServersCollectorSilent > 0)
-            {
-                note.Append(' ').Append(DeadlockCoverage.ServersCollectorSilent).Append(' ').Append(DeadlockCollectorSilentCause);
-            }
-
-            if (DeadlockCoverage.ServersCollectorDenied > 0)
-            {
-                note.Append(' ').Append(DeadlockCoverage.ServersCollectorDenied).Append(' ').Append(DeadlockCollectorDeniedCause);
-            }
+            Cause(note, DeadlockCoverage.PostgresServers, DeadlockPostgresCause);
+            Cause(note, DeadlockCoverage.ServersCollectorSilent, DeadlockCollectorSilentCause);
+            Cause(note, DeadlockCoverage.ServersCollectorDenied, DeadlockCollectorDeniedCause);
 
             /* The viewer-only arm, last because it is about this cycle's read rather than about a target. */
-            if (UnknownCount > 0)
-            {
-                note.Append(' ').Append(UnknownCount).Append(' ').Append(DeadlockUnreportedCause);
-            }
+            Cause(note, UnknownCount, DeadlockUnreportedCause);
 
             return note.ToString();
         }
+    }
+
+    /// <summary>
+    /// One cause, appended only when it applies, as "N server(s): what it is" — so a reader is not handed
+    /// four actions when one is called for.
+    ///
+    /// <para>The ONE place a count becomes words here, which is what keeps the four arms from disagreeing
+    /// about the noun. Nothing in the cause strings inflects, so this needs no second form for N = 1.</para>
+    /// </summary>
+    private static void Cause(StringBuilder note, int count, string cause)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        note.Append(' ').Append(count).Append(count == 1 ? " server: " : " servers: ").Append(cause);
     }
 
     /// <summary>

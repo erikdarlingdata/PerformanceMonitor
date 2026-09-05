@@ -986,10 +986,50 @@ public sealed class ViewerFleetDeadlockCoverageTests
             new[] { Card(1, isPostgres: true), Card(2, band: CollectorHealthClassifier.Healthy) },
             NoTotals).DeadlockCoverageTooltip;
 
-        Assert.Contains("1 " + FleetRollup.DeadlockPostgresCause, tooltip, StringComparison.Ordinal);
+        Assert.Contains("1 server: " + FleetRollup.DeadlockPostgresCause, tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain(FleetRollup.DeadlockCollectorSilentCause, tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain(FleetRollup.DeadlockCollectorDeniedCause, tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain(FleetRollup.DeadlockUnreportedCause, tooltip, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Each cause carries the noun its own count needs, both ways round. An "N are PostgreSQL targets"
+    /// shape prints "1 are PostgreSQL targets" the moment a fleet has exactly one of something, which is
+    /// the common case for the denied and silent arms — so the causes are verb-free noun phrases and the
+    /// count is turned into words in ONE place rather than once per arm.
+    /// </summary>
+    [Fact]
+    public void TheTooltip_AgreesWithItselfOnNumber_ForEveryCause()
+    {
+        var singular = FleetRollup.Build(
+            new[]
+            {
+                Card(1, isPostgres: true),
+                Card(2, band: CollectorHealthClassifier.Stopped),
+                Card(3, band: CollectorHealthClassifier.NoPermissions),
+            },
+            NoTotals, totalServerCount: 4).DeadlockCoverageTooltip;
+
+        Assert.Contains("1 server: " + FleetRollup.DeadlockPostgresCause, singular, StringComparison.Ordinal);
+        Assert.Contains("1 server: " + FleetRollup.DeadlockCollectorSilentCause, singular, StringComparison.Ordinal);
+        Assert.Contains("1 server: " + FleetRollup.DeadlockCollectorDeniedCause, singular, StringComparison.Ordinal);
+        Assert.Contains("1 server: " + FleetRollup.DeadlockUnreportedCause, singular, StringComparison.Ordinal);
+        Assert.DoesNotContain("1 servers", singular, StringComparison.Ordinal);
+
+        var plural = FleetRollup.Build(
+            new[]
+            {
+                Card(1, isPostgres: true), Card(2, isPostgres: true),
+                Card(3, band: CollectorHealthClassifier.Stopped), Card(4, band: CollectorHealthClassifier.NeverRun),
+                Card(5, band: CollectorHealthClassifier.NoPermissions), Card(6, band: CollectorHealthClassifier.NoPermissions),
+            },
+            NoTotals, totalServerCount: 8).DeadlockCoverageTooltip;
+
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockPostgresCause, plural, StringComparison.Ordinal);
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockCollectorSilentCause, plural, StringComparison.Ordinal);
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockCollectorDeniedCause, plural, StringComparison.Ordinal);
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockUnreportedCause, plural, StringComparison.Ordinal);
+        Assert.DoesNotContain("2 server:", plural, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1008,7 +1048,7 @@ public sealed class ViewerFleetDeadlockCoverageTests
         var tooltip = rollup.DeadlockCoverageTooltip;
 
         Assert.Equal(2, rollup.UnknownCount);
-        Assert.Contains("2 " + FleetRollup.DeadlockUnreportedCause, tooltip, StringComparison.Ordinal);
+        Assert.Contains("2 servers: " + FleetRollup.DeadlockUnreportedCause, tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain(FleetRollup.DeadlockCollectorSilentCause, tooltip, StringComparison.Ordinal);
         Assert.Equal(0, rollup.DeadlockCoverage.ServersCollectorSilent);
 
