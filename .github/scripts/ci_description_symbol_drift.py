@@ -152,6 +152,14 @@ def described_symbols(body, sections=AFFIRMATIVE_SECTIONS):
 
 # ---------------------------------------------------------------- what the diff touches
 TOKEN = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+# Narrower than SOURCE_EXT on purpose, and `json` is the gap that matters: a description may
+# legitimately name `darling.json`, so json belongs on the DESCRIBED side, but a diff of only
+# json is usually a dependency bump whose lock file shares no vocabulary with any prose. Such a
+# body names types from inside the bumped package -- which cannot appear in the diff by
+# definition -- so admitting json here converts a silent abstain into a false warning. Measured:
+# adding it moves no verdict on 110 merged PRs (none is json-only), and turns the one lock-file
+# change in that corpus from abstain into a warning naming a type in the upgraded package.
+# `sln`, `config` and `cff` are excluded for the same reason with even less vocabulary.
 CODE_EXT = ('.cs', '.sql', '.xaml', '.ps1', '.sh', '.py', '.csproj', '.props', '.targets',
             '.yml', '.yaml')
 
@@ -270,6 +278,15 @@ def self_test():
     check('docs-only diff abstains',
           assess('`SprocketCache` now evicts.',
                  [{'filename': 'CHANGELOG.md', 'patch': '@@ -1 +1 @@\n-a\n+b'}])[0] == 'abstain')
+    # json is on the described side but not the diff side, so a lock-file-only dependency bump
+    # abstains instead of warning about a type that lives inside the upgraded package. Pinned
+    # because the asymmetry reads like an oversight and the corpus holds no json-only PR to
+    # catch a well-meant widening.
+    check('lock-file-only diff abstains rather than warning',
+          assess('Takes the same build `WidgetHost` shipped, for the `GadgetOutput` decoder fix.',
+                 [{'filename': 'Darling/Darling.Tests/packages.lock.json',
+                   'patch': '@@ -1,3 +1,3 @@\n-      "resolved": "0.2.0",\n'
+                            '+      "resolved": "0.2.1",'}])[0] == 'abstain')
     check('empty body abstains', assess('', FIXTURE_DIFF)[0] == 'abstain')
 
     failed = [n for n, ok in cases if not ok]
