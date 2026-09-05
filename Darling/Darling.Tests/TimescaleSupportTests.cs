@@ -1053,13 +1053,23 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
     /// worse than a red one, not milder: an inert fix with a passing suite is a fix nobody looks at again.
     /// String-shape assertions on the SQL cannot see it, because they never run the statement.</para>
     ///
-    /// <para><b>The four assumptions only a live store can settle</b>, all named as unverified when the change
-    /// was written: that <c>alter_job</c> takes <c>fixed_schedule</c> and <c>initial_start</c> together on this
-    /// runtime; that <c>jsonb_set</c> produces a <c>start_offset</c> TimescaleDB then honours; that the
-    /// <c>jobs</c> → <c>continuous_aggregates</c> join on materialization-hypertable schema/name recovers
-    /// <c>view_name</c> for a refresh policy; and that a policy CREATED with <c>initial_start</c> comes back
-    /// <c>fixed_schedule = true</c> — on which the converge's own no-op-ness rests, because a fresh store whose
-    /// jobs read <c>false</c> would be re-altered on every start forever.</para>
+    /// <para><b>It found two defects on its first two runs, which is the argument for its existence.</b> The
+    /// join was written on <c>materialization_hypertable_schema/name</c>, because that is the id the
+    /// underlying <c>bgw_job</c> row carries — and <c>timescaledb_information.jobs</c> resolves a
+    /// continuous-aggregate job back to its USER VIEW, so the read found nothing at all and the converge would
+    /// have reported a tidy zero on every store. Then, with the join fixed:
+    /// <c>add_continuous_aggregate_policy(if_not_exists =&gt; true)</c> does NOT skip an existing policy
+    /// quietly the way its compression and retention siblings do — against a differing window it raises
+    /// <c>22023</c>, which makes the converge/ensure ORDER a correctness requirement rather than a
+    /// preference. Neither is visible to a string assertion on the SQL, because a string assertion never runs
+    /// the statement.</para>
+    ///
+    /// <para><b>The remaining assumptions this settles</b>, all named as unverified when the change was
+    /// written: that <c>alter_job</c> takes <c>fixed_schedule</c> and <c>initial_start</c> together on this
+    /// runtime; that <c>jsonb_set</c> produces a <c>start_offset</c> TimescaleDB then honours; and that a
+    /// policy CREATED with <c>initial_start</c> comes back <c>fixed_schedule = true</c> — on which the
+    /// converge's own no-op-ness rests, because a fresh store whose jobs read <c>false</c> would be re-altered
+    /// on every start forever.</para>
     ///
     /// <para><b>The fixed schedule is not a refinement.</b> Measured on the production store roughly two hours
     /// after the offsets were applied by hand: every job read <c>fixed_schedule = f</c> and only one of six
@@ -1096,8 +1106,12 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         var bodySucceeded = false;
         try
         {
+            /* The settled baseline: everything created with the shipped values, so every policy matches and
+               the count is what a healthy store reports. Held so step (4) can show the ensure UNDER-reporting
+               by exactly one when a single policy is left stale. */
             var createLog = new CapturingTestLogger();
-            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct);
+            var readyAll = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct);
+            Assert.True(readyAll > 0, $"the fixture did not build the aggregates; {createLog.Joined}");
 
             /* ---- (1) A policy as an OLDER BUILD left it: 3-day window, no initial_start. ---- */
             await ExecAsync(connection, $"SELECT remove_continuous_aggregate_policy('collect.{Hourly}', if_exists => true)", ct);
@@ -1121,13 +1135,28 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
             Assert.False(legacy.FixedSchedule,
                 "a policy created without initial_start is expected to be finish-to-start on this runtime");
 
-            /* ---- (2) The CREATE statement ALONE cannot fix it — if_not_exists skips outright. ---- */
-            await ExecAsync(connection, TimescaleSupport.AddHourlyRefreshPolicySql(Hourly), ct);
+            /* ---- (2) The CREATE statement alone cannot fix it, and NOT for the reason the sibling
+                    converges taught. add_compression_policy and add_retention_policy skip an existing policy
+                    quietly and return -1. add_continuous_aggregate_policy does that only when the window
+                    MATCHES: against one whose window DIFFERS it RAISES. So the create path is not merely
+                    unable to move a deployed store, it cannot even run before the converge has. ---- */
+            var overlap = await Assert.ThrowsAsync<PostgresException>(
+                async () => await ExecAsync(connection, TimescaleSupport.AddHourlyRefreshPolicySql(Hourly), ct));
+            Assert.Equal("22023", overlap.SqlState);
+
             var afterCreate = await RefreshPolicyStateAsync(connection, Hourly, ct);
             Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, afterCreate!.StartOffsetSeconds);
             Assert.False(afterCreate.FixedSchedule);
 
-            /* ---- (3) THE ASSERTION THE WHOLE CHANGE COMES DOWN TO: the deployed store converges. ---- */
+            /* ---- (3) THE ORDERING CONTRACT, functionally. Run in the wrong order the ensure meets that
+                    raise, swallows it in its per-aggregate catch, and comes back one short — reporting the
+                    aggregate as unready when only its refresh window was stale. Pinned as a COUNT rather than
+                    a log substring so it fails on the behaviour and not on the wording. ---- */
+            var wrongOrderLog = new CapturingTestLogger();
+            Assert.Equal(readyAll - 1, await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, wrongOrderLog, ct));
+            Assert.Contains(Hourly, wrongOrderLog.Joined, StringComparison.Ordinal);
+
+            /* ---- (4) THE ASSERTION THE WHOLE CHANGE COMES DOWN TO: the deployed store converges. ---- */
             var convergeLog = new CapturingTestLogger();
             var converged = await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, convergeLog, ct);
             Assert.True(converged >= 1,
@@ -1150,10 +1179,16 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
             Assert.Contains($"moved {Hourly}'s refresh policy to a {TimescaleSupport.HourlyRefreshStartOffset} window",
                 convergeLog.Joined, StringComparison.Ordinal);
 
-            /* ---- (4) Idempotent: a converged store finds nothing, so this never churns alter_job. ---- */
+            /* ---- (5) And NOW the ensure is whole again — the shipped order, on the store state that
+                    exposed the requirement. This is the assertion that would go red if the two calls in
+                    DarlingWorker were ever swapped back. ---- */
+            var rightOrderLog = new CapturingTestLogger();
+            Assert.Equal(readyAll, await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, rightOrderLog, ct));
+
+            /* ---- (6) Idempotent: a converged store finds nothing, so this never churns alter_job. ---- */
             Assert.Equal(0, await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct));
 
-            /* ---- (5) The CREATE path on a store with no policy yet: both halves from the start. ---- */
+            /* ---- (7) The CREATE path on a store with no policy yet: both halves from the start. ---- */
             await ExecAsync(connection, $"SELECT remove_continuous_aggregate_policy('collect.{Hourly}', if_exists => true)", ct);
             await ExecAsync(connection, TimescaleSupport.AddHourlyRefreshPolicySql(Hourly), ct);
 
@@ -1167,7 +1202,7 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
             /* And therefore the converge is a no-op against a FRESH store too, not only a settled one. */
             Assert.Equal(0, await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct));
 
-            /* ---- (6) SCOPE: the DAILY tier keeps its 3-day window and its finish-to-start schedule. ---- */
+            /* ---- (8) SCOPE: the DAILY tier keeps its 3-day window and its finish-to-start schedule. ---- */
             var daily = await RefreshPolicyStateAsync(connection, Daily, ct);
             Assert.NotNull(daily);
             Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, daily!.StartOffsetSeconds);

@@ -1232,16 +1232,19 @@ public sealed class DarlingWorker : BackgroundService
                 // Reshape: drop stale old-shape QS / procedure_stats CAGGs FIRST so the ensure below rebuilds them
                 // in the composer-dimension shape (no-op once reshaped, and on a fresh store nothing matches).
                 await TimescaleSupport.DropStaleContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
-                await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
-
-                /* #3012: same if_not_exists no-op as the compression tick above, on the refresh policies. The
-                   CREATE carries the narrowed 1-day window and the 15-minute phase grid, but a store that ever
-                   ran an older build keeps re-materializing three days every hour — cost set by the window, so
-                   it grows with the hypertable and eventually outruns its own cadence, at which point a queued
-                   compression exclusive lock convoys every collector store-write behind it. Only selects
-                   policies that DIFFER, and only hourly ones, so the daily tier keeps its 3-day window and a
-                   settled store is a no-op. */
+                /* #3012: the refresh-window converge, and it runs BEFORE the ensure rather than after it —
+                   which is a measured ordering requirement, not a preference. add_continuous_aggregate_policy
+                   does NOT behave like its compression and retention siblings: against a policy whose window
+                   DIFFERS, if_not_exists => true does not return -1, it raises 22023 "refresh interval
+                   overlaps with an existing continuous aggregate policy". So on any store that ever ran an
+                   older build, the ensure below would fail per-aggregate on all thirteen hourly views and
+                   under-report how many are ready, while the policies stayed on the 3-day window. Converging
+                   first leaves the ensure looking at policies that already match, which is the quiet -1 it
+                   was written for. Only hourly policies, only ones that DIFFER, so the daily tier keeps its
+                   3-day window and a settled store is a no-op. */
                 await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(timescaleConnection, _logger, stoppingToken);
+
+                await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
 
                 // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly HISTORY CAGGs 90d per #1937, daily
                 // history kept indefinitely; the interval-dedup and baseline tiers carry their own, #1958).

@@ -1787,6 +1787,15 @@ WITH NO DATA";
     /// statement. Failure-isolated per aggregate: one failure warns and the composer keeps querying raw.
     /// Idempotent (IF NOT EXISTS on both), so it re-converges every restart. Returns the number ready.
     ///
+    /// <para><b>MUST run AFTER <see cref="ConvergeContinuousAggregateRefreshAsync"/> (#3012).</b> The policy
+    /// half is idempotent only against a policy whose window MATCHES: <c>if_not_exists =&gt; true</c> returns
+    /// -1 for an identical policy, but against one whose window differs it raises <c>22023 refresh interval
+    /// overlaps with an existing continuous aggregate policy</c>. That is measured, and it is unlike
+    /// <c>add_compression_policy</c> and <c>add_retention_policy</c>, which both skip quietly. Run BEFORE the
+    /// converge, this sweep would raise on every hourly view of every already-deployed store, swallow it in
+    /// the per-aggregate catch, and report a count that reads as "the aggregates are broken" when only their
+    /// refresh windows are stale.</para>
+    ///
     /// <para>Does NOT backfill history, and on a store that already holds history that leaves a real gap rather
     /// than a merely un-accelerated one (#1759): the aggregates are born WITH NO DATA and each refresh policy
     /// only reaches its own start offset back (<see cref="HourlyRefreshStartOffset"/> hourly,
@@ -1946,13 +1955,17 @@ AND   ca.view_schema = 'collect'";
     /// bigint during function resolution, the #1586 trap), <c>$2</c> the <c>start_offset</c> text, <c>$3</c>
     /// the minute of the hour.
     ///
-    /// <para><b>Why this has to exist at all.</b>
-    /// <c>add_continuous_aggregate_policy(if_not_exists =&gt; true)</c> returns -1 for a policy the store
-    /// already has and changes NOTHING about it — the same documented behaviour
-    /// <see cref="ConvergeRetentionHorizonSql"/> and <see cref="ConvergeCompressionScheduleAsync"/> exist for.
-    /// Without this, #3012's fix would reach fresh installs only, and every store that ever ran an older build
-    /// would keep re-materializing three days every hour forever, with nothing failing until its hypertable
-    /// grew into the same convoy.</para>
+    /// <para><b>Why this has to exist, and why it is worse than the sibling cases.</b>
+    /// <see cref="ConvergeRetentionHorizonSql"/> and <see cref="ConvergeCompressionScheduleAsync"/> exist
+    /// because their <c>add_*</c> function returns -1 for a policy the store already has and changes nothing.
+    /// <c>add_continuous_aggregate_policy</c> does that only when the window MATCHES. Against a policy whose
+    /// window DIFFERS it raises <c>22023 refresh interval overlaps with an existing continuous aggregate
+    /// policy</c> — measured on a live store, and it is why
+    /// <see cref="EnsureContinuousAggregatesAsync"/> must run AFTER this rather than before. So without this
+    /// the narrowing would not merely fail to reach an upgraded store: the create path would raise on all
+    /// thirteen hourly views every start, be swallowed by that sweep's per-aggregate isolation, and leave the
+    /// policies re-materializing three days an hour forever, with nothing failing until the hypertable grew
+    /// into the same convoy.</para>
     ///
     /// <para><c>config</c> is updated with <c>jsonb_set</c> against the job's OWN config so the other keys
     /// (<c>end_offset</c>, <c>mat_hypertable_id</c>) are preserved untouched, which is why this is a
@@ -1975,13 +1988,16 @@ WHERE j.job_id = $1::integer";
     /// <see cref="RefreshPhaseStepMinutes"/> phase grid — for stores that already have policies.
     ///
     /// <para><b>Behaviour on each of the three store states, because that is the whole contract.</b> A FRESH
-    /// store had its policies created by <see cref="EnsureContinuousAggregatesAsync"/> moments earlier with
-    /// these exact values, so nothing here matches and nothing is touched. A store still carrying the OLD
-    /// values gets both halves applied on the first start after deploy. A store an operator already patched BY
-    /// HAND to the right window is matched on the window and left alone on it — it is only re-phased if its
-    /// job is not on a fixed schedule or not on this grid, which is the one case where code deliberately wins
-    /// over a live hand-applied value: a hand-set <c>next_start</c> without a fixed schedule drifts back to
-    /// finish-to-start scheduling and re-phases itself the first time a run overruns.</para>
+    /// store has no refresh jobs yet — its aggregates are created moments LATER — so this reads an empty set
+    /// and returns 0. A store still carrying the OLD values gets both halves applied on the first start after
+    /// deploy, and the create that follows then finds policies which match. A store an operator already
+    /// patched BY HAND to the right window is matched on the window and left alone on it — it is only
+    /// re-phased if its job is not on a fixed schedule or not on this grid, which is the one case where code
+    /// deliberately wins over a live hand-applied value, and production settled that argument: measured about
+    /// two hours after the offsets were applied by hand, every job read <c>fixed_schedule = false</c> and only
+    /// one of six hourly refreshes was still on the minute it had been set to. Without a fixed schedule the
+    /// next start comes off the previous FINISH, so a hand-applied stagger decays back into coincidence within
+    /// hours.</para>
     ///
     /// <para><b>DAILY refresh policies are skipped, by membership rather than by name-matching.</b> A view
     /// that is not on <see cref="HourlyRefreshPhaseOrder"/> is passed over untouched, so the daily tier keeps
