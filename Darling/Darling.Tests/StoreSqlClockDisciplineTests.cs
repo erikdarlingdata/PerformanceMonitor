@@ -162,6 +162,9 @@ public sealed class StoreSqlClockDisciplineTests
             /* HAVING and a JOIN's ON are predicate contexts too. */
             "SELECT 1 FROM t GROUP BY a HAVING max(collection_time) > now() - interval '1 hour'",
             "SELECT 1 FROM a JOIN b ON b.collection_time > now() - interval '1 hour'",
+            /* Bare predicate FRAGMENTS — the shape these readers interpolate, with no statement keyword. */
+            "AND r.collection_time >= NOW() - INTERVAL '10 MINUTES'",
+            "AND   qs.collection_time > now() - interval '2 hours'",
         ];
 
         foreach (var sql in hazards)
@@ -194,6 +197,10 @@ public sealed class StoreSqlClockDisciplineTests
                did not strip these. */
             "SELECT 1 FROM t WHERE collection_time > $1 /* not now() - interval '2 hours': the session zone shifts it */",
             "SELECT 1 FROM t WHERE collection_time > $1 -- was now() - interval '2 hours'",
+            /* Fragments that are already right: the bound form, and the rescued spelling the viewer's
+               monitored-servers upsert actually ships. */
+            "AND r.collection_time >= $4",
+            "(now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')",
         ];
 
         foreach (var sql in benign)
@@ -567,13 +574,31 @@ public sealed class StoreSqlClockDisciplineTests
 
     /* ---------------- text helpers ---------------- */
 
+    /// <summary>
+    /// Whether a literal is worth reading as SQL: a whole statement, OR a bare predicate FRAGMENT.
+    ///
+    /// <para>The fragment arm is not padding. These readers assemble filters as standalone literals and
+    /// interpolate them — <c>LocalDataService.WaitStats</c> builds five that way — so a fragment like
+    /// <c>"AND r.collection_time &gt;= NOW() - INTERVAL '10 MINUTES'"</c> carries no statement keyword at
+    /// all, and a statement-only filter skips the shape most likely to reintroduce this. A fragment is
+    /// recognised by carrying both a clock and a comparison, which is all the discriminator needs to judge
+    /// it.</para>
+    ///
+    /// <para>Known limit, stated rather than papered over: the scan reads ONE literal at a time, so a
+    /// predicate whose column sits in one literal and whose clock sits in another — welded together only by
+    /// concatenation — is outside it. No such split exists in the corpus today; the one fragment pairing a
+    /// clock with a column, <c>ViewerDataService.MonitoredServers</c>, already uses the rescued
+    /// <c>AT TIME ZONE 'UTC'</c> form. Catching it would mean resolving concatenation rather than reading
+    /// literals.</para>
+    /// </summary>
     private static bool LooksLikeSql(string body) =>
         body.Contains("SELECT ", StringComparison.OrdinalIgnoreCase)
         || body.Contains("INSERT ", StringComparison.OrdinalIgnoreCase)
         || body.Contains("UPDATE ", StringComparison.OrdinalIgnoreCase)
         || body.Contains("DELETE ", StringComparison.OrdinalIgnoreCase)
         || body.Contains("CREATE ", StringComparison.OrdinalIgnoreCase)
-        || body.Contains(" FROM ", StringComparison.OrdinalIgnoreCase);
+        || body.Contains(" FROM ", StringComparison.OrdinalIgnoreCase)
+        || (ClockRegex.IsMatch(body) && ComparisonRegex.IsMatch(body));
 
     /// <summary>Blanks SQL comments, preserving length so an offset still points where it did. The repo's SQL
     /// is heavily commented and those comments discuss <c>now()</c> constantly — including in the waiver this
