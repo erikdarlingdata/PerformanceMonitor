@@ -111,14 +111,39 @@ AND   delta_execution_count > 0";
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
-WITH latest AS
+WITH svr AS
+(
+    -- creation_time is the MONITORED SERVER's local wall clock -- QueryStatsCollector ships the
+    -- dm_exec_query_stats value verbatim -- while the window bound is naive UTC off DateTime.UtcNow.
+    -- De-skewing the column by the collected offset is what lets the compiled-before-the-window test
+    -- compare a single frame. Untranslated, a negative offset admits exactly the in-window plans this
+    -- predicate exists to exclude, and a positive one discards plans that legitimately predate the
+    -- window; either way a wide min/max worker-time spread stops being evidence of parameter
+    -- sensitivity and becomes an artefact of plan age. COALESCE to 0 because server_properties is an
+    -- on-load collector, so an absent offset is the state every server passes through on its first
+    -- cycle -- refusing the read there would pre-empt the two answers that outrank any window. The
+    -- CTE returns exactly one row, so no plan is lost to it.
+    SELECT COALESCE
+    (
+        (
+            SELECT utc_offset_minutes
+            FROM v_server_properties
+            WHERE server_id = $1
+            AND   utc_offset_minutes IS NOT NULL
+            ORDER BY collection_time DESC
+            LIMIT 1
+        ),
+        0
+    ) AS offset_minutes
+),
+latest AS
 (
     SELECT
         query_hash,
         query_plan_hash,
         database_name,
         execution_count,
-        creation_time,
+        creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -130,7 +155,7 @@ WITH latest AS
             PARTITION BY database_name, query_hash, query_plan_hash
             ORDER BY collection_time DESC
         ) AS rn
-    FROM v_query_stats
+    FROM v_query_stats, svr
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
@@ -147,7 +172,7 @@ WHERE rn = 1
 AND   min_worker_time >= 10000
 AND   max_worker_time >= 250000
 AND   execution_count >= 20
-AND   creation_time <= $2
+AND   creation_time_utc <= $2
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
 ORDER BY worker_ratio DESC
 LIMIT 20";
