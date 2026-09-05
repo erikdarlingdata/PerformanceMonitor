@@ -537,14 +537,14 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// Deadlocks reported in the window (#2661), last on this tab because they are blocking at its limit: a
-    /// chain the server had to break by cancelling somebody.
+    /// Deadlocks reported in the window (#2661), last on the Activity tab's Blocking sub-tab because they
+    /// are blocking at its limit: a chain the server had to break by cancelling somebody.
     ///
     /// <para><b>An empty grid is the healthy answer AND the shape of a log that cannot be read or cannot be
     /// parsed</b>, which is why the note names the other checks rather than leaving them. Deadlock reports
     /// need nothing ENABLED on the target, unlike plan capture, but they are not unsuppressable. Two things
-    /// have to hold: the log must be readable, which the plan-capture panel above already reports on
-    /// because it reads the same file, AND it must carry DETAIL, which <c>log_error_verbosity = terse</c>
+    /// have to hold: the log must be readable, which the Vacuum tab's plan-capture readiness panel
+    /// reports on because it reads the same file, AND it must carry DETAIL, which <c>log_error_verbosity = terse</c>
     /// strips along with the whole graph. pg_stat_database's cumulative deadlock counter is the independent
     /// test: if that moved and this is empty, the log is the problem — unreadable or too terse — rather
     /// than the server (#3030).</para>
@@ -564,8 +564,8 @@ public partial class ViewerServerTab
 
         PgDeadlocksNote.Text = PanelNote("pg_deadlocks", rows.Count,
             "No deadlock was reported in this window. That is the healthy answer, and it is also what an "
-            + "unreadable server log looks like — the plan-capture panel above reads the same file and says "
-            + "which it is.")
+            + "unreadable server log looks like — the Vacuum tab's plan-capture readiness panel reads the "
+            + "same file and says which it is.")
             + (rows.Count == 0
                 ? string.Empty
                 : "  Sightings counts how often the collector saw the SAME report while it stayed inside "
