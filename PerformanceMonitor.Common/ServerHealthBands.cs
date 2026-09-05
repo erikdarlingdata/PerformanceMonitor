@@ -987,7 +987,7 @@ namespace PerformanceMonitor.Common
         /// What <c>get_collection_health</c>'s output figures are measured over, and — the load-bearing
         /// half — what they are NOT (#3017).
         ///
-        /// <para><b>Both windows named, because only one of them was read here.</b> <c>rows</c> and
+        /// <para><b>Both windows named, because only one of them was read here.</b> <c>rows_stored</c> and
         /// <c>runs_with_rows</c> come out of the SAME aggregate over the SAME fixed trailing seven days as
         /// <c>total_runs</c> and the duration statistics beside them, so cost and output on one row always
         /// describe one set of runs. <c>get_collector_cost</c>'s <c>total_rows</c> is a different
@@ -996,21 +996,28 @@ namespace PerformanceMonitor.Common
         /// assume the two reconcile. That is #3027's discipline one level down: a surface must not assert a
         /// scope it did not measure.</para>
         ///
-        /// <para><b>And the third thing it is not.</b> <c>rows</c> counts what a run STORED. Nothing on
+        /// <para><b>The disclaimed tool is attributed to Darling on purpose.</b> One note serves both SKUs
+        /// (the whole reason it lives here), but <c>get_collector_cost</c> is Darling-ONLY by architecture —
+        /// it reads the central store's own hourly self-metric, which a single-instance Lite install has no
+        /// twin of. Unattributed, the sentence would point a Lite caller at a tool that SKU does not expose.
+        /// Naming the SKU keeps one string honest on both rather than splitting it per SKU, which is the
+        /// drift this class lives in Common to prevent.</para>
+        ///
+        /// <para><b>And the third thing it is not.</b> <c>rows_stored</c> counts what a run STORED. Nothing on
         /// this surface reads what the monitored engine COUNTED, so a zero here cannot separate a
         /// genuinely quiet source from a reader that is capturing nothing off a busy one. Engine-counter
         /// against rows-stored is a YIELD instrument and a different piece of work; saying so is what
         /// stops this figure being read as one.</para>
         /// </summary>
         public const string OutputWindowNote =
-            "rows and runs_with_rows are counted over the SAME fixed trailing seven days as total_runs and "
-            + "the duration statistics beside them - one aggregate over one window, so cost and output on a "
-            + "collector row always describe the same runs. They are NOT get_collector_cost's total_rows: "
-            + "that tool reads a separate hourly series, over the caller's own days_back and across every "
-            + "server at once, and these figures make no claim about what it reports. rows is also what a "
-            + "run STORED, never what the monitored engine counted - so a zero cannot tell a genuinely "
-            + "quiet source apart from a reader capturing nothing off a busy one, and nothing on this "
-            + "surface measures that.";
+            "rows_stored and runs_with_rows are counted over the SAME fixed trailing seven days as total_runs "
+            + "and the duration statistics beside them - one aggregate over one window, so cost and output on "
+            + "a collector row always describe the same runs. They are NOT the hourly per-collector series "
+            + "Darling's get_collector_cost reports as total_rows, which is summed over that caller's own "
+            + "days_back and across every server at once; these figures make no claim about it. rows_stored "
+            + "is also what a run STORED, never what the monitored engine counted - so a zero cannot tell a "
+            + "genuinely quiet source apart from a reader capturing nothing off a busy one, and nothing on "
+            + "this surface measures that.";
 
         /// <summary>
         /// The sentence a collector that SPENT and STORED NOTHING gets, and the two readings it has to keep

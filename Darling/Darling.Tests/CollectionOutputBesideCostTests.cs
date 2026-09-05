@@ -204,6 +204,53 @@ public sealed class CollectionOutputBesideCostTests
            measured is what stops the figure being read as a yield measurement. */
         Assert.Contains("STORED", note, StringComparison.Ordinal);
         Assert.Contains("engine counted", note, StringComparison.Ordinal);
+
+        /* And every snake_case NAME the note uses has to be one the surface actually carries. The first
+           draft of this note said "rows" where the field is `rows_stored` - a sentence describing a field
+           that does not exist, which is the same class of defect as a note claiming a scope it did not
+           measure, arriving through the field name instead of the window. It also named
+           `get_collector_cost` unattributed, and that tool is Darling-ONLY by architecture, so on Lite the
+           sentence pointed at a read that SKU does not expose.
+
+           Derived from the note rather than listed beside it, so a name added to the note later is checked
+           without this test being edited - and vocabulary spans BOTH tools plus the collector-cost tool the
+           note disclaims, because one string serves both SKUs. */
+        var vocabulary = string.Concat(ToolSources.Select(ReadRepoFile))
+            + ReadRepoFile(Path.Combine(
+                "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCollectorCostTools.cs"));
+
+        var namesInNote = Regex.Matches(note, "[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
+            .Select(m => m.Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        /* The precondition, so a note reworded into prose with no field names cannot turn the loop below
+           into a vacuous pass over an empty sequence. */
+        Assert.True(namesInNote.Length >= 5, $"the note names only {namesInNote.Length} fields - this pin needs re-anchoring");
+        Assert.Contains("rows_stored", namesInNote);
+        Assert.Contains("runs_with_rows", namesInNote);
+
+        foreach (var name in namesInNote)
+        {
+            Assert.Contains(name, vocabulary, StringComparison.Ordinal);
+        }
+
+        /* And the ORIGINAL defect directly, because the loop above CANNOT see it. The first draft wrote a
+           bare `rows` where the field is `rows_stored`; `rows` is not snake_case, so the extractor never
+           yields it, and the qualified name later in the same note kept both Contains assertions green.
+           A pin that passes with the defect present is the greedy-extractor failure this repo has been
+           bitten by - proven here by reinstating that exact wording and watching the loop stay green.
+
+           So the bare form is asserted absent with a boundary the engine actually implements (lookarounds,
+           never \b, which several tools in this repo's toolchain do not honour), and the Matches beside it
+           is the POSITIVE CONTROL: the identical lookaround form over the qualified name the note
+           demonstrably carries, so a DoesNotMatch passing by never compiling a pattern cannot hide here. */
+        Assert.DoesNotMatch(new Regex("(?<![A-Za-z0-9_])rows(?![A-Za-z0-9_])"), note);
+        Assert.Matches(new Regex("(?<![A-Za-z0-9_])rows_stored(?![A-Za-z0-9_])"), note);
+
+        /* The Lite half of the same point: the tool it disclaims is named WITH its SKU, because one shared
+           string reaches a caller who cannot call it. */
+        Assert.Contains("Darling's get_collector_cost", note, StringComparison.Ordinal);
     }
 
     /// <summary>
