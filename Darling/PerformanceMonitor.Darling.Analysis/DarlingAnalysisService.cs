@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -517,8 +518,14 @@ public sealed class DarlingAnalysisService
 
     /// <summary>
     /// Cleans up old findings beyond the retention period.
+    ///
+    /// <para>The default names <see cref="AnalysisRetentionDefaults.FindingsRetentionDays"/> rather than
+    /// repeating its value. Nothing in the service calls this — it carries the twins' surface, and the
+    /// worker sweeps findings through <see cref="PgFindingStore.CleanupOldFindingsAsync"/> directly — so
+    /// for any future caller this default IS the horizon, with no call site above it to correct a stale
+    /// literal.</para>
     /// </summary>
-    public async Task CleanupAsync(int retentionDays = 30)
+    public async Task CleanupAsync(int retentionDays = AnalysisRetentionDefaults.FindingsRetentionDays)
     {
         await _findingStore.CleanupOldFindingsAsync(retentionDays);
     }
