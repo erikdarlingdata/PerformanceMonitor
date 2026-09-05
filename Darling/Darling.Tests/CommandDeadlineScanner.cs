@@ -44,14 +44,6 @@ internal static class CommandDeadlineScanner
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// A deadline assigned through a member access - <c>command.CommandTimeout = ...</c>, the only way a
-    /// <c>CreateCommand</c> result can carry one. Read against the statement span.
-    /// </summary>
-    private static readonly Regex s_assignsTimeout = new(
-        @"\.\s*CommandTimeout\s*=",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    /// <summary>
     /// Whether the command constructed at <paramref name="index"/> in already-STRIPPED
     /// <paramref name="code"/> sets an explicit deadline.
     /// </summary>
