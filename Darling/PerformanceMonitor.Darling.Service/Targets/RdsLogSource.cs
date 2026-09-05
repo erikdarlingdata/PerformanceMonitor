@@ -183,17 +183,15 @@ public sealed class RdsLogSource
             },
             cancellationToken);
 
-        /* The null test comes BEFORE the LINQ because it has to: the SDK omits the collection entirely on
-           an answer that carried no file, so ordering a null raises ArgumentNullException and buries this
-           branch behind "Value cannot be null. (Parameter 'source')". */
-        var newest = files.DescribeDBLogFiles is null
-            ? null
-            : files.DescribeDBLogFiles
-                .OrderByDescending(f => f.LastWritten)
-                .Select(f => f.LogFileName)
-                .FirstOrDefault(name => !string.IsNullOrEmpty(name));
-
-        return newest
+        /* The null-conditional is load bearing, as in ResolveWriterAsync above: the SDK omits the
+           collection entirely on an answer that carried no file, so ordering a null raises
+           ArgumentNullException and buries this branch behind "Value cannot be null. (Parameter
+           'source')". It short-circuits the whole chain, so absent and empty both arrive as null and reach
+           the one message below. */
+        return files.DescribeDBLogFiles?
+            .OrderByDescending(f => f.LastWritten)
+            .Select(f => f.LogFileName)
+            .FirstOrDefault(name => !string.IsNullOrEmpty(name))
             ?? throw new InvalidOperationException(
                 $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
                 + "filtered on 'postgresql' returned nothing it could name. NO LOG WAS OPENED this cycle, "
