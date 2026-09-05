@@ -540,12 +540,14 @@ public partial class ViewerServerTab
     /// Deadlocks reported in the window (#2661), last on this tab because they are blocking at its limit: a
     /// chain the server had to break by cancelling somebody.
     ///
-    /// <para><b>An empty grid is the healthy answer AND the shape of an unreadable log</b>, which is why the
-    /// note names the other check rather than leaving it. Deadlock reports need nothing configured on the
-    /// target — unlike plan capture there is no setting that suppresses them — so the only precondition is
-    /// being able to read the server log, which the plan-capture panel above already reports on because it
-    /// reads the same file. pg_stat_database's cumulative deadlock counter is the independent test: if that
-    /// moved and this is empty, the log is the problem rather than the server.</para>
+    /// <para><b>An empty grid is the healthy answer AND the shape of a log that cannot be read or cannot be
+    /// parsed</b>, which is why the note names the other checks rather than leaving them. Deadlock reports
+    /// need nothing ENABLED on the target, unlike plan capture, but they are not unsuppressable. Two things
+    /// have to hold: the log must be readable, which the plan-capture panel above already reports on
+    /// because it reads the same file, AND it must carry DETAIL, which <c>log_error_verbosity = terse</c>
+    /// strips along with the whole graph. pg_stat_database's cumulative deadlock counter is the independent
+    /// test: if that moved and this is empty, the log is the problem — unreadable or too terse — rather
+    /// than the server (#3030).</para>
     /// </summary>
     private async Task LoadPgDeadlocksAsync(DateTime startUtc, DateTime endUtc)
     {

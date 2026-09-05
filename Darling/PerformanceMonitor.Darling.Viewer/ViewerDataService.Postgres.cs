@@ -359,9 +359,10 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>Activity tab - PostgreSQL deadlocks reported in the window (#2661), one row per distinct
-    /// report. Windowed on when the deadlock HAPPENED rather than when it was collected: the collector
-    /// re-reads an overlapping log tail, so a report is found minutes later and found again for as long as
-    /// it stays in the window, and filtering on collection time would place it wrongly and move it.</summary>
+    /// report. Windowed on when the deadlock HAPPENED rather than when it was collected: a report is
+    /// always found some minutes after the fact, and on the <c>pg_read_file</c> route it is found again
+    /// for as long as it stays in the re-read tail, so filtering on collection time would place it
+    /// wrongly and move it every cycle.</summary>
     public Task<List<DarlingPgDeadlockReader.PgDeadlockRow>> GetPgDeadlocksAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 100,
         CancellationToken cancellationToken = default) =>

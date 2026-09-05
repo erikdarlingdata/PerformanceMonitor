@@ -12,10 +12,15 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// Reads the stored PostgreSQL deadlock reports (#2661).
 ///
-/// <para><b>Once per deadlock, not once per sighting.</b> The collector re-reads an overlapping tail of the
-/// server log every cycle on purpose, so a report inside the window arrives again and again until it falls
-/// out. Every read here groups on <c>deadlock_hash</c> and takes the earliest sighting, which is also the
-/// closest to when it actually happened.</para>
+/// <para><b>Once per deadlock, not once per sighting.</b> On the <c>pg_read_file</c> route the collector
+/// re-reads an overlapping tail of the server log every cycle on purpose, so a report inside the window
+/// arrives again and again until it falls out. Every read here groups on <c>deadlock_hash</c> and takes
+/// the earliest sighting, which is also the closest to when it actually happened.</para>
+///
+/// <para>The grouping still earns its place on the consume-once RDS log-API route, which can re-offer a
+/// window after a restart or a write that did not land (#3008). But there a report normally arrives ONCE,
+/// so a low <c>times_seen</c> is the ordinary state rather than a partial count, and nothing in a row
+/// says which transport produced it (#3009).</para>
 /// </summary>
 public static class DarlingPgDeadlockReader
 {
@@ -55,10 +60,12 @@ public static class DarlingPgDeadlockReader
             MIN(d.lock_modes)           AS lock_modes,
             MIN(d.resources)            AS resources,
             MIN(d.victim_statement)     AS victim_statement,
-            /* How many times the collector saw this same report. Not a count of deadlocks — it is a
-               property of the overlapping read window, and it is surfaced so a reader can tell it apart
-               from a deadlock that genuinely recurred, which would carry a DIFFERENT hash each time
-               because the pids differ. */
+            /* How many times the collector saw this same report. Never a count of deadlocks: one that
+               genuinely recurred carries a DIFFERENT hash each time because the pids differ, and being
+               told apart from that is what this is surfaced for. On the pg_read_file route it is a
+               property of the overlapping read window; on the consume-once RDS route there is no such
+               window, so it is normally 1 and a low value is the ordinary state rather than a partial
+               count -- see the class remarks for the two ways it can still exceed 1 there (#3009). */
             COUNT(*)::int               AS times_seen
         FROM pg_deadlocks AS d
         WHERE d.server_id = $1
@@ -78,9 +85,10 @@ public static class DarlingPgDeadlockReader
     /// the shape the SQL Server "Deadlock Graphs" panel already has and the reason a reader does not have to
     /// call the summary first just to see a graph.</para>
     ///
-    /// <para><c>DISTINCT ON (deadlock_hash)</c> for the same reason every read here groups: the collector
-    /// re-reads an overlapping tail, so without it the newest few rows are frequently the same report
-    /// several times over.</para>
+    /// <para><c>DISTINCT ON (deadlock_hash)</c> for the same reason every read here groups: on the
+    /// <c>pg_read_file</c> route the collector re-reads an overlapping tail, so without it the newest few
+    /// rows are frequently the same report several times over. Costless where that route is not in
+    /// use.</para>
     /// </summary>
     public const string DeadlockDetailSql = """
         SELECT DISTINCT ON (d.deadlock_hash)

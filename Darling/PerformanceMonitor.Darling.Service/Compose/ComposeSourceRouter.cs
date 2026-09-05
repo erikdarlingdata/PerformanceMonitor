@@ -133,7 +133,7 @@ public static class ComposeCaggCatalog
 /// ago") must reach the tier that still retains it or the query returns empty rows.
 ///
 /// <para>Route thresholds sit a margin BELOW each retention horizon (raw kept 4d → route ≤3d; hourly kept 90d →
-/// route ≤89d), so a drop lagging the boundary (1-day chunk granularity + the 3-day CAGG refresh) can never leave
+/// route ≤89d), so a drop lagging the boundary (1-day chunk granularity + the CAGG refresh interval) can never leave
 /// the chosen tier missing the oldest chunk. The margin is pinned as a test invariant against the retention
 /// constants. A whole window routes to the single tier its OLDEST point needs — uniform coarsening, no cross-tier
 /// union (a future optimization); real-time aggregation on the CAGG stitches the still-filling recent edge.</para>
