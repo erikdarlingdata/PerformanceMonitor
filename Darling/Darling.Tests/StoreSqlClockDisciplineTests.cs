@@ -48,7 +48,7 @@ namespace Darling.Tests;
 public sealed class StoreSqlClockDisciplineTests
 {
     /* Floors, so the scan cannot pass by finding nothing. Measured on dev at the time of writing: 563 files,
-       19,604 string literals, 1,626 of them SQL-shaped, 58 naive timestamp column names. Set well below
+       19,604 string literals, 1,627 of them SQL-shaped, 56 naive timestamp column names. Set well below
        those so ordinary growth never trips them, but high enough that a broken glob or a desynchronised
        literal walk fails instead of reporting a clean bill of health. The column-vocabulary floor is the one
        that matters most: the discriminator needs those names, and a DDL scrape that quietly returned four of
@@ -57,6 +57,29 @@ public sealed class StoreSqlClockDisciplineTests
     private const int MinimumLiteralsScanned = 12_000;
     private const int MinimumSqlLiteralsScanned = 1_200;
     private const int MinimumTimestampColumnsKnown = 40;
+
+    /// <summary>
+    /// Column NAMES whose timestamp frame depends on which table they are in, so a name-keyed scan cannot
+    /// judge them and must not pretend to. Both are genuinely split:
+    ///
+    /// <list type="bullet">
+    /// <item><c>sample_time</c> — <c>cpu_utilization_stats.sample_time</c> is deliberately the MONITORED
+    /// SERVER's local wall clock (#1262 de-skews it per batch; Lite windows it through
+    /// <c>GetTimeRangeServerLocal</c>), while <c>memory_pressure_events.sample_time</c> must be UTC.</item>
+    /// <item><c>event_time</c> — <c>default_trace_events.event_time</c> is server-LOCAL (the .trc files
+    /// store local time), while <c>system_health.event_time</c> is UTC. <c>ViewerSystemEventsTests</c> says
+    /// it in one line: "system_health.event_time is UTC, default_trace.event_time is local".</item>
+    /// </list>
+    ///
+    /// <para><c>CollectorTimestampFrameTests</c> is the authority for these, pinning the frame PER COLUMN
+    /// against the read path each one protects. Its own remarks record that ITS first cut was a store-wide
+    /// "all naive timestamps are UTC" rule that would have forbidden the CPU collector's intentional local
+    /// clock — which is exactly the mistake a scan like this one makes if it assumes a name implies a
+    /// frame. A server-local column compared against a bare clock is still a defect, but a DIFFERENT one
+    /// with a different fix (de-skew by the server's offset, not bind naive UTC), so it belongs to that pin.
+    /// Add a name here only with the same kind of evidence: a documented split, per table.</para>
+    /// </summary>
+    private static readonly string[] AmbiguousFrameColumns = ["sample_time", "event_time"];
 
     /// <summary>
     /// The one bare <c>now()</c> left in the store's SQL, and it is waived on ARITHMETIC, not on being
@@ -499,15 +522,10 @@ public sealed class StoreSqlClockDisciplineTests
            break inside a DDL literal. Left in, it would match every SQL literal that casts anything. */
         names.Remove("timestamp");
 
-        /* sample_time is EXCLUDED, and not because it is safe. It is the one name in the store whose frame
-           depends on the table: cpu_utilization_stats.sample_time is deliberately the MONITORED SERVER's
-           local wall clock (#1262 de-skews it per batch, Lite windows it through GetTimeRangeServerLocal),
-           while memory_pressure_events.sample_time must be UTC. CollectorTimestampFrameTests pins both,
-           per column, against the read path each protects — and its own remarks record that its first cut
-           was a store-wide "all naive timestamps are UTC" rule that would have forbidden the CPU
-           collector's intentional local clock. This scan keys on column NAMES, so it cannot tell those two
-           apart and must not claim to; that column's frame is that pin's business, not this one's. */
-        names.Remove("sample_time");
+        foreach (var ambiguous in AmbiguousFrameColumns)
+        {
+            names.Remove(ambiguous);
+        }
 
         return names;
     }
