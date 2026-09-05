@@ -145,6 +145,13 @@ public sealed class LatestCpuReadShapeSqlTests
     [InlineData(true, "const string S = @\"\nSELECT DISTINCT ON (server_id)\n    server_id, a\nFROM v_cpu_utilization_stats\nORDER BY server_id, collection_time DESC, sample_time DESC\";")]
     /* DISTINCT ON something OTHER than server_id is not a per-server-newest read. */
     [InlineData(false, "const string S = @\"\nSELECT DISTINCT ON (database_name)\n    database_name, a\nFROM v_cpu_utilization_stats\nORDER BY database_name, collection_time DESC\";")]
+    /* The same read as a C# RAW string literal, which is how most of Darling/ writes SQL. */
+    [InlineData(true, "const string S = \"\"\"\n    SELECT a\n    FROM cpu_utilization_stats\n    WHERE server_id = $1\n    ORDER BY collection_time DESC, sample_time DESC\n    LIMIT 1\n    \"\"\";")]
+    /* A raw literal following a verbatim one in the same file: the nearer opener has to win, or the span
+       runs from the earlier literal and swallows both. */
+    [InlineData(true, "const string A = @\"SELECT 1\";\nconst string S = \"\"\"\n    SELECT a\n    FROM cpu_utilization_stats\n    WHERE server_id = $1\n    ORDER BY collection_time DESC, sample_time DESC\n    LIMIT 1\n    \"\"\";")]
+    /* And a verbatim one following a raw one, the mirror case. */
+    [InlineData(true, "const string A = \"\"\"\n    SELECT 1\n    \"\"\";\nconst string S = @\"\nSELECT a\nFROM cpu_utilization_stats\nWHERE server_id = $1\nORDER BY collection_time DESC, sample_time DESC\nLIMIT 1\";")]
     /* The v_ passthrough view counts too — the viewer and MCP reads go through it. */
     [InlineData(true, "const string S = @\"\nSELECT a FROM v_cpu_utilization_stats\nWHERE server_id = $1\nORDER BY collection_time DESC, sample_time DESC\nLIMIT 1\";")]
     /* A WINDOWED read is a different query under different rules — it legitimately bounds collection_time,
@@ -192,9 +199,9 @@ public sealed class LatestCpuReadShapeSqlTests
     /// <summary>
     /// One file's latest-row CPU reads. Comment spans go first (this codebase's SQL carries its reasoning in
     /// <c>/* ... */</c> blocks that quote the very predicates matched here), then each mention of the table is
-    /// taken out to the end of its verbatim literal and kept if that span is a latest-row read in either
-    /// shape: per-server (<c>LIMIT 1</c> with <c>$1</c> as its only parameter) or fleet-wide
-    /// (<c>DISTINCT ON (server_id)</c>, which has neither).
+    /// taken out to the bounds of its enclosing literal — verbatim or raw, since Darling writes SQL both
+    /// ways — and kept if that span is a latest-row read in either shape: per-server (<c>LIMIT 1</c> with
+    /// <c>$1</c> as its only parameter) or fleet-wide (<c>DISTINCT ON (server_id)</c>, which has neither).
     ///
     /// <para>The single-parameter test is what separates this class from a WINDOWED read. A windowed read
     /// takes its bounds as <c>$2</c>/<c>$3</c> and bounding <c>collection_time</c> is the right answer there;
@@ -210,11 +217,28 @@ public sealed class LatestCpuReadShapeSqlTests
         var reads = new List<(string, string)>();
         foreach (Match match in Regex.Matches(code, @"FROM\s+v?_?cpu_utilization_stats\b"))
         {
-            /* The enclosing verbatim literal, both ends: DISTINCT ON and the select list sit BEFORE the
-               table name, so a forward-only span would miss the fleet shape entirely. A read that lacks
-               either end is not a SQL literal and is left alone rather than guessed at. */
-            var close = code.IndexOf("\";", match.Index, StringComparison.Ordinal);
-            var open = code.LastIndexOf("@\"", match.Index, StringComparison.Ordinal);
+            /* The enclosing literal, both ends, in EITHER spelling. Both ends, because DISTINCT ON and the
+               select list sit BEFORE the table name and a forward-only span would miss the fleet shape
+               entirely. Either spelling, because 127 files under Darling/ write SQL as a C# raw string
+               (`""\"`) rather than a verbatim one, DarlingPgCpuUtilizationReader.LatestCpuSql among them — a
+               `@"`-only scan is blind to exactly the future copy this class exists to catch. The nearer
+               opener wins and its own closing form bounds the span; a read with neither is not a SQL literal
+               and is left alone rather than guessed at. */
+            var verbatimOpen = code.LastIndexOf("@\"", match.Index, StringComparison.Ordinal);
+            var rawOpen = code.LastIndexOf("\"\"\"", match.Index, StringComparison.Ordinal);
+
+            int open, close;
+            if (rawOpen > verbatimOpen)
+            {
+                open = rawOpen;
+                close = code.IndexOf("\"\"\"", match.Index, StringComparison.Ordinal);
+            }
+            else
+            {
+                open = verbatimOpen;
+                close = code.IndexOf("\";", match.Index, StringComparison.Ordinal);
+            }
+
             if (close < 0 || open < 0)
             {
                 continue;
