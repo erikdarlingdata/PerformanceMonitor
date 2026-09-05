@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgDeadlockTools
 {
-    [McpServerTool(Name = "get_pg_deadlocks"), Description("Gets PostgreSQL deadlocks that were reported in the window, newest first, with the victim process, how many sessions were in the cycle, the lock modes and resources involved, and the victim's full statement text. PostgreSQL writes a complete deadlock report to its server log unconditionally - there is no setting that suppresses it - so this needs nothing configured on the target, unlike plan capture. Each row is one DISTINCT deadlock: the collector re-reads an overlapping tail of the log every cycle on purpose, so the same report is seen several times, and times_seen reports that rather than hiding it. A deadlock that genuinely recurred appears as a separate row, because the participating process IDs differ. Use get_pg_deadlock_detail with a deadlock_hash for the full wait graph and every participant's SQL.")]
+    [McpServerTool(Name = "get_pg_deadlocks"), Description("Gets PostgreSQL deadlocks that were reported in the window, newest first, with the victim process, how many sessions were in the cycle, the lock modes and resources involved, and the victim's full statement text. PostgreSQL writes a complete deadlock report to its server log unconditionally - there is no setting that suppresses it - so this needs nothing configured on the target, unlike plan capture. Each row is one DISTINCT deadlock, and a deadlock that genuinely recurred appears as a separate row because the participating process IDs differ. times_seen counts how often the collector saw that SAME report, and what a value means depends on the transport. Where the collector reads the log file itself it re-reads an overlapping tail every cycle on purpose, so one report is seen several times and times_seen climbs while it stays in the window. On RDS and Aurora the log API is consume-once, so a report is seen once and times_seen is 1 and stays 1: there, 1 means 'this is all there will ever be', NOT 'seen once so far, expect more'. Do not read a low times_seen as a partial count without knowing which transport the server uses. Use get_pg_deadlock_detail with a deadlock_hash for the full wait graph and every participant's SQL.")]
     public static async Task<string> GetPgDeadlocks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -65,9 +65,13 @@ public sealed class DarlingMcpPgDeadlockTools
                 deadlock_count = rows.Count,
                 truncated = rows.Count >= limit,
                 note = "occurred_at is when PostgreSQL wrote the report, not when the collector found it. "
-                     + "times_seen counts how often the collector saw the SAME report while it stayed inside "
-                     + "the log tail it re-reads - it is a property of the read window and not a repeat "
-                     + "deadlock, which would appear as its own row with different process IDs.",
+                     + "times_seen counts how often the collector saw the SAME report, never how many times "
+                     + "the deadlock happened - a genuine repeat appears as its own row with different "
+                     + "process IDs. What a given value MEANS depends on the transport: reading the log file "
+                     + "directly re-reads an overlapping tail, so times_seen climbs while the report stays "
+                     + "in the window and is a property of that read window. On RDS and Aurora the log API "
+                     + "is consume-once, so times_seen is 1 and stays 1 - there it is not a partial count "
+                     + "and no further sightings are coming.",
                 deadlocks = rows.Select(r => new
                 {
                     occurred_at = r.OccurredAtUtc,
