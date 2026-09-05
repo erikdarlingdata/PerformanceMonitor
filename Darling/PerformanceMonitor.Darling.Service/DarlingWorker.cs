@@ -1800,11 +1800,15 @@ public sealed class DarlingWorker : BackgroundService
                     name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
                     config.PlanContentRetentionDays);
 
-                /* AN3: findings retention. Both apps' finding stores declare a 30-day cleanup
-                   but neither app schedules it (Lite's DuckDB archive-reset bounds it
-                   incidentally); a 24/7 service must actually invoke it or analysis_findings
-                   grows unbounded. Rides the daily purge; never throws (logs + degrades). */
-                await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(retentionDays: 30);
+                /* AN3: findings retention. Both apps' finding stores declare a cleanup but neither
+                   app schedules it (Lite's DuckDB archive-reset bounds it incidentally); a 24/7
+                   service must actually invoke it or analysis_findings grows unbounded. Rides the
+                   daily purge; never throws (logs + degrades). The horizon is the shared base window
+                   rather than a literal of the same value, so findings stay worth exactly as long as
+                   the metric data they are correlated against instead of holding at 30 on their own
+                   if that window ever moves. */
+                await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(
+                    retentionDays: DarlingRetention.DataRetentionBaseDays);
 
                 /* #1652: sweep the service's own rolling log files. The provider swept only in its
                    constructor, so a service up for months — the normal case — swept once at startup and
