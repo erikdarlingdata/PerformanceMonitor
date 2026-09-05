@@ -221,8 +221,13 @@ TOKEN = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 # therefore contribute no vocabulary a description could match, and counting them as code turns
 # every bump into a warning. This is the same reasoning as `json`'s absence from CODE_EXT below,
 # applied to the two manifests that ARE on it.
+# Anchored to a path-segment boundary, not merely to the end of the string: `filename` comes
+# off the API and reflects whatever the author named the file, so an unanchored suffix match
+# would treat `MyDirectory.Packages.props` as a NuGet manifest and exclude it. Exact, for the
+# same reason the described-file test matches an exact basename rather than a substring.
 DEPENDENCY_MANIFEST = re.compile(
-    r'(packages\.lock\.json|Directory\.Packages\.props|nuget\.config|packages\.config)$', re.I)
+    r'(?:^|/)(packages\.lock\.json|Directory\.Packages\.props|nuget\.config'
+    r'|packages\.config)$', re.I)
 # Narrower than SOURCE_EXT on purpose, and `json` is the gap that matters: a description may
 # legitimately name `darling.json`, so json belongs on the DESCRIBED side, but a diff of only
 # json is usually a dependency bump whose lock file shares no vocabulary with any prose. Such a
@@ -445,6 +450,12 @@ def self_test():
                  [{'filename': 'Lite/config/collection_schedule.json',
                    'patch': '@@ -1,3 +1,3 @@\n-  "IntervalSeconds": 60,\n'
                             '+  "IntervalSeconds": 30,'}])[0] == 'abstain')
+    # The manifest match is exact, not a suffix: a file the author happened to name
+    # `MyDirectory.Packages.props` is ordinary source and must still support a verdict.
+    check('a look-alike manifest name is not treated as a manifest',
+          assess('`SprocketCache` now evicts on write.',
+                 [{'filename': 'Lite/MyDirectory.Packages.props',
+                   'patch': '@@ -1 +1 @@\n-<X/>\n+<Y/>'}])[0] == 'warn')
     # Directory.Packages.props IS in CODE_EXT, so only DEPENDENCY_MANIFEST keeps a bump quiet.
     # Pinned separately from the json row above, or one exclusion covers for the other's removal.
     check('dependency-bump-only diff abstains rather than warning',
