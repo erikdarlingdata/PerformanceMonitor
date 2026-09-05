@@ -46,12 +46,18 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /// <summary>Latest SQL + other-process CPU for one server (newest ring-buffer sample). $1 server_id.</summary>
+    /// <summary>Latest SQL + other-process CPU for one server (newest ring-buffer sample). $1 server_id.
+    /// Ordered on <c>collection_time</c> — the hypertable's partition column, which earns TimescaleDB's
+    /// ordered ChunkAppend and so touches ONE chunk instead of appending and top-N sorting the server's whole
+    /// retained history — with <c>sample_time</c> as the within-batch tiebreak. Carries no time predicate:
+    /// <c>sample_time</c> is the monitored server's local wall clock, so bounding on it against store time
+    /// returns zero rows for any server behind the store. Full reasoning on
+    /// <c>DarlingWorker.LatestCpuSql</c>.</summary>
     public const string ServerSummaryCpuSql = @"
 SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
-ORDER BY sample_time DESC
+ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
     /// <summary>Latest total server memory + buffer pool (MB) for one server. $1 server_id.</summary>

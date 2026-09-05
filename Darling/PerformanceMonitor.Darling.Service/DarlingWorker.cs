@@ -4061,7 +4061,48 @@ public sealed class DarlingWorker : BackgroundService
             Database: row.Databases.Length > 0 ? row.Databases[0] : null);
 
     /// <summary>
-    /// The latest collected CPU sample for the snapshot — Lite's overview read
+    /// The newest collected CPU sample for one server, the read that gates CPU alerting. $1 server_id.
+    ///
+    /// <para><b>Ordered on <c>collection_time</c>, the hypertable's own partition column.</b>
+    /// <c>TimescaleSupport.CreateHypertableSql</c> partitions every collector table on its
+    /// <c>PrefixTimeColumnName</c>, and <c>CpuUtilizationCollector</c> does not override the
+    /// <c>collection_time</c> default, so <c>sample_time</c> is an ordinary payload column carrying neither
+    /// an index nor partition affinity. Ordering on the dimension is what earns TimescaleDB's ORDERED
+    /// ChunkAppend: it walks chunks newest-first and stops at the first one that yields a row, so every older
+    /// chunk plans as <c>never executed</c> and the read costs the same against thirty chunks as against one,
+    /// compressed chunks included. Ordering on <c>sample_time</c> instead appends every chunk and top-N sorts
+    /// the server's whole retained history to return a single row — 47,752 rows and 839 buffers at thirty
+    /// one-day chunks, once per server per alert tick.</para>
+    ///
+    /// <para><b>The <c>sample_time</c> tiebreak is load-bearing, not decoration.</b> One poll writes up to 60
+    /// ring-buffer samples under a single <c>collection_time</c>, and without it the read returns whichever of
+    /// them the index reaches first — measured 59 minutes stale. The batch with the newest
+    /// <c>collection_time</c> is always the one holding the newest <c>sample_time</c>, because the collector's
+    /// watermark IS <c>sample_time</c>, so a poll only ever inserts samples above the previous high-water
+    /// mark.</para>
+    ///
+    /// <para><b>No time predicate, deliberately.</b> <c>sample_time</c> is the monitored server's LOCAL wall
+    /// clock on the ring-buffer arm and UTC on the Azure SQL DB arm — two frames in one column, pinned in both
+    /// directions by <c>CollectorTimestampFrameTests</c>. So <c>sample_time &gt; now() - INTERVAL '...'</c>
+    /// compares two different clocks and returns ZERO rows for every server behind the store's, which reads as
+    /// "this server has no CPU data" rather than as an error: no exception, no log line, CPU alerting simply
+    /// stops. <c>collection_time</c> IS naive UTC and a bound on it would be frame-correct, but it buys nothing
+    /// here — ordered append already touches one chunk — and costs two failure modes of its own. It drops a
+    /// server that has stopped reporting out of alerting entirely, and a bare <c>now()</c> is a
+    /// <c>timestamptz</c> whose comparison against a naive column is re-framed by the STORE session's own
+    /// TimeZone (measured: a 1-hour window becomes 4 hours on an <c>America/New_York</c> store, and would
+    /// invert east of UTC). An ORDER BY carries no clock frame at all. Internal so the shape and the
+    /// same-row-across-offsets behaviour are both pinned by test.</para>
+    /// </summary>
+    internal const string LatestCpuSql = @"
+SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
+FROM cpu_utilization_stats
+WHERE server_id = $1
+ORDER BY collection_time DESC, sample_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// Runs <see cref="LatestCpuSql"/> and shapes it for the snapshot — Lite's overview read
     /// (LocalDataService.Overview.cs:37-51) against the raw PG table, and the
     /// ServerSummaryItem.TotalCpuPercent derivation (:140-141): total = SQL + (other ?? 0),
     /// null when there is no SQL sample (Azure SQL DB stores other as 0; Linux stores NULL).
@@ -4072,12 +4113,8 @@ public sealed class DarlingWorker : BackgroundService
         double? otherCpu = null;
 
         await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
-SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
-FROM cpu_utilization_stats
-WHERE server_id = $1
-ORDER BY sample_time DESC
-LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        using var command = new NpgsqlCommand(
+            LatestCpuSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
