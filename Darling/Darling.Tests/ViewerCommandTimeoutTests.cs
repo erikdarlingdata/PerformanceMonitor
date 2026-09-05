@@ -80,6 +80,21 @@ public sealed class ViewerCommandTimeoutTests
     /// cannot spell is a name they do not need. This is a project-wide census, and a census blind to
     /// <c>_ = Controller.ReadAsync();</c> would report a clean sweep over a shape it never looked at —
     /// which is the #3019 failure one level down.</para>
+    ///
+    /// <para><b>Unconstrained about the callee, unlike <see cref="s_deferredRead"/>, and that asymmetry is
+    /// a deliberate trade in BOTH directions.</b> Requiring an <c>Async</c> suffix here is not available:
+    /// three of this project's fifteen discarded call names are genuinely async without it —
+    /// <c>OpenPlanTab</c> (<c>private async Task</c>), <c>OnHeatmapDrillDown</c> and
+    /// <c>PlanViewerController.LoadPlanIntoSubTab</c> — so the suffix rule would reintroduce exactly the
+    /// silent gap #3019 is about. The cost paid instead is a false-positive path: <c>_ =</c> compiles for
+    /// any non-void call, so two discarded SYNCHRONOUS helpers in one member read as a two-wide fan-out and
+    /// would be asked for a width they do not need. Nothing in this project does that today (every
+    /// <c>_ = X(...)</c> site is a Task-returning call), the direction is a loud failure rather than a
+    /// silent one, and the shape is pinned in
+    /// <see cref="TheFanOutCensus_RecognisesEachShape_AndOnlyThose"/> so it reads as a known cost rather
+    /// than a surprise. The deferred rule can afford the suffix because its shape —
+    /// <c>var t = Call();</c> with no <c>await</c> — is otherwise indistinguishable from ordinary local
+    /// assignment, which is most lines in the project.</para>
     /// </summary>
     private static readonly Regex s_fireAndForget = new(
         @"(^|[^A-Za-z0-9_])_\s*=\s*[A-Za-z_][A-Za-z0-9_\.]*\s*\(",
@@ -452,6 +467,10 @@ public sealed class ViewerCommandTimeoutTests
     /// the positional residual, narrowed from per-file to per-member but not eliminated.</item>
     /// <item>Reads reached through a helper the member CALLS rather than fires are the helper's fan-out,
     /// not the caller's.</item>
+    /// <item>The deferred run is broken by any <c>await</c> between two starts, including one nested inside
+    /// a lambda rather than sequencing the starts at member level. That direction UNDER-reports — the same
+    /// direction as #3019 itself — and is left because the joined and fire-and-forget rules overlap it and
+    /// no member in this project is written that way; a depth-aware run would be the fix if one appears.</item>
     /// <item>Concurrency primitives this project does not use, pinned absent by
     /// <see cref="NoUnmodelledConcurrencyPrimitive_ReachesTheViewer"/> so that adding one goes red here
     /// rather than quietly widening this gap.</item>
@@ -620,6 +639,11 @@ public sealed class ViewerCommandTimeoutTests
     [InlineData("_ = RefreshServerStatusAsync();\nawait RefreshVisibleAsync();\n_ = PollAlertsAsync();\n", true)]
     /* Prose cannot make a fan-out. */
     [InlineData("/* two reads: _ = OneAsync(); _ = TwoAsync(); */\n", false)]
+    /* Two SYNCHRONOUS discards read as a fan-out — the accepted cost of not constraining the callee, and
+       the reason that trade is argued on s_fireAndForget rather than left to be rediscovered. Expected
+       true: this is the classifier's behaviour, not a defect to be fixed by narrowing the shape. Found in
+       review. */
+    [InlineData("_ = TryParseFirst(out var first);\n_ = TryParseSecond(out var second);\n", true)]
     public void TheFanOutCensus_RecognisesEachShape_AndOnlyThose(string body, bool expectedFanOut)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings("private async Task Fixture()\n{\n" + body + "}\n");
