@@ -38,16 +38,18 @@ public class RdsLogSourceTests
         public string LogName { get; init; } = "error/postgresql.log.2026-08-25-18";
         public string? NextMarker { get; set; } = "MARKER-1";
 
-        /* The three shapes a real answer takes that the populated fixtures above cannot produce. The AWS SDK
-           leaves a response collection NULL rather than empty when the service omits it, so every fixture
-           that sets its lists exercises only the populated half — which is why a null-source crash reached a
-           production fleet past a green suite (#2996). */
+        /* The answers the populated fixtures above cannot produce. The AWS SDK leaves a response collection
+           NULL rather than empty when the service omits it, so a fixture that sets all its lists exercises
+           only the populated half — which is why a null-source crash reached a production fleet past a
+           green suite (#2996). */
         public bool OmitClusters { get; init; }
         public bool OmitClusterMembers { get; init; }
 
-        /// <summary>Which of the three "nothing here to open" shapes the log-file list comes back in.
-        /// Absent, empty and present-but-unnamed are one fact and have to reach one named branch; they used
-        /// to diverge, the first crashing and the other two answering silently (#2996).</summary>
+        /// <summary>Which shape the log-file list comes back in. <c>absent</c>, <c>empty</c> and
+        /// <c>unnamed</c> are one fact — nothing here to open — and have to reach one named branch; they
+        /// used to diverge, the first crashing and the other two answering silently (#2996).
+        /// <c>unnamed-newest</c> is the opposite case and the positive control: a nameless entry sitting
+        /// beside real logs, which must still be read.</summary>
         public string? LogFileShape { get; init; }
 
         public override Task<DescribeDBClustersResponse> DescribeDBClustersAsync(
@@ -284,7 +286,7 @@ public class RdsLogSourceTests
     }
 
     /// <summary>
-    /// The SDK contract the three guards above exist for, pinned rather than remembered: a response
+    /// The SDK contract the guards above exist for, pinned rather than remembered: a response
     /// collection is <c>null</c> when the service omits it, and LINQ over one names only <c>source</c>.
     /// An SDK upgrade that went back to empty collections would make the guards look like dead defence;
     /// this says they are not.
