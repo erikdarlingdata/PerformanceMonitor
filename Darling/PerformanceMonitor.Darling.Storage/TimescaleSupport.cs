@@ -463,9 +463,9 @@ WITH NO DATA";
 
     /// <summary>
     /// One-time backfill of the baseline aggregates (#1757). WITHOUT THIS THE WHOLE CHANGE IS A REGRESSION:
-    /// the aggregates are created WITH NO DATA and their refresh policy has a 3-day start_offset, so left
-    /// alone they would hold roughly three days for a thirty-day question -- less than the four-day raw
-    /// horizon the change exists to escape. The provider is repointed at them, so an un-backfilled deploy
+    /// the aggregates are created WITH NO DATA and their refresh policy only re-materializes
+    /// <see cref="HourlyRefreshStartOffset"/>, so left alone they would hold roughly one day for a
+    /// thirty-day question -- far less than the four-day raw horizon the change exists to escape. The provider is repointed at them, so an un-backfilled deploy
     /// loses every baseline rather than improving it.
     ///
     /// <para>COVERAGE-GATED and self-healing, the shape the reshape sweep already uses: it compares the
@@ -902,6 +902,31 @@ $do$";
         _ => throw new ArgumentOutOfRangeException(nameof(view), view, "not a baseline aggregate"),
     };
 
+    /// <summary>
+    /// The non-baseline HOURLY continuous aggregates, in CREATION order, paired with their CREATE SQL.
+    ///
+    /// <para>Order is load-bearing twice over. <see cref="EnsureContinuousAggregatesAsync"/> builds them in
+    /// this sequence because <see cref="CreateQueryStoreStatsCorrectedHourlySql"/> is hierarchical from
+    /// <see cref="CreateQueryStoreStatsIntervalHourlySql"/> and a hierarchical aggregate cannot precede its
+    /// source. And <see cref="HourlyRefreshPhaseOrder"/> derives each view's slot on the phase grid from its
+    /// position here, so a reordering moves phases — which is why the collision guard checks the RESULT rather
+    /// than trusting the list.</para>
+    ///
+    /// <para>Hoisted out of the ensure sweep (#3012) so that sweep, the phase order and the collision guard
+    /// all read ONE list. Restating it in the guard would let the guard pass while the sweep drifted.</para>
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] HourlyAggregates =
+    {
+        (CreateQueryStatsHourlySql,      QueryStatsHourlyView),
+        (CreateProcedureStatsHourlySql,  ProcedureStatsHourlyView),
+        (CreateQueryStoreStatsHourlySql, QueryStoreStatsHourlyView),
+        (CreateQueryStatsDbHourlySql,    QueryStatsDbHourlyView),
+        /* The corrected Query Store rollups (#1849): L1 is raw-sourced and MUST precede the corrected view,
+           which is hierarchical from it. */
+        (CreateQueryStoreStatsIntervalHourlySql,  QueryStoreStatsIntervalHourlyView),
+        (CreateQueryStoreStatsCorrectedHourlySql, QueryStoreStatsCorrectedHourlyView),
+    };
+
     /// <summary>The seven baseline-tier aggregates in creation order (nine until #2007 retired the unread CPU/IO pair). Named ONCE so the ensure sweep, the
     /// retention list and the tests read one list rather than three hand-kept copies.</summary>
     public static readonly (string CreateSql, string View)[] BaselineAggregates =
@@ -1301,7 +1326,8 @@ WITH NO DATA";
     /// reduction is the collection multiplicity, NOT the dimensional collapse the composer-grain rollups get.
     /// It is therefore the one rollup here whose retention is deliberately SHORT
     /// (<see cref="IntervalRetentionInterval"/>): nothing reads it, so it only has to outlive raw for the
-    /// arming gate and outlive its consumers' 3-day refresh window.</para>
+    /// arming gate and outlive its consumers' refresh windows (<see cref="HourlyRefreshStartOffset"/> for
+    /// the corrected hourly, <see cref="DailyRefreshStartOffset"/> for the corrected daily).</para>
     /// </summary>
     public const string CreateQueryStoreStatsIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_hourly
 WITH (timescaledb.continuous) AS
@@ -1494,15 +1520,220 @@ GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bu
 WITH NO DATA";
 
     /// <summary>
-    /// The refresh policy for a continuous aggregate: materialize <c>[now - 3 days, now - endOffset]</c> every
-    /// <c>scheduleInterval</c>. <c>start_offset 3 days</c> gives margin past the ~2-day compression/hot window
-    /// (covers same-day-arriving corrections) and is the buffer the retention tiers lean on — a tier's drop must
-    /// never outrun the next tier's 3-day refresh start. <c>endOffset</c> leaves the still-filling current bucket
-    /// unmaterialized (no repeated rework); <c>scheduleInterval</c> matches the bucket. Defaults are the hourly
-    /// shape; the daily CAGGs pass <c>"1 day"</c>/<c>"1 day"</c>. <c>if_not_exists</c> so a restart re-converges.
+    /// The HOURLY refresh window: each hourly continuous aggregate re-materializes <c>[now - 1 day,
+    /// now - 1 hour]</c> on every run.
+    ///
+    /// <para><b>1 day rather than 3 (#3012).</b> A refresh's cost is set by the WINDOW it re-scans, not by the
+    /// rows that arrived in it — so a 3-day window against <see cref="RawRetentionInterval"/>'s 4 days
+    /// re-materialized roughly three quarters of the whole hypertable every hour, and that cost grew with the
+    /// hypertable rather than with ingest. Measured on the production store: the heaviest hourly refresh
+    /// (<see cref="QueryStoreStatsIntervalHourlyView"/>) ran 3,301-6,330 s against a 1-hour cadence —
+    /// <b>118-175% of its own schedule interval</b> — while rows arriving per hour FELL ~3x over the same
+    /// period. Narrowed to 1 day the same refresh runs <b>864 s, 24% of cadence</b>. The direction of that
+    /// measurement is the whole argument: duration tracking window size while ingest moves the other way is
+    /// what rules out "more rows to materialize" and rules in "too much window".</para>
+    ///
+    /// <para><b>Why a job that outran its cadence could not recover.</b> A refresh holds
+    /// <c>AccessShareLock</c> on the hypertable it reads; the compression policy on that same hypertable
+    /// queues an <c>AccessExclusiveLock</c> request behind it; and a queued exclusive request blocks every
+    /// SUBSEQUENT shared request — so collector store-writes and readers piled up behind a lock that was
+    /// merely QUEUED, not held, even though their own locks are mutually compatible. At >100% of cadence the
+    /// next run started into the tail of the previous one, and the convoy sustained itself. Below cadence it
+    /// cannot form, which is why this number and <see cref="RefreshPhaseStepMinutes"/> are complements rather
+    /// than alternatives: narrowing is what makes the heavy refresh finish, phasing is what keeps its
+    /// remaining 864 s out of everyone else's way.</para>
+    ///
+    /// <para><b>What still has to fit inside it, now stated as a relationship rather than left to a
+    /// constant.</b> Two things need the window to reach back far enough. Live collectors only ever append
+    /// current-time rows, so for them one refresh interval would do and a day is generous. The one writer of
+    /// BACKDATED rows is <c>QueryStoreBackfill</c>, and its reach is now DERIVED from this span (minus one
+    /// <see cref="HourlyRefreshScheduleInterval"/>, because the window slides forward between runs) instead of
+    /// from the raw retention horizon. That inversion is the actual fix: before it, the refresh window had to
+    /// cover a depth that retention chose, so every retention increase silently bought more refresh cost;
+    /// after it, the refresh window is chosen against its own cadence and the backdating depth follows.</para>
     /// </summary>
-    public static string AddContinuousAggregatePolicySql(string view, string endOffset = "1 hour", string scheduleInterval = "1 hour")
-        => $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}', if_not_exists => true)";
+    public const string HourlyRefreshStartOffset = "1 day";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRefreshStartOffset"/> for callers doing
+    /// arithmetic against it — <c>QueryStoreBackfill.Horizon</c> is derived from this, so the backdating depth
+    /// cannot be left behind when the window moves. Pinned equal to the string by
+    /// TimescaleContinuousAggregateTests.</summary>
+    public static readonly TimeSpan HourlyRefreshStartSpan = TimeSpan.FromDays(1);
+
+    /// <summary>The hourly refresh cadence, and also the hourly <c>end_offset</c> — the still-filling current
+    /// bucket is left unmaterialized so no run reworks it.</summary>
+    public const string HourlyRefreshScheduleInterval = "1 hour";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRefreshScheduleInterval"/>. The refresh window
+    /// slides forward by exactly this much between runs, which is why anything relying on "the next run will
+    /// re-materialize what I just wrote" has to subtract it from
+    /// <see cref="HourlyRefreshStartSpan"/> rather than using the span itself.</summary>
+    public static readonly TimeSpan HourlyRefreshScheduleSpan = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// The DAILY refresh window, deliberately still 3 days.
+    ///
+    /// <para>The daily tier is NOT the tier #3012 was about and must not be "made consistent" with the hourly
+    /// one. Its jobs run once a day, so a 3-day window is 3 days of scan against an 86,400-second cadence
+    /// rather than against 3,600 — it was never near its own schedule interval, and it never appeared in the
+    /// convoy. What it buys is the buffer <see cref="HourlyRetentionInterval"/> leans on: the hourly rollups
+    /// are dropped at 90 days, and the daily refresh reaching 3 days back is what guarantees a drop can never
+    /// outrun the aggregate meant to preserve that history. Narrowing this would trade nothing for a
+    /// correctness risk.</para>
+    /// </summary>
+    public const string DailyRefreshStartOffset = "3 days";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="DailyRefreshStartOffset"/>, pinned equal to the
+    /// string and pinned STRICTLY BELOW <see cref="HourlyRetentionSpan"/> by
+    /// TimescaleContinuousAggregateTests.</summary>
+    public static readonly TimeSpan DailyRefreshStartSpan = TimeSpan.FromDays(3);
+
+    /// <summary>The daily refresh cadence, and also the daily <c>end_offset</c>.</summary>
+    public const string DailyRefreshScheduleInterval = "1 day";
+
+    /// <summary>
+    /// Minutes between adjacent slots on the hourly refresh grid (#3012): the hourly refresh policies are
+    /// phased across the hour instead of all starting together.
+    ///
+    /// <para><b>Phasing alone is not the fix and neither is narrowing alone.</b>
+    /// <see cref="HourlyRefreshStartOffset"/> is what brought the heavy refresh from 6,330 s to 864 s; this is
+    /// what keeps those 864 s from being visible to anything else, because the refresh that is running is not
+    /// the one a compression policy or a sibling refresh is about to want. The heaviest hourly refresh is
+    /// still ~33x its lightest sibling on the narrowed window, so the two treatments address different halves
+    /// and dropping either one reopens the door.</para>
+    ///
+    /// <para><b>15 minutes over four slots is the configuration that was measured</b>, not a round number: the
+    /// production store's <c>query_store_stats</c> job family was moved to :00/:15/:30/:45 and the first full
+    /// staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on every sample since.
+    /// Spreading all thirteen hourly policies across thirteen distinct minutes would contend less still, and
+    /// is the obvious next refinement — but it is not what the numbers above were taken on.</para>
+    /// </summary>
+    public const int RefreshPhaseStepMinutes = 15;
+
+    /// <summary>Slots on the hourly refresh grid — 60 minutes divided by
+    /// <see cref="RefreshPhaseStepMinutes"/>. Pinned as that quotient rather than restated, so the two cannot
+    /// disagree.</summary>
+    public const int RefreshPhaseSlots = 60 / RefreshPhaseStepMinutes;
+
+    /// <summary>
+    /// The hourly refresh policies in phase order — the ONLY thing that decides which slot a policy gets, and
+    /// it is keyed on the VIEW name.
+    ///
+    /// <para><b>Never on a job id.</b> TimescaleDB job ids are assigned per deployment: the ids that appear in
+    /// #3012's evidence exist only on the store it was measured against, and would name entirely different
+    /// jobs anywhere else. Keying the grid on view identity is what makes the same configuration reproducible
+    /// on a store that has never seen those ids.</para>
+    ///
+    /// <para>Order matters and is asserted, because what the grid has to guarantee is that the policies
+    /// sharing a hypertable land on DIFFERENT slots — that is the lock-queue adjacency the convoy formed on.
+    /// The baseline aggregates are appended from <see cref="BaselineAggregates"/> rather than restated, so
+    /// this list and that one cannot drift apart.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> HourlyRefreshPhaseOrder =
+        HourlyAggregates.Concat(BaselineAggregates).Select(a => a.View).ToArray();
+
+    /// <summary>
+    /// Every hourly continuous aggregate paired with the CREATE that defines it —
+    /// <see cref="HourlyAggregates"/> then <see cref="BaselineAggregates"/>, in the same order
+    /// <see cref="HourlyRefreshPhaseOrder"/> derives from.
+    ///
+    /// <para>Exists so the phase grid's real invariant can be checked against the SHIPPED DEFINITIONS rather
+    /// than a second hand-written map. What the grid has to guarantee is that policies CONTENDING FOR THE SAME
+    /// RELATION start at different minutes — that is the lock adjacency the convoy formed on — and a view's
+    /// contended relation is whatever its own CREATE selects <c>FROM</c>. Recovering it from this text means a
+    /// new aggregate is covered the moment it is registered, and a map that drifted from the definitions
+    /// cannot report a false all-clear.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<(string CreateSql, string View)> HourlyRefreshDefinitions =
+        HourlyAggregates.Concat(BaselineAggregates).ToArray();
+
+    /// <summary>
+    /// Which minute of the hour <paramref name="view"/>'s hourly refresh policy starts on.
+    ///
+    /// <para>Throws for a view that is not on <see cref="HourlyRefreshPhaseOrder"/> — including every DAILY
+    /// view, which must not be dragged onto the grid. That is deliberately loud rather than defaulted: a new
+    /// hourly aggregate that silently got slot 0 would be coincident with three others, which is the exact
+    /// state #3012 was about. <see cref="EnsureContinuousAggregatesAsync"/> builds each policy statement
+    /// inside its own per-aggregate try, so an unregistered view costs that one aggregate and names itself in
+    /// the warning instead of taking the sweep down.</para>
+    /// </summary>
+    public static int RefreshPhaseMinutesFor(string view)
+    {
+        for (var index = 0; index < HourlyRefreshPhaseOrder.Count; index++)
+        {
+            if (string.Equals(HourlyRefreshPhaseOrder[index], view, StringComparison.Ordinal))
+            {
+                return index % RefreshPhaseSlots * RefreshPhaseStepMinutes;
+            }
+        }
+
+        throw new ArgumentOutOfRangeException(
+            nameof(view),
+            view,
+            "not an hourly continuous aggregate — register it in TimescaleSupport.HourlyRefreshPhaseOrder before giving it an hourly refresh policy");
+    }
+
+    /// <summary>
+    /// An HOURLY continuous aggregate's refresh policy: <see cref="HourlyRefreshStartOffset"/> of window, an
+    /// <see cref="HourlyRefreshScheduleInterval"/> cadence, and this view's own slot on the phase grid.
+    /// </summary>
+    public static string AddHourlyRefreshPolicySql(string view)
+        => AddContinuousAggregatePolicySql(
+            view,
+            HourlyRefreshStartOffset,
+            HourlyRefreshScheduleInterval,
+            HourlyRefreshScheduleInterval,
+            RefreshPhaseMinutesFor(view));
+
+    /// <summary>
+    /// A DAILY continuous aggregate's refresh policy: <see cref="DailyRefreshStartOffset"/> of window on a
+    /// daily cadence, and NO <c>initial_start</c> — the daily tier keeps TimescaleDB's finish-to-start
+    /// scheduling, exactly as it did before #3012, because it was never near its own cadence and never
+    /// appeared in the convoy.
+    /// </summary>
+    public static string AddDailyRefreshPolicySql(string view)
+        => AddContinuousAggregatePolicySql(
+            view,
+            DailyRefreshStartOffset,
+            DailyRefreshScheduleInterval,
+            DailyRefreshScheduleInterval,
+            phaseMinutes: null);
+
+    /// <summary>
+    /// The refresh policy for a continuous aggregate: materialize
+    /// <c>[now - startOffset, now - endOffset]</c> every <c>scheduleInterval</c>. <c>endOffset</c> leaves the
+    /// still-filling current bucket unmaterialized (no repeated rework); <c>scheduleInterval</c> matches the
+    /// bucket. <c>if_not_exists</c> so a restart re-converges. Prefer
+    /// <see cref="AddHourlyRefreshPolicySql"/> / <see cref="AddDailyRefreshPolicySql"/>, which carry the
+    /// per-tier decisions; this overload exists so those two share one statement shape.
+    ///
+    /// <para><b><paramref name="phaseMinutes"/> does two things, and the second one is the less obvious
+    /// half.</b> It puts the job on a known minute of the hour, which is the stagger. It also switches the job
+    /// to a FIXED schedule: TimescaleDB computes the next start from the previous FINISH when
+    /// <c>initial_start</c> is absent, and from the previous START when it is present. Finish-to-start is what
+    /// let one convoy phase-lock a whole family permanently — three jobs with unrelated schedules and very
+    /// different workloads finished within 119 seconds of each other, and then re-started together every hour
+    /// after that. A fixed schedule cannot inherit a phase from a bad hour.</para>
+    ///
+    /// <para>The anchor is the NEXT whole hour plus the phase, deliberately in the future: a fixed schedule
+    /// needs a non-null <c>initial_start</c>, and anchoring forward means the statement never depends on
+    /// TimescaleDB's handling of a past anchor. It is computed in UTC (<c>now() AT TIME ZONE 'UTC'</c>, then
+    /// back to <c>timestamptz</c>) rather than with a bare <c>date_trunc('hour', now())</c>, which truncates
+    /// in the SESSION time zone and would land off-grid on any of the half-hour and quarter-hour zones.</para>
+    /// </summary>
+    public static string AddContinuousAggregatePolicySql(
+        string view,
+        string startOffset,
+        string endOffset,
+        string scheduleInterval,
+        int? phaseMinutes)
+    {
+        var initialStart = phaseMinutes is int phase
+            ? $", initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '{phase.ToString(CultureInfo.InvariantCulture)} minutes'"
+            : string.Empty;
+
+        return $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '{startOffset}', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}', if_not_exists => true{initialStart})";
+    }
 
     /// <summary>
     /// The composer-dimension reshape: the QS hourly CAGG regrouped query_id/plan_id → module_name/query_hash
@@ -1586,10 +1817,20 @@ WITH NO DATA";
     /// statement. Failure-isolated per aggregate: one failure warns and the composer keeps querying raw.
     /// Idempotent (IF NOT EXISTS on both), so it re-converges every restart. Returns the number ready.
     ///
+    /// <para><b>MUST run AFTER <see cref="ConvergeContinuousAggregateRefreshAsync"/> (#3012).</b> The policy
+    /// half is idempotent only against a policy whose window MATCHES: <c>if_not_exists =&gt; true</c> returns
+    /// -1 for an identical policy, but against one whose window differs it raises <c>22023 refresh interval
+    /// overlaps with an existing continuous aggregate policy</c>. That is measured, and it is unlike
+    /// <c>add_compression_policy</c> and <c>add_retention_policy</c>, which both skip quietly. Run BEFORE the
+    /// converge, this sweep would raise on every hourly view of every already-deployed store, swallow it in
+    /// the per-aggregate catch, and report a count that reads as "the aggregates are broken" when only their
+    /// refresh windows are stale.</para>
+    ///
     /// <para>Does NOT backfill history, and on a store that already holds history that leaves a real gap rather
     /// than a merely un-accelerated one (#1759): the aggregates are born WITH NO DATA and each refresh policy
-    /// starts 3 days back, so the materialized span begins at roughly creation-minus-3-days and never reaches
-    /// further back on its own. Reads stay CORRECT because <see cref="RetentionTierRouter"/> routes windows
+    /// only reaches its own start offset back (<see cref="HourlyRefreshStartOffset"/> hourly,
+    /// <see cref="DailyRefreshStartOffset"/> daily), so the materialized span begins at roughly creation minus
+    /// that offset and never reaches further back on its own. Reads stay CORRECT because <see cref="RetentionTierRouter"/> routes windows
     /// below a rollup's measured floor to raw; the materialization itself is an operator op
     /// (<c>--backfill-rollups</c>), which is where the disk cost is preflighted rather than incurred at
     /// startup.</para>
@@ -1604,34 +1845,33 @@ WITH NO DATA";
         // Hourly CAGGs FIRST (the two delta tables + query_store_stats), THEN the daily tier — the daily CAGGs are
         // hierarchical (sourced from the hourly CAGGs), so the hourly ones must be created earlier in this ordered
         // sweep. Daily policies use the 1-day end-offset/schedule; the hourly ones take the helper's defaults.
-        var aggregates = new[]
+        /* The hourly tier comes from HourlyAggregates rather than being restated here (#3012): the phase grid
+           and its collision guard derive from that same list, and a second copy could drift from it. The
+           corrected Query Store rollups' ordering requirement lives with the list — L1 is raw-sourced and must
+           precede the corrected view, which is hierarchical from it. (The corrected DAILY is L1's SIBLING, not
+           the hourly's child: an identity-width hierarchical CAGG is a leaf — see
+           CreateQueryStoreStatsCorrectedDailySql.) */
+        var aggregates = HourlyAggregates
+            .Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true))
+            .Concat(new[]
         {
-            (CreateSql: CreateQueryStatsHourlySql,      View: QueryStatsHourlyView,      PolicySql: AddContinuousAggregatePolicySql(QueryStatsHourlyView)),
-            (CreateSql: CreateProcedureStatsHourlySql,  View: ProcedureStatsHourlyView,  PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsHourlyView)),
-            (CreateSql: CreateQueryStoreStatsHourlySql, View: QueryStoreStatsHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsHourlyView)),
-            (CreateSql: CreateQueryStatsDbHourlySql,    View: QueryStatsDbHourlyView,    PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbHourlyView)),
-            /* The corrected Query Store rollups (#1849). L1 is raw-sourced and MUST precede both corrected
-               views, which are hierarchical from it — the same ordering requirement the daily tier has. Both
-               corrected views read L1 (the daily is its SIBLING, not the hourly's child: an identity-width
-               hierarchical CAGG is a leaf — see CreateQueryStoreStatsCorrectedDailySql). */
-            (CreateSql: CreateQueryStoreStatsIntervalHourlySql,  View: QueryStoreStatsIntervalHourlyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsIntervalHourlyView)),
-            (CreateSql: CreateQueryStoreStatsCorrectedHourlySql, View: QueryStoreStatsCorrectedHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsCorrectedHourlyView)),
-            (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       PolicySql: AddContinuousAggregatePolicySql(QueryStatsDailyView, "1 day", "1 day")),
-            (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsDailyView, "1 day", "1 day")),
-            (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDailyView, "1 day", "1 day")),
-            (CreateSql: CreateQueryStoreStatsCorrectedDailySql, View: QueryStoreStatsCorrectedDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsCorrectedDailyView, "1 day", "1 day")),
-            (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbDailyView, "1 day", "1 day")),
+            (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       Hourly: false),
+            (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   Hourly: false),
+            (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  Hourly: false),
+            (CreateSql: CreateQueryStoreStatsCorrectedDailySql, View: QueryStoreStatsCorrectedDailyView, Hourly: false),
+            (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     Hourly: false),
             /* The DAY-grain corrected daily (#1869), THREE levels deep: L1 (above) -> L2 interval_daily ->
                daygrain_daily. Both must follow L1 and L2 must precede its own child, which this ordered sweep
                gives — the same requirement the daily tier has, one level longer. */
-            (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsIntervalDailyView, "1 day", "1 day")),
-            (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDayGrainDailyView, "1 day", "1 day")),
-        }
-        /* The seven baseline-tier aggregates (#1757; nine until #2007) take the helper's hourly defaults: they are sourced from
+            (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, Hourly: false),
+            (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, Hourly: false),
+        })
+        /* The seven baseline-tier aggregates (#1757; nine until #2007) ride the HOURLY tier: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
            requirement against the daily tier. Appended from the single BaselineAggregates list so this sweep
-           and the retention list cannot drift apart. */
-        .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, PolicySql: AddContinuousAggregatePolicySql(a.View))))
+           and the retention list cannot drift apart. HourlyRefreshPhaseOrder appends them from the same list,
+           so every view here has a slot on the phase grid. */
+        .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true)))
         .ToArray();
 
         /* A store that ran WITHOUT TimescaleDB and has now gained it is carrying the plain fallback views
@@ -1655,7 +1895,7 @@ WITH NO DATA";
         }
 
         var ready = 0;
-        foreach (var (createSql, view, policySql) in aggregates)
+        foreach (var (createSql, view, hourly) in aggregates)
         {
             try
             {
@@ -1663,6 +1903,11 @@ WITH NO DATA";
                 {
                     await create.ExecuteNonQueryAsync(cancellationToken);
                 }
+
+                /* Built HERE, not in the array above, so RefreshPhaseMinutesFor's throw for an hourly view
+                   missing from HourlyRefreshPhaseOrder costs that one aggregate and names it in the warning
+                   below, instead of taking the whole sweep down before the first CREATE runs. */
+                var policySql = hourly ? AddHourlyRefreshPolicySql(view) : AddDailyRefreshPolicySql(view);
 
                 using (var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds })
                 {
@@ -1689,8 +1934,193 @@ WITH NO DATA";
         return ready;
     }
 
-    /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — one day past the hourly CAGG's own 3-day
-    /// refresh window, so the raw drop never outruns the aggregate that preserves it.</summary>
+    /// <summary>
+    /// Every continuous-aggregate REFRESH job in <c>collect</c>, with the three things #3012's treatment is
+    /// made of: the window it re-materializes, whether it is on a fixed schedule, and which minute of the hour
+    /// it starts on.
+    ///
+    /// <para><b>Keyed on the VIEW, and the join matches EITHER identity on purpose.</b> The caller decides
+    /// what each view should look like from <see cref="HourlyRefreshPhaseOrder"/>, so this has to hand it a
+    /// <c>view_name</c>; nothing here or in the caller reads a job id for anything except passing it back to
+    /// <c>alter_job</c>. What the join cannot assume is WHICH name a refresh job reports. The underlying
+    /// <c>bgw_job</c> row carries the aggregate's MATERIALIZATION hypertable id, so the obvious form joins on
+    /// <c>materialization_hypertable_schema/name</c> — and that form is measured to find NOTHING, because
+    /// <c>timescaledb_information.jobs</c> already resolves a continuous-aggregate job back to its USER VIEW
+    /// and reports <c>collect</c> / <c>&lt;view&gt;</c>. Matching either identity is therefore not
+    /// belt-and-braces for its own sake: it is one measured behaviour plus the one the catalog columns imply,
+    /// and it cannot double-count, because a user view lives in <c>collect</c> while a materialization
+    /// hypertable lives in <c>_timescaledb_internal</c> — disjoint, so at most one row can match per job.
+    /// This was a real defect caught by the live test rather than a hypothetical: the materialization-only
+    /// form shipped first and read back nothing at all.</para>
+    ///
+    /// <para>Emitted as NUMBERS, not text: <c>start_offset</c> comes back as seconds so a C# comparison cannot
+    /// be fooled by <c>1 day</c> / <c>1 day 00:00:00</c> / <c>24:00:00</c> all meaning the same interval, and
+    /// the phase comes back as a minute-of-hour already converted to UTC (a bare
+    /// <c>EXTRACT(MINUTE FROM initial_start)</c> would read the SESSION time zone). A policy created with a
+    /// NULL <c>start_offset</c> — refresh from the beginning of time — yields NULL here and is treated as
+    /// stale, which is correct: it is the widest window there is.</para>
+    /// </summary>
+    public const string ContinuousAggregateRefreshStateSql = @"
+SELECT
+    j.job_id,
+    ca.view_name,
+    EXTRACT(EPOCH FROM (j.config->>'start_offset')::interval)::bigint AS start_offset_seconds,
+    j.fixed_schedule,
+    CASE
+        WHEN j.initial_start IS NULL THEN NULL
+        ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
+    END AS phase_minutes
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// Moves one EXISTING hourly refresh policy onto the shipped window and phase. <c>$1</c> the job id
+    /// (<c>::integer</c> — <c>alter_job</c> takes <c>job_id INTEGER</c> and PostgreSQL does not down-cast
+    /// bigint during function resolution, the #1586 trap), <c>$2</c> the <c>start_offset</c> text, <c>$3</c>
+    /// the minute of the hour.
+    ///
+    /// <para><b>Why this has to exist, and why it is worse than the sibling cases.</b>
+    /// <see cref="ConvergeRetentionHorizonSql"/> and <see cref="ConvergeCompressionScheduleAsync"/> exist
+    /// because their <c>add_*</c> function returns -1 for a policy the store already has and changes nothing.
+    /// <c>add_continuous_aggregate_policy</c> does that only when the window MATCHES. Against a policy whose
+    /// window DIFFERS it raises <c>22023 refresh interval overlaps with an existing continuous aggregate
+    /// policy</c> — measured on a live store, and it is why
+    /// <see cref="EnsureContinuousAggregatesAsync"/> must run AFTER this rather than before. So without this
+    /// the narrowing would not merely fail to reach an upgraded store: the create path would raise on all
+    /// thirteen hourly views every start, be swallowed by that sweep's per-aggregate isolation, and leave the
+    /// policies re-materializing three days an hour forever, with nothing failing until the hypertable grew
+    /// into the same convoy.</para>
+    ///
+    /// <para><c>config</c> is updated with <c>jsonb_set</c> against the job's OWN config so the other keys
+    /// (<c>end_offset</c>, <c>mat_hypertable_id</c>) are preserved untouched, which is why this is a
+    /// <c>SELECT ... FROM timescaledb_information.jobs</c> rather than a bare function call. <c>scheduled</c>
+    /// is deliberately not named: every un-named <c>alter_job</c> parameter means "leave unchanged", so this
+    /// cannot arm a paused job.</para>
+    /// </summary>
+    public const string SetContinuousAggregateRefreshSql = @"
+SELECT alter_job(
+    j.job_id,
+    config => jsonb_set(j.config, '{start_offset}', to_jsonb($2::text)),
+    fixed_schedule => true,
+    initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + ($3::int * INTERVAL '1 minute'))
+FROM timescaledb_information.jobs AS j
+WHERE j.job_id = $1::integer";
+
+    /// <summary>
+    /// Converges EXISTING hourly continuous-aggregate refresh policies onto both halves of #3012's treatment —
+    /// the narrowed <see cref="HourlyRefreshStartOffset"/> window and the
+    /// <see cref="RefreshPhaseStepMinutes"/> phase grid — for stores that already have policies.
+    ///
+    /// <para><b>Behaviour on each of the three store states, because that is the whole contract.</b> A FRESH
+    /// store has no refresh jobs yet — its aggregates are created moments LATER — so this reads an empty set
+    /// and returns 0. A store still carrying the OLD values gets both halves applied on the first start after
+    /// deploy, and the create that follows then finds policies which match. A store an operator already
+    /// patched BY HAND to the right window is matched on the window and left alone on it — it is only
+    /// re-phased if its job is not on a fixed schedule or not on this grid, which is the one case where code
+    /// deliberately wins over a live hand-applied value, and production settled that argument: measured about
+    /// two hours after the offsets were applied by hand, every job read <c>fixed_schedule = false</c> and only
+    /// one of six hourly refreshes was still on the minute it had been set to. Without a fixed schedule the
+    /// next start comes off the previous FINISH, so a hand-applied stagger decays back into coincidence within
+    /// hours.</para>
+    ///
+    /// <para><b>DAILY refresh policies are skipped, by membership rather than by name-matching.</b> A view
+    /// that is not on <see cref="HourlyRefreshPhaseOrder"/> is passed over untouched, so the daily tier keeps
+    /// <see cref="DailyRefreshStartOffset"/> and its finish-to-start scheduling. This is the guard against the
+    /// obvious future regression — a "make every refresh window consistent" edit — arriving through the
+    /// converge path instead of through the create path.</para>
+    ///
+    /// <para>Failure-isolated PER JOB, the #1775 shape: one <c>alter_job</c> that fails (most often because a
+    /// least-privilege bring-your-own store's login does not own the job) leaves that one policy on its old
+    /// window and the rest still converge. Returns how many it moved.</para>
+    /// </summary>
+    public static async Task<int> ConvergeContinuousAggregateRefreshAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var hourly = new HashSet<string>(HourlyRefreshPhaseOrder, StringComparer.Ordinal);
+        var desiredSeconds = (long)HourlyRefreshStartSpan.TotalSeconds;
+
+        var stale = new List<(int JobId, string View, long? WasSeconds, bool WasFixed, int? WasPhase)>();
+        try
+        {
+            using var probe = new NpgsqlCommand(ContinuousAggregateRefreshStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(1);
+                if (!hourly.Contains(view))
+                {
+                    continue;
+                }
+
+                var seconds = reader.IsDBNull(2) ? (long?)null : reader.GetInt64(2);
+                var fixedSchedule = !reader.IsDBNull(3) && reader.GetBoolean(3);
+                var phase = reader.IsDBNull(4) ? (int?)null : reader.GetInt32(4);
+
+                if (seconds == desiredSeconds && fixedSchedule && phase == RefreshPhaseMinutesFor(view))
+                {
+                    continue;
+                }
+
+                stale.Add((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), view, seconds, fixedSchedule, phase));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A plain-PostgreSQL store (the views do not exist) or a TimescaleDB too old to expose
+               initial_start. The caller already gates on the extension; nothing to converge either way. */
+            logger?.LogDebug("Continuous-aggregate refresh converge: could not read policy jobs: {Message}", ex.Message);
+            return 0;
+        }
+
+        var converged = 0;
+        foreach (var (jobId, view, wasSeconds, wasFixed, wasPhase) in stale)
+        {
+            var phase = RefreshPhaseMinutesFor(view);
+            try
+            {
+                using var alter = new NpgsqlCommand(SetContinuousAggregateRefreshSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                alter.Parameters.AddWithValue(jobId);
+                alter.Parameters.AddWithValue(HourlyRefreshStartOffset);
+                alter.Parameters.AddWithValue(phase);
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+                converged++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: moved {View}'s refresh policy to a {Now} window on a fixed :{Phase} schedule (was {WasSeconds}s of window, fixed_schedule={WasFixed}, phase {WasPhase}) — a refresh window wider than its own cadence is what turns a shared lock into a convoy (#3012).",
+                    view, HourlyRefreshStartOffset, phase.ToString("00", CultureInfo.InvariantCulture), wasSeconds, wasFixed, wasPhase);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not move {View}'s refresh policy (job {JobId}) to a {Interval} window on a fixed :{Phase} schedule — it keeps re-materializing its old window every run (often a permission issue: the store login must own the job): {Message}",
+                    view, jobId, HourlyRefreshStartOffset, phase.ToString("00", CultureInfo.InvariantCulture), ex.Message);
+            }
+        }
+
+        if (converged > 0)
+        {
+            logger?.LogInformation(
+                "TimescaleDB: {Converged}/{Total} hourly refresh policies moved onto the {Interval} window and the {Step}-minute phase grid (#3012).",
+                converged, stale.Count, HourlyRefreshStartOffset, RefreshPhaseStepMinutes);
+        }
+
+        return converged;
+    }
+
+    /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — comfortably past the hourly CAGG's own
+    /// <see cref="HourlyRefreshStartOffset"/> refresh window, so the raw drop never outruns the aggregate that
+    /// preserves it. The margin is three days since #3012 narrowed that window; it was one day before, and the
+    /// dependency now runs the other way — the refresh window is chosen against its own cadence and this
+    /// horizon only has to clear it.</summary>
     public const string RawRetentionInterval = "4 days";
 
     /// <summary>Hourly-CAGG-tier retention horizon: keep the hourly rollups 90 days — well past the daily CAGG's
@@ -1722,7 +2152,8 @@ WITH NO DATA";
     /// by taste. It must EXCEED <see cref="RawRetentionInterval"/> (4 days) with margin, because the raw purge
     /// is gated on this view covering raw's oldest row — equal horizons would race, with raw's newest-dropped
     /// chunk and L1's oldest-kept bucket at the same age. And it only has to exceed it: nothing READS this
-    /// view, and its consumers (the two corrected rollups) refresh over a 3-day window.</para>
+    /// view, and its consumers refresh over at most <see cref="DailyRefreshStartOffset"/> (the corrected
+    /// daily; the corrected hourly reaches only <see cref="HourlyRefreshStartOffset"/> back).</para>
     ///
     /// <para><b>MEASURED, because #1849 raises capacity as a real input and #1581 says settle it before
     /// shipping.</b> On a seeded 600-query store at the default 5-minute <c>query_store</c> cadence
@@ -2157,8 +2588,9 @@ AND   j.hypertable_name = '{relation}'";
     /// logs names all of them, because an operator cross-checking it against
     /// <c>timescaledb_information.jobs</c> meets every one (#1958).
     /// Ordering safety is by HORIZON, not run order — each tier's drop stays comfortably past the next
-    /// tier's 3-day refresh start_offset (4d raw vs 3d hourly refresh; 90d hourly vs 3d daily refresh), so a drop
-    /// never removes history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
+    /// tier's refresh start_offset (4d raw vs the hourly refresh's <see cref="HourlyRefreshStartOffset"/>;
+    /// 90d hourly vs the daily refresh's <see cref="DailyRefreshStartOffset"/>), so a drop never removes
+    /// history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
     /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
     /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
     ///
@@ -2449,8 +2881,9 @@ AND   j.hypertable_name = '{relation}'";
     /// pre-existing history serves ONLY what was materialized. Real-time aggregation cannot rescue it —
     /// the watermark is a hard partition (materialized below <c>UNION ALL</c> raw at-or-above), so raw
     /// older than the watermark is excluded by construction, not merely un-accelerated. Every rollup's
-    /// refresh policy starts 3 days back, so on a store that existed before its rollups the materialized
-    /// span begins at roughly creation-minus-3-days and NEVER reaches further back on its own.</para>
+    /// refresh policy only reaches its own start offset back, so on a store that existed before its rollups
+    /// the materialized span begins at roughly creation minus that offset and NEVER reaches further back on
+    /// its own.</para>
     ///
     /// <para><b><c>to_regclass</c>-safe by construction, not by guard.</b> A relation named in a statement
     /// is resolved at PARSE time, so no in-statement <c>to_regclass</c> test can keep <c>min(bucket)</c>

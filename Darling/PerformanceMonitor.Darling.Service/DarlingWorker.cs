@@ -1232,15 +1232,28 @@ public sealed class DarlingWorker : BackgroundService
                 // Reshape: drop stale old-shape QS / procedure_stats CAGGs FIRST so the ensure below rebuilds them
                 // in the composer-dimension shape (no-op once reshaped, and on a fresh store nothing matches).
                 await TimescaleSupport.DropStaleContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
+                /* #3012: the refresh-window converge, and it runs BEFORE the ensure rather than after it —
+                   which is a measured ordering requirement, not a preference. add_continuous_aggregate_policy
+                   does NOT behave like its compression and retention siblings: against a policy whose window
+                   DIFFERS, if_not_exists => true does not return -1, it raises 22023 "refresh interval
+                   overlaps with an existing continuous aggregate policy". So on any store that ever ran an
+                   older build, the ensure below would fail per-aggregate on all thirteen hourly views and
+                   under-report how many are ready, while the policies stayed on the 3-day window. Converging
+                   first leaves the ensure looking at policies that already match, which is the quiet -1 it
+                   was written for. Only hourly policies, only ones that DIFFER, so the daily tier keeps its
+                   3-day window and a settled store is a no-op. */
+                await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(timescaleConnection, _logger, stoppingToken);
+
                 await TimescaleSupport.EnsureContinuousAggregatesAsync(timescaleConnection, _logger, stoppingToken);
+
                 // AFTER the CAGGs exist: the tiered retention (raw 4d, hourly HISTORY CAGGs 90d per #1937, daily
                 // history kept indefinitely; the interval-dedup and baseline tiers carry their own, #1958).
                 await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);
 
                 /* #1757: the baseline aggregates ship WITH NO DATA and their refresh policy only ever covers
-                   the trailing 3 days, so without this they would answer a 30-day question with 3 days of
-                   supply. DELIBERATELY LAUNCHED, NOT AWAITED: it is a bulk materialization whose cost scales
-                   with however much history the store already had, and every step below this block — the
+                   the trailing 1-day refresh window, so without this they would answer a 30-day question with
+                   a day of supply. DELIBERATELY LAUNCHED, NOT AWAITED: it is a bulk materialization whose
+                   cost scales with however much history the store already had, and every step below — the
                    composer tuning, the delta re-seed, the collection loop itself — is sequenced after it.
                    Awaiting it here would take a restarted service dark for as long as the backfill runs,
                    which is exactly when an operator is most likely to be restarting it. Coverage-gated, so it
@@ -1522,8 +1535,13 @@ public sealed class DarlingWorker : BackgroundService
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
            clamp-bounded outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
            never past the raw tier's horizon. Plan capture reads the same live provider the runner does. */
+        /* The extension flag reaches the backfill because its HORIZON depends on it (#3012): on a plain
+           PostgreSQL store there are no hourly rollups for a backdated row to fall out of, so the refresh
+           term does not apply and that deployment mode keeps the full raw-tier depth. Passed as a provider
+           rather than a value so it cannot capture a stale reading. */
         var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans,
-            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb));
+            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
+            () => _timescaleAvailable);
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* The fleet concurrency gate (#1553 D2): at most N=4 per-server collection bodies open a SQL connection
@@ -2148,7 +2166,8 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>
     /// Materializes the baseline aggregates over the history the store already had (#1757), concurrently with
     /// the collection sweep rather than ahead of it. On a fresh store the coverage gate makes this a no-op; on
-    /// an upgraded store it is the one-time pass that turns a 3-day supply into the full baseline window.
+    /// an upgraded store it is the one-time pass that turns a refresh-window-deep supply into the full
+    /// baseline window.
     ///
     /// <para>Takes its OWN connection rather than borrowing the startup one: the caller's connection is scoped
     /// to the TimescaleDB setup block and is disposed the moment that block exits, which is long before this

@@ -49,12 +49,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>The horizon.</b> Slices carry a BACKDATED collection_time (the slice ceiling), so the
 /// rows land in time buckets adjacent to their own activity — readers window on collection_time,
 /// hourly CAGGs bucket on it, and retention drops on it. That is exactly why this stage refuses to
-/// dig below <see cref="Horizon"/> (derived from the raw tier, not hand-maintained — the #1937
-/// rule): inside it, every CAGG's 3-day <c>start_offset</c> re-materializes the touched buckets on
-/// its next scheduled run and the 4-day raw retention cannot immediately drop what was just
-/// shipped; below it, neither holds, and that deeper stage is a separate decision (#2022's own
-/// staging note). Re-shipped interval rows are already deduped by every reader (#1907/#1841), so a
-/// boundary overlap is waste at worst, never a double-count.</para>
+/// dig below <see cref="HorizonFor"/> (derived from the refresh window and the raw tier, not
+/// hand-maintained — the #1937 rule): inside it, the hourly CAGGs' refresh window re-materializes
+/// the touched buckets on their next scheduled run AND raw retention cannot immediately drop what
+/// was just shipped; below it, at least one of those stops holding, and that deeper stage is a
+/// separate decision (#2022's own staging note). Re-shipped interval rows are already deduped by
+/// every reader (#1907/#1841), so a boundary overlap is waste at worst, never a double-count.</para>
 ///
 /// <para><b>Pacing.</b> One slice per server per tick on the worker's OWN loop (the command-loop
 /// precedent), each slice bounded by the same per-database byte budget as the live path, on its own
@@ -71,11 +71,68 @@ public sealed class QueryStoreBackfill
     public const string StateCollectorName = QueryStoreBackfillState.StateCollectorName;
 
     /// <summary>
-    /// How far below now a backfill slice may reach — the raw tier's read horizon
-    /// (<see cref="RetentionTierRouter.RawMaxAge"/>, raw retention minus the route margin), derived
-    /// so it can never drift from the retention/CAGG numbers it exists to respect.
+    /// How deep the hourly refresh policy can still reach on its NEXT run — its start offset minus one
+    /// schedule interval, because the window slides forward by exactly that much between runs. A row landed at
+    /// the start-offset boundary itself is already outside the window by the time the policy next fires.
     /// </summary>
-    public static readonly TimeSpan Horizon = RetentionTierRouter.RawMaxAge;
+    private static readonly TimeSpan RefreshReachableDepth =
+        TimescaleSupport.HourlyRefreshStartSpan - TimescaleSupport.HourlyRefreshScheduleSpan;
+
+    /// <summary>
+    /// How far below now a backfill slice may reach on a store WITHOUT continuous aggregates: the raw read
+    /// horizon alone.
+    ///
+    /// <para>TimescaleDB is optional and auto-detected, and plain PostgreSQL is a supported configuration
+    /// rather than a degraded one. On such a store there are no hourly rollups for a backdated row to fall
+    /// out of — every read goes to raw — so the refresh term below does not apply, and narrowing for it would
+    /// cost that deployment mode two days of catch-up reach in exchange for nothing. Raised by review; the
+    /// first version of #3012's change narrowed unconditionally.</para>
+    ///
+    /// <para>A store that LATER gains the extension is not left with a split: the aggregates are born
+    /// <c>WITH NO DATA</c> and <see cref="RetentionTierRouter"/> routes any window below a rollup's measured
+    /// floor to raw, so rows shipped while the store was plain are served from raw exactly as they were
+    /// before.</para>
+    /// </summary>
+    public static readonly TimeSpan PlainStoreHorizon = RetentionTierRouter.RawMaxAge;
+
+    /// <summary>
+    /// How far below now a backfill slice may reach on a store WITH continuous aggregates — the SMALLER of
+    /// the two conditions that both have to hold, derived from each rather than hand-maintained.
+    ///
+    /// <para><b>Both, not either.</b> A slice lands rows at a BACKDATED <c>collection_time</c>, so for the
+    /// slice to be worth shipping two things must be true of the depth it lands at: raw retention must not
+    /// immediately drop it (<see cref="RetentionTierRouter.RawMaxAge"/>, raw retention minus the route
+    /// margin), and the hourly continuous aggregates must still re-materialize the buckets it touched
+    /// (<see cref="RefreshReachableDepth"/>). The rollups are materialized-only — the watermark is a hard
+    /// partition, not a fallback — so a bucket the refresh window no longer covers keeps whatever it was
+    /// materialized with, and the backfilled rows are invisible to every window that routes at hourly grain
+    /// while still being visible at raw grain. That is a silent split between two tiers, not a delay.</para>
+    ///
+    /// <para><b>Why this is a <c>min</c> now and was a single term before (#3012).</b> The two conditions
+    /// happened to coincide: the hourly refresh window was 3 days and <c>RawMaxAge</c> is 3 days, so taking
+    /// only the retention term looked complete. It was not — it was the retention term acting as a PROXY for
+    /// the refresh term, which is exactly the coupling that made the refresh expensive. The hourly window is
+    /// now chosen against its own cadence (<see cref="TimescaleSupport.HourlyRefreshStartOffset"/>), so the
+    /// two terms differ and the smaller one is the real horizon. The cost is stated rather than hidden: this
+    /// horizon narrows from three days to one day minus a refresh interval, so post-outage catch-up and
+    /// first-contact tail recovery reach less far back per store. The figure itself stays in the constants
+    /// this derives from — <c>QueryStoreBackfillTests</c> pins it — rather than being restated here where it
+    /// would go stale. Digging deeper than the refresh window is a separate stage that would have to
+    /// refresh the buckets it wrote — which is a decision about running
+    /// <c>refresh_continuous_aggregate</c> off the backfill loop, not a constant.</para>
+    /// </summary>
+    public static readonly TimeSpan RollupStoreHorizon =
+        RetentionTierRouter.RawMaxAge <= RefreshReachableDepth
+            ? RetentionTierRouter.RawMaxAge
+            : RefreshReachableDepth;
+
+    /// <summary>
+    /// The horizon for THIS store. <paramref name="hasContinuousAggregates"/> is the TimescaleDB-extension
+    /// flag, which is the right question rather than a proxy for it: the hourly rollups are created by
+    /// <c>EnsureContinuousAggregatesAsync</c> under exactly that gate, so they exist if and only if it does.
+    /// </summary>
+    public static TimeSpan HorizonFor(bool hasContinuousAggregates)
+        => hasContinuousAggregates ? RollupStoreHorizon : PlainStoreHorizon;
 
     /// <summary>Candidate databases come from rows this window fresh — a database that stopped
     /// shipping Query Store rows entirely ages out of the backfill scan with them.</summary>
@@ -86,6 +143,12 @@ public sealed class QueryStoreBackfill
     private readonly CollectorDeltaCalculator _deltas;
     private readonly ILogger? _logger;
     private readonly Func<bool> _capturePlans;
+
+    /* Whether this store has TimescaleDB continuous aggregates, read LIVE rather than captured: the worker
+       sets its flag during startup detection and this class is constructed after that, but reading it through
+       a provider keeps the two from depending on construction order. Defaults to true for hosts that do not
+       say — the conservative direction, since the narrower horizon cannot produce a tier split. */
+    private readonly Func<bool> _hasContinuousAggregates;
 
     /* #2164: the per-database text budget override in MB, read live like _capturePlans. Backfill slices
        carry the SAME nvarchar(max) query-text/plan-XML payload over the same link as a live tick, so the
@@ -99,7 +162,8 @@ public sealed class QueryStoreBackfill
         CollectorDeltaCalculator deltas,
         ILogger? logger,
         Func<bool>? capturePlans = null,
-        Func<int>? textBudgetMb = null)
+        Func<int>? textBudgetMb = null,
+        Func<bool>? hasContinuousAggregates = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
@@ -108,6 +172,7 @@ public sealed class QueryStoreBackfill
         _capturePlans = capturePlans ?? (() => true);
         /* Null provider = keep the collector's compile-time budget (tests and any non-Darling host). */
         _textBudgetMb = textBudgetMb ?? (() => 0);
+        _hasContinuousAggregates = hasContinuousAggregates ?? (() => true);
     }
 
     /// <summary>
@@ -148,7 +213,7 @@ public sealed class QueryStoreBackfill
         var databases = await GetCandidateDatabasesAsync(server.ServerId, cancellationToken);
 
         var nowUtc = DateTime.UtcNow;
-        var floorLimit = nowUtc - Horizon;
+        var floorLimit = nowUtc - HorizonFor(_hasContinuousAggregates());
 
         foreach (var databaseName in databases)
         {
