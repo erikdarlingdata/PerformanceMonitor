@@ -1484,7 +1484,10 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        var (hoursBack, fromDate, toDate) = GetCurrentWindow();
+        /* Re-pins the axes onto the window the plotted data was read over, so it takes the same offset
+           those reads take — the selected tab's. This runs from a chart on the visible tab, where that
+           is this tab. */
+        var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.UtcOffsetMinutes);
         DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
         DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
         chart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());

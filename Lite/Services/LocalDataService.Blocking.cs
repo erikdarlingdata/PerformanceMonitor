@@ -78,7 +78,7 @@ GROUP BY collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT
@@ -125,7 +125,7 @@ LIMIT 50";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -179,7 +179,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -267,12 +267,25 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
     /// Gets lightweight blocking + deadlock counts and latest event time for alert badge updates.
     /// Much cheaper than fetching full rows with XML — just COUNT(*) and MAX(time).
     /// </summary>
-    public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    /// <param name="utcOffsetMinutes">
+    /// The UTC offset of <paramref name="serverId"/> itself, not of whichever server tab the desktop has
+    /// selected. This read is the one on the badge path, which runs on every tab's own timer whether or
+    /// not that tab is visible, so the server it names and the server the desktop is showing are
+    /// routinely different ones.
+    ///
+    /// <para>Required, and required to be the SAME offset the caller used to convert
+    /// <paramref name="fromDate"/>/<paramref name="toDate"/> out of the display mode. Those two
+    /// conversions cancel in <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> and only the one here
+    /// applies in <c>ServerTime</c>; sourcing them from different servers leaves a residue in every
+    /// mode. <c>ServerTab.RefreshAlertCountsAsync</c> derives both from the tab's own
+    /// <c>UtcOffsetMinutes</c>.</para>
+    /// </param>
+    public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, int utcOffsetMinutes)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, utcOffsetMinutes);
 
         /* blocking_count prefers the blocked-process-report; falls back to the always-on DMV snapshot when
            BPR captured nothing (AWS RDS). latest_event_time includes DMV blocking recency too. */
@@ -318,7 +331,7 @@ SELECT
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -557,7 +570,7 @@ LIMIT 5000";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* BPR buckets, falling back to the always-on DMV snapshot only when BPR has no buckets in the
@@ -627,7 +640,7 @@ ORDER BY bucket";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT
@@ -670,7 +683,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* Use blocked_process_reports from XE session - more reliable than point-in-time snapshots
@@ -722,7 +735,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT
@@ -823,7 +836,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT
@@ -891,7 +904,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 WITH raw AS

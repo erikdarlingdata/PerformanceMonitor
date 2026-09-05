@@ -108,17 +108,43 @@ public partial class LocalDataService
     }
 
     /// <summary>
+    /// The UTC offset of the desktop's currently selected server tab, for a read whose server-local
+    /// <c>fromDate</c>/<c>toDate</c> can only have come from that tab's own toolbar pickers.
+    ///
+    /// <para>Named rather than spelled <c>ServerTimeHelper.UtcOffsetMinutes</c> inline because it is an
+    /// answer, not a value: it says "this window belongs to whichever server the desktop has selected".
+    /// That is true only for a read the selected tab drives. It is the wrong answer for a read that can
+    /// run for a server other than the selected one, and such a read has to take the offset of the server
+    /// it names — see <see cref="GetAlertCountsAsync"/>, which does.</para>
+    ///
+    /// <para>The offset is applied twice per window and the two applications have to name the same
+    /// server or they stop cancelling: <c>ServerTab.GetCurrentWindow</c> converts the pickers from the
+    /// display mode into server time, and the custom-range branch below converts back out to UTC. In
+    /// <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> the pair cancels; in <c>ServerTime</c>, the
+    /// default, only the branch below applies anything. A caller that changes one side's offset source
+    /// without the other breaks the two modes that cancel, so the two are paired per path.</para>
+    /// </summary>
+    private static int SelectedServerTabUtcOffsetMinutes => ServerTimeHelper.UtcOffsetMinutes;
+
+    /// <summary>
     /// Gets the time range for queries based on hoursBack or explicit date range.
     /// Returns UTC time for collection_time queries (most tables store collection_time in UTC).
-    /// When fromDate/toDate are provided, they should already be in UTC.
     /// </summary>
-    private static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc = null)
+    /// <param name="utcOffsetMinutes">
+    /// The UTC offset of the server whose rows this window will select — the same server as the
+    /// <c>server_id</c> in the predicate beside it. REQUIRED rather than defaulted: an offset and a
+    /// server_id are two halves of one question, and taking the offset from ambient state is how they came
+    /// to name two different servers. A caller with no server-specific offset to give has to say so at the
+    /// call site instead of inheriting one silently. Ignored unless <paramref name="fromDate"/> and
+    /// <paramref name="toDate"/> are both supplied, since only that branch converts.
+    /// </param>
+    private static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, int utcOffsetMinutes)
     {
         if (fromDate.HasValue && toDate.HasValue)
         {
             /* Custom date range - convert from server time back to UTC for storage lookup */
-            var startUtc = fromDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
-            var endUtc = toDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
+            var startUtc = fromDate.Value.AddMinutes(-utcOffsetMinutes);
+            var endUtc = toDate.Value.AddMinutes(-utcOffsetMinutes);
             return (startUtc, endUtc);
         }
 
