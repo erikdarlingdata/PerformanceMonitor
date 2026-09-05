@@ -3305,6 +3305,16 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// name of a feature it cannot use. Falling back keeps the old behaviour exactly: cadence converged, phase
     /// skipped. Raised by review.</para>
     ///
+    /// <para><b>The version range this is for is the one this file already states, not one assumed from the
+    /// bundled runtime.</b> Nothing in the product declares a TimescaleDB floor and nothing checks
+    /// <c>extversion</c>: <see cref="EnableCompressionSql"/> says the pre-2.18 compression vocabulary is
+    /// "preferred here for compatibility across 2.x", the forced-refresh path already handles a store where
+    /// <c>force</c> does not exist (2.18+), and the continuous-aggregate converge's own catch already names "a
+    /// TimescaleDB too old to expose <c>initial_start</c>" as a state that reaches it. Fixed-schedule
+    /// background jobs — and therefore these two columns — are a later 2.x addition than
+    /// <c>schedule_interval</c>, so inside a stated 2.x compatibility target they cannot be assumed present.
+    /// That is the whole argument for degrading rather than for a floor pin.</para>
+    ///
     /// <para>The first four columns are byte-identical to the wide read's, in the same order, because the
     /// caller reads both with one set of ordinals — the phase columns are what it stops reading, not a
     /// different shape it starts reading.</para>
@@ -3399,8 +3409,29 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// least-privilege bring-your-own store's login does not own the job) leaves that one hypertable on its old
     /// schedule and the rest still converge. Returns how many it moved.</para>
     /// </summary>
-    public static async Task<int> ConvergeCompressionScheduleAsync(
+    public static Task<int> ConvergeCompressionScheduleAsync(
         NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        => ConvergeCompressionScheduleAsync(connection, logger, CompressionPolicyStateSql, cancellationToken);
+
+    /// <summary>
+    /// The seam that lets the FALLBACK DIRECTION be tested: <paramref name="phasedStateSql"/> is the wide read
+    /// the public entry point supplies, and a test supplies a deliberately-failing one instead.
+    ///
+    /// <para><b>Why a seam rather than prose.</b> The property that has to hold is not "the phase applies" but
+    /// "a probe failure costs the phase and NOTHING ELSE" — an old store must keep the
+    /// <see cref="CompressScheduleInterval"/> cadence converge it already had from #1778. Returning 0 there
+    /// would be a total regression wearing a partial's clothes, which is the failure shape this whole area
+    /// keeps producing: silent and partial, never loud. Against a runtime that HAS the phase columns there is
+    /// no other way to make the wide read fail, so without this the direction could only be reasoned about,
+    /// and that is exactly what a reviewer had to do.</para>
+    ///
+    /// <para>The FALLBACK statement is deliberately NOT injectable — <see cref="CompressionCadenceOnlyStateSql"/>
+    /// is always the one used, so a test cannot accidentally prove the degradation against a statement the
+    /// product does not ship. And the wide statement being injectable costs nothing: the public path's own
+    /// live assertions land real phases, which a wrong wide read could not do.</para>
+    /// </summary>
+    internal static async Task<int> ConvergeCompressionScheduleAsync(
+        NpgsqlConnection connection, ILogger? logger, string phasedStateSql, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
@@ -3460,7 +3491,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
 
         try
         {
-            await ReadStateAsync(CompressionPolicyStateSql, withPhase: true);
+            await ReadStateAsync(phasedStateSql, withPhase: true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -2889,6 +2889,117 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         }
     }
 
+    /// <summary>
+    /// THE DEGRADATION DIRECTION (#3035), live: a probe failure costs the PHASE and nothing else.
+    ///
+    /// <para><b>Why this is the assertion that makes the widened read safe.</b>
+    /// <see cref="TimescaleSupport.CompressionPolicyStateSql"/> names <c>fixed_schedule</c> and
+    /// <c>initial_start</c>, which entered <c>timescaledb_information.jobs</c> later than
+    /// <c>schedule_interval</c> did. Nothing in this product declares a TimescaleDB floor or checks
+    /// <c>extversion</c>, and the file's own comments state a 2.x compatibility target, handle a store where
+    /// <c>force</c> does not exist, and name "a TimescaleDB too old to expose <c>initial_start</c>" as a
+    /// state that reaches the continuous-aggregate converge's catch. So on a store inside the stated range the
+    /// wide read can throw — and if that returned 0, the store would silently lose #1778's cadence converge
+    /// as well, which had worked there before this change ever existed. A total regression wearing a
+    /// partial's clothes.</para>
+    ///
+    /// <para><b>Proven by inducing the failure rather than by reading the catch.</b> The fixture is 2.28.1 and
+    /// has the columns, so the only way to exercise the fallback is to hand the converge a wide statement that
+    /// fails — which is what <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync(NpgsqlConnection, Microsoft.Extensions.Logging.ILogger, string, System.Threading.CancellationToken)"/>
+    /// exists for. The fallback statement itself is NOT injectable, so this cannot pass against a statement
+    /// the product does not ship.</para>
+    ///
+    /// <para>The planted hypertable is FOREIGN on purpose: it is the population #1778 exists for, and it also
+    /// makes the "phase not applied" half of the assertion unambiguous — a foreign hypertable would be left
+    /// unphased on the happy path too, so the pin that separates the two is that the CADENCE moved.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_CompressionSchedule_AProbeFailureCostsThePhaseAndKeepsTheCadenceConverge_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compression-converge degradation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string Stale = "tick3035_degrade";
+
+        /* A wide read shaped exactly like the shipped one except for a column no job catalog has — so it
+           fails the same way a missing fixed_schedule/initial_start would, at the same point, and the SCOPE
+           it would have selected is identical. */
+        const string BrokenPhasedRead = @"
+SELECT
+    j.job_id,
+    j.hypertable_name,
+    j.schedule_interval::text,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds,
+    j.fixed_schedule,
+    j.initial_start_column_that_does_not_exist,
+    j.hypertable_schema
+FROM timescaledb_information.jobs AS j
+WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
+
+        var bodySucceeded = false;
+        try
+        {
+            await DropTickTableAsync(connection, Stale, ct);
+            await CreateTickTableAsync(connection, Stale, ct);
+
+            /* A policy on the 12-hour default — the #1778 population, which must survive the degradation. */
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Stale}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+            Assert.Equal(TimeSpan.FromHours(12), (await CompressionPolicyStateAsync(connection, Stale, ct))!.ScheduleInterval);
+
+            /* CONTROL, first: the broken read really does fail, and fails on its own rather than because
+               the store is unreachable. Without this the test could "prove" the fallback while the wide read
+               was quietly succeeding. */
+            var broken = await Assert.ThrowsAsync<PostgresException>(
+                async () => await ExecAsync(connection, BrokenPhasedRead, ct));
+            Assert.Equal("42703", broken.SqlState);
+
+            /* And the shipped wide read does NOT fail on this runtime — so the fallback below is being
+               reached by the induced failure and not by an ambient one. */
+            await ExecAsync(connection, TimescaleSupport.CompressionPolicyStateSql, ct);
+
+            /* ---- THE ASSERTION: the phase is lost, the cadence converge is not. ---- */
+            var log = new CapturingTestLogger();
+            var converged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, log, BrokenPhasedRead, ct);
+
+            Assert.True(converged >= 1,
+                $"a failed phase probe returned no conversions, so the store lost #1778's cadence converge along with the phase it could not have; {log.Joined}");
+
+            var after = await CompressionPolicyStateAsync(connection, Stale, ct);
+            Assert.NotNull(after);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, after!.ScheduleInterval);
+
+            /* The phase half is genuinely absent, so this is a DEGRADATION and not a silent success. */
+            Assert.False(after.FixedSchedule);
+            Assert.False(after.HasInitialStart);
+
+            /* The operator is told which half was lost and which was kept — the line is the only signal a
+               store has silently dropped to cadence-only. */
+            Assert.Contains("retrying without it", log.Joined, StringComparison.Ordinal);
+            Assert.Contains("#1778", log.Joined, StringComparison.Ordinal);
+
+            /* Idempotent on the fallback path too: the cadence now matches, so a second degraded pass finds
+               nothing rather than re-altering the same job on every start. */
+            Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, BrokenPhasedRead, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropTickTableAsync(cleanup, Stale, cleanupCt));
+        }
+    }
+
     /// <summary>The top-level items of a statement's SELECT list, trimmed and newline-flattened — used to
     /// assert the ORDINAL contract the compression converge's reader depends on. Split on commas, which is
     /// safe for these two statements specifically because neither carries a top-level comma inside an
