@@ -35,13 +35,14 @@ namespace PerformanceMonitor.Darling.Viewer;
 ///
 /// <para>First cut: all four sub-tabs (re)load on Memory-tab activation (Lite's full-refresh branch);
 /// Lite's sub-tab-only timer optimization is deferred, so the sub-TabControl has no SelectionChanged
-/// handler. <b>Pressure-event time:</b> like CPU's <c>sample_time</c>, the pressure <c>sample_time</c> is
-/// the monitored server's LOCAL wall clock, but the per-batch de-skew the CPU read uses (#1262) assumes the
-/// newest sample is ~1 minute old — true for the dense CPU ring buffer, NOT for the sparse resource-monitor
-/// ring buffer — so it does not transfer. The pressure chart therefore windows AND plots on raw
-/// <c>sample_time</c> through <see cref="ViewerTimeHelper.ForDisplay"/>: bars stay inside the X range and
-/// internally consistent (both bounds and bars share the one clock); for a non-UTC server the whole
-/// standalone chart shifts by the server's UTC offset. A reliable pressure-time de-skew is deferred.</para>
+/// handler. <b>Pressure-event time:</b> unlike CPU's <c>sample_time</c>, which is the monitored server's
+/// LOCAL wall clock and needs the per-batch de-skew (#1262), the pressure <c>sample_time</c> is naive UTC —
+/// <c>MemoryPressureEventsCollector</c> stamps it from <c>SYSUTCDATETIME()</c> and
+/// <c>CollectorTimestampFrameTests</c> pins that it must. So the chart windows AND plots on raw
+/// <c>sample_time</c> through <see cref="ViewerTimeHelper.ForDisplay"/>, which takes naive-UTC input, and
+/// needs no de-skew of its own: the CPU read's correction assumes the newest sample is ~1 minute old, true
+/// for the dense CPU ring buffer and not for the sparse resource-monitor one, and would be wrong here even
+/// if the frame called for it.</para>
 /// </summary>
 public partial class ViewerServerTab
 {

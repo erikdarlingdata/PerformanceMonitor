@@ -49,12 +49,16 @@ internal static class DarlingHealthReader
             CpuPercent is null && MemoryMb is null && LastCollectionTime is null;
     }
 
-    /// <summary>Latest SQL-process CPU for one server (newest ring-buffer sample). $1 server_id.</summary>
+    /// <summary>Latest SQL-process CPU for one server (newest ring-buffer sample). $1 server_id.
+    /// Same shape and same reasoning as <c>DarlingWorker.LatestCpuSql</c>: ordered on the hypertable's
+    /// <c>collection_time</c> partition column so ordered ChunkAppend stops at the newest chunk, with
+    /// <c>sample_time</c> as the within-batch tiebreak, and no time predicate because <c>sample_time</c> is
+    /// the monitored server's local wall clock.</summary>
     public const string ServerSummaryCpuSql = @"
 SELECT sqlserver_cpu_utilization
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
-ORDER BY sample_time DESC
+ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
     /// <summary>Latest total server memory (MB) for one server. $1 server_id.</summary>

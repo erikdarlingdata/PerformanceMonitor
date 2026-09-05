@@ -86,7 +86,9 @@ public sealed class DarlingFleetReaderSqlTests
     public void LatestSnapshotReads_AreDistinctOnPerServer()
     {
         Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY server_id, sample_time DESC", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
+        /* collection_time leads, matching FleetMemorySql; sample_time is the within-batch tiebreak. For the
+           frame, not the cost - LatestCpuReadShapeSqlTests and the constant's own doc carry both halves. */
+        Assert.Contains("ORDER BY server_id, collection_time DESC, sample_time DESC", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
         Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetMemorySql, StringComparison.Ordinal);
         Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetThreadsSql, StringComparison.Ordinal);
     }

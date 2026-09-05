@@ -112,14 +112,29 @@ SELECT id, name, parent_id, sort_order, colour
 FROM server_tags
 ORDER BY sort_order, lower(name)";
 
-    /// <summary>Latest SQL + other-process CPU per server (newest ring-buffer sample). $ none.</summary>
+    /// <summary>Latest SQL + other-process CPU per server (newest ring-buffer sample). $ none.
+    ///
+    /// <para>The <c>collection_time</c> key, matching <see cref="FleetMemorySql"/> below, is here for the
+    /// FRAME rather than for the cost. <c>sample_time</c> is the monitored server's local wall clock, so
+    /// leading on it invites the bound that looks like the obvious optimisation and returns zero rows for
+    /// every server behind the store — and this is the one CPU read with no <c>server_id</c> filter, so it
+    /// would take the whole fleet at once. Ordering carries no clock frame; see
+    /// <c>DarlingWorker.LatestCpuSql</c> for the full reasoning and
+    /// <c>LatestCpuReadShapeSqlTests</c> for the guard.</para>
+    ///
+    /// <para>It buys NO speed, and the doc says so rather than implying otherwise: <c>DISTINCT ON</c> with
+    /// <c>server_id</c> leading and no per-server <c>LIMIT</c> reads and sorts the whole relation whatever
+    /// the time key is (measured identical, 240,701 rows and 169 buffers either way at thirty chunks). The
+    /// per-server reads get ordered ChunkAppend from this same change because each has its own
+    /// <c>LIMIT 1</c>; this one would need a per-server lateral instead, which is a different query.</para>
+    /// </summary>
     public const string FleetCpuSql = @"
 SELECT DISTINCT ON (server_id)
     server_id,
     sqlserver_cpu_utilization,
     other_process_cpu_utilization
 FROM v_cpu_utilization_stats
-ORDER BY server_id, sample_time DESC";
+ORDER BY server_id, collection_time DESC, sample_time DESC";
 
     /// <summary>Latest total server memory + buffer pool (MB) per server. $ none.</summary>
     public const string FleetMemorySql = @"
