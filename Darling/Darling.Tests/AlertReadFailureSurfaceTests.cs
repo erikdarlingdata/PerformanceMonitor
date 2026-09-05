@@ -462,6 +462,9 @@ public sealed class AlertReadFailureSurfaceTests
              Member: "EvaluatePostgresAlertsAsync"),
         };
 
+        /* How many entry points the ORDER arm actually reached, so it cannot go vacuous unnoticed. */
+        var ordered = 0;
+
         foreach (var (file, member) in passEntryPoints)
         {
             var raw = ReadSource(file);
@@ -469,12 +472,45 @@ public sealed class AlertReadFailureSurfaceTests
             var (start, end) = MemberBody(stripped, member);
             var body = stripped[start..end];
 
+            var passAt = body.IndexOf("RecordPass(", StringComparison.Ordinal);
+
             Assert.True(
-                body.Contains("RecordPass(", StringComparison.Ordinal),
+                passAt >= 0,
                 $"{member} in {Path.GetFileName(file)} is an alert evaluation pass that does not record "
                 + "itself, so every read failure it swallows lands in the numerator with nothing added to "
                 + "the denominator");
+
+            /* ORDER, not just presence. A RecordPass placed INSIDE the try — after the reads rather than
+               before them — records the pass only on the cycles that succeeded, so a pass whose read
+               failed would contribute a failure to the numerator and nothing to the denominator. That is
+               the same defect as omitting the call, arriving through placement instead of absence, and
+               presence alone cannot see it. Asserted structurally rather than behaviourally because
+               reaching these bodies at runtime needs a live store, and a test that opens a socket to
+               prove an ordering is a flaky test proving a static fact.
+               Matched as the try STATEMENT rather than the substring: "try" occurs inside retry, entry and
+               geometry, and a substring hit would compare the pass against an arbitrary identifier.
+
+               Not every pass entry point HAS a try of its own — AlertEngine.EvaluateCoreAsync dispatches
+               fourteen checks that each own theirs — and where there is none the ordering claim does not
+               apply. The count of entry points the check actually reached is asserted below, so the arm
+               cannot quietly become vacuous for all three. */
+            var tryMatch = Regex.Match(body, @"\btry\s*\{");
+
+            if (tryMatch.Success)
+            {
+                ordered++;
+
+                Assert.True(
+                    passAt < tryMatch.Index,
+                    $"{member} records its pass at offset {passAt}, INSIDE or after the try at "
+                    + $"{tryMatch.Index}: a cycle whose read fails would then add to the numerator and "
+                    + "nothing to the denominator");
+            }
         }
+
+        /* The order arm reached the two entry points that own their own try (the self-alert evaluator and
+           the PostgreSQL predictor group). A drop here means the arm stopped checking anything. */
+        Assert.True(ordered >= 2, $"the pass-ordering arm only reached {ordered} entry point(s)");
 
         /* Both directions. A new pass that forgets to record fails the loop above; a RecordPass placed
            anywhere that is not one of these entry points fails this count, which is what stops the
