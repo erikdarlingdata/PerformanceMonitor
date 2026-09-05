@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
@@ -2602,6 +2603,50 @@ LIMIT 1", connection))
         var foreignSql = TimescaleSupport.AddCompressionPolicySql("collect.someone_elses_hypertable");
         Assert.DoesNotContain("initial_start", foreignSql, StringComparison.Ordinal);
         Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", foreignSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The converge really CALLS the phase-setting statement, read out of the IL — because the pure suite
+    /// cannot see it any other way.
+    ///
+    /// <para><b>This gap was found by a control, not reasoned about.</b> Mutating
+    /// <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync"/> so an owned hypertable takes the
+    /// cadence-only branch — so the phase never reaches a deployed store at all — left the entire pure suite
+    /// GREEN. Every string pin above still passed, because a string pin asserts what a statement SAYS and
+    /// never that anything runs it, and that is the inert-fix-with-a-passing-suite shape rather than a milder
+    /// version of a red one. The live converge test catches it, but only in CI's PostgreSQL job; this catches
+    /// the wiring on every build.</para>
+    ///
+    /// <para>Scanned inside the compiler-generated state machine, because an async method's body lives there
+    /// after compilation and not in the source method. The cadence-only statement is the control: it has to
+    /// appear too, so a scan that resolved nothing cannot satisfy this by finding zero of everything — and
+    /// the state-machine name is asserted present first, for the same reason.</para>
+    /// </summary>
+    [Fact]
+    public void ConvergeCompressionSchedule_ActuallyCallsThePhaseStatement_NotOnlyTheCadenceOne()
+    {
+        const string Machine = "<ConvergeCompressionScheduleAsync>d__";
+        const string Phase = "get_SetCompressionSchedulePhaseSql";
+        const string Cadence = "get_SetCompressionScheduleSql";
+
+        var assemblyPath = typeof(TimescaleSupport).Assembly.Location;
+        Assert.True(File.Exists(assemblyPath), $"Storage assembly not found at '{assemblyPath}'.");
+
+        var byMachine = IlCallSiteScanner.CountCallsByStateMachine(
+            assemblyPath,
+            [Machine],
+            [Phase, Cadence]);
+
+        Assert.True(byMachine.ContainsKey(Machine),
+            $"no state machine whose name starts with {Machine} in {assemblyPath} — a renamed or inlined machine "
+            + "would report zero calls to everything and satisfy this pin for the wrong reason");
+
+        var counts = byMachine[Machine];
+
+        Assert.True(counts[Phase] >= 1,
+            "the converge never reads the phase-setting statement, so a deployed store's compression policies would keep drifting while every string pin stayed green");
+        Assert.True(counts[Cadence] >= 1,
+            "the converge never reads the cadence-only statement, so #1778's reach onto a foreign hypertable is gone");
     }
 
     /// <summary>
