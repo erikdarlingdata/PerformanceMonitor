@@ -1315,6 +1315,10 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
     /// rather than as raw equality, because the policy under test is deliberately ARMED and an armed
     /// TimescaleDB job is one its background scheduler may run at any moment — see that helper for the two
     /// events being separated and for what the separation cannot see (#2937).</para>
+    ///
+    /// <para>The settled third sweep additionally asserts the convergence reported moving NOTHING, because
+    /// that is the only observable difference between the no-op the <c>IS DISTINCT FROM</c> guard promises and
+    /// a redundant re-apply of every horizon - see <see cref="HorizonMovesReported"/>.</para>
     /// </summary>
     [Fact]
     public async Task EnsureRetentionPolicies_ConvergesAnOldHorizon_PreservingScheduledStateAndNextStart_AgainstDevPostgres()
@@ -1409,6 +1413,16 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             Assert.True(converged == RetentionPolicyCount,
                 $"the convergence pass should count all {RetentionPolicyCount} policies, got {converged}; {convergeLog.Joined}");
 
+            /* ... and it reports moving exactly the two horizons that drifted, read off the LOG rather than
+               the catalog. This is the POSITIVE CONTROL for the settled sweep's zero further down: a reading
+               that matched nothing would make that zero a claim about nothing, so the same reading has to fire
+               here, on the pass that really does move something. */
+            var convergeMoves = HorizonMovesReported(convergeLog);
+            Assert.True(convergeMoves == 2,
+                $"the convergence pass should report moving exactly the two demoted horizons, got {convergeMoves}; {convergeLog.Joined}");
+            Assert.Contains($"Retention policy for {HeldRelation} moved to a 4 days horizon", convergeLog.Joined, StringComparison.Ordinal);
+            Assert.Contains($"Retention policy for {ArmedRelation} moved to a 90 days horizon", convergeLog.Joined, StringComparison.Ordinal);
+
             var after = new
             {
                 Held = await PolicyStateAsync(connection, HeldRelation, ct),
@@ -1428,6 +1442,22 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             var settled17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, settledLog, ct);
             Assert.True(settled17 == RetentionPolicyCount,
                 $"the idempotent third sweep should count all {RetentionPolicyCount} policies, got {settled17}; {settledLog.Joined}");
+
+            /* THE guard's claim, and the one thing the state reads below cannot see. Every value they compare
+               is identical whether this sweep was a no-op or re-applied all 17 horizons on top of themselves,
+               because a returned row is the convergence's ONLY effect beyond the horizon itself - it is what
+               increments the sweep's converged count and logs the per-relation line. So idempotence has to be
+               asserted as "moved nothing", not as "ended up the same".
+
+               Measured with the IS DISTINCT FROM guard deleted from ConvergeRetentionHorizonSql, on
+               TimescaleDB 2.29.2 / PostgreSQL 17.11: the statement then returns a row for all 17 relations on
+               EVERY start, a fresh store's first one included, and this is the only assertion in the test that
+               notices - state, counts and next_start all still match. An operator would be told 17 tiers had
+               just been migrated off an earlier default when none had, on every restart, forever. #1958's
+               defect class exactly: a log line that did not survive being checked. */
+            var settledMoves = HorizonMovesReported(settledLog);
+            Assert.True(settledMoves == 0,
+                $"the settled sweep must report moving NO horizon - the IS DISTINCT FROM guard makes the convergence a no-op once every policy is on its constant - got {settledMoves}; {settledLog.Joined}");
             var settled = await PolicyStateAsync(connection, ArmedRelation, ct);
             Assert.Equal(("90 days", true), (settled.DropAfter, settled.Scheduled));
             AssertConvergenceLeftNextStartAlone(after.Armed, settled, "the idempotent third sweep");
@@ -1454,6 +1484,36 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
                 await unseed.ExecuteNonQueryAsync(cleanupCt);
             });
         }
+    }
+
+    /// <summary>
+    /// How many relations a sweep REPORTED moving onto a new horizon, counted off the captured log rather than
+    /// out of the catalog. <c>ConvergeRetentionHorizonSql</c> ends in an <c>IS DISTINCT FROM</c> comparison
+    /// whose entire purpose is to return NO row for a policy already sitting on its constant, and a returned
+    /// row is the only thing that statement does beyond the horizon itself: it is what increments
+    /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync"/>'s converged count and logs one line per
+    /// relation. The resulting job state therefore cannot tell a no-op from a redundant re-apply of the value
+    /// already there - the log is the only place that difference exists at all.
+    ///
+    /// <para>Counted by phrase, and the phrase is deliberately a fragment: the sweep's own end-of-run summary
+    /// says "moved ONTO a new horizon", so it cannot be miscounted here. The fragment is pinned in BOTH
+    /// directions by the two callers - the convergence pass requires a positive count AND the exact
+    /// per-relation text, so a reword that stopped matching fails loudly there rather than quietly turning the
+    /// settled pass's expected zero into a tautology.</para>
+    /// </summary>
+    private static int HorizonMovesReported(CapturingTestLogger log)
+    {
+        const string Moved = "moved to a";
+
+        var captured = log.Joined;
+        var reported = 0;
+        for (var at = captured.IndexOf(Moved, StringComparison.Ordinal); at >= 0;
+             at = captured.IndexOf(Moved, at + Moved.Length, StringComparison.Ordinal))
+        {
+            reported++;
+        }
+
+        return reported;
     }
 
     /// <summary>Sets a retention policy's <c>drop_after</c> directly, standing in for a store created under an
