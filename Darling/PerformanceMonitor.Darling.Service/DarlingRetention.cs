@@ -609,8 +609,11 @@ public static class DarlingRetention
                back to (a self-review row references the force row it re-judges), and TimescaleSupport already
                excludes PK-bearing tables for exactly that reason — conversion would reject the key or force it
                onto the partition column, breaking the self-reference the append-only design is built on.
-               idx_plan_force_actions_time (server_id, action_time) serves both min(action_time) probes and the
-               slice range scan, so the delete is cheap without one.
+               The work bound is the one-day SLICE, not an index seek: idx_plan_force_actions_time leads with
+               server_id and this DELETE has no server_id predicate, so that index cannot be seeked here. Same
+               shape as config_alert_log's purge against idx_config_alert_log_time(server_id, metric_name,
+               alert_time), and adequate for the same reason — the bot's per-query cooldown and per-server
+               daily budget cap arrivals at a few rows per server per day, so there is never much to scan.
                SCHEMA-QUALIFIED to match the V107 DDL and PgPlanForceActionStore, which both name
                collect.plan_force_actions explicitly. Unlike config.config_command a bare name would also
                resolve here (search_path = collect, config, public), but naming the schema keeps the purge and
