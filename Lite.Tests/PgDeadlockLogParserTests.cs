@@ -225,6 +225,83 @@ public sealed class PgDeadlockLogParserTests
         Assert.Equal(1549, deadlock.VictimPid);
     }
 
+    /* A numeric-offset zone under a COLON-delimited prefix: the one combination where the zone's own
+       colons and the prefix's delimiter are the same character, and therefore the only combination where
+       reading the zone is ambiguous at all. A zone with no abbreviation renders as an offset, so this is
+       what a managed target with log_timezone set to such a zone emits.
+
+       The IPv6 %r is the case that decides it. 2001:db8::1 is RFC 3849 documentation space; its leading
+       hextet is all decimal digits, so an offset pattern that keeps its own colons cannot tell `:2001`
+       from another of its own groups, and IPv6's next colon then satisfies the delimiter with nothing
+       left to backtrack. Two digits is not the boundary either, which the second address is here to say:
+       0020 renders as `20`. */
+    private const string ZeroOffsetColonPrefix =
+        "2026-08-26 22:25:24 +00:00:192.0.2.10(52345):app_user@app_db:[1549]:";
+    private const string ZeroOffsetColonPrefixIpv6 =
+        "2026-08-26 22:25:24 +00:2001:db8::1(52345):app_user@app_db:[1549]:";
+    private const string ZeroOffsetColonPrefixIpv6ShortHextet =
+        "2026-08-26 22:25:24 +00:20:db8::1(52345):app_user@app_db:[1549]:";
+    private const string NonZeroOffsetColonPrefix =
+        "2026-08-26 22:25:24 -03:30:192.0.2.10(52345):app_user@app_db:[1549]:";
+
+    /// <summary>
+    /// A zone that IS zero offset, spelled numerically, under a colon-delimited prefix: parsed, not
+    /// refused, whatever the client address looks like.
+    ///
+    /// <para>Refusing here is the failure worth designing against, because it is a wrong ANSWER rather
+    /// than a missing one — the target's <c>log_timezone</c> is zero-offset, the stamps beside it really
+    /// are UTC, and a refusal abandons the whole read while telling the operator to set a setting that is
+    /// already right. On the consume-once transport that recurs every cycle for as long as the client
+    /// keeps connecting from that address.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(ZeroOffsetColonPrefix))]
+    [InlineData(nameof(ZeroOffsetColonPrefixIpv6))]
+    [InlineData(nameof(ZeroOffsetColonPrefixIpv6ShortHextet))]
+    public void ANumericZeroOffsetZoneParsesUnderAColonDelimitedPrefix(string which)
+    {
+        var prefix = which switch
+        {
+            nameof(ZeroOffsetColonPrefix) => ZeroOffsetColonPrefix,
+            nameof(ZeroOffsetColonPrefixIpv6) => ZeroOffsetColonPrefixIpv6,
+            _ => ZeroOffsetColonPrefixIpv6ShortHextet,
+        };
+
+        var report = ReportUnder(prefix);
+
+        /* Named separately from the count, because the two failures are different: a refusal means the
+           zone was misread, and an empty list means the block was. */
+        Assert.Null(Record.Exception(() => PgDeadlockLogParser.Extract(report)));
+
+        var deadlock = Assert.Single(PgDeadlockLogParser.Extract(report));
+
+        Assert.Equal(new DateTime(2026, 8, 26, 22, 25, 24, DateTimeKind.Utc), deadlock.OccurredAtUtc);
+        Assert.Equal(1549, deadlock.VictimPid);
+    }
+
+    /// <summary>
+    /// And the same combination still REFUSES a zone that is not zero offset, so the tolerance above is
+    /// not a blanket acceptance of anything numeric. The token in the message is read up to the prefix's
+    /// delimiter — <c>-03</c> rather than <c>-03:30</c> — which is the accepted cost of the zone and the
+    /// delimiter sharing a character; the verdict is what has to be right, and the space-delimited
+    /// prefix (where nothing is ambiguous) still names the offset whole.
+    /// </summary>
+    [Fact]
+    public void ANumericNonZeroOffsetZoneStillRefusesUnderAColonDelimitedPrefix()
+    {
+        var ex = Assert.Throws<PgLogTimezoneUnsupportedException>(
+            () => PgDeadlockLogParser.Extract(ReportUnder(NonZeroOffsetColonPrefix)));
+
+        Assert.StartsWith("-03", ex.ObservedZone, StringComparison.Ordinal);
+        Assert.Contains("log_timezone", ex.Message, StringComparison.Ordinal);
+
+        /* The space-delimited prefix is where the offset is unambiguous, and there it stays whole. */
+        var whole = Assert.Throws<PgLogTimezoneUnsupportedException>(
+            () => PgDeadlockLogParser.Extract(WithLogZone("-03:30")));
+
+        Assert.Equal("-03:30", whole.ObservedZone);
+    }
+
     /// <summary>
     /// A participant's statement is arbitrary user SQL and can span lines, each arriving tab-indented under
     /// the DETAIL block. Taking one line per participant would truncate every multi-line statement to its
