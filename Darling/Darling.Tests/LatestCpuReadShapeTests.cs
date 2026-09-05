@@ -280,6 +280,7 @@ LIMIT 1";
         await connection.OpenAsync(cancellationToken);
         await PgMigrations.MigrateAsync(connection, cancellationToken);
 
+        var bodySucceeded = false;
         try
         {
             await DeleteSentinelsAsync(connection, cancellationToken);
@@ -317,10 +318,15 @@ LIMIT 1";
                    with a broken oracle would still fail here. */
                 Assert.Equal((10, 20), shipped);
             }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteSentinelsAsync(connection, CancellationToken.None);
+            /* #1794/#1902: teardown gets its own freshly-opened connection, because the body's is the one
+               thing the failure being reported may have destroyed — and a throw from finally would
+               replace the body's exception with connection noise. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
         }
     }
 
@@ -336,6 +342,7 @@ LIMIT 1";
         await connection.OpenAsync(cancellationToken);
         await PgMigrations.MigrateAsync(connection, cancellationToken);
 
+        var bodySucceeded = false;
         try
         {
             await DeleteSentinelsAsync(connection, cancellationToken);
@@ -355,10 +362,15 @@ LIMIT 1";
                proving the predicate is well-formed and the empty result above is not a typo. */
             Assert.Null(await ReadAsync(connection, TrapSql, FirstServerId, cancellationToken));
             Assert.Equal((55, 66), await ReadAsync(connection, TrapSql, FirstServerId - 1, cancellationToken));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteSentinelsAsync(connection, CancellationToken.None);
+            /* #1794/#1902: teardown gets its own freshly-opened connection, because the body's is the one
+               thing the failure being reported may have destroyed — and a throw from finally would
+               replace the body's exception with connection noise. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
         }
     }
 
@@ -374,6 +386,7 @@ LIMIT 1";
         await connection.OpenAsync(cancellationToken);
         await PgMigrations.MigrateAsync(connection, cancellationToken);
 
+        var bodySucceeded = false;
         try
         {
             await DeleteSentinelsAsync(connection, cancellationToken);
@@ -397,10 +410,15 @@ LIMIT 1";
             /* The newest sample in the batch is minutesAgo == 0; an unsorted tied group returns one of the
                others, up to 29 minutes stale. */
             Assert.Equal((0, 0), await ReadAsync(connection, DarlingWorker.LatestCpuSql, FirstServerId, cancellationToken));
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteSentinelsAsync(connection, CancellationToken.None);
+            /* #1794/#1902: teardown gets its own freshly-opened connection, because the body's is the one
+               thing the failure being reported may have destroyed — and a throw from finally would
+               replace the body's exception with connection noise. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
         }
     }
 
