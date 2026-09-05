@@ -1443,6 +1443,12 @@ public partial class MainWindow : Window
                 {
                     var summary = await service.GetServerSummaryAsync(server.ServerId, server.DisplayName);
                     summary.ServerName = server.ServerName;
+                    /* #3029: the engine discriminator comes from the REGISTRY row, which already carries it
+                       (servers.engine_kind, via ManagedServersSql / ServersSql) — the per-server summary
+                       reads have no engine column and need none. It is what tells the fleet deadlock total's
+                       coverage apart from a quiet SQL Server fleet: v_deadlocks holds the SQL Server
+                       extended-event capture and nothing else. */
+                    summary.IsPostgres = server.IsPostgres;
                     summary.ApplyFreshness(nowUtc);
                     found.Add(summary);
                 }
