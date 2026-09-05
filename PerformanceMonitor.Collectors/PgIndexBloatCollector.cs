@@ -62,6 +62,26 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// </summary>
     public const long MeasureCeilingBytes = 20L * 1024 * 1024 * 1024;
 
+    /// <summary>
+    /// How many bytes of index ONE CYCLE will measure in total, largest first. Independent of
+    /// <see cref="MeasureCeilingBytes"/> on purpose: that one bounds a single index, this one bounds
+    /// the statement, and #2617 shipped the first believing it covered the second.
+    ///
+    /// <para><b>Why 20 GB and not more.</b> The only hard datum is a negative one: 286 GB of
+    /// sub-ceiling index did NOT finish inside the 300-second deadline on a live Aurora target, so
+    /// effective throughput there is below 0.95 GB/s and the true figure is unknown - a cut-off run
+    /// gives a lower bound on its own duration and nothing else. The <c>:61</c> "a few seconds of
+    /// I/O" figure beside the per-index ceiling is an estimate that was never measured, and the
+    /// live failure bounds it well away from that. So this is set an order of magnitude below the
+    /// number that failed rather than derived from a throughput nobody has.</para>
+    ///
+    /// <para><b>What would justify raising it.</b> A SUCCESS row's own
+    /// <c>collection_log.sql_duration_ms</c>. That number did not exist when this was chosen - the
+    /// ERROR arm recorded a literal zero for every one of the eleven failures - and recording it
+    /// (#2997) is what turns the next raise into a measurement instead of another guess.</para>
+    /// </summary>
+    public const long CycleMeasureBudgetBytes = 20L * 1024 * 1024 * 1024;
+
     /// <param name="AvgLeafDensity">The server's own figure, 0–100. NOT a bloat percentage — a healthy
     /// index sits near 90, so subtracting from 100 invents roughly 10 points of bloat that is not there.</param>
     /// <param name="LeafFragmentation">Share of leaf pages out of physical order. Zero on a freshly built
@@ -140,7 +160,21 @@ WITH candidates AS (
 ranked AS (
     SELECT
         k.*,
-        row_number() OVER (ORDER BY k.index_bytes DESC, k.index_name) AS size_rank
+        row_number() OVER (ORDER BY k.index_bytes DESC, k.index_name) AS size_rank,
+        /* The running total of what will actually be READ, so the cycle can stop at a byte figure
+           rather than a row count. FILTERed to sub-ceiling indexes because an over-ceiling one is
+           never handed to pgstatindex and therefore costs no pages; charging it to the budget would
+           spend the whole allowance on indexes nobody reads. On the target this bounds, the three
+           over-ceiling indexes total 71 GB - more than the budget by themselves.
+
+           coalesce because a FILTERed window sum is NULL until its frame contains a matching row,
+           and the over-ceiling indexes sort FIRST under size DESC. NULL <= budget is NULL rather
+           than false, so the raw form would leave the gate neither open nor closed. */
+        coalesce(
+            sum(k.index_bytes) FILTER (WHERE k.index_bytes < " + CeilingLiteral + @")
+                OVER (ORDER BY k.index_bytes DESC, k.index_name
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+            0)::bigint                      AS measured_bytes_through_here
     FROM candidates AS k
 )
 SELECT
@@ -160,6 +194,13 @@ SELECT
         WHEN k.index_bytes >= " + CeilingLiteral + @"
             THEN 'index is larger than the measurement ceiling; pgstatindex reads every page, so it is '
                  || 'recorded but not measured'
+        /* The BYTE budget is reported ahead of the count one because it is the bound that actually
+           binds on a large-index target, and an index past both is past this one first. */
+        WHEN k.measured_bytes_through_here > " + CycleByteBudgetLiteral + @"
+            THEN 'not measured this cycle (work budget): pgstatindex reads every page, so a run '
+                 || 'stops once it has measured ' || pg_catalog.pg_size_pretty(" + CycleByteBudgetLiteral + @"::bigint)
+                 || ' of index, largest first. This one is recorded at its size so it is never '
+                 || 'mistaken for healthy.'
         WHEN k.size_rank > " + BudgetLiteral + @"
             THEN 'not measured this cycle (work budget): pgstatindex reads every page, so only the '
                  || 'largest ' || " + BudgetLiteral + @" || ' indexes are measured per run. This one is '
@@ -169,23 +210,44 @@ FROM ranked AS k
 LEFT JOIN LATERAL public.pgstatindex(k.index_oid::regclass) AS s
   ON  k.index_bytes < " + CeilingLiteral + @"
   AND k.size_rank  <= " + BudgetLiteral + @"
+  /* The gate that bounds the statement's real cost. Without this term the two above label rows
+     correctly while still reading every one of them - which is exactly how a 200-index budget
+     came to read 286 GB. */
+  AND k.measured_bytes_through_here <= " + CycleByteBudgetLiteral + @"
 ORDER BY k.index_bytes DESC";
 
     private const string CeilingLiteral = "21474836480";
 
-    /* How many indexes one cycle will actually MEASURE, largest first. 200 rather than a byte budget
-       because the cost is per PAGE and the sizes are wildly uneven: a byte cap would measure three
-       large indexes on one server and four hundred small ones on another, and neither operator could
-       predict what they were getting. A count is legible, and the ORDER BY means the 200 measured are
-       always the ones where bloat is worth reclaiming. */
+    /* How many indexes one cycle will actually MEASURE, largest first: 200 indexes OR
+       CycleMeasureBudgetBytes, whichever comes first.
+
+       A count is the legible half and is kept for that reason - an operator can predict "the 200
+       biggest" in a way they cannot predict a byte figure. But legibility is not a bound: the cost
+       is per PAGE, and a count bounds pages only where count correlates with bytes. On the first
+       production target it did not, and the byte term below is what makes the pair a budget rather
+       than a label. */
     private const string BudgetLiteral = "200";
 
+    /* Kept in the C# type system as well as in the SQL literal so a reader has one authoritative
+       figure and CycleByteBudgetIsThePinnedConstant can pin that the two agree. */
+    private const string CycleByteBudgetLiteral = "21474836480";
+
     /// <summary>
-    /// Five minutes, because even 200 indexes of pages is real work and a slow single index should
-    /// yield a CLASSIFIED timeout rather than a dropped connection. #2617 surfaced as
-    /// <c>Exception while reading from stream</c> - an unclassified Npgsql failure - precisely because
-    /// there was no budget and no override; index_object_stats took the same override for the same
-    /// reason (#1135).
+    /// Five minutes, because even a bounded cycle of pages is real work and a slow single index
+    /// should yield a CLASSIFIED timeout rather than a dropped connection. index_object_stats takes
+    /// the same override for the same reason (#1135).
+    ///
+    /// <para>This is a BACKSTOP, not the bound. The deadline cannot make an over-large statement
+    /// finish - it only decides how long the sweep waits before giving up, and for eleven
+    /// consecutive runs the answer was "the whole five minutes, then nothing". What bounds the work
+    /// is <see cref="CycleMeasureBudgetBytes"/>; a run that needs this deadline has already been
+    /// mis-budgeted.</para>
+    ///
+    /// <para>Npgsql's CommandTimeout is a socket READ timeout that every backend message restarts,
+    /// so it bounds backend SILENCE rather than total elapsed time. <c>pgstatindex</c> sends nothing
+    /// while it scans, so it gets no reprieve from that and the deadline does fire - which is why
+    /// the failures arrive as <c>Exception while reading from stream</c>, the transport's own words
+    /// for a read that ran out of time.</para>
     /// </summary>
     public override int? CommandTimeoutSecondsOverride => 300;
 

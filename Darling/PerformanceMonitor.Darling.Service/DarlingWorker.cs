@@ -5900,10 +5900,61 @@ LIMIT 1";
                 + "rather than waiting in a blocking chain. One sweep skipped; evidence of lock contention "
                 + "on the monitored server, not a monitoring failure."),
 
-            /* Everything else — including a command timeout and a fatal connection error — belongs to the
-               general handler, which logs ERROR and (for ConnectionFatal) forces the reprobe. */
+            /* Everything else belongs to the general handler, which logs ERROR and (for
+               ConnectionFatal) forces the reprobe. A command timeout no longer arrives here as raw
+               transport text — see PostgresTimeoutExplanation and the arm that calls it — but it
+               still lands on ERROR, because a deadline that collected nothing IS a collection
+               failure and must stay inside the error counts that feed collector health. */
             _ => ("ERROR", ex.Message),
         };
+    }
+
+    /// <summary>
+    /// The sentence a PostgreSQL command timeout gets instead of the transport's seven words (#2997).
+    ///
+    /// <para><b>Why this is not folded into <see cref="PostgresFaultOutcome"/>.</b> That method takes a
+    /// <see cref="PostgresException"/>, and a client-side deadline never produces one: Npgsql surfaces it
+    /// as an <c>NpgsqlException</c> wrapping a <c>TimeoutException</c>, with no SQLSTATE to switch on. So
+    /// the classification it needed could not be reached through a SQLSTATE map however wide that map
+    /// grew — the gap was the parameter type, not the code list.</para>
+    ///
+    /// <para><b>The status stays ERROR.</b> The store has five and none of them means "ran out of time";
+    /// PERMISSIONS is the non-fatal-degradation bucket and would wrongly exclude this from the error
+    /// counts, the health band and the collection-failure self-alerts, which is precisely where a
+    /// collector that has never once succeeded belongs. What changes is that the row is now readable:
+    /// the message names the collector, the database, the mechanism and the measured elapsed time, and
+    /// the caller records that elapsed figure instead of a literal zero.</para>
+    ///
+    /// <para><paramref name="serverCancelled"/> splits the two deadlines that both classify as
+    /// <see cref="CollectorTargetFault.CommandTimeout"/>, because the remedy differs and the raw text
+    /// cannot tell them apart: SQLSTATE 57014 is the SERVER cancelling the statement (a
+    /// <c>statement_timeout</c> on the target, which an operator changes on the target), while the
+    /// client-side deadline is ours and is changed here.</para>
+    /// </summary>
+    internal static string PostgresTimeoutExplanation(
+        string collectorName, string? connectedDatabase, long elapsedMs, bool serverCancelled)
+    {
+        var where = string.IsNullOrWhiteSpace(connectedDatabase)
+            ? "the connected database"
+            : $"database '{connectedDatabase}'";
+
+        /* Invariant culture on the grouping separator: this string is read by operators and compared
+           across rows, and a machine-dependent thousands separator makes two identical durations look
+           like different ones. */
+        var elapsed = elapsedMs.ToString("N0", CultureInfo.InvariantCulture);
+
+        return serverCancelled
+            ? $"{collectorName} on {where} was CANCELLED BY THE SERVER after {elapsed} ms (SQLSTATE "
+              + "57014) — the target's own statement_timeout expired, so the deadline that fired is on "
+              + "the monitored server, not here. Nothing was collected this cycle: this is NOT 'there "
+              + "was nothing to collect'."
+            : $"{collectorName} on {where} hit its CLIENT-SIDE command deadline after {elapsed} ms — "
+              + "the collector's CommandTimeoutSecondsOverride expired and Npgsql cancelled the read "
+              + "mid-stream, which is why the transport reports 'Exception while reading from stream' "
+              + "with no SQLSTATE. The statement was still running when it was cut off, so the work "
+              + "asked for does not fit the deadline; raising the deadline is the wrong half of that "
+              + "and shrinking the work is the right one. Nothing was collected this cycle: this is "
+              + "NOT 'there was nothing to collect'.";
     }
 
     /// <summary>
@@ -6007,6 +6058,18 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName);
             return 0;
         }
+
+        /* #2997: wall clock for the whole run, read ONLY by the fault arms below. The success path
+           keeps reporting the runner's own measured sql/storage split and never consults this — a
+           wall clock that included dispatch overhead would quietly widen three published numbers
+           (collection_log.duration_ms, sql_duration_ms and the collector_cost series) to satisfy a
+           log line.
+
+           The fault arms have no split to report, because a fault by definition interrupted whichever
+           phase was running, and what they recorded instead was three literal zeros. That made a
+           300-second death indistinguishable from an instant one and sent two separate investigations
+           after a connection that dies at open. One honest total beats three precise zeros. */
+        var runClock = System.Diagnostics.Stopwatch.StartNew();
 
         try
         {
@@ -6228,6 +6291,41 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        catch (Exception ex) when (
+            server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql
+            && PostgresTargetProvider.Instance.Classify(ex, yieldsOnLockTimeout: false)
+               == CollectorTargetFault.CommandTimeout)
+        {
+            /* #2997: a PostgreSQL deadline, authored rather than left as transport text.
+               pg_index_bloat died here eleven consecutive times reporting only "Exception while
+               reading from stream" — seven words, no collector, no database, no duration — which is
+               indistinguishable from a dropped socket and was read as one twice.
+
+               Deliberately AFTER the PostgresException arm above and not merged into it: this arm has
+               to catch a plain Exception, because a client-side deadline arrives as an
+               NpgsqlException wrapping a TimeoutException and never as a PostgresException at all.
+               SQLSTATE 57014 (the server cancelling) does reach the arm above first, where
+               PostgresFaultOutcome maps it to ERROR and so declines it — which is what lets both
+               deadlines land here and be told apart by type rather than by two separate arms.
+
+               NO reprobe, and that is the same care the general catch takes: the provider classifies
+               this CommandTimeout rather than ConnectionFatal precisely so a slow statement cannot
+               force a reconnect and turn a tuning problem into a reconnect storm. ConnectionFatal is
+               left to the general catch below, which is where the reprobe lives; classifying it here
+               would take the reprobe away and re-create the bug that arm exists to fix. */
+            var elapsedMs = runClock.ElapsedMilliseconds;
+            var serverCancelled = ex is PostgresException { SqlState: "57014" };
+            var explanation = PostgresTimeoutExplanation(
+                collectorName, runtime.ConnectedDatabase, elapsedMs, serverCancelled);
+
+            _logger.LogError("  [{Server}] {Collector} => ERROR (timeout): {Message}",
+                server.Config.DisplayName, collectorName, explanation);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "ERROR", 0, elapsedMs, 0, explanation,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
         catch (Exception ex)
         {
             _logger.LogError("  [{Server}] {Collector} => ERROR: {Message}",
@@ -6262,8 +6360,14 @@ LIMIT 1";
                recorded the fault to the app log, so no signal is lost. */
             try
             {
+                /* #2997 item 3: the run's real elapsed time, not the literal zero this arm used to
+                   store. duration_ms is sqlMs + storageMs, so three zeros made every failure look
+                   instantaneous — a 300-second timeout and a refused connection stored the identical
+                   row, and the number that separates them is the only one an operator needs first.
+                   Read from the stopwatch rather than from the exception, because most faults carry
+                   no duration at all. */
                 await DarlingObservability.LogCollectionAsync(
-                    _postgres!, runtime, collectorName, "ERROR", 0, 0, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                    _postgres!, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             }
             catch
             {

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using Lite.Tests.Helpers;
@@ -183,5 +184,90 @@ public class PgIndexBloatCollectorDefinitionTests
     {
         Assert.NotNull(PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride);
         Assert.True(PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride >= 120);
+    }
+
+    /// <summary>
+    /// The cycle budget bounds BYTES, not just index count (#2997).
+    ///
+    /// <para><b>This is the assertion that would have caught eleven consecutive failures.</b> The count
+    /// budget from #2617 and the 300-second override from #2618 were both in place and both pinned, and
+    /// the collector still died every single run with <c>rows = 0</c> — because 200 sub-ceiling indexes
+    /// on a real Aurora target admit 286 GB, and <c>pgstatindex</c> reads every page of every one of
+    /// them. A count bounds pages only where count correlates with bytes, and the one target that had
+    /// the extension installed was the counterexample.</para>
+    ///
+    /// <para>The gate has to sit on the LATERAL. Labelling rows over the budget while still passing
+    /// every one of them to the function is precisely the shape that shipped: correct
+    /// <c>skipped_reason</c> text on a statement that reads the whole instance anyway.</para>
+    /// </summary>
+    [Fact]
+    public void TheCycleBudget_BoundsBytes_NotJustIndexCount()
+    {
+        var sql = Sql();
+
+        Assert.Contains("measured_bytes_through_here", sql, StringComparison.Ordinal);
+        Assert.Matches(
+            new Regex(@"LEFT JOIN LATERAL[\s\S]*?measured_bytes_through_here\s*<=\s*\d+"), sql);
+    }
+
+    /// <summary>
+    /// Only the indexes that will actually be READ may spend the budget.
+    ///
+    /// <para>An over-ceiling index is never handed to <c>pgstatindex</c>, so it costs no pages. Charging
+    /// it to the byte budget anyway would spend the allowance on work nobody does — and not marginally:
+    /// on the target this bounds, the three over-ceiling indexes total 71 GB against a 20 GB budget, so
+    /// the unfiltered running total would exhaust the budget before the first measurable index and the
+    /// collector would return zero measurements for a second, entirely new reason.</para>
+    /// </summary>
+    [Fact]
+    public void TheByteBudget_ChargesOnlyTheIndexesItWillActuallyRead()
+        => Assert.Matches(
+            new Regex(@"sum\(k\.index_bytes\)\s*FILTER\s*\(WHERE\s+k\.index_bytes\s*<\s*\d+\)"), Sql());
+
+    /// <summary>
+    /// The running total is a running total — ordered largest-first and framed from the start of the
+    /// partition. An unframed window sum would return the WHOLE total on every row, so no row would ever
+    /// be under budget and nothing would be measured; a differently-ordered one would spend the budget
+    /// on small indexes and pass over the big ones, inverting the argument the ORDER BY exists to make.
+    /// </summary>
+    [Fact]
+    public void TheByteBudget_AccumulatesLargestFirst()
+        => Assert.Matches(
+            new Regex(@"OVER \(ORDER BY k\.index_bytes DESC, k\.index_name\s+"
+                      + @"ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\)"), Sql());
+
+    /// <summary>
+    /// Over-budget-by-bytes indexes are RETURNED with a reason, on the same argument as the count budget
+    /// and the size ceiling: an index missing from the result reads as one that does not exist.
+    /// </summary>
+    [Fact]
+    public void OverByteBudgetIndexesAreReturnedWithAReason()
+        => Assert.Matches(
+            new Regex(@"WHEN k\.measured_bytes_through_here\s*>\s*\d+[\s\S]*?"
+                      + @"not measured this cycle \(work budget\)"), Sql());
+
+    /// <summary>
+    /// The SQL literals agree with the constants a reader will find in C#. Two representations of one
+    /// number is the existing shape here (<c>CeilingLiteral</c> beside
+    /// <see cref="PgIndexBloatCollector.MeasureCeilingBytes"/>), and it had no pin — so this reads the
+    /// literal out of the gate it actually governs rather than merely looking for the digits somewhere
+    /// in the query, which a stale second copy would also satisfy.
+    /// </summary>
+    [Fact]
+    public void TheBudgetLiterals_AgreeWithTheirConstants()
+    {
+        var sql = Sql();
+
+        var byteGate = Regex.Match(sql, @"measured_bytes_through_here\s*<=\s*(\d+)");
+        Assert.True(byteGate.Success, "the cycle byte budget no longer gates the LATERAL");
+        Assert.Equal(
+            PgIndexBloatCollector.CycleMeasureBudgetBytes,
+            long.Parse(byteGate.Groups[1].Value, CultureInfo.InvariantCulture));
+
+        var ceilingFilter = Regex.Match(sql, @"FILTER \(WHERE k\.index_bytes < (\d+)\)");
+        Assert.True(ceilingFilter.Success, "the byte budget no longer filters on the per-index ceiling");
+        Assert.Equal(
+            PgIndexBloatCollector.MeasureCeilingBytes,
+            long.Parse(ceilingFilter.Groups[1].Value, CultureInfo.InvariantCulture));
     }
 }

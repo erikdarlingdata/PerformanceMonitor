@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.IO;
+using System.Text.RegularExpressions;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -205,5 +207,146 @@ public class PostgresFaultOutcomeTests
         var status = DarlingWorker.PostgresFaultOutcome(Pg(sqlState), PlainCollector).Status;
 
         Assert.Contains(status, new[] { "SUCCESS", "PERMISSIONS", "ERROR", "SESSION_MISSING", "YIELDED" });
+    }
+
+    /// <summary>
+    /// The gap #2997 is about, stated as an assertion: a client-side command deadline is NOT a
+    /// <see cref="PostgresException"/>, so no amount of widening the SQLSTATE map above could ever
+    /// classify it.
+    ///
+    /// <para>Npgsql raises an <c>NpgsqlException</c> wrapping a <c>TimeoutException</c> and carrying no
+    /// SQLSTATE at all — the transport's "Exception while reading from stream". The provider already
+    /// classifies that shape correctly; what could not reach it was <see cref="DarlingWorker"/>'s
+    /// PostgreSQL arm, whose parameter type excludes it. Eleven consecutive <c>pg_index_bloat</c>
+    /// failures were logged as raw transport text for exactly this reason, and two separate
+    /// investigations read them as a connection dying at open.</para>
+    /// </summary>
+    [Fact]
+    public void AClientSideDeadlineIsNotAPostgresException_SoTheSqlStateMapCannotReachIt()
+    {
+        var timeout = new NpgsqlException("Exception while reading from stream", new TimeoutException());
+
+        Assert.IsNotType<PostgresException>(timeout);
+        Assert.Equal(
+            CollectorTargetFault.CommandTimeout,
+            PostgresTargetProvider.Instance.Classify(timeout, yieldsOnLockTimeout: false));
+    }
+
+    /// <summary>
+    /// The authored sentence carries the four things the raw seven words did not: which collector, which
+    /// database, how long it actually ran, and that nothing was collected.
+    /// </summary>
+    [Fact]
+    public void TheTimeoutExplanationNamesTheCollectorTheDatabaseAndTheMeasuredElapsedTime()
+    {
+        var explanation = DarlingWorker.PostgresTimeoutExplanation(
+            "pg_index_bloat", "appdb", elapsedMs: 300_142, serverCancelled: false);
+
+        Assert.Contains("pg_index_bloat", explanation, StringComparison.Ordinal);
+        Assert.Contains("appdb", explanation, StringComparison.Ordinal);
+        Assert.Contains("300,142 ms", explanation, StringComparison.Ordinal);
+
+        /* The house rule on honest empties: a run that read nothing must never be mistakable for a run
+           that found nothing. */
+        Assert.Contains("Nothing was collected this cycle", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Two deadlines both classify as <see cref="CollectorTargetFault.CommandTimeout"/> and they are
+    /// fixed in different places — SQLSTATE 57014 is the TARGET's <c>statement_timeout</c>, the other is
+    /// ours. A single sentence covering both would send an operator to the wrong knob half the time.
+    /// </summary>
+    [Fact]
+    public void TheTimeoutExplanationDistinguishesTheServersDeadlineFromOurs()
+    {
+        var client = DarlingWorker.PostgresTimeoutExplanation(
+            "pg_index_bloat", "appdb", elapsedMs: 300_000, serverCancelled: false);
+        var server = DarlingWorker.PostgresTimeoutExplanation(
+            "pg_index_bloat", "appdb", elapsedMs: 300_000, serverCancelled: true);
+
+        Assert.Contains("CLIENT-SIDE", client, StringComparison.Ordinal);
+        Assert.DoesNotContain("57014", client, StringComparison.Ordinal);
+
+        Assert.Contains("CANCELLED BY THE SERVER", server, StringComparison.Ordinal);
+        Assert.Contains("57014", server, StringComparison.Ordinal);
+        Assert.Contains("statement_timeout", server, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An unknown connected database degrades to a phrase rather than inventing a name — the same rule
+    /// <see cref="DarlingWorker.PostgresFaultOutcome"/>'s ObjectMissing arm follows via WhereToCreateIt.
+    /// </summary>
+    [Fact]
+    public void TheTimeoutExplanationDegradesWhenTheDatabaseIsUnknown()
+    {
+        var explanation = DarlingWorker.PostgresTimeoutExplanation(
+            "pg_index_bloat", connectedDatabase: null, elapsedMs: 1, serverCancelled: false);
+
+        Assert.Contains("the connected database", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("''", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The ERROR arms record the run's REAL elapsed time, not the literal zeros they used to store
+    /// (#2997 item 3).
+    ///
+    /// <para>A wiring invariant, so it is pinned in the source the way this suite already pins the
+    /// #1648 middleware order and the #1706 upgrade catch order: the value is written by
+    /// <c>LogCollectionAsync</c> inside a live sweep, so no pure test can observe it, and the defect is
+    /// an argument list rather than a logic error. Three literal zeros made a 300-second death and an
+    /// instantly-refused connection store byte-identical rows — and <c>duration_ms</c> is
+    /// <c>sqlMs + storageMs</c>, so it destroyed the one number that separates them.</para>
+    /// </summary>
+    [Fact]
+    public void TheErrorArmsRecordRealElapsedTimeRatherThanLiteralZeros()
+    {
+        var worker = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        /* The stopwatch the fault arms read. */
+        Assert.Contains("var runClock = System.Diagnostics.Stopwatch.StartNew();", worker, StringComparison.Ordinal);
+
+        /* No ERROR row may be written with the old three-zero argument list. This is the assertion that
+           fails if the fix is reverted: the arms once read `"ERROR", 0, 0, 0`. */
+        Assert.DoesNotContain("collectorName, \"ERROR\", 0, 0, 0", worker, StringComparison.Ordinal);
+
+        /* Both ERROR writes — the authored timeout arm and the general catch — now pass a measured
+           figure in the sqlMs slot that feeds duration_ms. */
+        Assert.Equal(2, Regex.Matches(
+            worker,
+            @"collectorName, ""ERROR"", 0, (?:elapsedMs|runClock\.ElapsedMilliseconds), 0").Count);
+    }
+
+    /// <summary>
+    /// The timeout arm must NOT force a reconnect. The provider classifies a deadline as
+    /// <see cref="CollectorTargetFault.CommandTimeout"/> rather than
+    /// <see cref="CollectorTargetFault.ConnectionFatal"/> specifically so a slow statement cannot turn a
+    /// tuning problem into a reconnect storm, and an arm that nulled the runtime would undo that while
+    /// also taking the reprobe away from the faults that genuinely need it.
+    /// </summary>
+    [Fact]
+    public void TheTimeoutArmDoesNotStealTheReprobeFromConnectionFatal()
+    {
+        var timeout = new NpgsqlException("Exception while reading from stream", new TimeoutException());
+        var dead = new NpgsqlException("connection was closed");
+
+        Assert.Equal(
+            CollectorTargetFault.CommandTimeout,
+            PostgresTargetProvider.Instance.Classify(timeout, yieldsOnLockTimeout: false));
+        Assert.Equal(
+            CollectorTargetFault.ConnectionFatal,
+            PostgresTargetProvider.Instance.Classify(dead, yieldsOnLockTimeout: false));
+    }
+
+    private static string ReadSource(string relativePath)
+    {
+        var dir = AppContext.BaseDirectory;
+        while (dir is not null && !File.Exists(Path.Combine(dir, relativePath)))
+        {
+            dir = Directory.GetParent(dir)?.FullName;
+        }
+
+        Assert.NotNull(dir);
+        return File.ReadAllText(Path.Combine(dir!, relativePath));
     }
 }
