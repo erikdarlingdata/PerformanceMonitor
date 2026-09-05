@@ -2464,12 +2464,7 @@ LIMIT 1", connection))
            list is a defect only a live store can see, and it would silently read a phase out of a boolean.
            So the schema is asserted to be the LAST of exactly seven selected columns, which is the property
            the C# index depends on. */
-        var selected = read[(read.IndexOf("SELECT", StringComparison.Ordinal) + "SELECT".Length)
-                ..read.IndexOf("FROM timescaledb_information.jobs", StringComparison.Ordinal)]
-            .Split(',')
-            .Select(part => part.Trim().Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal))
-            .Where(part => part.Length > 0)
-            .ToArray();
+        var selected = SelectedColumns(read);
 
         /* Control on the split itself: a CASE expression carries no top-level comma, so seven parts is the
            column count and not an artifact of splitting inside one. */
@@ -2482,6 +2477,24 @@ LIMIT 1", connection))
            purpose — that is #1778's reach. */
         Assert.Contains("j.hypertable_schema", read, StringComparison.Ordinal);
         Assert.DoesNotContain("hypertable_schema = ", read, StringComparison.Ordinal);
+
+        /* THE FALLBACK'S SHAPE PARITY. fixed_schedule and initial_start are younger columns than
+           schedule_interval, so a store that lacks them takes the narrow read rather than losing #1778's
+           cadence converge along with a phase it cannot use. One reader serves both statements, so the
+           narrow one's columns must be the wide one's FIRST FOUR, in the same order — a divergence there
+           reads a phase out of the wrong column and only a live old-runtime store could see it. Raised by
+           review. */
+        var narrowSelected = SelectedColumns(TimescaleSupport.CompressionCadenceOnlyStateSql);
+
+        Assert.Equal(4, narrowSelected.Length);
+        Assert.Equal(selected[..4], narrowSelected);
+        Assert.DoesNotContain("fixed_schedule", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("initial_start", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hypertable_schema", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+
+        /* Same scope as the wide read, so falling back cannot quietly change WHICH jobs get converged. */
+        Assert.Contains("proc_name LIKE '%compression%'", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+        Assert.Contains("proc_name LIKE '%columnstore%'", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
 
         var phased = TimescaleSupport.SetCompressionSchedulePhaseSql;
 
@@ -2875,6 +2888,19 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
             });
         }
     }
+
+    /// <summary>The top-level items of a statement's SELECT list, trimmed and newline-flattened — used to
+    /// assert the ORDINAL contract the compression converge's reader depends on. Split on commas, which is
+    /// safe for these two statements specifically because neither carries a top-level comma inside an
+    /// expression; the caller asserts the resulting count, which is what would catch it if that ever stopped
+    /// being true.</summary>
+    private static string[] SelectedColumns(string sql)
+        => sql[(sql.IndexOf("SELECT", StringComparison.Ordinal) + "SELECT".Length)
+                ..sql.IndexOf("FROM timescaledb_information.jobs", StringComparison.Ordinal)]
+            .Split(',')
+            .Select(part => part.Trim().Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal))
+            .Where(part => part.Length > 0)
+            .ToArray();
 
     /// <summary>A compression policy's schedule as the store reports it: cadence, whether that cadence is a
     /// FIXED schedule, and which minute of the hour it is anchored to (in UTC, for the same reason the shipped

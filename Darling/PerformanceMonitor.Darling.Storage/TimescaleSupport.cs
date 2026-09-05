@@ -3258,6 +3258,13 @@ AND   j.hypertable_name = '{relation}'";
     /// decisions, and the retention jobs in particular carry an armed/paused state (#1680) this must never
     /// disturb.</para>
     ///
+    /// <para><b>Two of these columns are younger than the rest of the read, which is why
+    /// <see cref="CompressionCadenceOnlyStateSql"/> exists.</b> <c>fixed_schedule</c> and
+    /// <c>initial_start</c> entered <c>timescaledb_information.jobs</c> later than <c>schedule_interval</c>
+    /// did, so on a store old enough to lack them this statement throws — and #1778's cadence converge, which
+    /// only ever needed the older columns, would be lost with it. The caller retries with the narrow read
+    /// instead of returning zero.</para>
+    ///
     /// <para>The phase comes back as a minute-of-hour already converted to UTC. A bare
     /// <c>EXTRACT(MINUTE FROM initial_start)</c> would read the SESSION time zone, which on any of the
     /// half-hour and quarter-hour zones is a store-wide silent skew rather than a local oddity.</para>
@@ -3282,6 +3289,32 @@ SELECT
         ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
     END AS phase_minutes,
     j.hypertable_schema
+FROM timescaledb_information.jobs AS j
+WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
+
+    /// <summary>
+    /// The same read as <see cref="CompressionPolicyStateSql"/> minus the two columns the PHASE needs — the
+    /// fallback for a store whose <c>timescaledb_information.jobs</c> does not have them.
+    ///
+    /// <para><b>This exists because widening a read can turn a partial capability into a total outage, and
+    /// that direction is worse than the one it was widening for.</b> <c>schedule_interval</c> has been in that
+    /// view far longer than <c>fixed_schedule</c> and <c>initial_start</c> have. #1778's cadence converge only
+    /// ever needed the former, so a store old enough to lack the latter two used to be converged fine — and
+    /// once the phase columns were added to the one read this function makes, that store's probe would throw,
+    /// be caught, return 0, and lose the cadence converge it already had. A silent TOTAL regression in the
+    /// name of a feature it cannot use. Falling back keeps the old behaviour exactly: cadence converged, phase
+    /// skipped. Raised by review.</para>
+    ///
+    /// <para>The first four columns are byte-identical to the wide read's, in the same order, because the
+    /// caller reads both with one set of ordinals — the phase columns are what it stops reading, not a
+    /// different shape it starts reading.</para>
+    /// </summary>
+    public const string CompressionCadenceOnlyStateSql = @"
+SELECT
+    j.job_id,
+    j.hypertable_name,
+    j.schedule_interval::text,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds
 FROM timescaledb_information.jobs AS j
 WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
 
@@ -3377,21 +3410,28 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         var desiredSeconds = (long)CompressScheduleSpan.TotalSeconds;
 
         var stale = new List<(int JobId, string? Hypertable, string? Interval, bool WasFixed, int? WasPhase, int? Phase)>();
-        try
+
+        /* One reader for both statements: the narrow one is the wide one's first four columns in the same
+           order, so withPhase decides which ordinals are READ rather than selecting a different shape. */
+        async Task ReadStateAsync(string sql, bool withPhase)
         {
-            using var probe = new NpgsqlCommand(CompressionPolicyStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            stale.Clear();
+
+            using var probe = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds };
             await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 var hypertable = reader.IsDBNull(1) ? null : reader.GetString(1);
                 var intervalText = reader.IsDBNull(2) ? null : reader.GetString(2);
                 var seconds = reader.IsDBNull(3) ? (long?)null : reader.GetInt64(3);
-                var fixedSchedule = !reader.IsDBNull(4) && reader.GetBoolean(4);
-                var wasPhase = reader.IsDBNull(5) ? (int?)null : reader.GetInt32(5);
+
+                var fixedSchedule = withPhase && !reader.IsDBNull(4) && reader.GetBoolean(4);
+                var wasPhase = withPhase && !reader.IsDBNull(5) ? reader.GetInt32(5) : (int?)null;
 
                 /* Schema-exact, because CompressionPhaseOrder holds BARE names: a foreign hypertable
                    named like one of ours must not inherit its minute. */
-                var ours = !reader.IsDBNull(6)
+                var ours = withPhase
+                    && !reader.IsDBNull(6)
                     && string.Equals(reader.GetString(6), PgSchemaGenerator.CollectSchema, StringComparison.Ordinal);
 
                 int? phase = ours && hypertable is not null && TryCompressionPhaseMinutesFor(hypertable, out var slot)
@@ -3417,13 +3457,33 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     phase));
             }
         }
+
+        try
+        {
+            await ReadStateAsync(CompressionPolicyStateSql, withPhase: true);
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* A plain-PostgreSQL store (the views do not exist), a TimescaleDB too old to expose
-               initial_start, or a store hiccup. The caller already gates on the extension; nothing to
-               converge either way. */
-            logger?.LogDebug("Compression-schedule converge: could not read policy jobs: {Message}", ex.Message);
-            return 0;
+            /* The wide read names fixed_schedule and initial_start, which entered
+               timescaledb_information.jobs later than schedule_interval did. Retry WITHOUT them rather than
+               giving up: a store old enough to lack them was converged fine by #1778 before the phase was
+               added to this read, and returning 0 here would silently take that away as well. See
+               CompressionCadenceOnlyStateSql. */
+            logger?.LogInformation(
+                "TimescaleDB: could not read compression-policy schedules with their phase ({Message}) — retrying without it. A store whose job catalog predates fixed_schedule/initial_start still gets the {Interval} tick (#1778); its compression policies keep TimescaleDB's finish-to-start scheduling and will drift through the refresh slots (#3035).",
+                ex.Message, CompressScheduleInterval);
+
+            try
+            {
+                await ReadStateAsync(CompressionCadenceOnlyStateSql, withPhase: false);
+            }
+            catch (Exception narrow) when (narrow is not OperationCanceledException)
+            {
+                /* A plain-PostgreSQL store (the views do not exist) or a store hiccup. The caller already
+                   gates on the extension; nothing to converge either way. */
+                logger?.LogDebug("Compression-schedule converge: could not read policy jobs: {Message}", narrow.Message);
+                return 0;
+            }
         }
 
         var converged = 0;
