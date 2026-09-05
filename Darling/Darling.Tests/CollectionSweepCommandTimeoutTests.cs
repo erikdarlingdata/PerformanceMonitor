@@ -188,20 +188,6 @@ public sealed class CollectionSweepCommandTimeoutTests
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// The deadline, judged over STRIPPED source like the construction scan above it — the two halves of
-    /// one question should not disagree about what counts as code.
-    ///
-    /// <para>Stripping the VALUE span is not unconditionally right for every pin in this family: one whose
-    /// value regex has to see inside a string LITERAL would be broken by it. It is right for this one
-    /// because the pattern targets an assignment in code, and the failure it closes is a false CLEAN — a
-    /// comment in the two-statement window spelling <c>command.CommandTimeout =</c> would certify an
-    /// untimed site, at a line where no edit could ever fix it.</para>
-    /// </summary>
-    private static readonly Regex s_setsTimeout = new(
-        @"CommandTimeout\s*=",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    /// <summary>
     /// The store's command FACTORY, as the receiver reads immediately behind a <c>CreateCommand</c>:
     /// <c>_postgres</c> is the worker's and the ingestor's field, <c>postgres</c> the
     /// <c>NpgsqlDataSource</c> the static helpers take as a parameter. The optional <c>!</c> is the
@@ -263,7 +249,8 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// <c>NpgsqlBinaryImporter.Timeout</c>, matched on the property rather than on a variable name so a
     /// site that calls its importer something other than <c>importer</c> still counts.
     ///
-    /// <para>Judged over STRIPPED source, for the reason on <see cref="s_setsTimeout"/> and with the same
+    /// <para>Judged over STRIPPED source, for the reason on
+    /// <see cref="CommandDeadlineScanner.SetsAnExplicitDeadline"/> and with the same
     /// justification: it targets code, not a literal. The leading dot is what made this one's
     /// comment-immunity fixture pass for the wrong reason until the fixture was corrected — see
     /// <see cref="TheCopyScanner_SeesTheImporterDeadlineWithoutBorrowingANeighbours"/>.</para>
@@ -295,12 +282,15 @@ public sealed class CollectionSweepCommandTimeoutTests
             {
                 total++;
 
-                /* Two statements, for the reason #2810's pin records: the CreateCommand shape's method
-                   result cannot take an object initializer, so its deadline is the statement AFTER the
-                   construction. The span is walked literal- and comment-aware, which is load-bearing
-                   rather than defensive here — these members embed verbatim SQL carrying both semicolons
-                   and quote characters. */
-                if (!SetsTheSweepDeadline(code, ctor.Index))
+                /* The shared judgement (#2938), which asks in two halves: an initializer is read from the
+                   CONSTRUCTION span, an assignment from the two-statement span and only when it NAMES the
+                   variable bound here. Both halves are load-bearing for this pin — the CreateCommand
+                   shape cannot take an initializer, so its deadline is the statement after the
+                   construction, and all thirteen of these sites are answered by the name-bound half. The
+                   spans are walked literal- and comment-aware, which is load-bearing rather than
+                   defensive here: these members embed verbatim SQL carrying both semicolons and quote
+                   characters. */
+                if (!CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
                 {
                     offenders.Add($"{file} {member} +{LineOf(code, ctor.Index)}");
                 }
@@ -530,7 +520,8 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// The deadline scan reads CODE, not prose — the positive control for judging the value span over
     /// stripped source, and the command half of the fixture
     /// <see cref="TheCopyScanner_SeesTheImporterDeadlineWithoutBorrowingANeighbours"/> is for the COPY
-    /// half. Without it the fix to <see cref="s_setsTimeout"/> would have no witness at all.
+    /// half. Without it the stripped-source half of
+    /// <see cref="CommandDeadlineScanner.SetsAnExplicitDeadline"/> would have no witness at all.
     ///
     /// <para>The first two fixtures are the failure being closed, and the comment is written the way
     /// someone documenting the absence of a deadline actually writes it — quoting the assignment. Over raw
@@ -566,18 +557,50 @@ public sealed class CollectionSweepCommandTimeoutTests
         var ctor = s_commandCtor.Match(code);
 
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
-        Assert.Equal(expectedTimed, SetsTheSweepDeadline(code, ctor.Index));
+        Assert.Equal(expectedTimed, CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index));
     }
 
     /// <summary>
-    /// Whether the construction at <paramref name="at"/> carries a deadline, over the TWO statements from
-    /// it — the <c>CreateCommand</c> shape's result cannot take an object initializer, so its deadline is
-    /// the statement after the construction. <paramref name="code"/> is stripped source, so a
-    /// <c>CommandTimeout =</c> written in a comment or inside the member's verbatim SQL cannot certify an
-    /// untimed site.
+    /// <para>A deadline written on a NEIGHBOUR is not this site's deadline — the two false accepts the
+    /// shared judgement closes, and the reason this pin adopting it is a behaviour change rather than a
+    /// tidy-up. Both are invisible to a single bare <c>CommandTimeout\s*=</c> over the two-statement span,
+    /// which is what this pin asked before #2938.</para>
+    ///
+    /// <para>The first is the FOLLOWING construction's own initializer: an untimed command directly ahead
+    /// of a timed one sits inside the untimed one's statement window, so the window's deadline is real —
+    /// it just belongs to the next site. Reading initializers from the CONSTRUCTION span excludes it.</para>
+    ///
+    /// <para>The second is a SIBLING's assignment inside an untimed <c>using</c> header's block, which
+    /// spends both counted statements on the sibling. No statement count or scope bound can exclude that
+    /// one — it is in the same scope and in the very next statement — so only the NAME the assignment
+    /// qualifies can. That half is not hypothetical here: all thirteen census sites are answered by it,
+    /// two of them through receivers not called <c>command</c>.</para>
     /// </summary>
-    private static bool SetsTheSweepDeadline(string code, int at)
-        => s_setsTimeout.IsMatch(CSharpSourceWalker.StatementSpanFrom(code, at, statements: 2));
+    [Theory]
+    [InlineData(
+        "using var first = new NpgsqlCommand(A, connection);\n"
+        + "using var second = new NpgsqlCommand(B, connection) { CommandTimeout = 60 };\n",
+        false)]
+    [InlineData(
+        "using (var command = connection.CreateCommand())\n"
+        + "{\n"
+        + "    using var sibling = connection.CreateCommand();\n"
+        + "    sibling.CommandTimeout = 10;\n"
+        + "}\n",
+        false)]
+    [InlineData(
+        "using var command = new NpgsqlCommand(A, connection);\n"
+        + "command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;\n"
+        + "using var second = new NpgsqlCommand(B, connection);\n",
+        true)]
+    public void TheDeadlineScanner_DoesNotBorrowANeighboursDeadline(string source, bool expectedTimed)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var ctor = s_commandCtor.Match(code);
+
+        Assert.True(ctor.Success, "the fixture did not contain a command construction");
+        Assert.Equal(expectedTimed, CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index));
+    }
 
     /// <summary>
     /// The member extractor, pinned separately. It is the piece with no precedent in this sweep — every
