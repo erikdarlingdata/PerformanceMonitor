@@ -120,7 +120,7 @@ public sealed class AlertEngine
     /* The collection_time of the wait_stats row(s) last actually fired on. Read adapters answer
        "what's the newest poison-wait row within the last 10 minutes", which is independent of
        whether it is NEW since the previous ask — at fleet load the collector's delivered cadence
-       can lag the alert cooldown (PerformanceMonitor's own dogfooding on prod-pos-use2-monitor-01
+       can lag the alert cooldown (PerformanceMonitor's own dogfooding on <monitor-host>
        caught byte-identical duplicate alerts ~5-7 minutes apart), so the cooldown elapsing is not
        proof a fresh observation exists. Poison wait is deliberately NOT level-triggered like CPU
        (which resamples live every sweep): a delta is one collector cycle's computation, and
