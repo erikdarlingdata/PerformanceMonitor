@@ -31,10 +31,9 @@ namespace PerformanceMonitorLite.Tests;
 /// bounds. A helper-only test would pass with the plumbing missing, which is exactly the shape of bug the
 /// #2213 review found four of.</para>
 /// </summary>
-/* The server-local half below reads ServerTimeHelper.UtcOffsetMinutes, a process-wide mutable static that a
-   sibling class SETS for its duration. xUnit runs test classes in parallel, so this joins the collection the
-   other offset-reading classes already use rather than racing them into a window hours away from its rows. */
-[Collection("server-time-helper")]
+/* Runs fully parallel: every read exercised here now takes its UTC offset from the store per server_id, so
+   nothing in this class reads or writes ServerTimeHelper's process-wide static and a sibling class setting it
+   cannot move a window out from under a seeded row. */
 public sealed class AsOfWindowAnchorTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     /* Outside every default window on the surface (the widest default is 24 hours). The two windows are
@@ -191,42 +190,40 @@ public sealed class AsOfWindowAnchorTests : IClassFixture<SharedDuckDbFixture>, 
     /// Two families, two time bases, one instant — a bug here would shift the window by the monitored
     /// server's offset and still look plausible.
     ///
-    /// <para><b>The offset is SET, not read</b> (review catch). Reading whatever
-    /// <c>ServerTimeHelper.UtcOffsetMinutes</c> happens to be means running at 0 on any normal machine, and
-    /// at 0 a correct conversion and no conversion at all produce identical results — the test would pass
-    /// vacuously for exactly the bug its own summary names. UTC+5:30 is used because a half-hour offset also
-    /// catches an implementation that rounds to whole hours. Saved and restored, and this class shares the
-    /// <c>server-time-helper</c> collection so the write cannot land under a sibling class mid-read.</para>
+    /// <para><b>A non-zero offset is required, not incidental.</b> At offset 0 a correct conversion and no
+    /// conversion at all produce identical results, so the test would pass vacuously for exactly the bug its
+    /// own summary names. UTC+5:30 is used because a half-hour offset also catches an implementation that
+    /// rounds to whole hours.</para>
+    ///
+    /// <para><b>The offset is SEEDED, not set on the static.</b> It used to be assigned to
+    /// <c>ServerTimeHelper.UtcOffsetMinutes</c>, which made this test the thing that HID a second defect: the
+    /// tool took its window from that static rather than from the server it had resolved, and handing the
+    /// static the right answer first meant the coupling never showed. The offset now travels the way the
+    /// production path supplies it — a collected <c>server_properties.utc_offset_minutes</c> for this
+    /// server_id — and the static is left alone. <c>McpServerLocalOffsetTests</c> owns the per-server
+    /// contract; this test is back to being only about the anchor.</para>
     /// </summary>
     [Fact]
     public async Task TheAnchorAlsoMoves_AServerLocalWindow()
     {
-        var savedOffset = ServerTimeHelper.UtcOffsetMinutes;
-        try
-        {
-            ServerTimeHelper.UtcOffsetMinutes = 330; // UTC+5:30
+        const int offset = 330; // UTC+5:30
+        await SeedServerOffsetAsync(offset);
 
-            var now = DateTime.UtcNow;
-            var incident = now.AddHours(-30);
+        var now = DateTime.UtcNow;
+        var incident = now.AddHours(-30);
 
-            /* sample_time is the monitored server's LOCAL wall clock, so the fixture is seeded in that base —
-               the read's window is server-local and the anchor arrives in UTC, and the point of the test is
-               that the conversion between them happens exactly once. */
-            var offset = ServerTimeHelper.UtcOffsetMinutes;
-            await SeedCpuAsync(incident.AddMinutes(offset), 91);
-            await SeedCpuAsync(now.AddMinutes(-10).AddMinutes(offset), 12);
+        /* sample_time is the monitored server's LOCAL wall clock, so the fixture is seeded in that base —
+           the read's window is server-local and the anchor arrives in UTC, and the point of the test is
+           that the conversion between them happens exactly once. */
+        await SeedCpuAsync(incident.AddMinutes(offset), 91);
+        await SeedCpuAsync(now.AddMinutes(-10).AddMinutes(offset), 12);
 
-            var anchored = await McpCpuTools.GetCpuUtilization(
-                _dataService, _serverManager, "TestServer", 4, incident.AddMinutes(30).ToString("o"));
-            Assert.Equal(new[] { 91 }, SqlCpuIn(anchored));
+        var anchored = await McpCpuTools.GetCpuUtilization(
+            _dataService, _serverManager, "TestServer", 4, incident.AddMinutes(30).ToString("o"));
+        Assert.Equal(new[] { 91 }, SqlCpuIn(anchored));
 
-            var live = await McpCpuTools.GetCpuUtilization(_dataService, _serverManager, "TestServer");
-            Assert.Equal(new[] { 12 }, SqlCpuIn(live));
-        }
-        finally
-        {
-            ServerTimeHelper.UtcOffsetMinutes = savedOffset;
-        }
+        var live = await McpCpuTools.GetCpuUtilization(_dataService, _serverManager, "TestServer");
+        Assert.Equal(new[] { 12 }, SqlCpuIn(live));
     }
 
     // ── helpers ──
@@ -293,6 +290,29 @@ public sealed class AsOfWindowAnchorTests : IClassFixture<SharedDuckDbFixture>, 
         P(_serverId);
         P(at);
         P(sqlCpu);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// The collected <c>server_properties.utc_offset_minutes</c> a server-local read resolves this server's
+    /// window from. The NOT NULL edition/hardware columns are filled with values nothing here reads.
+    /// </summary>
+    private async Task SeedServerOffsetAsync(int utcOffsetMinutes)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO server_properties
+            (collection_id, collection_time, server_id, server_name,
+             edition, product_version, product_level, engine_edition,
+             cpu_count, hyperthread_ratio, physical_memory_mb, utc_offset_minutes)
+            VALUES ($1, $2, $3, 'TestServer', 'Developer Edition', '16.0.4150.1', 'RTM', 3, 8, 1, 16384, $4)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--);
+        P(DateTime.UtcNow);
+        P(_serverId);
+        P(utcOffsetMinutes);
         await cmd.ExecuteNonQueryAsync();
     }
 }

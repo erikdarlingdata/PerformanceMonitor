@@ -35,9 +35,9 @@ namespace PerformanceMonitorLite.Services;
  * ServerTimeHelper.FormatServerTime (naive-UTC -> display) exactly like the deadlock / blocked-process grids.
  * The Default Trace event_time is the monitored server's LOCAL StartTime (ft.StartTime, stored raw) — that
  * read windows on the server-LOCAL bounds from GetTimeRangeServerLocal and de-skews each row's server-local
- * event_time to naive-UTC (subtract the connected server's UtcOffsetMinutes) BEFORE the row VM, so a Default
- * Trace row and a system_health row from the same instant render the same wall-clock time and a merged
- * System Events timeline sorts consistently.
+ * event_time to naive-UTC (subtract THAT server's utc offset, the one the caller passed alongside its
+ * server_id) BEFORE the row VM, so a Default Trace row and a system_health row from the same instant render
+ * the same wall-clock time and a merged System Events timeline sorts consistently.
  */
 
 /// <summary>Shared render of a naive-UTC event timestamp for the System Events grids — the same
@@ -630,13 +630,21 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
     /// Significant Default Trace events for the window, newest first, from the v_default_trace_events archive
     /// view. The Default Trace StartTime is the monitored server's LOCAL wall clock (ft.StartTime, stored
     /// raw), so this windows on the server-LOCAL bounds from <see cref="GetTimeRangeServerLocal"/> and
-    /// de-skews each row's server-local event_time to naive-UTC (subtracting the connected server's
-    /// <see cref="ServerTimeHelper.UtcOffsetMinutes"/>) BEFORE the row VM, so the returned timestamps share
+    /// de-skews each row's server-local event_time to naive-UTC (subtracting that server's UTC offset)
+    /// BEFORE the row VM, so the returned timestamps share
     /// the same UTC frame as the system_health rows and render/sort consistently on the tab. #1319: the
     /// global database filter is pushed into SQL on <c>database_name</c>. The ErrorLog severity gate is
     /// applied on read via the shared <see cref="DefaultTraceEventSignificance"/>.
     /// </summary>
-    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    /// <param name="utcOffsetMinutes">
+    /// <paramref name="serverId"/>'s OWN UTC offset. Used TWICE here — to build the server-local window and
+    /// to de-skew each returned row — and both uses read the one resolved value, so the bounds and the
+    /// timestamps can never disagree about which server's clock they are in. <c>null</c> means "use the
+    /// desktop UI's selected-tab offset" (<see cref="ServerTimeHelper.UtcOffsetMinutes"/>); see
+    /// <see cref="LocalDataService.GetCpuUtilizationAsync"/> for why a caller that picks its own
+    /// <paramref name="serverId"/> must not take that default.
+    /// </param>
+    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? utcOffsetMinutes = null)
     {
         using var _q = TimeQuery("GetDefaultTraceEventsAsync", "v_default_trace_events significant-set read");
         using var connection = await OpenConnectionAsync();
@@ -644,7 +652,8 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
 
         /* Default Trace event_time is server-LOCAL, so window on server-local bounds (the same helper the
            CPU/sample_time reads use). Bind db filter params immediately after the 3 fixed params ($4+). */
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc);
+        var offset = utcOffsetMinutes ?? ServerTimeHelper.UtcOffsetMinutes;
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc, offset);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -673,8 +682,6 @@ ORDER BY event_time DESC";
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
-
-        var offset = ServerTimeHelper.UtcOffsetMinutes;
 
         var rows = new List<DefaultTraceEventRow>();
         using var reader = await command.ExecuteReaderAsync();
