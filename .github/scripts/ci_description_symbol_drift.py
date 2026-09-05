@@ -115,7 +115,10 @@ def claim_scope(body, sections=AFFIRMATIVE_SECTIONS):
 BACKTICK = re.compile(r'``([^`]+)``|`([^`\n]+)`')
 SOURCE_EXT = ('cs', 'csproj', 'sql', 'xaml', 'json', 'props', 'targets', 'sln', 'ps1', 'sh',
               'yml', 'yaml', 'md', 'cff', 'config', 'py')
-HUMP = re.compile(r'[a-z0-9][A-Z]')
+# A case hump is what separates a symbol from a prose word. The second alternative is for
+# acronym-prefixed names -- IOException, IPAddress, DbCommand -- which have no lowercase-to-
+# uppercase transition anywhere and were read as prose without it.
+HUMP = re.compile(r'[a-z0-9][A-Z]|[A-Z]{2}[a-z]')
 IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 MEMBER = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$')
 FILENAME = re.compile(r'^(?:[A-Za-z0-9_.+-]+/)*([A-Za-z0-9_.+-]+)\.([A-Za-z0-9]+)$')
@@ -146,8 +149,19 @@ def classify(span):
     if text[0] in '/-':                         # /api/ping is a route literal; -flag is a switch
         return None
     named_file = FILENAME.match(text)
-    if named_file and named_file.group(2).lower() in SOURCE_EXT:
-        return ('file', named_file.group(1) + '.' + named_file.group(2))
+    if named_file:
+        suffix = named_file.group(2)
+        if suffix.lower() in SOURCE_EXT:
+            return ('file', named_file.group(1) + '.' + suffix)
+        # An all-lowercase suffix is a FILE extension, so a name wearing one that is not a
+        # source extension is a build output or an asset -- `MyLib.dll`, `WidgetHost.exe`.
+        # Rejecting it here matters because the MEMBER branch below would otherwise accept it
+        # and take the EXTENSION as the member name, so `MyLib.dll` would count as found
+        # against any diff whose text contains the token `dll`: a false clear, from a span
+        # naming something that is not source at all. A member path is safe from this test
+        # because its last component carries a capital (`ServerTimeHelper.UtcOffsetMinutes`).
+        if suffix.islower():
+            return None
     if '/' in text:
         return None
     if text.isupper():                          # wait types, env vars, HEAD, SQL keywords
@@ -314,7 +328,13 @@ def self_test():
     # stays green -- which is how this row came to exist.
     for span in ('SOS_SCHEDULER_YIELD', 'HEAD', 'BASE64URL', 'net10.0', '[Theory]', 'MOVED=0',
                  r'\.CommandTimeout\s*=', 'dotnet build -c Debug', '/api/ping',
-                 '*CommandTimeoutTests.cs', 'core.autocrlf', 'dev', '0/8'):
+                 '*CommandTimeoutTests.cs', 'core.autocrlf', 'dev', '0/8',
+                 # `data.Xml` and `foo.Bar` are the witnesses for the no-hump-dotted rule
+                 # specifically: their suffix is not all-lowercase, so the non-source-extension
+                 # test above lets them past, and no component carries a hump. `core.autocrlf`
+                 # no longer reaches that rule -- the suffix test rejects it first -- so without
+                 # these two rows a mutation removing the hump requirement stays green.
+                 'data.Xml', 'foo.Bar'):
         check(f'rejected as a symbol: {span}', classify(span) is None)
     # Shape acceptances.
     for span in ('WidgetReader', 'StoreDeadlines.WidgetSeconds', 'ReadWidgetsAsync()',
@@ -324,6 +344,24 @@ def self_test():
     check('line-cited file resolves to the file', classify('WidgetReader.cs:88') ==
           ('file', 'WidgetReader.cs'))
     # Docs-only diffs cannot support a verdict.
+    # A non-source extension must be rejected outright, not fall through to MEMBER, which would
+    # take the extension as the member name and match any diff mentioning that token.
+    for span in ('MyLib.dll', 'WidgetHost.exe', 'Payload.zip', 'Icon.ico'):
+        check(f'rejected as a symbol: {span}', classify(span) is None)
+    # Abstain, not warn: the span contributes no symbol at all, so there is nothing to check.
+    # What matters is that it is not CLEAR -- before the suffix test this body counted as
+    # described-and-found purely because the patch text contained the token `dll`.
+    check('a build output does not clear a diff that merely mentions its extension',
+          assess('`MyLib.dll` is rebuilt.',
+                 [{'filename': 'Lite/Services/Loader.cs',
+                   'patch': '@@ -1 +1 @@\n-var a = 1;\n+// load the dll here'}])[0] == 'abstain')
+    # A member path survives that test because its last component carries a capital.
+    check('a dotted member path is not mistaken for a file',
+          classify('ServerTimeHelper.UtcOffsetMinutes')
+          == ('ident', 'ServerTimeHelper.UtcOffsetMinutes', 'UtcOffsetMinutes'))
+    # Acronym-prefixed type names have no lowercase-to-uppercase transition at all.
+    for span in ('IOException', 'IPAddress', 'DbCommand'):
+        check(f'accepted as a symbol: {span}', classify(span) is not None)
     check('a same-suffix filename is not counted as found',
           assess('`Config.cs` gains a field.',
                  [{'filename': 'Lite/AppConfig.csproj',
