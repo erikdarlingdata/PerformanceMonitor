@@ -66,6 +66,22 @@ public sealed class RdsDeadlockIngestorTests
     private static readonly string NonUtcDeadlockText =
         DeadlockText.Replace(" UTC ", " EST ", StringComparison.Ordinal);
 
+    /* The same report as a MANAGED target renders it, whose parameter group carries the system default
+       log_line_prefix = '%t:%r:%u@%d:[%p]:'. This suite is the managed transport's, so this is the shape
+       it is actually handed: %t renders no fractional seconds, and the prefix's own ':' sits where the
+       self-hosted default puts a space.
+
+       Identifiers synthesised, shape verbatim: %r renders host(port) and %u@%d the connected user and
+       database, so a real line carries a real user and database name there. 192.0.2.10 is RFC 5737
+       documentation space, which exists to be written down. */
+    private const string ManagedPrefix =
+        "2026-08-26 22:25:24 UTC:192.0.2.10(52345):app_user@app_db:[1549]:";
+
+    private const string SelfHostedPrefix = "2026-08-26 22:25:24.100 UTC [1549] ";
+
+    private static readonly string ManagedDeadlockText =
+        DeadlockText.Replace(SelfHostedPrefix, ManagedPrefix, StringComparison.Ordinal);
+
     /* A window with log traffic but no deadlock in it — the ordinary quiet cycle, and the positive control
        for the commit firing at all. */
     private const string QuietText =
@@ -385,5 +401,59 @@ public sealed class RdsDeadlockIngestorTests
         {
             Assert.DoesNotContain("did not look", note, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// The managed fixture's precondition, the counterpart of
+    /// <see cref="TheFixtureReallyParsesToOneDeadlock"/>: the re-rendering really did replace the prefix
+    /// on every prefixed line, and the result really is one report.
+    /// </summary>
+    [Fact]
+    public void TheManagedFixtureCarriesTheManagedPrefix_AndParsesToTheSameReport()
+    {
+        Assert.DoesNotContain(SelfHostedPrefix, ManagedDeadlockText, StringComparison.Ordinal);
+        Assert.Contains(ManagedPrefix, ManagedDeadlockText, StringComparison.Ordinal);
+
+        var managed = Assert.Single(PgDeadlockLogParser.Extract(ManagedDeadlockText));
+        var selfHosted = Assert.Single(PgDeadlockLogParser.Extract(DeadlockText));
+
+        Assert.Equal(1549, managed.VictimPid);
+        Assert.Equal(2, managed.ParticipantCount);
+
+        /* One report, one identity, whichever prefix rendered it - the prefix is not part of the graph.
+           A target that moved between the two transports would otherwise store its history twice. */
+        Assert.Equal(selfHosted.DeadlockHash, managed.DeadlockHash);
+    }
+
+    /// <summary>
+    /// A managed window carrying a report reaches the WRITE, and this is the assertion the managed
+    /// transport was missing: every other test here drives it over text a self-hosted target renders, so
+    /// the suite proved the plumbing over a shape its own targets do not emit (#3030).
+    ///
+    /// <para>The store is the dead one, so reaching the write means throwing. An
+    /// <c>RdsIngestOutcome.Read(0)</c> here would be the quiet-cycle path in
+    /// <see cref="AQuietCycleAdvancesTheMarker"/> taken over a window that is not quiet: the note would
+    /// say the window held no deadlock, and the marker would advance and consume it, so the report is
+    /// never offered again.</para>
+    /// </summary>
+    [Fact]
+    public async Task AManagedPrefixWindowReachesTheWrite_RatherThanReportingAnEmptyLog()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var (ingestor, client, _) = Build(store, new FakeRds { FirstBody = ManagedDeadlockText });
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host));
+
+        /* The WRITE failed, not the read: RdsLogUnavailableException would mean the fetch produced no
+           chunk and nothing here would mean anything. */
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
+        Assert.Single(client.Downloads);
+
+        /* And the window survives the failed write, exactly as the self-hosted one does. */
+        await Assert.ThrowsAnyAsync<Exception>(() => ingestor.IngestAsync(1, "target-a", Host));
+
+        Assert.Equal(2, client.Downloads.Count);
+        Assert.Null(client.Downloads[1].Marker);
     }
 }

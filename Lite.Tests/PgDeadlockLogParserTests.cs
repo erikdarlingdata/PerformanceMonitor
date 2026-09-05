@@ -78,6 +78,153 @@ public sealed class PgDeadlockLogParserTests
         Assert.Single(PgDeadlockLogParser.Extract(noQueryId));
     }
 
+    /* The log prefix in front of every line, and the only thing the regimes below vary. The report body
+       is RealBlock's, so a regime that yields nothing yields nothing because of its prefix.
+
+       Two requirements of the shape are separable, and PostgreSQL's own default satisfies both while the
+       system default on a managed target satisfies neither:
+
+         FRACTION - %m renders fractional seconds on the stamp; %t does not.
+         BRACKET  - '%m [%p] ' puts a SPACE before the bracketed pid. '%t:%r:%u@%d:[%p]:' puts a COLON
+                    there, because ':' is that prefix's own delimiter and %r and %u@%d sit between the
+                    zone and the pid.
+
+       Identifiers in the managed prefixes are synthesised and the shape is not: %r renders host(port) and
+       %u@%d the connected user and database, so a real line carries a real user and database name in that
+       slot. 192.0.2.10 is RFC 5737 documentation space, which exists to be written down. */
+    private const string SelfHostedPrefix = "2026-08-26 22:25:24.100 UTC [1549] ";
+    private const string NoFractionAndSpacePrefix = "2026-08-26 22:25:24 UTC [1549] ";
+    private const string FractionAndColonPrefix = "2026-08-26 22:25:24.100 UTC:192.0.2.10(52345):app_user@app_db:[1549]:";
+    private const string NoFractionAndColonPrefix = "2026-08-26 22:25:24 UTC:192.0.2.10(52345):app_user@app_db:[1549]:";
+    private const string EmptyRemoteHostPrefix = "2026-08-26 22:25:24 UTC::@:[1549]:";
+
+    /// <summary>The captured report re-rendered under another <c>log_line_prefix</c>, prefix only.</summary>
+    private static string ReportUnder(string prefix) =>
+        RealBlock.Replace(SelfHostedPrefix, prefix, StringComparison.Ordinal);
+
+    private static int Occurrences(string text, string token)
+    {
+        var count = 0;
+
+        for (var i = text.IndexOf(token, StringComparison.Ordinal);
+             i >= 0;
+             i = text.IndexOf(token, i + token.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// The re-rendering's own control, so no regime below can pass on the shape the rest of this suite is
+    /// already built from. Three of the report's lines carry a prefix - ERROR, DETAIL and HINT - and all
+    /// three must be re-rendered, while the tab-indented continuation lines carry none and must be left
+    /// alone. A rewrite that missed a line, or reached into the graph, would make the regimes measure
+    /// something other than the prefix.
+    /// </summary>
+    [Fact]
+    public void ReRenderingThePrefixReplacesEveryPrefixedLine_AndNothingElse()
+    {
+        Assert.Equal(3, Occurrences(RealBlock, SelfHostedPrefix));
+
+        var managed = ReportUnder(NoFractionAndColonPrefix);
+
+        Assert.Equal(3, Occurrences(managed, NoFractionAndColonPrefix));
+        Assert.DoesNotContain(SelfHostedPrefix, managed, StringComparison.Ordinal);
+        Assert.Equal(Occurrences(RealBlock, "\tProcess "), Occurrences(managed, "\tProcess "));
+    }
+
+    /// <summary>
+    /// <c>log_line_prefix = '%t:%r:%u@%d:[%p]:'</c>, the system default on a managed PostgreSQL parameter
+    /// group and therefore the shape the RDS log-API transport is handed on those targets (#3030). It
+    /// carries neither fractional seconds nor a space before the pid, so both requirements above fail on
+    /// the same line.
+    /// </summary>
+    [Fact]
+    public void ParsesTheManagedSystemDefaultPrefix()
+    {
+        var deadlock = Assert.Single(PgDeadlockLogParser.Extract(ReportUnder(NoFractionAndColonPrefix)));
+
+        /* Whole seconds, because %t renders no fraction. A millisecond component here would mean some
+           other stamp was read. */
+        Assert.Equal(new DateTime(2026, 8, 26, 22, 25, 24, DateTimeKind.Utc), deadlock.OccurredAtUtc);
+        Assert.Equal(1549, deadlock.VictimPid);
+        Assert.Equal(2, deadlock.ParticipantCount);
+        Assert.Equal("ShareLock", deadlock.LockModes);
+
+        /* The prefix is not part of the graph, so one report has one identity whichever prefix rendered
+           it, and the two transports' copies of it dedupe against each other. */
+        Assert.Equal(
+            Assert.Single(PgDeadlockLogParser.Extract(RealBlock)).DeadlockHash,
+            deadlock.DeadlockHash);
+    }
+
+    /// <summary>
+    /// The fraction on its own, under <c>'%t [%p] '</c>: a space precedes the pid and only the fractional
+    /// seconds are absent. This is the regime that isolates the stamp - a pattern requiring
+    /// <c>\.\d+</c> matches nothing here while still matching a colon-delimited prefix that has one.
+    /// </summary>
+    [Fact]
+    public void ParsesAStampWithNoFractionalSeconds()
+    {
+        var deadlock = Assert.Single(PgDeadlockLogParser.Extract(ReportUnder(NoFractionAndSpacePrefix)));
+
+        Assert.Equal(new DateTime(2026, 8, 26, 22, 25, 24, DateTimeKind.Utc), deadlock.OccurredAtUtc);
+        Assert.Equal(1549, deadlock.VictimPid);
+    }
+
+    /// <summary>
+    /// The delimiter on its own, under <c>'%m:%r:%u@%d:[%p]:'</c>: the stamp carries its fraction and only
+    /// the character before the bracket differs. This is the regime that isolates the delimiter - a
+    /// pattern requiring a space there matches nothing here while still matching a fraction-less prefix
+    /// that has one.
+    /// </summary>
+    [Fact]
+    public void ParsesAColonBeforeTheBracketedPid()
+    {
+        var deadlock = Assert.Single(PgDeadlockLogParser.Extract(ReportUnder(FractionAndColonPrefix)));
+
+        Assert.Equal(new DateTime(2026, 8, 26, 22, 25, 24, 100, DateTimeKind.Utc), deadlock.OccurredAtUtc);
+        Assert.Equal(1549, deadlock.VictimPid);
+    }
+
+    /// <summary>
+    /// The zone token ends at the prefix's OWN delimiter, asserted as the absence of a refusal rather than
+    /// as a count.
+    ///
+    /// <para>Under a colon-delimited prefix the run between the stamp and the pid holds the zone, the
+    /// remote host and port, and the user and database. A zone read across that whole run is
+    /// <c>UTC:192.0.2.10(52345):app_user@app_db</c>, which
+    /// <see cref="PgDeadlockLogParser.IsZeroOffsetLogZone"/> refuses - so the report is REFUSED rather
+    /// than missed, and on a fleet whose <c>log_timezone</c> really is UTC every window is abandoned with
+    /// a message naming a setting that is already correct. Missing the report and refusing it are two
+    /// different wrongs, they are one character apart in the pattern, and a count-only assertion cannot
+    /// tell them apart because both leave nothing stored.</para>
+    /// </summary>
+    [Fact]
+    public void ReadsTheZoneUpToThePrefixDelimiter_RatherThanRefusingTheWholeRun()
+    {
+        Assert.Null(Record.Exception(() => PgDeadlockLogParser.Extract(ReportUnder(NoFractionAndColonPrefix))));
+        Assert.Null(Record.Exception(() => PgDeadlockLogParser.Extract(ReportUnder(FractionAndColonPrefix))));
+        Assert.Null(Record.Exception(() => PgDeadlockLogParser.Extract(ReportUnder(EmptyRemoteHostPrefix))));
+    }
+
+    /// <summary>
+    /// <c>%r</c> renders EMPTY on a line with no client connection, and <c>%u@%d</c> with it, so the run
+    /// between the zone and the pid collapses to <c>::@:</c> - consecutive colons and an <c>@</c> are all
+    /// that is left of three escapes. Those lines share the window with the reports, so the pattern must
+    /// not require that run to be non-empty.
+    /// </summary>
+    [Fact]
+    public void ParsesTheManagedPrefixWhenTheRemoteHostRendersEmpty()
+    {
+        var deadlock = Assert.Single(PgDeadlockLogParser.Extract(ReportUnder(EmptyRemoteHostPrefix)));
+
+        Assert.Equal(new DateTime(2026, 8, 26, 22, 25, 24, DateTimeKind.Utc), deadlock.OccurredAtUtc);
+        Assert.Equal(1549, deadlock.VictimPid);
+    }
+
     /// <summary>
     /// A participant's statement is arbitrary user SQL and can span lines, each arriving tab-indented under
     /// the DETAIL block. Taking one line per participant would truncate every multi-line statement to its

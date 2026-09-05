@@ -47,7 +47,29 @@ public static class PgDeadlockLogParser
         string? VictimStatement,
         string GraphText);
 
-    /* The report as PostgreSQL writes it. Two traps are encoded here rather than discovered later:
+    /* The report as PostgreSQL writes it, under either family of log_line_prefix this parser meets.
+
+       PostgreSQL's own default is '%m [%p] ', rendering `2026-08-26 22:25:24.100 UTC [1549] `. The system
+       default on a managed parameter group is '%t:%r:%u@%d:[%p]:', rendering
+       `2026-08-26 22:25:24 UTC:<host>(<port>):<user>@<db>:[1549]:`. Two things differ between them and
+       both are load bearing:
+
+       The FRACTION is optional, because %m renders fractional seconds and %t does not.
+
+       The character before the bracketed pid is a space OR a colon, and whatever sits between it and the
+       bracket is prefix rather than report: %r and %u@%d land there, and %r renders EMPTY on a line with
+       no client connection, so that run can collapse to consecutive colons. Lazy, so the pid is the FIRST
+       bracketed run of digits on the line - an %r rendering an IPv6 address brings its own brackets.
+
+       The ZONE is bounded by the prefix's OWN delimiter, and that boundary is the difference between
+       missing a report and REFUSING one. A zone allowed to run to the last delimiter before the bracket
+       reads `UTC:<host>(<port>):<user>@<db>`, which IsZeroOffsetLogZone refuses - so a fleet whose
+       log_timezone really is UTC has every window abandoned, with a message naming a setting that is
+       already correct. Two alternatives, because a zone renders as either an abbreviation or a numeric
+       offset and only the numeric one contains a colon of its own: [+-]\d+(?::\d+)* keeps -03:30 whole so
+       a refusal names the zone it read, and [^ :\n]+ takes an abbreviation up to the delimiter. Not \w+
+       for the second - \w matches neither a sign nor a colon, and a prefix the pattern cannot match
+       produces no block at all, which reads as a server with no deadlocks.
 
        %Q puts the query id immediately before the severity with NO separator — measured output reads
        `[1549] 322048460535975151ERROR:  deadlock detected` — so this must not require whitespace there.
@@ -58,17 +80,15 @@ public static class PgDeadlockLogParser
        itself contain newlines, and each continuation arrives tab-indented, so a line-count rule or a
        blank-line rule would truncate multi-line SQL silently.
 
-       The zone is captured and READ (#2993). PostgreSQL renders %m in log_timezone and prints that zone's
-       abbreviation beside the stamp, so this token is the setting's own rendered value for THIS line, and
+       The zone is captured and READ (#2993). PostgreSQL renders the stamp in log_timezone and prints that
+       zone's abbreviation beside it, so this token is the setting's own rendered value for THIS line, and
        it is what decides whether the naive timestamp next to it is already UTC. See IsZeroOffsetLogZone
        for why that question is answerable from an abbreviation when "which zone is this" is not.
 
-       [^ \n]+ for it rather than \w+: a zone with no abbreviation renders as a numeric offset (+07,
-       -03:30) and \w+ matches neither the sign nor the colon, so the whole block failed to match and the
-       server reported no deadlocks at all — the same silent nothing the [^\n]* trap above avoids, and the
-       one shape that would have slipped past the zone check by never reaching it. */
+       PgDeadlocksCollector holds this pattern's counterpart for the pg_read_file route, as SQL and
+       narrower: that one requires the fraction and the space, which PostgreSQL's own default renders. */
     private static readonly Regex s_deadlockBlock = new(
-        @"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) (?<zone>[^ \n]+) \[(?<pid>\d+)\][^\n]*ERROR:  deadlock detected\s*\n"
+        @"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) (?<zone>[+-]\d+(?::\d+)*|[^ :\n]+)[ :][^\n]*?\[(?<pid>\d+)\][^\n]*ERROR:  deadlock detected\s*\n"
         + @"[^\n]*DETAIL:  (?<detail>(?:[^\n]*\n)(?:\t[^\n]*\n)*)",
         RegexOptions.Compiled | RegexOptions.Multiline);
 
