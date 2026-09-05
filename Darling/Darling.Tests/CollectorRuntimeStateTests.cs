@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -246,6 +247,58 @@ public sealed class CollectorRuntimeStateTests
         /* The instant is serialized as UTC with its Z, so a monitor's "how long has this been down" is not
            read against the service host's local offset. */
         Assert.Contains("Z\"", down, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>/api/ping</c> sits INSIDE the network-mode auth gate. This is the premise the response payload
+    /// rests on, so it is pinned rather than reasoned about: <c>detail</c> carries a store failure's message —
+    /// which can name the store host, port, username and database — and that is defensible only because no
+    /// uncredentialed network caller ever receives it.
+    ///
+    /// <para><b>The exemption this forbids is the natural one.</b> Health endpoints are routinely allowlisted
+    /// past auth so a load balancer can poll them without a credential, and this route is exactly the
+    /// candidate. <see cref="DarlingWebHostService.IsAuthFlowPath"/> is the only path-based bypass in the
+    /// gate; adding <c>/api/ping</c> to it would make the message readable by anyone who can reach the port,
+    /// and nothing else in the build would notice. If that is ever wanted, the payload has to be coarsened in
+    /// the same change — keep <c>status</c>, <c>step</c>, <c>attempt</c> and <c>attempts</c>, which is what a
+    /// probe actually needs, and drop <c>detail</c>.</para>
+    ///
+    /// <para>Loopback-only mode is out of scope here and unchanged: the caller registers this gate inside
+    /// <c>if (networkMode)</c>, so a dashboard with no <c>web.network</c> block is tokenless on every route
+    /// and reachable only from the host itself.</para>
+    /// </summary>
+    [Fact]
+    public void ThePingRoute_IsInsideTheNetworkModeAuthGate_WhichIsWhatLetsItCarryAFailureMessage()
+    {
+        /* Not one of the three literal auth-flow paths, with OIDC either way. */
+        Assert.False(DarlingWebHostService.IsAuthFlowPath("/api/ping", oidcEnabled: false));
+        Assert.False(DarlingWebHostService.IsAuthFlowPath("/api/ping", oidcEnabled: true));
+
+        var cidr = IPNetwork.Parse("192.168.1.0/24");
+
+        /* Outside the CIDR: refused outright, the CIDR being outermost. */
+        Assert.Equal(
+            DarlingWebHostService.WebRequestAction.Forbid,
+            DarlingWebHostService.DecideWebRequest(
+                IPAddress.Parse("203.0.113.9"), cidr, isAuthFlowRoute: false, hasValidCookie: false, hasValidToken: false));
+
+        /* Inside the CIDR but uncredentialed: the login page, NOT this route's body. */
+        Assert.Equal(
+            DarlingWebHostService.WebRequestAction.ShowLogin,
+            DarlingWebHostService.DecideWebRequest(
+                IPAddress.Parse("192.168.1.50"), cidr, isAuthFlowRoute: false, hasValidCookie: false, hasValidToken: false));
+
+        /* And loopback too, in network mode — #1649 removed the tokenless local pass. */
+        Assert.Equal(
+            DarlingWebHostService.WebRequestAction.ShowLogin,
+            DarlingWebHostService.DecideWebRequest(
+                IPAddress.Loopback, cidr, isAuthFlowRoute: false, hasValidCookie: false, hasValidToken: false));
+
+        /* Only a credential reaches the route. */
+        Assert.Equal(
+            DarlingWebHostService.WebRequestAction.Allow,
+            DarlingWebHostService.DecideWebRequest(
+                IPAddress.Parse("192.168.1.50"), cidr, isAuthFlowRoute: false, hasValidCookie: true, hasValidToken: false));
     }
 
     // ── The census ────────────────────────────────────────────────────────────────────────
