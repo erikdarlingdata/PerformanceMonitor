@@ -577,9 +577,16 @@ public class StartupFailureTriageTests
             }
         }
 
-        /* And exactly three triaged sites, so a fourth cannot be added without coming through here. */
+        /* And exactly three triaged sites, so a fourth cannot be added without coming through here.
+
+           The stopwatch count is spelled with the RetryBudget suffix all three share rather than as a
+           bare Stopwatch.StartNew(): every retry budget here is a stopwatch, but not every stopwatch is
+           a retry budget. The bare form made this pin fail for ANY unrelated timing added anywhere in
+           DarlingWorker - #2997 added a per-run clock to the collector fault arms, hundreds of lines and
+           one concern away - which tells nobody whether a fourth retry site appeared. Suffixed, the pin
+           measures the thing its own sentence claims. */
         Assert.Equal(3, CountOf(source, "StartupFailureTriage.IsRetryable(ex)"));
-        Assert.Equal(3, CountOf(source, "System.Diagnostics.Stopwatch.StartNew();"));
+        Assert.Equal(3, CountOf(source, "RetryBudget = System.Diagnostics.Stopwatch.StartNew();"));
     }
 
     /// <summary>

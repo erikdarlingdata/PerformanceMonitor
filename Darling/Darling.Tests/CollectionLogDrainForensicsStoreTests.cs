@@ -329,13 +329,17 @@ public class CollectionLogDrainForensicsStoreTests
            rationale is that a ratio needs a denominator from ordinary rows, not only from failures. */
         Assert.DoesNotContain("sweepPeerMaxMs: null", worker, StringComparison.Ordinal);
 
-        /* drain STAYS null on those arms: nothing was drained, so there is nothing to describe. */
-        Assert.Equal(7, Regex.Matches(worker, @"drain: null").Count);
+        /* drain STAYS null on those arms: nothing was drained, so there is nothing to describe.
 
-        /* And V110's fetch sums stay null on the same seven arms and for the same reason: no item completed,
+           Eight since #2997 added the authored PostgreSQL command-timeout arm, which is an early-return
+           fault arm like the rest and drained nothing either. The count is what makes that visible: a new
+           arm has to come through this pin and state which of the two it is. */
+        Assert.Equal(8, Regex.Matches(worker, @"drain: null").Count);
+
+        /* And V110's fetch sums stay null on the same eight arms and for the same reason: no item completed,
            so no fetch was performed. Counted rather than merely present, so an arm that starts passing a
            real value - which would mean attributing another run's fetch to a failure row - is a red. */
-        Assert.Equal(7, Regex.Matches(worker, @"fetchPhases: null").Count);
+        Assert.Equal(8, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     /// <summary>
