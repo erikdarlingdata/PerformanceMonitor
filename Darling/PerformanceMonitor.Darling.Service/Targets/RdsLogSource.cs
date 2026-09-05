@@ -165,8 +165,11 @@ public sealed class RdsLogSource
     /// was opened — and only the first licenses the "no new … in the RDS log window" note the runner stamps
     /// on a zero-row cycle, which is a claim about the log's CONTENTS. Answering with a silent empty read
     /// is the #2633 confusion arriving by a second route. A stopped instance, one still being created, and
-    /// one whose logs have just rotated all answer this way, so the message says it is worth retrying
-    /// rather than sending anyone to look for a grant.</para>
+    /// one whose logs have just rotated all answer this way and clear on the first cycle that finds a
+    /// log, and the message says so rather than sending anyone to look for a grant. It stays a loud
+    /// ERROR either way — the store's rule for an unclassified failure, and the band a target nobody
+    /// can read should carry, because the alternative on this fleet is the quiet blindness #2994 is
+    /// about.</para>
     ///
     /// <para>Total, therefore, rather than nullable: an empty list, an omitted one, and a newest entry
     /// carrying no filename are one fact — there is nothing here to open — and a null return would have the
@@ -195,8 +198,10 @@ public sealed class RdsLogSource
             ?? throw new InvalidOperationException(
                 $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
                 + "filtered on 'postgresql' returned nothing it could name. NO LOG WAS OPENED this cycle, "
-                + "so this is not an empty log — whatever this window held is unread. An instance that is "
-                + "stopped, still being created, or has just rotated its logs answers this way, so it is "
-                + "worth retrying rather than treating as a configuration error.");
+                + "so this is not an empty log — whatever this window held is unread. This records as a "
+                + "collection ERROR and not as a permissions skip, because no grant fixes it: an instance "
+                + "that is stopped, still being created, or has just rotated its logs answers this way and "
+                + "clears itself on the first cycle that finds a log, while one that keeps answering this "
+                + "way is a target nobody can read and wants a decision rather than silence.");
     }
 }

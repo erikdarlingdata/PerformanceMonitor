@@ -229,6 +229,12 @@ public class RdsLogSourceTests
         Assert.Contains("NO LOG WAS OPENED", ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("Value cannot be null", ex.Message, StringComparison.Ordinal);
 
+        /* The text and the band have to agree. This lands as ERROR through the runner's generic arm, so
+           the message has to say that rather than imply the softer treatment an IAM denial gets — a
+           sentence promising one classification while the row carries another is the contradiction
+           CollectorRuntimePrecondition's own doc comment exists to record. */
+        Assert.Contains("records as a collection ERROR", ex.Message, StringComparison.Ordinal);
+
         /* And nothing was downloaded — the branch is decided before a byte is asked for. */
         Assert.Empty(client.Downloads);
     }
@@ -344,6 +350,7 @@ public class RdsDeadlockBranchClassificationTests
             () => ingestor.IngestAsync(1, "srv", "solo.abc123.us-east-1.rds.amazonaws.com"));
 
         Assert.Contains("listed no PostgreSQL server log file", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("records as a collection ERROR", ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("Value cannot be null", ex.Message, StringComparison.Ordinal);
 
         /* Not an authorization refusal, so the runner does not append the "the role needs
