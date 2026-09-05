@@ -483,6 +483,20 @@ public sealed class ViewerCommandTimeoutTests
     /// immune to the nesting (the outer and nested <c>try</c> are the same member) and to the laundering (a
     /// declaration in one method cannot satisfy a fan-out in another).</para>
     ///
+    /// <para><b>The markers are censused TREE-WIDE and attributed afterwards, which is the whole reason
+    /// <c>unattributed</c> can mean anything.</b> Each pattern is matched against the file, not inside each
+    /// member body, and a marker whose <see cref="Owner"/> is null is REPORTED rather than skipped. Scoped
+    /// the other way round — search within each braced body — a marker in a shape the walk cannot see would
+    /// simply never be looked at, and <c>unattributed</c> would sit at zero VACUOUSLY while covering less.
+    /// That distinction is not academic here: an expression-bodied member
+    /// (<c>Task Both() =&gt; Task.WhenAll(a, b);</c>) is a legal join with no braced body at all, and this
+    /// project has 378 expression-bodied members against 1,234 braced ones. None holds a join today, and
+    /// the point is that the census does not depend on that staying true — the first one to appear is a red
+    /// build naming its line, not a silent zero. Pinned by
+    /// <see cref="TheCensus_ReportsAJoinInAMemberWithNoBracedBody"/>, and the same property for an
+    /// unrecognised BRACED shape (a property accessor) is why the assertion names the signature pattern in
+    /// its message rather than the offending member.</para>
+    ///
     /// <para><b>What this does NOT cover, stated because each gap is real.</b>
     /// <list type="bullet">
     /// <item>The declared WIDTH is not checked, only that a width is declared. <c>Of(n)</c>'s own summary
@@ -727,6 +741,36 @@ public sealed class ViewerCommandTimeoutTests
         Assert.True(deferred.Length == 2, $"{deferred.Length} deferred read(s) parsed out of the fixture, not 2");
         Assert.All(deferred, d => Assert.NotNull(Owner(bodies, d.Index)));
         Assert.True(ConcurrentRun(code, deferred) >= 2, "the generic method's deferred pair did not read as a fan-out");
+    }
+
+    /// <summary>
+    /// A join in a member with NO braced body is reported, not dropped. An expression-bodied member is a
+    /// legal fan-out site and the member walk cannot represent it, so the only thing standing between it
+    /// and a silent miss is that the census runs tree-wide and attributes afterwards.
+    ///
+    /// <para>This asserts the REPORTING path, not coverage: the join is matched, it has no owner, and the
+    /// sweep therefore lists it as unattributed. That is the honest outcome for a shape the walk cannot
+    /// pair a declaration against — a loud red naming the line, rather than a vacuous zero.</para>
+    /// </summary>
+    [Fact]
+    public void TheCensus_ReportsAJoinInAMemberWithNoBracedBody()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            "private Task RefreshBothAsync() => Task.WhenAll(LoadOneAsync(), LoadTwoAsync());\n");
+
+        var joins = s_joinedFanOut.Matches(code).Select(m => m.Index).ToArray();
+        var bodies = MemberBodies(code);
+
+        /* Censused: the pattern runs over the file, so the join is seen even though nothing can own it. */
+        Assert.True(joins.Length == 1, $"the census matched {joins.Length} join(s) in an expression-bodied member, not 1");
+
+        Assert.True(
+            bodies.Count == 0,
+            $"an expression-bodied member parsed to {bodies.Count} braced body(ies); if the walk starts "
+            + "representing them, pair the join against it here instead of asserting it is reported");
+
+        /* And unowned, so EveryViewerFanOut_DeclaresItsWidth adds it to `unattributed` and fails loudly. */
+        Assert.Null(Owner(bodies, joins[0]));
     }
 
     /// <summary>
