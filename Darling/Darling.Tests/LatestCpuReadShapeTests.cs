@@ -46,17 +46,24 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class LatestCpuReadShapeSqlTests
 {
-    /// <summary>The required ordering: the partition column first, <c>sample_time</c> only as the
-    /// within-batch tiebreak.</summary>
-    private const string RequiredOrdering = "ORDER BY collection_time DESC, sample_time DESC";
+    /// <summary>The required ordering, as the substring common to the per-server reads
+    /// (<c>ORDER BY collection_time DESC, ...</c>) and the fleet-wide one
+    /// (<c>ORDER BY server_id, collection_time DESC, ...</c>): the partition column ahead of
+    /// <c>sample_time</c>, which is only the within-batch tiebreak.</summary>
+    private const string RequiredOrdering = "collection_time DESC, sample_time DESC";
 
     /// <summary>
-    /// The number of latest-CPU reads in <c>Darling/</c> — the alert sweep's, the viewer's server-summary
-    /// card, and the MCP health reader's. A hard floor rather than an exact count so adding a fourth read is
-    /// allowed; what is not allowed is the scan silently finding NOTHING and passing vacuously, which is the
-    /// only way this whole class could stop guarding without going red.
+    /// The number of latest-CPU reads in <c>Darling/</c>: the alert sweep's, the viewer's server-summary
+    /// card, the MCP health reader's, and the MCP fleet reader's per-server-newest <c>DISTINCT ON</c>. A hard
+    /// floor rather than an exact count so adding a fifth read is allowed; what is not allowed is the scan
+    /// silently finding NOTHING and passing vacuously, which is the only way this whole class could stop
+    /// guarding without going red.
+    ///
+    /// <para>It was 3 while the extraction keyed on <c>LIMIT 1</c> alone, and the fleet read — the only one
+    /// of the four with no <c>server_id</c> filter, so the one where a mis-framed bound would take the whole
+    /// fleet — was the copy the guard could not see.</para>
     /// </summary>
-    private const int KnownLatestCpuReadCount = 3;
+    private const int KnownLatestCpuReadCount = 4;
 
     [Fact]
     public void EveryLatestCpuRead_OrdersOnThePartitionColumnWithASampleTimeTiebreak()
@@ -75,10 +82,14 @@ public sealed class LatestCpuReadShapeSqlTests
 
             /* sample_time must not be the LEADING sort key by any route: that is the shape being replaced,
                and it costs the server's whole retained history plus a sort to return one row. */
+            /* sample_time must not be the leading TIME key by any route - not on its own, and not behind
+               the fleet read's server_id. That is the shape being replaced, and it is also the shape that
+               invites a bound on a local-clock column. */
             Assert.False(
-                Regex.IsMatch(sql, @"ORDER\s+BY\s+sample_time"),
-                $"{where}: orders on sample_time, which has no index and is not the partition column. "
-                + $"Use \"{RequiredOrdering}\" — see DarlingWorker.LatestCpuSql.");
+                Regex.IsMatch(sql, @"ORDER\s+BY\s+(?:server_id\s*,\s*)?sample_time"),
+                $"{where}: leads its ordering on sample_time, which has no index, is not the partition "
+                + $"column, and is not in the store's clock frame. Put \"{RequiredOrdering}\" ahead of it "
+                + "— see DarlingWorker.LatestCpuSql.");
         }
     }
 
@@ -128,6 +139,12 @@ public sealed class LatestCpuReadShapeSqlTests
     [Theory]
     /* A latest-row read: table, LIMIT 1, and the ordering under test. */
     [InlineData(true, "const string S = @\"\nSELECT a FROM cpu_utilization_stats\nWHERE server_id = $1\nORDER BY collection_time DESC, sample_time DESC\nLIMIT 1\";")]
+    /* The fleet-wide shape: newest-per-server via DISTINCT ON, so no LIMIT 1 and no $1 at all. Keying on
+       LIMIT 1 alone left this one invisible, which is how a fourth copy already existed under a guard whose
+       own doc worried about a fourth copy being added. */
+    [InlineData(true, "const string S = @\"\nSELECT DISTINCT ON (server_id)\n    server_id, a\nFROM v_cpu_utilization_stats\nORDER BY server_id, collection_time DESC, sample_time DESC\";")]
+    /* DISTINCT ON something OTHER than server_id is not a per-server-newest read. */
+    [InlineData(false, "const string S = @\"\nSELECT DISTINCT ON (database_name)\n    database_name, a\nFROM v_cpu_utilization_stats\nORDER BY database_name, collection_time DESC\";")]
     /* The v_ passthrough view counts too — the viewer and MCP reads go through it. */
     [InlineData(true, "const string S = @\"\nSELECT a FROM v_cpu_utilization_stats\nWHERE server_id = $1\nORDER BY collection_time DESC, sample_time DESC\nLIMIT 1\";")]
     /* A WINDOWED read is a different query under different rules — it legitimately bounds collection_time,
@@ -175,8 +192,9 @@ public sealed class LatestCpuReadShapeSqlTests
     /// <summary>
     /// One file's latest-row CPU reads. Comment spans go first (this codebase's SQL carries its reasoning in
     /// <c>/* ... */</c> blocks that quote the very predicates matched here), then each mention of the table is
-    /// taken out to the end of its verbatim literal and kept only if that span is a LATEST-row read:
-    /// <c>LIMIT 1</c> and <c>$1</c> as its only parameter.
+    /// taken out to the end of its verbatim literal and kept if that span is a latest-row read in either
+    /// shape: per-server (<c>LIMIT 1</c> with <c>$1</c> as its only parameter) or fleet-wide
+    /// (<c>DISTINCT ON (server_id)</c>, which has neither).
     ///
     /// <para>The single-parameter test is what separates this class from a WINDOWED read. A windowed read
     /// takes its bounds as <c>$2</c>/<c>$3</c> and bounding <c>collection_time</c> is the right answer there;
@@ -192,17 +210,21 @@ public sealed class LatestCpuReadShapeSqlTests
         var reads = new List<(string, string)>();
         foreach (Match match in Regex.Matches(code, @"FROM\s+v?_?cpu_utilization_stats\b"))
         {
-            /* The end of the enclosing verbatim literal. A read that somehow lacks one is not a SQL literal
-               and is left alone rather than guessed at. */
+            /* The enclosing verbatim literal, both ends: DISTINCT ON and the select list sit BEFORE the
+               table name, so a forward-only span would miss the fleet shape entirely. A read that lacks
+               either end is not a SQL literal and is left alone rather than guessed at. */
             var close = code.IndexOf("\";", match.Index, StringComparison.Ordinal);
-            if (close < 0)
+            var open = code.LastIndexOf("@\"", match.Index, StringComparison.Ordinal);
+            if (close < 0 || open < 0)
             {
                 continue;
             }
 
-            var span = code[match.Index..close];
-            if (span.Contains("LIMIT 1", StringComparison.Ordinal)
-                && !span.Contains("$2", StringComparison.Ordinal))
+            var span = code[open..close];
+            var perServerNewest = span.Contains("LIMIT 1", StringComparison.Ordinal)
+                                  && !span.Contains("$2", StringComparison.Ordinal);
+            var fleetNewest = span.Contains("DISTINCT ON (server_id)", StringComparison.Ordinal);
+            if (perServerNewest || fleetNewest)
             {
                 reads.Add((where, span));
             }
