@@ -45,7 +45,7 @@ namespace Darling.Tests;
     Deliberately not written down here: any inventory of how much ordinary prose the unreachable
     shapes would match, and any distinguishing property of the names this guard exists to keep out.
     Neither is needed to maintain the guard, both are useful only to someone working out where it
-    does not look, and this file is public. Resist the urge to helpfully re-add them.
+    does not look, and this file is public. Their absence is load-bearing, not an oversight.
 */
 public sealed class FleetIdentifierScrubTests
 {
