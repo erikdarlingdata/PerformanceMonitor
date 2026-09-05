@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -305,7 +306,7 @@ WHERE server_id = $1";
         /* Collectors row — REUSE the viewer's own 7-day per-collector health banding (the same STALE /
            FAILING / NEVER_RUN / HEALTHY logic the Collection Health tab renders), mirroring the Dashboard's
            SUM(CASE health_status = 'HEALTHY' / 'FAILING') over report.collection_health. */
-        var (healthyCollectors, failingCollectors) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
+        var (healthyCollectors, failingCollectors, deadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
 
         return new ServerSummaryItem
         {
@@ -330,6 +331,7 @@ WHERE server_id = $1";
             RequestsWaitingForThreads = requestsWaitingForThreads,
             HealthyCollectorCount = healthyCollectors,
             FailedCollectorCount = failingCollectors,
+            DeadlockCollectorBand = deadlockBand,
             LastCollectionTime = lastCollection,
         };
     }
@@ -341,13 +343,26 @@ WHERE server_id = $1";
     /// <c>report.collection_health</c>) — HEALTHY and FAILING are the two bands the card surfaces; the
     /// STALE / WARNING / NO_PERMISSIONS / NEVER_RUN rows count as neither (a failing collector is one the
     /// banding calls FAILING: no success in over 24h).
+    ///
+    /// <para>The <c>deadlocks</c> collector's own band comes back BESIDE the tallies rather than as a second
+    /// read, because it is in the rows already enumerated here and the Overview fans this call out once per
+    /// server (#3029). It is the one collector whose band the fleet deadlock total's coverage turns on, and
+    /// neither tally can stand in for it: STOPPED, NEVER_RUN and NO_PERMISSIONS all count as neither HEALTHY
+    /// nor FAILING, so a server reading nothing at all shows up in both counts as a zero.</para>
+    ///
+    /// <para>Null when the collector left no row in the window. Matched from
+    /// <see cref="DeadlocksCollector"/>'s own name rather than a literal, so a rename cannot leave this
+    /// silently matching nothing and reporting every server uncovered.</para>
     /// </summary>
-    private async Task<(int Healthy, int Failing)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
+    private async Task<(int Healthy, int Failing, string? DeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
     {
         var rows = await GetCollectionHealthAsync(serverId, cancellationToken);
         var healthy = rows.Count(r => r.HealthStatus == "HEALTHY");
         var failing = rows.Count(r => r.HealthStatus == "FAILING");
-        return (healthy, failing);
+        var deadlockBand = rows
+            .FirstOrDefault(r => string.Equals(r.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal))
+            ?.HealthStatus;
+        return (healthy, failing, deadlockBand);
     }
 
     /// <summary>Whole minutes elapsed from a stored naive-UTC instant to now (UTC), floored at 0, or null
@@ -457,6 +472,45 @@ public sealed class ServerSummaryItem
 
     /// <summary>Minutes since the most recent deadlock ever — the "Last: N ago" deadlock detail.</summary>
     public int? LastDeadlockMinutesAgo { get; set; }
+
+    /// <summary>
+    /// Whether the store says this target is PostgreSQL — stamped by the Overview loader from the registry
+    /// row (<c>DarlingServer.IsPostgres</c>), the way <see cref="ServerName"/> is, because the per-server
+    /// summary reads carry no engine column of their own.
+    ///
+    /// <para>It is here for <see cref="DeadlockSource"/>: <see cref="DeadlockCount"/> comes out of
+    /// <c>v_deadlocks</c>, which holds the SQL Server extended-event capture and nothing else, so a
+    /// PostgreSQL target's zero is structural rather than quiet. Absence is not evidence for either engine,
+    /// so the default false keeps the SQL Server reading for a row no connect has stamped — the same
+    /// posture <c>DarlingServer.IsPostgres</c> takes.</para>
+    /// </summary>
+    public bool IsPostgres { get; set; }
+
+    /// <summary>
+    /// The <c>deadlocks</c> collector's own 7-day band for this server, or null when that collector left no
+    /// row in the health window at all (#3029). Retained from the same
+    /// <see cref="ViewerDataService.GetCollectionHealthAsync"/> read the
+    /// <see cref="HealthyCollectorCount"/> / <see cref="FailedCollectorCount"/> tallies come out of, so it
+    /// costs no extra round trip.
+    ///
+    /// <para>The counts alone could not answer this. A FAILING tally says how many collectors are failing,
+    /// not WHICH — and the one collector <see cref="DeadlockCount"/> depends on can be STOPPED, NEVER_RUN or
+    /// permission-denied while that tally reads zero, because none of those three bands is FAILING.</para>
+    /// </summary>
+    public string? DeadlockCollectorBand { get; set; }
+
+    /// <summary>
+    /// Whether <see cref="DeadlockCount"/> read a deadlock source for this server at all, and when it did
+    /// not, which cause (#3029) — the shared <see cref="FleetDeadlockCoverage.ClassifyDeadlockSource"/>, so
+    /// this card and the service's fleet card cannot disagree about what covers a total.
+    ///
+    /// <para>DERIVED rather than assigned, so a card built by a path that does not set the two inputs reads
+    /// as UNCOVERED rather than sitting at an enum default meaning "read" and inflating the fleet's
+    /// coverage. The unset case is <see cref="FleetDeadlockSource.CollectorSilent"/>, which is the honest
+    /// reading of a card that makes no claim.</para>
+    /// </summary>
+    public FleetDeadlockSource DeadlockSource =>
+        FleetDeadlockCoverage.ClassifyDeadlockSource(IsPostgres, DeadlockCollectorBand);
 
     /// <summary>Worker-thread ceiling (max_workers_count). NULL = no scheduler snapshot (e.g. Azure SQL DB).</summary>
     public int? TotalThreads { get; set; }

@@ -165,11 +165,8 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
     /// Drops on the cleanup connection the caller supplies, and does NOT swallow — the masking rule lives
     /// in <see cref="LiveStoreCleanup.RunAsync"/>, which is the only place that knows whether the body
     /// already failed. A <c>catch</c> here would apply it unconditionally and hide a real leak.
-    /// <para><c>WITH (FORCE)</c> so a pooled connection somewhere cannot wedge the drop, matching the
-    /// scratch-database helper's teardown. <c>IF EXISTS</c> because the create is conditional.</para>
-    /// <para>The helper is named in prose only, never as a bare identifier: the #1902 ratchet exempts any
-    /// file whose text contains that type's name, so mentioning it would have taken this class out of
-    /// scope of the very rule it now satisfies — passing for the wrong reason instead of complying.</para>
+    /// <para><c>WITH (FORCE)</c> so a pooled connection somewhere cannot wedge the drop, matching
+    /// <see cref="ScratchPostgres"/>'s teardown. <c>IF EXISTS</c> because the create is conditional.</para>
     /// </summary>
     private static async Task DropAsync(
         NpgsqlConnection connection, string databaseName, CancellationToken cancellationToken)
