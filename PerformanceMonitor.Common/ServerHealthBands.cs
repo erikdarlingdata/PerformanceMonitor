@@ -698,6 +698,69 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public const string HasUserDatabasesQualifier = "target has user databases";
 
+        /// <summary>
+        /// Whether a collector's newest DENIAL postdates its newest SUCCESS — the answer to the only
+        /// question a reader of <c>last_error</c> actually has: is this the collector's current state, or a
+        /// fault from a code path it no longer takes (#3010)?
+        ///
+        /// <para><b>The field this exists for cannot be read correctly without it.</b> <c>last_error</c> is
+        /// a single retained slot holding the newest ERROR/PERMISSIONS message in a seven-day window, and
+        /// both MCP <c>get_collection_health</c> tools served it with no timestamp at all. So a message
+        /// from six days ago, recorded on a route the collector has since stopped taking, read exactly like
+        /// one from the last cycle — and nothing on the surface could contradict the assumption.</para>
+        ///
+        /// <para><b>Measured, and it produced a filed issue.</b> <c>pg_deadlocks</c> moved from the
+        /// in-database <c>pg_read_file</c> route to the RDS log API. Its 15,885 PERMISSIONS runs stop dead
+        /// at the cutover; all 50 targets have returned SUCCESS every day since. Six days later
+        /// <c>get_collection_health</c> still showed HEALTHY, <c>errors 0</c>, a reassuring note, AND the
+        /// stale 42501 — every element individually true, together describing a server being refused right
+        /// now, which was false. #2994 was filed on that reading and closed as not-a-defect.</para>
+        ///
+        /// <para><b>Why a comparison of instants and not a rate.</b> A denial RATE would read 15.9% on
+        /// that collector today and call it denied — sending an operator to issue a grant for a route the
+        /// collector does not use. Two stored instants out of one aggregate over one window answer the
+        /// currency question directly, and the answer flips the moment a success lands.</para>
+        ///
+        /// <para><b>Deliberately NOT an input to <see cref="Classify"/>.</b> This reports; it does not
+        /// band. The banding chain is untouched by #3010, and widening a band on this predicate is a
+        /// separate question with its own evidence bar — one nothing measured here clears.</para>
+        /// </summary>
+        /// <param name="permissionDeniedCount">PERMISSIONS runs in the window (<c>permission_denied_count</c>).</param>
+        /// <param name="errorCount">
+        /// ERROR runs in the window; any at all makes this false. The precondition lives WITH the
+        /// derivation rather than at each caller so relaxing one cannot silently widen the other: with an
+        /// ERROR present, "denied since the last success" is no longer the whole story of what went wrong.
+        /// </param>
+        /// <param name="lastSuccessTimeUtc">
+        /// The newest SUCCESS/SKIPPED instant (<c>last_success_time</c>), or null when the window holds no
+        /// success — in which case a denial is trivially the newest outcome.
+        /// </param>
+        /// <param name="lastDeniedTimeUtc">
+        /// The newest PERMISSIONS instant (<c>last_denied_time</c>). Null says nothing was denied inside
+        /// the window, whatever the count claims, so this returns false.
+        /// </param>
+        public static bool DeniedSinceLastSuccess(
+            long permissionDeniedCount,
+            long errorCount,
+            DateTime? lastSuccessTimeUtc,
+            DateTime? lastDeniedTimeUtc)
+        {
+            if (permissionDeniedCount <= 0 || errorCount > 0 || lastDeniedTimeUtc is null)
+            {
+                return false;
+            }
+
+            /* Both instants come from ONE aggregate over ONE window, so this compares two stored values
+               rather than two clock reads — which is why the decision takes timestamps instead of two
+               independently-computed elapsed-hours doubles. Two DateTime.UtcNow subtractions taken
+               microseconds apart can order equal instants either way, and this answer has to be stable.
+
+               Strictly greater: equal instants are NOT "denied since". A tie is a window whose newest
+               success and newest denial landed in the same cycle, where "which came last" is not a fact
+               the store holds, and claiming currency on a coin flip is the defect this reports on. */
+            return lastSuccessTimeUtc is null || lastDeniedTimeUtc.Value > lastSuccessTimeUtc.Value;
+        }
+
         /// <summary>The FAILING cutoff (hours since last success) for a collector of the given cadence.</summary>
         public static double FailingThresholdHours(int frequencyMinutes) =>
             Math.Max(FailingFloorHours, FailingCadenceMultiplier * (frequencyMinutes / 60.0));

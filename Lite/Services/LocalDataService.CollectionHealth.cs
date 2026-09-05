@@ -161,7 +161,14 @@ SELECT
     -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
     -- for query_store), so equality against one rendered sentence matches one collector.
     SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
-             THEN 1 ELSE 0 END) AS abandoned_count
+             THEN 1 ELSE 0 END) AS abandoned_count,
+    -- #3010: the newest DENIAL on its own, which is what dates the last_error slot above.
+    -- last_error_time cannot stand in for it -- that column is a MAX over ERROR and PERMISSIONS
+    -- together, so on a collector carrying both it hands a reader an error's instant and lets them
+    -- call it a denial. Compared against last_success_time this separates a collector still being
+    -- refused from one whose refusals all predate a later success. APPENDED, and Darling's
+    -- CollectionHealthSql mirrors the ordinal, because both are read positionally.
+    MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time
 FROM
 (
     -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
@@ -259,7 +266,9 @@ ORDER BY collector_name";
                 SlowestItemMs = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18)),
                 SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19)),
                 /* Appended (#2804), for the same reason the four above were. */
-                AbandonedCount = reader.IsDBNull(20) ? 0 : ToInt64(reader.GetValue(20))
+                AbandonedCount = reader.IsDBNull(20) ? 0 : ToInt64(reader.GetValue(20)),
+                /* Appended (#3010), for the same reason every column before it was. */
+                LastDeniedTime = reader.IsDBNull(21) ? null : reader.GetDateTime(21)
             });
         }
 
@@ -457,6 +466,13 @@ public class CollectorHealthRow
     public string? LastError { get; set; }
     public DateTime? LastErrorTime { get; set; }
     public long PermissionDeniedCount { get; set; }
+
+    /// <summary>
+    /// The newest PERMISSIONS instant in the window (#3010) - what dates <see cref="LastError"/>.
+    /// Distinct from <see cref="LastErrorTime"/>, a MAX over ERROR and PERMISSIONS together, which
+    /// therefore cannot answer whether the last thing that happened here was a refusal.
+    /// </summary>
+    public DateTime? LastDeniedTime { get; set; }
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
@@ -512,6 +528,14 @@ public class CollectorHealthRow
             : null;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
+
+    /// <summary>
+    /// Whether <see cref="LastError"/> describes the collector's CURRENT state or a fault from a code
+    /// path it no longer takes (#3010). Derived from the one shared predicate so both SKUs answer it
+    /// identically. Reported, never banded: <see cref="HealthStatus"/> does not read it.
+    /// </summary>
+    public bool DeniedSinceLastSuccess => CollectorHealthClassifier.DeniedSinceLastSuccess(
+        PermissionDeniedCount, ErrorCount, LastSuccessTime, LastDeniedTime);
 
     /// <summary>Share of runs the #2673 budget abandoned (#2804) — its own rate, not folded into
     /// <see cref="FailureRatePercent"/>, because the two carry very different thresholds and merging
