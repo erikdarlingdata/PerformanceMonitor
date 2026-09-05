@@ -1100,11 +1100,12 @@ public sealed class DarlingMcpDataTools
                     instance_read_failures = alertReads.InstanceReadFailures,
                     /* The currency term, and the reason a count alone would be misread: this figure never
                        ages out of a window, so without a stamp beside it a healed episode from days ago and
-                       one still in progress read identically. Exactly last_error's #2966 lesson. */
-                    /* Round-trip "o", matching last_success / last_error_at / last_denied_at on the
-                       collector rows of this same response. A raw DateTime would serialize to an ISO
-                       string too, but with trailing zeros trimmed, so two timestamps on one payload
-                       would carry different precision guarantees for no reason. */
+                       one still in progress read identically. Exactly last_error's #3010 lesson.
+
+                       Round-trip "o", matching last_success / last_error_at / last_denied_at on the
+                       collector rows of this same response. A raw DateTime would serialize to an ISO string
+                       too, but with trailing zeros trimmed, so two timestamps on one payload would carry
+                       different precision guarantees for no reason. */
                     last_failure_at = alertReads.LastFailureAtUtc?.ToString("o"),
                     last_failure_read = alertReads.LastFailureRead,
                     /* The floor under the zero. A restart resets these counts, so counting_since is what

@@ -391,7 +391,7 @@ public sealed class McpHealthTools
                collection_log row and every field above this line stays green while the alert pass goes
                blind one condition at a time. The key is derived the way THIS SKU's alert pass derives it
                (MainWindow.AlertEngine.cs's summary.ServerId.ToString()), so the read and the write land in
-               the same bucket; LiteAlertReadSurfaceTests pins that agreement from source rather than
+               the same bucket; Lite.Tests' AlertReadFailureSurfaceTests pins that agreement from source rather than
                trusting it. Lite's alert reads hit the local DuckDB store, so the deadline stratification
                #3013 measured on a Postgres store does not apply here - but the SURFACE gap did, and this
                block is a parity change, not a port of the mechanism. */
@@ -421,11 +421,12 @@ public sealed class McpHealthTools
                     instance_read_failures = alertReads.InstanceReadFailures,
                     /* The currency term, and the reason a count alone would be misread: this figure never
                        ages out of a window, so without a stamp beside it a healed episode from days ago and
-                       one still in progress read identically. Exactly last_error's #2966 lesson. */
-                    /* Round-trip "o", matching last_success / last_error_at / last_denied_at on the
-                       collector rows of this same response. A raw DateTime would serialize to an ISO
-                       string too, but with trailing zeros trimmed, so two timestamps on one payload
-                       would carry different precision guarantees for no reason. */
+                       one still in progress read identically. Exactly last_error's #3010 lesson.
+
+                       Round-trip "o", matching last_success / last_error_at / last_denied_at on the
+                       collector rows of this same response. A raw DateTime would serialize to an ISO string
+                       too, but with trailing zeros trimmed, so two timestamps on one payload would carry
+                       different precision guarantees for no reason. */
                     last_failure_at = alertReads.LastFailureAtUtc?.ToString("o"),
                     last_failure_read = alertReads.LastFailureRead,
                     /* The floor under the zero. A restart resets these counts, so counting_since is what

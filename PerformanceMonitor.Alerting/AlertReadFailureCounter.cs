@@ -175,7 +175,7 @@ public sealed class AlertReadFailureCounter
     /// <param name="LastFailureAtUtc">
     /// When the newest failure for this server happened, or null if it has none. The currency term: a
     /// nonzero count with a stamp from days ago is a healed episode, and a count with no stamp beside it
-    /// is the mistake <c>last_error</c> already taught this surface (#2966).
+    /// is the mistake <c>last_error</c> already taught this surface (#3010).
     /// </param>
     /// <param name="LastFailureRead">Which read failed most recently for this server.</param>
     /// <param name="CountingSinceUtc">When counting began — process start.</param>
