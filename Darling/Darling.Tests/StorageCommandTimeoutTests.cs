@@ -47,11 +47,7 @@ public sealed class StorageCommandTimeoutTests
     /// (367 of its 371 sites were untimed), and 50 of this project's 70 were that shape.
     /// </summary>
     private static readonly Regex s_commandCtor = new(
-        @"new NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    private static readonly Regex s_setsTimeout = new(
-        @"CommandTimeout\s*=",
+        @"new\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     [Fact]
@@ -64,13 +60,19 @@ public sealed class StorageCommandTimeoutTests
         {
             var text = File.ReadAllText(path);
 
-            foreach (Match ctor in s_commandCtor.Matches(text))
+            /* Both halves of the question are asked of STRIPPED text, which is character-aligned with its
+               input so an offset means the same thing in either. A construction written only in a comment or
+               a literal is not a construction - reported raw it is a phantom offender at a line no edit can
+               fix, already observed once in this family on a bare CreateCommand method group inside a block
+               comment. And a deadline merely SPELLED in a comment is not a deadline: judged raw, a note
+               explaining where the deadline used to be stands in for the deadline. */
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+            foreach (Match ctor in s_commandCtor.Matches(code))
             {
                 total++;
 
-                var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
-
-                if (!s_setsTimeout.IsMatch(span))
+                if (!CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
                 {
                     var line = text.Take(ctor.Index).Count(c => c == '\n') + 1;
                     offenders.Add($"{Path.GetFileName(path)}:{line}");
@@ -122,8 +124,35 @@ public sealed class StorageCommandTimeoutTests
     /// site, as it must. A scanner whose depth counter cannot go negative treats the block's closing
     /// <c>}</c> as still depth-zero, keeps consuming past it, and reads the FOLLOWING command's
     /// deadline — calling the untimed site clean. That is how two Python scanners each missed the real
-    /// <c>QueryStoreSliceRepair</c> rail-lift during this change; the <c>depth &lt;= 0</c> walker below
+    /// <c>QueryStoreSliceRepair</c> rail-lift during this change; the scope-bounded walker below
     /// reports it.</para>
+    ///
+    /// <para><b>The last two cases are the same leak in the layouts a statement COUNT cannot bound.</b>
+    /// Give the block above a single body statement and the two-statement window spends its budget on that
+    /// statement and on the one AFTER the block, so the following command's initializer satisfies the scan
+    /// and the untimed site is reported clean. Give the construction no header at all and make it the last
+    /// statement of its block, and the window reaches past the closing brace to a deadline set where this
+    /// command no longer exists. Both were silent until the span stopped at the end of the scope the
+    /// construction sits in rather than after a fixed number of semicolons.</para>
+    ///
+    /// <para><b>The final two cases are the neighbour no scope bound can exclude</b>, because the sibling is
+    /// in the same scope: an untimed construction directly followed by a timed one, and an untimed
+    /// <c>using (...)</c> header whose block opens with a timed sibling. In both the deadline the scan finds
+    /// belongs to the NEXT construction, which is why the span is cut at the next construction rather than
+    /// only at the end of the scope. The following statement stays reachable, which the first case above
+    /// needs: a <c>CreateCommand</c> deadline is an assignment, and an assignment is not a construction.</para>
+    ///
+    /// <para><b>A deadline SPELLED in a comment or a literal is not a deadline.</b> The span is judged over
+    /// STRIPPED source for the same reason the construction scan enumerates over it: this codebase quotes
+    /// code in its prose constantly, and a scan that reads raw text lets an explanatory comment about a
+    /// deadline stand in for the deadline itself. That is the value half of the same mistake - right span,
+    /// wrong text.</para>
+    ///
+    /// <para><b>The last case is why the span is not simply CUT at the next construction</b>, which is the
+    /// tempting one-line version of that rule. It is real code — the conditional in
+    /// <c>ViewerDataService.FinOps.Locking.cs</c> — where TWO constructions share ONE deadline, so cutting at
+    /// the second reports the first as an offender. Reading the initializer from the construction and the
+    /// assignment from the statement span gets both this and the two cases above right.</para>
     /// </summary>
     [Theory]
     [InlineData(
@@ -146,14 +175,64 @@ public sealed class StorageCommandTimeoutTests
         + "}\n"
         + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
         false)]
+    [InlineData(
+        "using (var untimed = new NpgsqlCommand(\"SELECT 1\", connection))\n"
+        + "{\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n"
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
+        false)]
+    [InlineData(
+        "if (probe)\n"
+        + "{\n"
+        + "    using var untimed = new NpgsqlCommand(\"SELECT 1\", connection);\n"
+        + "}\n"
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
+        false)]
+    [InlineData(
+        "using var untimed = new NpgsqlCommand(Sql, connection);\n"
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
+        false)]
+    [InlineData(
+        "using (var untimed = new NpgsqlCommand(Sql, connection))\n"
+        + "{\n"
+        + "    using var sibling = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n",
+        false)]
+    [InlineData(
+        "await using var command = databaseName == null\n"
+        + "    ? _dataSource.CreateCommand(IndexLockingAllSql)\n"
+        + "    : _dataSource.CreateCommand(IndexLockingByDbSql);\n"
+        + "command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;\n",
+        true)]
+    [InlineData(
+        "using var command = connection.CreateCommand();\n"
+        + "/* the deadline used to be command.CommandTimeout = 10 here */\n"
+        + "await command.ExecuteNonQueryAsync(cancellationToken);\n",
+        false)]
+    [InlineData(
+        "using var command = connection.CreateCommand();\n"
+        + "var doc = \"command.CommandTimeout = 10\";\n",
+        false)]
+    /* The sibling spelled as an ASSIGNMENT rather than an initializer. Every other sibling fixture in this
+       family used the initializer form, which has no leading dot and so never reached the assignment regex -
+       while the assignment spelling is the dominant one in this codebase. Found in review. */
+    [InlineData(
+        "using (var untimed = connection.CreateCommand())\n"
+        + "{\n"
+        + "    using var sibling = connection.CreateCommand();\n"
+        + "    sibling.CommandTimeout = 10;\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n",
+        false)]
     public void TheScanner_JudgesTheSiteItself_NotItsNeighbours(string source, bool expectedTimed)
     {
-        var ctor = s_commandCtor.Match(source);
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var ctor = s_commandCtor.Match(code);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
-
-        Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
+        Assert.Equal(expectedTimed, CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index));
     }
 
     /* The literal- and comment-aware walk this pin used to carry lives in CSharpSourceWalker as of
@@ -161,6 +240,31 @@ public sealed class StorageCommandTimeoutTests
        with the literal text around them, so a call written inside an interpolation was invisible to every
        scan built on them. The reasoning that shaped the walk moved there with it, and
        CSharpSourceWalkerTests carries the witnesses. */
+
+    /// <summary>
+    /// <para>A construction written ONLY in a comment or a literal is not a construction. The scan reads
+    /// stripped text so it cannot report one: a phantom offender names a line where no edit can ever make
+    /// the build pass, which is worse than a miss because it cannot be acted on. Not hypothetical — an
+    /// earlier census in this family reported a bare <c>CreateCommand</c> method group that turned out to
+    /// be the phrase in running prose inside a block comment.</para>
+    ///
+    /// <para>The last case is a FIFTH construction shape, <c>new Npgsql.NpgsqlCommand(</c>, which the
+    /// unqualified pattern could not see at all. None exists in this project today; one exists elsewhere in
+    /// the solution, so the shape is real and a pattern blind to it would report a clean sweep over a site
+    /// it never looked at.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("var command = _postgres.CreateCommand(Sql);", true)]
+    [InlineData("/* these go through _postgres.CreateCommand(Sql) and leave nothing open. */", false)]
+    [InlineData("// TODO: replace with new NpgsqlCommand(Sql, connection)", false)]
+    [InlineData("var doc = \"await using var c = _postgres.CreateCommand(Sql);\";", false)]
+    [InlineData("await using var command = new Npgsql.NpgsqlCommand(Sql, connection);", true)]
+    public void TheConstructionScan_ReadsCodeNotProse(string source, bool expectedSite)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+
+        Assert.Equal(expectedSite, s_commandCtor.IsMatch(code));
+    }
 
     private static IEnumerable<string> StorageSources()
     {

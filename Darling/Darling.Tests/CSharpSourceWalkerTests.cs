@@ -355,6 +355,196 @@ public sealed class CSharpSourceWalkerTests
     }
 
     /// <summary>
+    /// <para>The span ends with the SCOPE it started in. Both fixtures are the shape the landed pins could
+    /// not report: an untimed construction whose two-statement window reaches a deadline set where the
+    /// command no longer exists — once out through the closing brace of the block a <c>using (...)</c> header
+    /// governs, once out through the closing brace of a plain block the construction is the last statement
+    /// of. The legacy walk is the positive control in both: it leaks, which is why the assertion that the
+    /// current walk does not is worth something.</para>
+    ///
+    /// <para>Reproduced against real merged code before this landed. <c>DarlingRetention.PurgeOneAsync</c>
+    /// lifts a TimescaleDB decompression rail through an untimed <c>using (...)</c> whose body holds one
+    /// statement, and the timed delete that follows it satisfied the scan. It was the ONLY site in the
+    /// repository the leak was actually hiding, and it sat outside every pin's reach — the count it was one of
+    /// moves with every command anyone adds, so the figure lives in the change log rather than here, where a
+    /// comment cannot keep it true.</para>
+    /// </summary>
+    [Fact]
+    public void AStatementSpanEndsWithTheScopeItStartedIn()
+    {
+        var throughAHeadersBlock = Lines(
+            """        using (var untimed = _dataSource.CreateCommand(Sql))""",
+            """        {""",
+            """            await untimed.ExecuteNonQueryAsync(cancellationToken);""",
+            """        }""",
+            """        timed.CommandTimeout = 5;""");
+
+        var throughAPlainBlock = Lines(
+            """        if (probe)""",
+            """        {""",
+            """            var untimed = _dataSource.CreateCommand(Sql);""",
+            """        }""",
+            """        timed.CommandTimeout = 5;""");
+
+        foreach (var fixture in new[] { throughAHeadersBlock, throughAPlainBlock })
+        {
+            var start = fixture.IndexOf(".CreateCommand(", StringComparison.Ordinal);
+
+            Assert.True(start > 0, "the fixture no longer contains a command construction");
+
+            Assert.Contains(
+                "CommandTimeout",
+                LegacyStatementSpanFrom(fixture, start, statements: 2),
+                StringComparison.Ordinal);
+
+            Assert.DoesNotContain(
+                "CommandTimeout",
+                CSharpSourceWalker.StatementSpanFrom(fixture, start, statements: 2),
+                StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The same bound for a header whose embedded statement carries NO braces. The brace stop cannot reach
+    /// this one — there is no block to end at — so the span ends with the embedded statement instead, and the
+    /// braced and braceless spellings of the same <c>using</c> are judged alike. The legacy walk is the
+    /// positive control: it runs on to the deadline set after the scope has closed.
+    /// </summary>
+    [Fact]
+    public void AStatementSpanEndsWithABracelessHeadersOwnStatement()
+    {
+        var fixture = Lines(
+            """        using (var untimed = _dataSource.CreateCommand(Sql))""",
+            """            await untimed.ExecuteNonQueryAsync(cancellationToken);""",
+            """        timed.CommandTimeout = 5;""");
+
+        var start = fixture.IndexOf(".CreateCommand(", StringComparison.Ordinal);
+
+        Assert.True(start > 0, "the fixture no longer contains a command construction");
+
+        Assert.Contains(
+            "CommandTimeout",
+            LegacyStatementSpanFrom(fixture, start, statements: 2),
+            StringComparison.Ordinal);
+
+        Assert.DoesNotContain(
+            "CommandTimeout",
+            CSharpSourceWalker.StatementSpanFrom(fixture, start, statements: 2),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A closing parenthesis that was open before the start is NOT always a statement header. When the
+    /// construction sits in an ordinary argument list the expression simply continues, and the command is a
+    /// normal part of the statement it is in - so the statement budget has to continue with it. Ending the
+    /// span at the header rule instead cuts this fixture off before the assignment on the next line and
+    /// reports a correctly-timed command. Caught in review rather than by this file, which is why it is here.
+    /// </summary>
+    [Fact]
+    public void AStatementSpanTreatsAnArgumentListDifferentlyFromAStatementHeader()
+    {
+        var nested = Lines(
+            """        var command = Wrap(connection.CreateCommand());""",
+            """        command.CommandTimeout = 5;""");
+
+        var header = Lines(
+            """        using (var untimed = connection.CreateCommand())""",
+            """            await untimed.ExecuteNonQueryAsync(cancellationToken);""",
+            """        timed.CommandTimeout = 5;""");
+
+        Assert.Contains(
+            "CommandTimeout",
+            CSharpSourceWalker.StatementSpanFrom(nested, nested.IndexOf(".CreateCommand(", StringComparison.Ordinal), statements: 2),
+            StringComparison.Ordinal);
+
+        Assert.DoesNotContain(
+            "CommandTimeout",
+            CSharpSourceWalker.StatementSpanFrom(header, header.IndexOf(".CreateCommand(", StringComparison.Ordinal), statements: 2),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The other side of the same bound, and the reason it is the SCOPE rather than the header: fourteen
+    /// sites across the four projects these pins scan construct their command in a <c>using (...)</c> header
+    /// and set its deadline as the block's first statement. A span that stopped at the header would report
+    /// every one of them, and a false positive fails a green build on correct code.
+    /// </summary>
+    [Fact]
+    public void AStatementSpanStillReachesADeadlineSetInsideTheBlockItsHeaderGoverns()
+    {
+        var fixture = Lines(
+            """        await using (var command = _dataSource.CreateCommand(Sql))""",
+            """        {""",
+            """            command.CommandTimeout = 5;""",
+            """        }""");
+
+        var start = fixture.IndexOf(".CreateCommand(", StringComparison.Ordinal);
+
+        Assert.True(start > 0, "the fixture no longer contains a command construction");
+
+        Assert.Contains(
+            "CommandTimeout",
+            CSharpSourceWalker.StatementSpanFrom(fixture, start, statements: 2),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <para><see cref="CSharpSourceWalker.ConstructionSpanFrom"/> covers the site and its initializer, and
+    /// stops. The third case is what it exists for: a deadline in the NEXT construction's initializer is not
+    /// this one's, and no statement count or scope bound can tell them apart because the neighbour is in the
+    /// same scope. The second case is the matching limit — an assignment is outside this span by design, and
+    /// the pins read it from the statement span instead.</para>
+    ///
+    /// <para>Two of these are the positive controls for the walk being literal- and comment-aware here too:
+    /// a semicolon inside verbatim SQL must not cut the argument list short, and a comment written between a
+    /// construction and its initializer must not detach them.</para>
+    ///
+    /// <para>The last is a bare <c>.CreateCommand</c> METHOD GROUP, which two pins in this family match on
+    /// purpose. It has NO argument list, so a scan that simply looked for the next <c>(</c> would leave the
+    /// statement and return the following construction's span, initializer included - a hand-off with no
+    /// deadline of its own reading as timed. The walk may only cross what a construction's head is made of,
+    /// so the span here is the reference alone and carries no deadline.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("var c = new NpgsqlCommand(Sql, connection) { CommandTimeout = 5 };\n", true)]
+    [InlineData("var c = new NpgsqlCommand(Sql, connection);\nc.CommandTimeout = 5;\n", false)]
+    [InlineData(
+        "var c = _dataSource.CreateCommand(Sql);\n"
+        + "var d = new NpgsqlCommand(Sql, connection) { CommandTimeout = 5 };\n",
+        false)]
+    [InlineData("var c = new NpgsqlCommand(@\"SELECT 1; SELECT 2;\", connection) { CommandTimeout = 5 };\n", true)]
+    [InlineData("var c = new NpgsqlCommand(Sql, connection) /* set here; not below */ { CommandTimeout = 5 };\n", true)]
+    [InlineData(
+        "builder.Register(factory.CreateCommand, options);\n"
+        + "var other = new NpgsqlCommand(Sql, connection) { CommandTimeout = 5 };\n",
+        false)]
+    public void AConstructionSpanIsTheSiteAndItsInitializerAndNothingElse(string fixture, bool carriesTheDeadline)
+    {
+        var start = FirstConstruction(fixture);
+
+        Assert.True(start >= 0, "the fixture no longer contains a command construction");
+
+        Assert.Equal(
+            carriesTheDeadline,
+            CSharpSourceWalker.ConstructionSpanFrom(fixture, start).Contains("CommandTimeout", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The FIRST construction in <paramref name="fixture"/>, in whichever of the two shapes it is written.
+    /// First rather than any, because the neighbour case above needs the site that does NOT carry the
+    /// deadline.
+    /// </summary>
+    private static int FirstConstruction(string fixture)
+    {
+        var constructed = fixture.IndexOf("new NpgsqlCommand(", StringComparison.Ordinal);
+        var manufactured = fixture.IndexOf(".CreateCommand", StringComparison.Ordinal);
+
+        return constructed < 0 ? manufactured
+            : manufactured < 0 ? constructed
+            : Math.Min(constructed, manufactured);
+    }
+
+    /// <summary>
     /// A semicolon in a comment still cannot end a span, which is the assertion the three timeout pins lean
     /// on most: this codebase's style puts an explanatory comment in exactly the gap between a
     /// <c>CreateCommand</c> and its deadline, and a semicolon inside one would report a correctly-timed site

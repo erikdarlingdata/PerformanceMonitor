@@ -958,7 +958,8 @@ public static class DarlingRetention
                purge deliberately is. Lift it for this connection only. On a store without the extension
                the qualified name is accepted as a placeholder GUC, so this is safe everywhere. */
             using (var lift = new NpgsqlCommand(
-                "SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0", connection))
+                "SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0",
+                connection) { CommandTimeout = DeleteTimeoutSeconds })
             {
                 await lift.ExecuteNonQueryAsync(cancellationToken);
             }

@@ -12,9 +12,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// Explicit command deadlines for this project's store access (#2874), one constant per BUDGET REGIME.
 ///
 /// <para><c>.Service</c> is roughly fifteen regimes, not one, and they are being closed a regime at a
-/// time; this file is where each one's constant lands. Eight are here: the collection sweep, the
-/// startup/bootstrap path and its connect probe, the serial collection-loop thread, the command plane,
-/// the actual-plan store resolve, the Query Store backfill's reads, and the control-plane reload beacon.
+/// time; this file is where each one's constant lands. Eleven are here: the collection sweep (#2928),
+/// the post-analysis force-plan hook and the two CLI verbs (group E), the startup/bootstrap path and
+/// its connect probe and the serial collection-loop thread (#2946), and the command plane, the
+/// actual-plan store resolve, the Query Store backfill's reads and the control-plane reload beacon
+/// (group D).
 /// <b>Do not reuse a constant across regimes</b> — the four numbers this sweep has already produced
 /// (60 s in <c>.Analysis</c> from a 120 s <c>CancelAfter</c>, 10 s for the alert pass from its 30 s
 /// cadence, <c>.Storage</c>'s five, <c>.Viewer</c>'s 15/5/10 from a connection permit) each came from a
@@ -40,9 +42,19 @@ public static class ServiceCommandDeadlines
     /// 200 runs was <b>1.53 s</b> — <c>query_store</c> writing 11,614 rows as a per-database batch
     /// sequence. Fleet-wide, the per-run store-write average across all 39 collectors on both
     /// production stores tops out at <b>1,511 ms</b> (<c>index_object_stats</c>, ~21,090 rows/run) with
-    /// most collectors in the single-digit-to-low-tens ms. On top of that sits store connection
-    /// acquisition, measured at <b>673-893 ms</b> in #2819. So ~2.4 s covers the worst thing actually
-    /// observed, and 10 s keeps ~4x headroom over it.</para>
+    /// most collectors in the single-digit-to-low-tens ms. So <b>1.53 s</b> is the worst thing actually
+    /// observed, and 10 s keeps ~6.5x headroom over it.</para>
+    ///
+    /// <para><b>Store connection acquisition is NOT in this floor</b>, and the reason is what
+    /// <c>CommandTimeout</c> actually bounds. #2819 measured acquisition at 673-893 ms, and an earlier
+    /// derivation of this constant added it to the store write to reach a ~2.4 s floor. It does not
+    /// belong there: <c>CommandTimeout</c> starts when the command EXECUTES on an already-open
+    /// connection, while the connect phase is tracked by the connection string's <c>Timeout</c>. That is
+    /// measured rather than reasoned — with <c>Timeout=2</c> a connect failure lands at 2.0 s whether
+    /// <c>CommandTimeout</c> is 1 or 60. Folding an acquisition figure into a <c>CommandTimeout</c>
+    /// floor credits this knob with bounding a phase it cannot reach. The 673-893 ms is real and still
+    /// binds where it belongs — pool pressure, in <c>DarlingManagedPostgres</c> and
+    /// <c>DarlingCollectorRunner</c> — just not here.</para>
     ///
     /// <para><b>BELOW the point where the deadline costs more than it saves</b>, and the bound is the
     /// 60 s watchdog rather than a cadence, because the body runs its due collectors SEQUENTIALLY. Real
@@ -61,8 +73,8 @@ public static class ServiceCommandDeadlines
     /// connection-seconds from retention, alerting and observability. At the 30 s default and C = 8 that
     /// is 8 of 24 connections held for 30 s, a third of the pool, against a sixth at C = 4. So the
     /// floor above was doubled before the headroom was taken — 1.53 s of measured store write projected
-    /// to ~3.1 s if write latency scaled linearly with twice the concurrent writers, plus ~0.9 s of
-    /// acquisition, is the ~4.0 s that 10 s is set to clear. <b>The value is correct at 8 and at 16;
+    /// to <b>~3.1 s</b> if write latency scaled linearly with twice the concurrent writers is what 10 s
+    /// is set to clear, and it clears it by ~3.2x. <b>The value is correct at 8 and at 16;
     /// it was chosen so that raising the knob does not invalidate it.</b></para>
     ///
     /// <para><b>What this is NOT derived from.</b> Not the 120 s <c>PerItemWallClockBudget</c>
@@ -77,6 +89,127 @@ public static class ServiceCommandDeadlines
     /// below by a 1,744.9 ms forced-plan read, neither of which appears anywhere above.</para>
     /// </summary>
     public const int CollectionSweepSeconds = 10;
+
+    /// <summary>
+    /// <c>PgPlanForceActionStore</c>'s four commands — the force-plan bot's journal write and its windowed
+    /// history read, plus the two reads #2731's write path will consume.
+    ///
+    /// <para><b>The regime, and why #2882 deferred it.</b> The alert pass excluded these deliberately: they
+    /// look like members of that family and are not. <c>PlanForceBot.RunAfterAnalysisAsync</c> is built at
+    /// <c>DarlingWorker.cs</c>'s <c>postPassHook</c> closing over the plain <c>stoppingToken</c>, so it runs
+    /// OUTSIDE <c>passCts.CancelAfter(s_analysisTimeout)</c> — whose token is threaded only into
+    /// <c>analysisService.AnalyzeAsync</c> — despite being invoked lexically inside the pass. Being
+    /// lexically inside a budgeted method is not the same as being under its budget. So nothing encloses
+    /// these, exactly as in #2882; what differs is the CADENCE, which is the analysis interval clamped
+    /// 5-360 minutes rather than the 30 s alert sweep the 10 s was bounded against.</para>
+    ///
+    /// <para><b>The ceiling is the analysis pass's own budget, not a cadence and not the watchdog.</b> The
+    /// hook runs inside <c>ProcessServerSweepAsync</c>, holding one of <c>max_concurrent_sweeps</c> permits
+    /// for its whole duration, and that server's collection cannot relaunch while the body is in flight. The
+    /// 60 s <c>DarlingWorker.SweepWatchdogSeconds</c> is NOT the bound here the way it is for the collection
+    /// sweep: a body that ran an analysis pass has already been eligible to trip it, since the pass alone is
+    /// budgeted at 120 s. What the pass's 120 s IS, is the product's own statement of how long a server's
+    /// collection may be suspended for analysis — so a hook that rides the pass must not exceed it. The bot
+    /// performs at most <c>PlanForceBot.MaxTargetsPerPass</c> (10) history reads plus one journal write each,
+    /// sequentially, on separate store connections: <b>20 commands</b>. 20 x 5 s = 100 s, inside the pass's
+    /// 120 s. At Npgsql's inherited 30 s default it is 600 s — <b>five times the budget of the pass it rides
+    /// on</b>, for a hook that is not part of it.</para>
+    ///
+    /// <para><b>ABOVE the worst case, and the floor is NOT connection acquisition.</b> #2940 measured that
+    /// the connect phase tracks the connection string's <c>Timeout</c> and not <c>CommandTimeout</c> — at
+    /// <c>Timeout=2</c> it fails at 2.0 s with <c>CommandTimeout</c> set to either 1 or 60 — so the 673-893 ms
+    /// acquisition of #2819 is outside what this constant bounds and is deliberately NOT in the arithmetic
+    /// below. What is left is the statement itself. Measured on PostgreSQL 17 against a
+    /// <c>collect.plan_force_actions</c> seeded to 5.0 M
+    /// rows / 1,382 MB — 43 servers x 8 databases x 1,000 distinct queries over a 1,095-day horizon, because
+    /// this table has NO retention path and grows for the life of the deployment — <c>GetQueryHistoryAsync</c>
+    /// runs in <b>3.59 ms cold</b> and 0.84-1.01 ms warm, and the journal <c>INSERT ... RETURNING</c> in
+    /// <b>0.346 ms</b>. It is flat in table size: both indexes V107 creates are used, and the only subquery
+    /// that scales with volume is the trailing-24 h server count, which stayed at 0.47 ms with a
+    /// deliberately pathological 2,925-row window (the volume a per-query cooldown of zero would produce).
+    /// Those figures are from a local container, so the floor is anchored on the one COLD store read this
+    /// sweep has measured in production instead: #2882's forced-plan read at <b>1,744.9 ms</b> over ~6.0 GB.
+    /// A value under ~2 s could fire on a cold read; 5 s carries ~2.9x over it.</para>
+    ///
+    /// <para><b>So the CEILING is what fixes this number, not the floor.</b> The pass budget puts it at
+    /// 6 s or less and the floor only rules out the bottom two, which is worth saying plainly rather than
+    /// presenting a two-sided squeeze that is really one-sided.</para>
+    ///
+    /// <para><b>The two reads with no caller yet.</b> <c>GetPendingReviewsAsync</c> and
+    /// <c>GetRecentActionsAsync</c> are specced ahead of #2731 and have no production caller in this build,
+    /// so they take this constant because the class they sit on is the bot's. When
+    /// <c>GetRecentActionsAsync</c> gains the <c>get_plan_force_actions</c> tool its doc comment names, it
+    /// becomes an MCP read and belongs on <c>Mcp.McpCommandDeadlines.ReadSeconds</c> instead — flagged here
+    /// rather than pre-empted, because moving it now would bound a caller that does not exist against a
+    /// regime it is not yet in.</para>
+    /// </summary>
+    public const int PostAnalysisForcePlanSeconds = 5;
+
+    /// <summary>
+    /// The store reads and writes the CLI verbs perform — <c>--enable-mcp</c>/<c>--disable-mcp</c>/
+    /// <c>--enable-web</c>/<c>--disable-web</c>'s <c>config_service</c> update, <c>--configure-firewall</c>'s
+    /// endpoint-toggle read, and <c>--recompress-plan-dim</c>'s plan-codec preflight.
+    ///
+    /// <para><b>This number is not new: the product already derived it, and two of the three sites did not
+    /// get it.</b> <c>DarlingCliCommands.TryReadEndpointTogglesAsync</c> wraps its read in a linked
+    /// <c>CancellationTokenSource</c> at ten seconds, with the reason written down — <i>"the store is down"
+    /// and "the store is slow" must not differ in how long an installer hangs</i> — and it prints that number
+    /// back to the operator ("the store did not answer within 10 seconds"). That argument is a property of
+    /// the SURFACE, not of that one verb: every one of these runs with a person or an installer script
+    /// waiting on a console, with no enclosing budget, no retry and no next tick. The other two sites simply
+    /// never had it, which is the #2786 shape — a bound that names the arm it was written for.</para>
+    ///
+    /// <para><b>So the ceiling is the promise in that message.</b> A <c>CommandTimeout</c> above ten seconds
+    /// would let a command outlive the budget whose expiry the operator is told about, and Npgsql's inherited
+    /// 30 s does exactly that: the CTS fires at 10 s while the command believes it has 20 s left, so the two
+    /// bounds disagree about the same wait. Making the command agree with the budget is what stops the
+    /// message from being a lie. The floor is a single-row read or a single-row primary-key update of a
+    /// one-row <c>config_service</c> table — sub-millisecond work — against #2882's 1,744.9 ms production
+    /// cold-read anchor, so ten seconds is ~5.7x the worst thing that can legitimately happen.</para>
+    ///
+    /// <para><b>The CTS and the <c>CommandTimeout</c> bound different spans, and that is why both exist.</b>
+    /// #2940 measured that the connect phase tracks <c>Timeout</c>, not <c>CommandTimeout</c>. So
+    /// <c>TryReadEndpointTogglesAsync</c>'s linked <c>CancellationTokenSource</c> is the only one of the two
+    /// that covers <c>OpenAsync</c> — which is the half an installer actually hangs on — while this constant
+    /// bounds the statement. Both are set to the same number because the operator is told one number; they
+    /// are not redundant, and the store-connection acquisition cost belongs to the CTS's span rather than to
+    /// this constant's.</para>
+    ///
+    /// <para>It lands on the same ten seconds as <see cref="CollectionSweepSeconds"/> and #2882's alert pass.
+    /// That is a third derivation meeting them rather than a number reused: nothing above mentions a 30 s
+    /// sweep interval, a 60 s watchdog or <c>max_concurrent_sweeps</c>, and this one is bounded by a sentence
+    /// printed to an operator.</para>
+    /// </summary>
+    public const int CliStoreReadSeconds = 10;
+
+    /// <summary>
+    /// The command deadline at the ONE CLI site that already has a budget of its own —
+    /// <c>TryReadEndpointTogglesAsync</c>'s linked <c>CancellationTokenSource</c> — set deliberately ABOVE
+    /// <see cref="CliStoreReadSeconds"/> so the budget wins the race rather than tying it.
+    ///
+    /// <para><b>Review caught this, and it undercut the justification for the constant above.</b> Setting the
+    /// command to the same duration as the CTS makes which one fires first a race, and the two arms report
+    /// differently: the CTS surfaces as <c>OperationCanceledException</c> and is caught by the arm that says
+    /// "the store did not answer within N seconds", while an Npgsql <c>CommandTimeout</c> expiry is an
+    /// <c>NpgsqlException</c> wrapping a <c>TimeoutException</c>, falls through to the general arm, and
+    /// renders <c>ex.Message</c> — which is <c>Exception while reading from stream</c>, the network-fault
+    /// costume #2826 exists to stop this product wearing. So a tie does not merely reword the failure; under
+    /// half the timing window it hands an installer the exact misdiagnosis, from the site whose whole purpose
+    /// is to say plainly why the store did not answer.</para>
+    ///
+    /// <para><b>It is the same rule as the HypoPG forward path, and that is why the margin is the same 5 s.</b>
+    /// <c>HypotheticalIndexExperiment.ForwardCommandTimeoutSeconds</c> sits above the server-side
+    /// <c>SET LOCAL statement_timeout</c> for exactly this reason — a client-side deadline BELOW the
+    /// authoritative one converts a diagnosable error into an undiagnosable one. Here the authoritative bound
+    /// is a client-side CTS rather than a server GUC, but the ordering requirement is identical: whichever
+    /// bound produces the better message must be the one that fires, so the other is a backstop strictly
+    /// above it. The backstop still matters — it is what bounds the statement if the token is never observed —
+    /// and it stays far below Npgsql's inherited 30 s.</para>
+    ///
+    /// <para>The other two CLI sites have no budget around them, so for them
+    /// <see cref="CliStoreReadSeconds"/> IS the bound and there is nothing to order it against.</para>
+    /// </summary>
+    public const int CliBudgetBackstopSeconds = CliStoreReadSeconds + 5;
 
     /// <summary>
     /// The once-per-process STARTUP / BOOTSTRAP path's store commands: the managed-Postgres network

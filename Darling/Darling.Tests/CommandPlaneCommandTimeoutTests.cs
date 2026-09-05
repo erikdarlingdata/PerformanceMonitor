@@ -192,6 +192,55 @@ public sealed class CommandPlaneCommandTimeoutTests
     }
 
     /// <summary>
+    /// The same nine sites, judged a SECOND way — through the shared
+    /// <see cref="CommandDeadlineScanner"/> that #2938 extracted and five pins route through.
+    ///
+    /// <para><b>Additive rather than a replacement, because the two ask different questions.</b> The
+    /// shared scanner answers "does this site set an explicit deadline at all", and it does that better
+    /// than a bare regex can: it reads the construction's own initializer separately from the statement
+    /// span, and it qualifies the assignment by the NAME bound to the construction, so a sibling's
+    /// deadline inside the same two-statement window cannot be borrowed. What it cannot express is which
+    /// REGIME's constant a site must take — and cross-wiring the actual-plan resolve to the command
+    /// plane's 5 s would put a tens-of-seconds read on a millisecond bound while satisfying every
+    /// deadline-shaped check. So the relational assertion above stays as the primary guard and this runs
+    /// beside it. If the two ever disagree, one of them is wrong and the build says so.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCommandPlaneSite_AlsoPassesTheSharedDeadlineScanner()
+    {
+        var offenders = new List<string>();
+        var total = 0;
+
+        foreach (var (file, member, _) in s_sites)
+        {
+            var path = SourcePath(file);
+            var body = MemberBody(File.ReadAllText(path), member, path);
+
+            /* The scanner's contract is already-STRIPPED source, which is the standard this pin's own
+               fixture argued for before the extraction existed. */
+            var stripped = CSharpSourceWalker.StripCommentsAndStrings(body);
+
+            foreach (Match ctor in s_commandCtor.Matches(stripped))
+            {
+                total++;
+
+                if (!CommandDeadlineScanner.SetsAnExplicitDeadline(stripped, ctor.Index))
+                {
+                    offenders.Add($"{file} {member} +{LineOf(body, ctor.Index)}");
+                }
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            $"{offenders.Count} command-plane site(s) fail the SHARED deadline scanner even though the "
+            + "relational check above passed — the two guards disagree, so one of them is reading the "
+            + $"wrong span: {string.Join(", ", offenders)}");
+
+        Assert.Equal(ExpectedSiteCount, total);
+    }
+
+    /// <summary>
     /// The command plane's own bound, on both sides — derived in
     /// <see cref="ServiceCommandDeadlines.CommandPlaneSeconds"/>. A band rather than an equality, following
     /// the precedent .Storage and .Viewer set: freezing the number makes every re-derivation a test edit,

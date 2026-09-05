@@ -45,11 +45,7 @@ public sealed class ViewerCommandTimeoutTests
     /// here it is 191 of the 193 sites.
     /// </summary>
     private static readonly Regex s_commandCtor = new(
-        @"new NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    private static readonly Regex s_setsTimeout = new(
-        @"CommandTimeout\s*=",
+        @"new\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -71,13 +67,17 @@ public sealed class ViewerCommandTimeoutTests
         {
             var text = File.ReadAllText(path);
 
-            foreach (Match ctor in s_commandCtor.Matches(text))
+            /* Both halves of the question are asked of STRIPPED text, which is character-aligned with its
+               input so an offset means the same thing in either. A construction named only in prose is not a
+               construction, and a deadline merely SPELLED in a comment is not a deadline - judged raw, a note
+               explaining where the deadline used to be stands in for the deadline. */
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+            foreach (Match ctor in s_commandCtor.Matches(code))
             {
                 total++;
 
-                var span = CSharpSourceWalker.StatementSpanFrom(text, ctor.Index, statements: 2);
-
-                if (!s_setsTimeout.IsMatch(span))
+                if (!CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
                 {
                     var line = text.Take(ctor.Index).Count(c => c == '\n') + 1;
                     offenders.Add($"{Path.GetFileName(path)}:{line}");
@@ -208,11 +208,16 @@ public sealed class ViewerCommandTimeoutTests
     ///
     /// <para>The fourth case is the shape this group's own tooling got wrong on <c>.Storage</c>: an
     /// untimed command inside a <c>using (...) { }</c> STATEMENT, with the block's closing brace
-    /// between it and the next command's deadline. A scanner whose depth counter cannot go negative
-    /// treats that <c>}</c> as still depth-zero, keeps consuming past it, and reads the FOLLOWING
-    /// command's deadline — calling the untimed site clean. The <c>depth &lt;= 0</c> walker below
-    /// reports it. The fifth is this project's real shape: the timed factory lambda that replaced the
-    /// method-group hand-off, which must read as TIMED.</para>
+    /// between it and the next command's deadline. The fifth is this project's real shape: the timed
+    /// factory lambda that replaced the method-group hand-off, which must read as TIMED.</para>
+    ///
+    /// <para><b>The last three are the layouts the landed scan could not report</b>, and they are why the
+    /// question is asked in two halves. Give the block above ONE body statement and the two-statement window
+    /// spends its budget on that statement and on the statement after the block; put the timed command in the
+    /// very next statement, or as the untimed header's own first body statement, and the deadline the scan
+    /// finds belongs to the neighbour outright. The initializer is therefore read from the CONSTRUCTION span
+    /// and only the assignment from the statement span. Cutting the statement span at the next construction
+    /// instead would fail the SECOND case above, where two constructions legitimately share one deadline.</para>
     /// </summary>
     [Theory]
     [InlineData(
@@ -245,14 +250,51 @@ public sealed class ViewerCommandTimeoutTests
         + "    return command;\n"
         + "},\n",
         true)]
+    [InlineData(
+        "using (var untimed = new NpgsqlCommand(\"SELECT 1\", connection))\n"
+        + "{\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n"
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
+        false)]
+    [InlineData(
+        "using var untimed = new NpgsqlCommand(Sql, connection);\n"
+        + "using var next = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n",
+        false)]
+    [InlineData(
+        "using (var untimed = new NpgsqlCommand(Sql, connection))\n"
+        + "{\n"
+        + "    using var sibling = new NpgsqlCommand(OtherSql, connection) { CommandTimeout = 10 };\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n",
+        false)]
+    [InlineData(
+        "using var command = connection.CreateCommand();\n"
+        + "/* the deadline used to be command.CommandTimeout = 10 here */\n"
+        + "await command.ExecuteNonQueryAsync(cancellationToken);\n",
+        false)]
+    [InlineData(
+        "using var command = connection.CreateCommand();\n"
+        + "var doc = \"command.CommandTimeout = 10\";\n",
+        false)]
+    /* The sibling spelled as an ASSIGNMENT rather than an initializer. Every other sibling fixture in this
+       family used the initializer form, which has no leading dot and so never reached the assignment regex -
+       while the assignment spelling is the dominant one in this codebase. Found in review. */
+    [InlineData(
+        "using (var untimed = connection.CreateCommand())\n"
+        + "{\n"
+        + "    using var sibling = connection.CreateCommand();\n"
+        + "    sibling.CommandTimeout = 10;\n"
+        + "    await untimed.ExecuteNonQueryAsync(cancellationToken);\n"
+        + "}\n",
+        false)]
     public void TheScanner_JudgesTheSiteItself_NotItsNeighbours(string source, bool expectedTimed)
     {
-        var ctor = s_commandCtor.Match(source);
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var ctor = s_commandCtor.Match(code);
         Assert.True(ctor.Success, "the fixture did not contain a command construction");
 
-        var span = CSharpSourceWalker.StatementSpanFrom(source, ctor.Index, statements: 2);
-
-        Assert.Equal(expectedTimed, s_setsTimeout.IsMatch(span));
+        Assert.Equal(expectedTimed, CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index));
     }
 
     /// <summary>
@@ -278,6 +320,31 @@ public sealed class ViewerCommandTimeoutTests
        with the literal text around them, so a call written inside an interpolation was invisible to every
        scan built on them. The reasoning that shaped the walk moved there with it, and
        CSharpSourceWalkerTests carries the witnesses. */
+
+    /// <summary>
+    /// <para>A construction written ONLY in a comment or a literal is not a construction. The scan reads
+    /// stripped text so it cannot report one: a phantom offender names a line where no edit can ever make
+    /// the build pass, which is worse than a miss because it cannot be acted on. Not hypothetical — an
+    /// earlier census in this family reported a bare <c>CreateCommand</c> method group that turned out to
+    /// be the phrase in running prose inside a block comment.</para>
+    ///
+    /// <para>The last case is a FIFTH construction shape, <c>new Npgsql.NpgsqlCommand(</c>, which the
+    /// unqualified pattern could not see at all. None exists in this project today; one exists elsewhere in
+    /// the solution, so the shape is real and a pattern blind to it would report a clean sweep over a site
+    /// it never looked at.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("var command = _dataSource.CreateCommand(Sql);", true)]
+    [InlineData("/* these go through _dataSource.CreateCommand(Sql) and leave nothing open. */", false)]
+    [InlineData("// TODO: replace with new NpgsqlCommand(Sql, connection)", false)]
+    [InlineData("var doc = \"await using var c = _dataSource.CreateCommand(Sql);\";", false)]
+    [InlineData("await using var command = new Npgsql.NpgsqlCommand(Sql, connection);", true)]
+    public void TheConstructionScan_ReadsCodeNotProse(string source, bool expectedSite)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+
+        Assert.Equal(expectedSite, s_commandCtor.IsMatch(code));
+    }
 
     private static IEnumerable<string> ViewerSources()
     {
