@@ -1898,6 +1898,9 @@ public partial class MainWindow : Window
            _minimizeToTray live). Minimize-to-tray is viewer-local (the reloaded file); the alerts-master +
            "Tray notification cooldown" the window just wrote to the STORE are re-read from there. */
         _minimizeToTray = reloaded.MinimizeToTray;
+        /* The toast-settings read and the display-mode tab reload below are both fired unawaited, so they
+           are in flight together whenever the mode changed. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
         _ = RefreshAlertToastSettingsFromStoreAsync();
         /* Re-apply the fleet refresh interval to the live shell timers so a change takes effect immediately
            (the connection timeout is a connect-time setting and applies on the next viewer launch). */
