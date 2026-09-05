@@ -48,8 +48,18 @@ public static class DarlingModuleMap
     /// two days of procedure_stats — well inside its 4-day raw retention, so no handle is missed between runs.
     /// ACCUMULATES: a handle that stops appearing keeps its last-known attribution forever (no delete). DISTINCT ON
     /// keeps the most-recent row per handle; the ON CONFLICT only advances a row (never regresses last_seen), so a
-    /// stale run can't overwrite a fresher attribution. <c>now()</c> is fine here — this is runtime maintenance, not
-    /// the deterministic compiler.
+    /// stale run can't overwrite a fresher attribution.
+    ///
+    /// <para><c>now()</c> IS LEFT BARE HERE, alone in the store's SQL, and it survives on margin rather than on
+    /// being harmless. <c>collection_time</c> is naive UTC and <c>now()</c> is <c>timestamptz</c>, so the store
+    /// session's TimeZone shifts this bound like any other: across the real offset range (UTC-12..UTC+14) the
+    /// 48-hour window delivers between 34 and 60 hours. Both ends are safe for THIS query and only because of
+    /// the two numbers either side of it — 34h still covers the refresh cadence (startup, then riding the 24h
+    /// purge) so no handle is missed between runs, and 60h is still inside
+    /// <c>TimescaleSupport.RawRetentionInterval</c> (4 days) so the widened end scans nothing that has been
+    /// dropped. The map also ACCUMULATES, so a wider window only re-reads rows it already has. Shorten the
+    /// cadence past 34h or the raw retention past 60h and this has to become a bound parameter like every other
+    /// windowed read; it is not a licence for the next one.</para>
     ///
     /// <para>The <c>ORDER BY</c> its DISTINCT ON requires also happens to be a deterministic ascending order
     /// on the conflict key, so concurrent refreshes take these row locks in the same relative order and the

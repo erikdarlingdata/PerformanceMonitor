@@ -599,6 +599,10 @@ LIMIT 2000";
         return items;
     }
 
+    /// <summary>How fresh the latest snapshot must be for its sessions to count as still running. Bound as
+    /// <c>$4</c> rather than written into the SQL — see the bind site.</summary>
+    private static readonly TimeSpan LatestSnapshotFreshness = TimeSpan.FromMinutes(10);
+
     /// <summary>
     /// Gets long-running queries from the latest collection snapshot.
     /// Returns sessions whose total elapsed time exceeds the given threshold.
@@ -652,7 +656,7 @@ LIMIT 2000";
                 FROM v_query_snapshots AS r
                 WHERE r.server_id = $1
                     AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
-                    AND r.collection_time >= NOW() - INTERVAL '10 MINUTES'
+                    AND r.collection_time >= $4
                     AND r.session_id > 50
                     {spServerDiagnosticsFilter}
                     {waitForFilter}
@@ -666,6 +670,11 @@ LIMIT 2000";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = thresholdMs });
         command.Parameters.Add(new DuckDBParameter { Value = maxResults });
+        /* $4 is the snapshot-freshness floor, bound rather than spelled `NOW() - INTERVAL '10 MINUTES'`:
+           collection_time is a naive-UTC TIMESTAMP, NOW() is TIMESTAMP WITH TIME ZONE, and the mixed
+           comparison resolves the naive side in the host's TimeZone. East of UTC the floor lands in the
+           future and this read returns nothing, so the long-running-query alert never fires at all. */
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - LatestSnapshotFreshness });
 
         var items = new List<LongRunningQueryInfo>();
         using var reader = await command.ExecuteReaderAsync();
