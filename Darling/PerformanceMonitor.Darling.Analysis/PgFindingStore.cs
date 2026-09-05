@@ -15,6 +15,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -553,8 +554,12 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
     /// does not exist.</para>
+    ///
+    /// <para>The default names <see cref="AnalysisRetentionDefaults.FindingsRetentionDays"/> rather
+    /// than repeating its value, so the horizon this store falls back to cannot drift from the one the
+    /// worker's daily sweep passes in.</para>
     /// </summary>
-    public async Task CleanupOldFindingsAsync(int retentionDays = 30)
+    public async Task CleanupOldFindingsAsync(int retentionDays = AnalysisRetentionDefaults.FindingsRetentionDays)
     {
         try
         {
