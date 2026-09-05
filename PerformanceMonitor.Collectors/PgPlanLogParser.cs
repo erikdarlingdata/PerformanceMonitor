@@ -88,6 +88,14 @@ public static class PgPlanLogParser
     /// <para>Blocks that will not parse are skipped rather than reported. Both transports read a bounded
     /// window, so a block cut in half at the edge is an ordinary consequence of not reading the whole file
     /// and not a fault worth surfacing every cycle.</para>
+    ///
+    /// <para><b>Skipping it is only free where the next read overlaps, and on the self-hosted route at the
+    /// default cadence it often does not.</b> <see cref="PgPlanCaptureCollector"/> reads a fixed 4 MB tail
+    /// hourly, so the windows touch only while the log grows by under 4 MB an hour — roughly 1.2 KB/s.
+    /// Past that the gap between two reads is never read at all, and the plans in it are lost rather than
+    /// deferred. <see cref="PgDeadlockLogParser"/> carries the arithmetic and the transport split; the
+    /// short version is that the RDS log API keeps a resume marker and does not have this failure, while
+    /// the <c>pg_read_file</c> tail has no marker and does.</para>
     /// </summary>
     public static List<ParsedPlan> Extract(string? logBody)
     {
