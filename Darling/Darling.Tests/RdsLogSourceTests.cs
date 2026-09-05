@@ -176,16 +176,23 @@ public class RdsLogSourceTests
     }
 
     /// <summary>
-    /// First read asks for a bounded TAIL; the next resumes from the marker. Without the tail, a first read
-    /// against a rotated multi-GB log would pull all of it across the network — #2565 measured 772 MB in
-    /// twenty seconds at capture-everything.
+    /// First read asks for a bounded TAIL; the next resumes from the marker, ONCE THE FIRST CHUNK HAS BEEN
+    /// COMMITTED. Without the tail, a first read against a rotated multi-GB log would pull all of it across
+    /// the network — #2565 measured 772 MB in twenty seconds at capture-everything.
+    ///
+    /// <para>The <c>CommitResume</c> between the two reads is the part worth noticing: it used to be absent
+    /// because the read recorded its own marker, which is #3008. The pair below and
+    /// <see cref="TheMarkerDoesNotAdvanceUntilTheChunkIsCommitted"/> are each other's control — one shows
+    /// the marker still advances when the caller commits, the other that it does not when the caller
+    /// doesn't, and a fix that broke either would pass the other.</para>
     /// </summary>
     [Fact]
     public async Task FirstReadIsBounded_ThenItResumesFromTheMarker()
     {
         var (source, client) = Build();
 
-        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+        var first = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+        source.CommitResume(first!.Value.Resume);
         await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
 
         Assert.Null(client.Downloads[0].Marker);
@@ -193,6 +200,71 @@ public class RdsLogSourceTests
 
         Assert.Equal("MARKER-1", client.Downloads[1].Marker);
         Assert.Equal(0, client.Downloads[1].NumberOfLines);
+    }
+
+    /// <summary>
+    /// An UNCOMMITTED chunk does not move the marker: the second read asks RDS for the same window as the
+    /// first, tail request and all (#3008).
+    ///
+    /// <para>This is the transport-level half of the data-loss fix. <c>DownloadDBLogFilePortion</c> is
+    /// consume-once and the marker lives in this process, so a marker recorded inside the fetch made every
+    /// failure after it — a parse fault, a COPY past its deadline, a dropped store connection, a cancelled
+    /// cycle — consume a window nobody stored, with no error naming the loss. Reading twice with no commit
+    /// in between is exactly the shape a failed cycle followed by the next cycle takes.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheMarkerDoesNotAdvanceUntilTheChunkIsCommitted()
+    {
+        var (source, client) = Build();
+
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+
+        Assert.Equal(2, client.Downloads.Count);
+
+        /* The retry is byte-for-byte the first request: no marker, and the same bounded tail. Asserting
+           only Marker would pass over a read that had quietly switched to NumberOfLines = 0 and so asked
+           for a different window than the one that was lost. */
+        Assert.Null(client.Downloads[1].Marker);
+        Assert.Equal(client.Downloads[0].Marker, client.Downloads[1].Marker);
+        Assert.Equal(client.Downloads[0].NumberOfLines, client.Downloads[1].NumberOfLines);
+        Assert.True(client.Downloads[1].NumberOfLines > 0);
+    }
+
+    /// <summary>
+    /// The marker a chunk carries is the one RDS sent, and it is keyed to the file it came from — the
+    /// property that makes a log rotation start a fresh marker instead of resuming a new file at an old
+    /// file's offset. Handing the token back is a caller's only move, so it has to arrive intact.
+    /// </summary>
+    [Fact]
+    public async Task AChunkCarriesTheServiceMarkerKeyedToItsFile()
+    {
+        var (source, _) = Build();
+
+        var chunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+
+        Assert.Equal("MARKER-1", chunk!.Value.Resume.Marker);
+        Assert.Contains("error/postgresql.log.2026-08-25-18", chunk.Value.Resume.Key, StringComparison.Ordinal);
+        Assert.Contains("solo", chunk.Value.Resume.Key, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Committing a chunk RDS sent no marker with is a no-op rather than a wedge or a crash. The API
+    /// answers this way on a read that reached the end of a file, and a caller commits unconditionally on
+    /// its success path — so this arrives in normal operation, not only from a fabricated token.
+    /// </summary>
+    [Fact]
+    public async Task CommittingAChunkWithNoServiceMarkerDoesNothing()
+    {
+        var (source, client) = Build(new FakeRds { NextMarker = null });
+
+        var chunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+        source.CommitResume(chunk!.Value.Resume);
+        source.CommitResume(default);
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+
+        Assert.Null(client.Downloads[1].Marker);
+        Assert.True(client.Downloads[1].NumberOfLines > 0);
     }
 
     /// <summary>A non-RDS host is not this transport's problem: null, so the caller uses pg_read_file.</summary>
