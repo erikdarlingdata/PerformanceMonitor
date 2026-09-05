@@ -416,8 +416,9 @@ public sealed class DarlingFleetDeadlockCoverageTests
     /// <summary>
     /// A card that sets nothing reads as UNCOVERED, and that is the load-bearing default. <c>DeadlockSource</c>
     /// is derived rather than assigned precisely so a card built by a path nobody re-reads cannot sit at an
-    /// enum default meaning "read" and inflate the fleet's coverage — the silent-default shape this file's
-    /// own <c>AbandonedCount</c> comment already names as a defect class.
+    /// enum default meaning "read" and inflate the fleet's coverage — the silent-default shape the READER's
+    /// own <c>AbandonedCount</c> comment (inside <c>FleetCollectionHealthSql</c>) already names as a defect
+    /// class: "it would COMPILE, because the default is silent".
     /// </summary>
     [Fact]
     public void ACardThatMakesNoClaim_IsUncovered_NotCovered()

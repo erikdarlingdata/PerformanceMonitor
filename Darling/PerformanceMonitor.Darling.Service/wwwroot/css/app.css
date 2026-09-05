@@ -343,6 +343,11 @@ a:hover { text-decoration: underline; }
 }
 .rollup .tile .num { font-size: 1.5rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .rollup .tile .lbl { font-size: 0.72rem; color: var(--muted); letter-spacing: 0.3px; }
+/* #3017: the deadlock total's coverage denominator, under its label. Smaller than .lbl so it reads as a
+   qualifier on the number rather than as a second label, and styled on its OWN state rather than inheriting
+   the tile's severity — full coverage under a red count is good news about a bad number. */
+.rollup .tile .sub { font-size: 0.68rem; color: var(--muted); letter-spacing: 0.2px; margin-top: 0.15rem; }
+.rollup .tile .sub.partial { color: var(--warn); }
 .rollup .tile.healthy .num { color: var(--ok); }
 .rollup .tile.warning .num { color: var(--warn); }
 .rollup .tile.critical .num { color: var(--err); }

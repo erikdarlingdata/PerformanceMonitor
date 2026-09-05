@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Reflection;
 using PerformanceMonitor.Common;
 using Xunit;
 
@@ -61,22 +62,72 @@ public sealed class NothingReadBandsTests
     }
 
     /// <summary>
-    /// Set equality, so the two theories above cannot both keep passing while an EIGHTH band arrives with no
-    /// decision made about it. Every band constant on the classifier is accounted for by exactly one of the
-    /// two lists.
+    /// Set equality, so the two theories above cannot both keep passing while the set itself is widened or
+    /// narrowed without a decision reaching them.
     /// </summary>
     [Fact]
     public void TheSetIsExactly_TheThreeBandsThatReadNothing()
     {
         Assert.Equal(
-            new[]
-            {
-                CollectorHealthClassifier.NeverRun,
-                CollectorHealthClassifier.NoPermissions,
-                CollectorHealthClassifier.Stopped,
-            }.OrderBy(b => b, StringComparer.Ordinal).ToArray(),
+            ReadNothing.OrderBy(b => b, StringComparer.Ordinal).ToArray(),
             CollectorHealthClassifier.NothingReadBands.OrderBy(b => b, StringComparer.Ordinal).ToArray());
     }
+
+    /// <summary>
+    /// And the direction the set-equality test above cannot reach on its own: an EIGHTH band added to the
+    /// classifier and to NEITHER list.
+    ///
+    /// <para>A test that compared the set against a hand-written triple would keep passing through that
+    /// change, because nothing in it ever asks the classifier what bands EXIST — a decision would simply
+    /// never be made, and the new band would count as read by default. So the band constants are read off
+    /// the type and every one is required to sit in exactly one of the two lists.</para>
+    ///
+    /// <para>The band constants are told apart from the classifier's other <c>public const string</c>
+    /// members (<c>EmptyEnumerationMarker</c>, <c>HasUserDatabasesQualifier</c> — lower-case prose) by their
+    /// VALUE shape rather than by a name list, so a new band is picked up without this test being edited. A
+    /// non-band constant that happened to be upper-case would be swept in and demand a decision it does not
+    /// need, which is the safe direction: it fails loudly and gets one line of triage, where the miss it
+    /// replaces is silent and wrong.</para>
+    /// </summary>
+    [Fact]
+    public void EveryBandOnTheClassifier_HasADecision_InExactlyOneList()
+    {
+        var bands = typeof(CollectorHealthClassifier)
+            .GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+            .Where(f => f is { IsLiteral: true, IsInitOnly: false } && f.FieldType == typeof(string))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .Where(v => v.Length > 0 && v.All(ch => char.IsAsciiLetterUpper(ch) || ch == '_'))
+            .ToList();
+
+        /* The precondition, named so a reflection change reports itself instead of turning this into a
+           vacuous pass over an empty sequence. */
+        Assert.Equal(7, bands.Count);
+
+        var decided = ReadNothing.Concat(DidRead).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Equal(
+            bands.OrderBy(b => b, StringComparer.Ordinal).ToArray(),
+            decided.OrderBy(b => b, StringComparer.Ordinal).ToArray());
+
+        /* No band in both lists — a band that read nothing and also read is not a decision. */
+        Assert.Empty(ReadNothing.Intersect(DidRead, StringComparer.Ordinal));
+    }
+
+    /* The two decisions, as data, so both tests above read from the same lists the theories enumerate. */
+    private static readonly string[] ReadNothing =
+    [
+        CollectorHealthClassifier.NeverRun,
+        CollectorHealthClassifier.NoPermissions,
+        CollectorHealthClassifier.Stopped,
+    ];
+
+    private static readonly string[] DidRead =
+    [
+        CollectorHealthClassifier.Failing,
+        CollectorHealthClassifier.Stale,
+        CollectorHealthClassifier.Warning,
+        CollectorHealthClassifier.Healthy,
+    ];
 
     /// <summary>
     /// A null band answers FALSE, not TRUE. Absence of a band is not a claim that nothing was read, and a
