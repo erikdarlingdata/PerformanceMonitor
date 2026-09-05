@@ -26,23 +26,26 @@ namespace Darling.Tests;
     TWO shapes are reachable that way -- a full hostname, and a short name plus its ordinal.
     Two more are NOT, and the sweeps below deliberately do not attempt them:
 
-      - A bare short name in prose: "measured on OMEGA". There is no shape to match, because
-        the token is just a word. Matching capitalised prose tokens instead ("on <ALLCAPS>")
-        returns 606 hits across 102 words on this tree, and they are all either an acronym
-        (SQL, DMV, CPU, RDS) or this codebase's own emphasis caps (EVERY, BOTH, ENTIRE, ONLY).
-        The allowlist would have to be the English language.
+      - A bare name in prose: "measured on OMEGA". There is no shape to match, because the
+        token is just a word. The nearest pattern available -- capitalised prose tokens --
+        cannot tell a name from an acronym or from this codebase's own emphasis caps, so its
+        allowlist would have to be the English language.
 
-      - A real value in an identity-bearing fixture field -- a display_name, a ServerName.
-        Also no shape: this tree assigns 251 distinct free-form descriptive names to those
-        properties (ServerName = "blocking-stats-read"), which is GOOD test naming and worth
-        keeping, and a short name hides among them indistinguishably from srv, host or shared.
+      - A name standing as the value of an identity-bearing fixture field. Also no shape: those
+        fields hold free-form descriptive strings by design, which is GOOD test naming and worth
+        keeping, and a name reads as one more of them.
 
-    Hashing a denylist of the real names rescues neither case. A three-letter name has 17,576
-    candidates, so a hash committed here is recoverable by brute force in microseconds --
-    publishing the hash publishes the name -- and moving the salt to a CI secret would make the
-    guard silently no-op on every fork and outside contribution, which is exactly the "green for
-    the wrong reason" failure the scanned-count assert exists to catch. So those two categories
-    stay a review matter, and what is left below is a tripwire rather than a proof.
+    Hashing a denylist rescues neither case. A hostname slug is a short token drawn from a small
+    alphabet, so its whole keyspace enumerates in microseconds: a hash committed to a public repo
+    publishes what it stands for. Moving the salt to a CI secret trades that for a guard that
+    silently no-ops on every fork and outside contribution, which is exactly the "green for the
+    wrong reason" failure the scanned-count assert exists to catch. So those two categories stay a
+    review matter, and what is left below is a tripwire rather than a proof.
+
+    Deliberately not written down here: any inventory of how much ordinary prose the unreachable
+    shapes would match, and any distinguishing property of the names this guard exists to keep out.
+    Neither is needed to maintain the guard, both are useful only to someone working out where it
+    does not look, and this file is public. Resist the urge to helpfully re-add them.
 */
 public sealed class FleetIdentifierScrubTests
 {
@@ -80,8 +83,8 @@ public sealed class FleetIdentifierScrubTests
     /*
         A server gets named by its short name and ordinal too -- omega-01, not
         prod-sql-use1-omega-01 -- and InstanceName cannot see that form: it requires the
-        service prefix and both middle segments. Both real identifiers that survived #2490
-        and #2900 to be caught by hand in #2903 were exactly this shape.
+        service prefix and both middle segments. #2490 and #2900 swept the full-hostname shape
+        only, #2903 closed this one by hand, and the sweep below is what makes it automatic.
 
         The ZERO PADDING is what makes the shape checkable at all. Prose writes a measurement
         as top-25, sev-10, pre-18, phase-2, and never pads one to two digits; a fleet pads
@@ -90,9 +93,16 @@ public sealed class FleetIdentifierScrubTests
         and demanding a purely alphabetic word drops the escape-sequence and version debris
         with it (n2026-08 out of a literal "\n2026-08", krb5-2, w1f-2).
 
-        Accepted blind spot: this reaches -00 through -09 only, so a name whose first published
-        box is -10 or higher slips past. A fleet's first box is -01, and every real identifier
-        this guard has had to catch so far has been -01.
+        The ceiling follows from that padding, as a property of the shape rather than a bet on
+        how a fleet numbers its boxes: padding is only observable below ten. A two-digit ordinal
+        needs none, so it is shape-identical to the two-digit measurements prose already writes,
+        and widening the ordinal does not extend the discriminator -- it spends it. Re-measured
+        on this tree: allowing any two-digit ordinal doubles the false-positive vocabulary, 11
+        words to 28 and 103 occurrences to 204, and every word it adds is a measurement or a
+        version number rather than a name. So this reaches -00 through -09 by construction; a
+        short name first published above that is out of reach, and stays a review matter like
+        the two shapes at the top of the file. Widen the shape only against a measurement that
+        says the trade has changed, and prefer tightening it over lengthening either allowlist.
     */
     private static readonly Regex ShortNameOrdinal = new(
         @"\b(?<slug>[a-z]{3,})-0[0-9]\b",
