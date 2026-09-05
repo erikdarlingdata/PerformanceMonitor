@@ -34,9 +34,9 @@ namespace PerformanceMonitor.Collectors;
 /// report over more than once — but NOT by the same mechanism, and the difference decides what a
 /// truncated report costs. This definition's window OVERLAPS between cycles on purpose, so a report cut
 /// in half at the edge of one read is whole in the next. The RDS route is consume-once: its resume marker
-/// advances past whatever a successful cycle stored, so a report cut at one of its chunk boundaries is
-/// not completed, and its own repeats come from a restart discarding that in-process marker or from a
-/// write that did not land (#3008, #3009).</para>
+/// advances past everything a successful cycle CONSUMED, not merely what that cycle stored, so a report
+/// cut at one of its chunk boundaries is not completed while the marker lives, and its own repeats come
+/// from a restart discarding that in-process marker or from a write that did not land (#3008, #3009).</para>
 /// </summary>
 public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDeadlocksCollector.Row>
 {

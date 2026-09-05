@@ -192,7 +192,8 @@ public static class PgDeadlockLogParser
         /* THROWN rather than skipped, and it is the only thing in this parser that is not tolerant.
            Everything else a block can be wrong about is tolerated because the pg_read_file route reads it
            again on the next overlapping pass, so skipping it costs nothing THERE. The consume-once RDS
-           route has no such pass, so a skip on it is permanent — see Extract's remarks and #3009.
+           route has no such pass, so a skip on it stands for the life of its resume marker — see
+           Extract's remarks and #3009.
            This one neither clears itself nor announces itself: the timestamp
            below parses PERFECTLY under a non-UTC prefix, AssumeUniversal takes it for UTC, and the row
            lands in the wrong hour with nothing anywhere disagreeing. Returning null instead would store no
