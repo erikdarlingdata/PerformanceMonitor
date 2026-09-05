@@ -187,7 +187,7 @@ public sealed class PlanCorrectionCollectorDefinitionTests
            measured post-#2764 with SET STATISTICS TIME ON, compile is ~84ms CPU total across all five
            statements, and that figure is a ceiling (taken under emulation).
 
-           #2760 removed both hints believing ~4,237ms of avg CPU on prod-pos-use1-multi-45/Demo was
+           #2760 removed both hints believing ~4,237ms of avg CPU on <host>/<database> was
            compile cost. It never was — that was the live Query Store catalog-view joins, which #2764
            fixed by staging them into temps. Pinned so nobody removes these to "save" compile time
            again. Anchored per statement rather than by bare Contains, because the enumeration query
