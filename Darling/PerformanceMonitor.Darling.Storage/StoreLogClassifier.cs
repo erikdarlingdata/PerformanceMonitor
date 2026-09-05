@@ -483,6 +483,14 @@ public static class StoreLogClassifier
         var counts = new Dictionary<(string Class, string Severity, string? Message), (int Count, string? Sample)>();
         var perClass = new Dictionary<string, int>(StringComparer.Ordinal);
         var order = new List<(string Class, string Severity, string? Message)>();
+
+        /* Which over-budget MESSAGES have already been folded. Needed because a folded message's own key is
+           never inserted into `counts` — only the untexted fold row is — so every repeat of it re-enters the
+           budget branch below. Counting those repeats would report an operator's ONE retried typo as five
+           hundred distinct messages folded, which is the opposite of what this figure is documented to mean
+           in three places (this struct, CaptureSummary.MessagesFolded, and the sentence get_store_log
+           renders) and would read to a human as five hundred separate problems. */
+        var folded = new HashSet<(string Class, string Severity, string? Message)>();
         dropped = 0;
 
         foreach (var entry in entries)
@@ -502,8 +510,12 @@ public static class StoreLogClassifier
                 if (distinct >= MaxRetainedGroupsPerClass)
                 {
                     /* Past the budget: fold into the class's untexted row so the OCCURRENCE is never lost,
-                       and report the fold. */
-                    dropped++;
+                       and report the fold ONCE PER DISTINCT MESSAGE, not once per occurrence of it. */
+                    if (folded.Add(key))
+                    {
+                        dropped++;
+                    }
+
                     var foldKey = (entry.EventClass, entry.Severity, (string?)null);
                     if (counts.TryGetValue(foldKey, out var fold))
                     {

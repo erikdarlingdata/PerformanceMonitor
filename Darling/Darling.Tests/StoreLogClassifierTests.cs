@@ -319,9 +319,12 @@ public class StoreLogClassifierTests
 
         Assert.Equal("user_request_cancel", Assert.Single(withQueryId.Groups).EventClass);
 
-        /* And a LOWER-case letter before it, which is what a prefix ending in %c's hex session id renders. */
+        /* And a LOWER-case letter before it, which is what a prefix ending in %c's hex session id renders.
+           The last character before ERROR has to BE a letter for this to exercise anything the digit case
+           above does not — an earlier version of this fixture ended `14b0ERROR` and silently retested the
+           digit path. */
         var withSessionId = StoreLogClassifier.Classify(
-            "2026-09-05 14:03:02.551 UTC 68bb1f2a.14b0ERROR:  canceling statement due to user request\n");
+            "2026-09-05 14:03:02.551 UTC 68bb1f2a.14abERROR:  canceling statement due to user request\n");
 
         Assert.Equal("user_request_cancel", Assert.Single(withSessionId.Groups).EventClass);
     }
@@ -435,17 +438,31 @@ public class StoreLogClassifierTests
     {
         var slab = new StringBuilder();
         const int Distinct = 25;
+        const int RepeatsOfTheLast = 500;
+
         for (var i = 0; i < Distinct; i++)
         {
-            slab.Append(DefaultPrefix)
-                .Append("ERROR:  column \"c")
-                .Append(i)
-                .Append("\" does not exist\n");
+            /* The LAST message repeats, and it is over budget. Every earlier version of this fixture gave
+               each message exactly one occurrence, which made distinct-folded and occurrences-folded the
+               same number and hid a real defect: the fold counted every REPEAT of an over-budget message as
+               another distinct message, so an operator's one retried typo reported as five hundred. The
+               repeat is what separates the two figures, and it is the case the budget exists for. */
+            var repeats = i == Distinct - 1 ? RepeatsOfTheLast : 1;
+            for (var r = 0; r < repeats; r++)
+            {
+                slab.Append(DefaultPrefix)
+                    .Append("ERROR:  column \"c")
+                    .Append(i)
+                    .Append("\" does not exist\n");
+            }
         }
 
         var census = StoreLogClassifier.Classify(slab.ToString());
+        var entries = Distinct - 1 + RepeatsOfTheLast;
 
-        Assert.Equal(Distinct, census.EntriesRead);
+        Assert.Equal(entries, census.EntriesRead);
+
+        /* DISTINCT messages folded, not occurrences of them. */
         Assert.Equal(Distinct - StoreLogClassifier.MaxRetainedGroupsPerClass, census.GroupsDropped);
 
         var unclassified = census.Groups
@@ -455,8 +472,12 @@ public class StoreLogClassifierTests
         Assert.Equal(StoreLogClassifier.MaxRetainedGroupsPerClass + 1, unclassified.Length);
         Assert.Equal(StoreLogClassifier.MaxRetainedGroupsPerClass, unclassified.Count(g => g.MessageText != null));
 
-        /* NOTHING is lost: the occurrences still sum to every entry read. */
-        Assert.Equal(Distinct, unclassified.Sum(g => g.Occurrences));
+        /* NOTHING is lost: the occurrences still sum to every entry read, repeats included. */
+        Assert.Equal(entries, unclassified.Sum(g => g.Occurrences));
+
+        /* And the repeats really did land in the untexted fold row rather than anywhere else. */
+        var fold = Assert.Single(unclassified.Where(g => g.MessageText is null));
+        Assert.Equal(Distinct - StoreLogClassifier.MaxRetainedGroupsPerClass - 1 + RepeatsOfTheLast, fold.Occurrences);
     }
 
     /// <summary>A message and its continuations are retained as ONE entry, so the DETAIL body a person needs
