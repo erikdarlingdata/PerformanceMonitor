@@ -151,6 +151,9 @@ public sealed class AlertReadFailureCounter
     /// anything. What the denominator is FOR is telling three failures over two hundred passes apart
     /// from three over four.
     /// </summary>
+    /// <remarks>Nullable for symmetry with <see cref="RecordReadFailure"/>, but no caller passes null
+    /// today: both SKUs' passes are per-server, and the fleet-scoped store self-alerts are polled on
+    /// their own cadences rather than as a pass over a server.</remarks>
     public void RecordPass(string? serverKey)
     {
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? _fleet : Bucket(serverKey!);
@@ -184,7 +187,16 @@ public sealed class AlertReadFailureCounter
         string? LastFailureRead,
         DateTime CountingSinceUtc);
 
-    /// <summary>Reads one server's figures. An unseen key reads as zeroes, not as an absence.</summary>
+    /// <summary>
+    /// Reads one server's figures. An unseen key reads as zeroes, not as an absence — the surface
+    /// serializes this straight into JSON, and a null-shaped reading for a server that simply has not
+    /// failed would render as a block of nulls for a reader to interpret.
+    ///
+    /// <para>A null or blank key is deliberately NOT a route to the fleet bucket, even though
+    /// <see cref="RecordReadFailure"/> writes there for one: this is the PER-SERVER read, and a caller
+    /// with no server in hand wants <see cref="ReadInstance"/>. The fleet bucket still reaches every
+    /// reader through <c>InstanceReadFailures</c>, which is the field that exists for it.</para>
+    /// </summary>
     public Reading ReadFor(string? serverKey)
     {
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? null : Lookup(serverKey!);
@@ -281,7 +293,8 @@ public sealed class AlertReadFailureCounter
     public const string WindowNote =
         "alert_read_health is the ONLY block on this response that is not measured over the trailing seven "
         + "days. It is an in-memory count kept by the running service or app, from counting_since — which is "
-        + "when this process started — to now, and a restart takes it to zero. So a zero here means "
+        + "when this process began counting, early in its own startup — to now, and a restart takes it to "
+        + "zero. So a zero here means "
         + "\"none since counting_since\" and NOT \"none in seven days\": check counting_since before reading "
         + "the zero as reassurance, because a process that started a minute ago can only report on a minute. "
         + "It is deliberately not persisted: what it counts is a failure to READ the store, so a counter that "

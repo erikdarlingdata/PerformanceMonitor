@@ -3204,7 +3204,9 @@ public sealed class DarlingWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError("[{Server}] Alert sweep failed: {Message}", server.Config.DisplayName, ex.Message);
-            _readFailures?.RecordReadFailure(runtime.ServerId.ToString(CultureInfo.InvariantCulture), "alert pass (latest-CPU read and the shared engine sweep)");
+            _readFailures.RecordReadFailure(
+                runtime.ServerId.ToString(CultureInfo.InvariantCulture),
+                "alert pass (latest-CPU read and the shared engine sweep)");
         }
     }
 
@@ -3320,7 +3322,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
-            _readFailures?.RecordReadFailure(snapshot.ServerKey, "PostgreSQL outage-predictor reads");
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL outage-predictor reads");
         }
 
         /* #2711/#2719: Deadlocks, Blocking, Long-Running Query, Poison Wait and High CPU, each
@@ -3422,7 +3424,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL CPU alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
-            _readFailures?.RecordReadFailure(snapshot.ServerKey, "PostgreSQL CPU alert read");
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL CPU alert read");
         }
     }
 
@@ -3536,7 +3538,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL deadlock alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
-            _readFailures?.RecordReadFailure(snapshot.ServerKey, "PostgreSQL deadlock alert read");
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL deadlock alert read");
         }
     }
 
@@ -3647,7 +3649,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL blocking alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
-            _readFailures?.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read");
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read");
         }
     }
 
@@ -3764,7 +3766,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL long-running-query alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
-            _readFailures?.RecordReadFailure(snapshot.ServerKey, "PostgreSQL long-running-query alert read");
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL long-running-query alert read");
         }
     }
 
@@ -3967,7 +3969,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogError("[{Server}] PostgreSQL poison wait alert evaluation failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
-            _readFailures?.RecordReadFailure(snapshot.ServerKey, "PostgreSQL poison wait alert read");
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL poison wait alert read");
         }
     }
 
@@ -4339,7 +4341,8 @@ LIMIT 1";
         catch (Exception ex)
         {
             _logger.LogError("Compression-job health check failed: {Message}", ex.Message);
-            _readFailures?.RecordReadFailure(null, "store background-job health reads (compression, job cadence, retention holds)");
+            _readFailures.RecordReadFailure(
+                null, "store background-job health reads (compression, job cadence, retention holds)");
         }
     }
 
