@@ -142,6 +142,58 @@ public sealed class DarlingRetentionTests
     }
 
     [Fact]
+    public void PlanForceLedgerRetention_IsAYear_AndIsTheLongestHorizonInTheStore()
+    {
+        /* collect.plan_force_actions (the force-plan bot's decision journal) is not a collector and not a
+           hypertable, so it purges through the same batched DELETE builder as config_alert_log, on its own
+           action_time column. A year: it is the audit trail of a bot WRITING to production servers, so it
+           has to outlive the metrics that motivated each decision by enough that "why did this plan change"
+           is still answerable releases later. */
+        Assert.Equal(365, DarlingRetention.PlanForceLedgerRetentionDays);
+
+        /* The LONGEST horizon in the store, deliberately — strictly greater than every sibling, including
+           the alert log's already-generous 90 days. This is the assertion that catches a copy-paste of a
+           shorter sibling's constant into the purge call. */
+        Assert.True(
+            DarlingRetention.PlanForceLedgerRetentionDays > DarlingRetention.AlertHistoryRetentionDays,
+            "the plan-force ledger must outlive alert history");
+        Assert.True(
+            DarlingRetention.PlanForceLedgerRetentionDays > DarlingRetention.CollectionLogRetentionDays,
+            "the plan-force ledger must outlive the collection log");
+        Assert.True(
+            DarlingRetention.PlanForceLedgerRetentionDays > DarlingRetention.CommandHistoryRetentionDays,
+            "the plan-force ledger must outlive command history");
+
+        /* SCHEMA-QUALIFIED to match the V107 DDL and PgPlanForceActionStore, which both name
+           collect.plan_force_actions explicitly. No extra predicate: unlike config.config_command every row
+           here is eligible once it is past the horizon — the journal is append-only, so there is no live-row
+           state a purge could strand. */
+        Assert.Equal(
+            "DELETE FROM collect.plan_force_actions WHERE action_time < $1"
+            + " AND action_time >= (SELECT min(action_time) FROM collect.plan_force_actions WHERE action_time < $1)"
+            + " AND action_time < (SELECT min(action_time) FROM collect.plan_force_actions WHERE action_time < $1) + INTERVAL '1 days'",
+            DarlingRetention.TimeSlicedDeleteSql("collect.plan_force_actions", "action_time"));
+    }
+
+    [Fact]
+    public void ThePlanForceLedger_IsNotACollectorTable_SoTheCatalogLoopCannotReachIt()
+    {
+        /* Why the purge needs its own explicit block rather than an entry in the shared catalog: the journal
+           is written by the service's post-analysis bot pass, not by a collector, so nothing in
+           CollectorCatalog.All names it and the catalog-driven loop skips it entirely. If it ever DOES gain a
+           catalog entry, this test fails and the explicit block becomes a double-purge to delete. */
+        Assert.DoesNotContain(
+            CollectorCatalog.All,
+            d => d.TargetTable.Contains("plan_force_actions", StringComparison.OrdinalIgnoreCase));
+
+        /* Positive control for that negative: the same predicate DOES find a real collector table, so the
+           assertion above is a fact about the catalog rather than a mis-spelled probe that can never match. */
+        Assert.Contains(
+            CollectorCatalog.All,
+            d => d.TargetTable.Equals("file_io_stats", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void TimeSlicedDelete_WithoutAnExtraPredicate_IsUnchanged()
     {
         /* The optional predicate must not perturb the existing callers' statements by so much as a space. */
@@ -409,6 +461,32 @@ public sealed class DarlingRetentionTests
                 await insert.ExecuteNonQueryAsync(ct);
             }
 
+            /* collect.plan_force_actions (the force-plan bot's decision journal) purges on its own 365-day
+               horizon. The two ages are chosen to DISCRIMINATE that horizon rather than merely exercise it: a
+               400-day row is past it and goes, and a 100-day row SURVIVES even though it is past every other
+               horizon in the store (90-day alert history, 60-day collection_log, 30-day base). So this fails
+               if the purge is wired to a shorter sibling's constant by copy-paste, and it fails if the table
+               is not purged at all. Only the NOT NULL columns without defaults are supplied; action_id is
+               GENERATED ALWAYS AS IDENTITY, so it is never written. */
+            foreach (var (ageDays, decision) in new[] { (400, "would_force"), (100, "blocked") })
+            {
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO collect.plan_force_actions"
+                    + " (action_time, server_id, server_name, database_name, query_id, plan_id, action, mode, decision, outcome)"
+                    + " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
+                insert.Parameters.AddWithValue(utcNow.AddDays(-ageDays));
+                insert.Parameters.AddWithValue(TestServerId);
+                insert.Parameters.AddWithValue("retention-e2e");
+                insert.Parameters.AddWithValue("retention_e2e_db");
+                insert.Parameters.AddWithValue(1L);
+                insert.Parameters.AddWithValue(2L);
+                insert.Parameters.AddWithValue("force");
+                insert.Parameters.AddWithValue("dry_run");
+                insert.Parameters.AddWithValue(decision);
+                insert.Parameters.AddWithValue("journaled");
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
             /* At least our three expired rows go (40-day wait_stats, 70-day collection_log, 100-day
                config_alert_log); a shared dev store may shed more. The extension-free DELETE path on purpose
                (timescaleAvailable: false) — it must keep working even on a store whose tables ARE hypertables,
@@ -475,6 +553,20 @@ public sealed class DarlingRetentionTests
                 Assert.Contains(survivors, s => s.Status == "pending" && s.CreatedAt < utcNow.AddDays(-39));
                 Assert.Contains(survivors, s => s.Status == "succeeded" && s.CreatedAt > utcNow.AddDays(-1));
                 Assert.DoesNotContain(survivors, s => s.Status == "failed");
+            }
+
+            using (var read = new NpgsqlCommand(
+                "SELECT action_time FROM collect.plan_force_actions WHERE server_id = $1", connection))
+            {
+                read.Parameters.AddWithValue(TestServerId);
+                using var reader = await read.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct),
+                    $"the 100-day plan_force_actions row (inside the 365-day horizon) did not survive the purge; {purgeLog.Joined}");
+                var survivor = reader.GetDateTime(0);
+                Assert.True(survivor < utcNow.AddDays(-99) && survivor > utcNow.AddDays(-101),
+                    $"the surviving journal row should be the 100-day one, got {survivor:O}; {purgeLog.Joined}");
+                Assert.False(await reader.ReadAsync(ct),
+                    $"the 400-day plan_force_actions row survived past the 365-day horizon; {purgeLog.Joined}");
             }
 
             /* The purge writes ONE auditable run-record under the fleet sentinel server_id — SUCCESS here
@@ -644,6 +736,7 @@ WHERE hypertable_name = 'wait_stats'
             $"DELETE FROM collection_log WHERE server_id = {TestServerId}; " +
             $"DELETE FROM config_alert_log WHERE server_id = {TestServerId}; " +
             $"DELETE FROM config.config_command WHERE target_server_id = {TestServerId}; " +
+            $"DELETE FROM collect.plan_force_actions WHERE server_id = {TestServerId}; " +
             $"DELETE FROM collection_log WHERE server_id = {DarlingObservability.FleetServerId} AND collector_name = 'data_retention';",
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);

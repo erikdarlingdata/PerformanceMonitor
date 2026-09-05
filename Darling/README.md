@@ -862,6 +862,7 @@ A purge runs on the first sweep after startup and then daily, driven by the same
 | 30 days | Most collector tables (wait/query/procedure/Query Store stats, CPU, memory, file I/O, tempdb, perfmon, deadlocks, blocking, sessions, config snapshots), plus `collection_log` and `analysis_findings` |
 | 90 days | `database_size_stats`, `index_object_stats`, `pvs_stats` |
 | 365 days | `server_properties` |
+| 365 days | `collect.plan_force_actions`, the auto force-plan bot's decision journal — a **fixed** horizon (`DarlingRetention.PlanForceLedgerRetentionDays`) rather than a per-collector one, and deliberately the longest in the store: it audits a bot *writing* to production servers rather than measuring them, so it has to outlive the metrics that motivated each decision. Append-only, never a hypertable, so it purges by bounded DELETE |
 
 On plain PostgreSQL the purge is DELETE-based. With TimescaleDB it switches to `drop_chunks` — a metadata-only detach of whole expired chunks (rows inside a partially-expired chunk survive until the whole chunk ages out; up to ~1 day of grace at the 1-day chunk width), with a per-table DELETE fallback for any table that is not a hypertable. Failure-isolated per table: one stuck purge is logged and retried the next day without stopping the sweep.
 
