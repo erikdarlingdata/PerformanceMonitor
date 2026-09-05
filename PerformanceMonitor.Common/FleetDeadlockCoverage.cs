@@ -12,7 +12,6 @@ using System.Text.Json.Serialization;
 
 namespace PerformanceMonitor.Common;
 
-
 /// <summary>
 /// Whether one server's deadlock count read a deadlock source at all, and when it did not, which cause
 /// (#3017). Serialized as its STRING name (the fleet DTOs' <c>JsonStringEnumConverter</c>), so a consumer
