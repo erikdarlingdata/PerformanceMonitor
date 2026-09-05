@@ -55,7 +55,6 @@ public class CollectionLogFetchPhaseSumsStoreTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
@@ -397,8 +396,8 @@ public class CollectionLogFetchPhaseSumsStoreTests
 
     /// <summary>
     /// The connect-time gate. A COLUMN sentinel rather than a table one, because <c>collection_log</c> has
-    /// existed since V1 and only its columns are new. Being the TOP rung, a fully-migrated store must map to
-    /// exactly this version or the viewer refuses a store that is perfectly current.
+    /// existed since V1 and only its columns are new. This rung's sentinel and ordinal are still pinned here
+    /// — they never move — while a fully-migrated store maps to whatever the current top rung is.
     /// </summary>
     [Fact]
     public void TheProbeAsksForTheColumn_AndMapsAFullyMigratedStoreToThisRung()
@@ -416,19 +415,14 @@ public class CollectionLogFetchPhaseSumsStoreTests
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* Every sentinel true = a fully-migrated store, which must map to THIS rung. As the top rung this is
-           also the "and no more than that" guard: a later rung appending a sentinel without its own arm
-           would leave this returning 110 for a store that is actually further along. Built by reflection so
-           the arity tracks the signature - the literal-true form silently defaults a newly added sentinel to
-           false and maps one version low. */
+        /* Every sentinel true = a fully-migrated store, which must map to the CURRENT top rung. Built by
+           reflection so the arity tracks the signature - the literal-true form silently defaults a newly
+           added sentinel to false and maps one version low. This rung is no longer the top one, so the
+           "one rung behind" half of this check now belongs to whichever rung is (V111's own test carries
+           it); keeping a copy here that names 109 would assert this rung is still newest, which is how the
+           NEXT rung's build goes red. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        /* One rung behind: every sentinel present EXCEPT this one must report 109, not 110. Without this the
-           arm above could be satisfied by an unconditional return and nothing would notice. */
-        var allButMine = Enumerable.Repeat((object)true, arity).ToArray();
-        allButMine[arity - 1] = false;
-        Assert.Equal(109, (int)method.Invoke(null, allButMine)!);
     }
 
     /* internal so the live sibling asserts against the SAME list rather than a second copy that

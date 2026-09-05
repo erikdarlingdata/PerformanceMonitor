@@ -4325,6 +4325,11 @@ LIMIT 1";
     /// row, and the series' own bounded retention DELETE. Failure-isolated at the worker level like the
     /// disk-pressure and compression checks: a store hiccup logs and skips this tick, never aborting the
     /// sweep loop, and the series simply gains a one-hour gap.
+    ///
+    /// <para>Two more self-telemetry passes ride the same tick, connection and budget: the #3021
+    /// <see cref="StoreLogSweep"/> read of the store's own server log, and the #2674 collector-cost flush.
+    /// The shared budget is what bounds the whole tick — three passes on one
+    /// <see cref="StoreSelfMetrics.SweepTimeoutSeconds"/> linked CTS, not one each.</para>
     /// </summary>
     private async Task SweepStoreSelfMetricsAsync(CancellationToken cancellationToken)
     {
@@ -4342,6 +4347,15 @@ LIMIT 1";
         {
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
             await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, budget.Token);
+
+            /* #3021: the store reading its OWN server log, on the same hourly tick and the same connection.
+               It rides this cadence rather than carrying its own for two reasons. The log grows slowly (a
+               production day is ~1,400 entries worth classifying), so an hourly bucket is the finest grain
+               the census can honestly report; and sharing the tick makes the two self-telemetry series -
+               what the store WEIGHS and what it COMPLAINED about - land on the same timestamp grid, which is
+               how they get read side by side. Inside this try, so a store hiccup skips both series' tick
+               together instead of leaving one half-written. */
+            await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, _logger, budget.Token);
 
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)
                for the window, plus the accumulator's own bounded retention DELETE. */
