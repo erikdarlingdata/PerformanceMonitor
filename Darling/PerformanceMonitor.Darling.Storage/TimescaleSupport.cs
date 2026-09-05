@@ -309,6 +309,17 @@ public static class TimescaleSupport
     /// crosses each fixed refresh slot in turn, spending hours to days inside one before drifting out. A
     /// table outside <see cref="CompressionPhaseOrder"/> gets the statement without it: this code has no
     /// business deciding when a foreign hypertable compresses.</para>
+    ///
+    /// <para><b>This resolves a bare name where the converge additionally checks the schema, and the
+    /// asymmetry is a caller invariant rather than an oversight.</b> A statement takes a table name and has
+    /// no schema to check — <c>add_compression_policy</c> resolves it through the session's search path, the
+    /// same way every other bare name in this file does. So the safety rests on WHO calls it, and both
+    /// callers pass names this product owns: <see cref="ApplyCompressionPolicyAsync"/> walks
+    /// <see cref="HypertableTables"/> and <see cref="EnsureCollectionLogHypertableAsync"/> passes
+    /// <see cref="CollectionLogTable"/>. The converge has a schema available because it reads one back from
+    /// the job catalog, where the rows are whatever the store contains rather than whatever this product
+    /// created, so it checks. A future caller handing this overload a foreign or qualified name would break
+    /// that invariant and get a phase it should not have. Raised by review.</para>
     /// </summary>
     public static string AddCompressionPolicySql(string table)
     {
@@ -3500,8 +3511,11 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                giving up: a store old enough to lack them was converged fine by #1778 before the phase was
                added to this read, and returning 0 here would silently take that away as well. See
                CompressionCadenceOnlyStateSql. */
+            /* The catch is deliberately broad — the file's existing tolerant style — so this line must not
+               assert a cause it has not established. It states what was observed and what it costs, and
+               offers the two candidate reasons as candidates. Raised by review. */
             logger?.LogInformation(
-                "TimescaleDB: could not read compression-policy schedules with their phase ({Message}) — retrying without it. A store whose job catalog predates fixed_schedule/initial_start still gets the {Interval} tick (#1778); its compression policies keep TimescaleDB's finish-to-start scheduling and will drift through the refresh slots (#3035).",
+                "TimescaleDB: could not read compression-policy schedules with their phase ({Message}) — retrying without it, so the {Interval} tick (#1778) still converges and only the phase is skipped. The reason is not established here: a job catalog predating fixed_schedule/initial_start fails this way on every start, while a transient store error fails this way once and the next start pins the phases. Either way these policies keep TimescaleDB's finish-to-start scheduling until a phased read succeeds, so they drift through the refresh slots (#3035).",
                 ex.Message, CompressScheduleInterval);
 
             try
