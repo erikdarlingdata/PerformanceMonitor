@@ -251,7 +251,11 @@ def self_test():
                         ('table row', '| site | `SprocketCache` |\n')):
         check(f'{label} contributes no symbols', not described_symbols(body))
     # Shape rejections, each observed backticked in a real body.
-    for span in ('SOS_SCHEDULER_YIELD', 'HEAD', 'net10.0', '[Theory]', 'MOVED=0',
+    # BASE64URL earns its place: it is the one ALL_CAPS shape the hump rule alone would ACCEPT,
+    # because a digit followed by a capital ("4U") reads as a case hump. Without it the isupper
+    # rejection is redundant with the hump rule for every span here and a mutation removing it
+    # stays green -- which is how this row came to exist.
+    for span in ('SOS_SCHEDULER_YIELD', 'HEAD', 'BASE64URL', 'net10.0', '[Theory]', 'MOVED=0',
                  r'\.CommandTimeout\s*=', 'dotnet build -c Debug', '/api/ping',
                  '*CommandTimeoutTests.cs', 'core.autocrlf', 'dev', '0/8'):
         check(f'rejected as a symbol: {span}', classify(span) is None)
