@@ -86,12 +86,43 @@ public sealed class RdsPlanIngestor
                 ex.Message, RdsLogUnavailableException.IsAuthorizationRefusal(ex), ex);
         }
 
-        if (chunk is null || string.IsNullOrEmpty(chunk.Value.Text))
+        if (chunk is null)
         {
             return 0;
         }
 
-        var plans = PgPlanLogParser.Extract(chunk.Value.Text);
+        var written = await StoreAsync(serverId, storageName, chunk.Value.Text, cancellationToken);
+
+        /* THE MARKER MOVES HERE AND NOWHERE ELSE — the same order, and for the same reason, as
+           RdsDeadlockIngestor (#3008). Reaching this line means everything the chunk held is either in the
+           store or was nothing to store; anything else threw out of StoreAsync and left the marker where it
+           was, so the next cycle asks RDS for the same window again rather than resuming past it.
+
+           Plan rows dedup on (queryid, plan_hash), so the repeat this can cause costs a re-store of shapes
+           the store already has. The loss it replaces was unbounded and silent. */
+        _logs.CommitResume(chunk.Value.Resume);
+
+        return written;
+    }
+
+    /// <summary>
+    /// Parse a chunk and store what it held, or throw. Split out so the resume marker has exactly one
+    /// commit point above it: every way this can decline to store rows — empty text, a slab no plan
+    /// threshold was crossed in — is a legitimate zero that loses nothing, and every way it can FAIL leaves
+    /// via an exception rather than a zero the caller would have to tell apart from those.
+    /// </summary>
+    private async Task<int> StoreAsync(
+        int serverId,
+        string storageName,
+        string text,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        var plans = PgPlanLogParser.Extract(text);
 
         if (plans.Count == 0)
         {

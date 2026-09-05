@@ -82,15 +82,52 @@ public sealed class RdsDeadlockIngestor
                 ex.Message, RdsLogUnavailableException.IsAuthorizationRefusal(ex), ex);
         }
 
-        if (chunk is null || string.IsNullOrEmpty(chunk.Value.Text))
+        if (chunk is null)
         {
             return 0;
         }
 
-        /* Not inside the tolerant catch above, which covers the AWS FETCH. A parse refusal is a statement
-           about the target's configuration rather than about reaching it, and it has to reach the runner
-           to be classified. */
-        var deadlocks = PgDeadlockLogParser.Extract(chunk.Value.Text);
+        var written = await StoreAsync(serverId, storageName, chunk.Value.Text, cancellationToken);
+
+        /* THE MARKER MOVES HERE AND NOWHERE ELSE. Reaching this line means everything the chunk held is
+           either in the store or was nothing to store; anything else threw out of StoreAsync above and
+           left the marker where it was, so the next cycle asks RDS for the same window again.
+
+           The order is the fix (#3008). While the marker advanced inside ReadNewestAsync, a parse fault, a
+           COPY that tripped its deadline, a dropped store connection or a cancelled cycle each consumed a
+           window nobody stored — and DownloadDBLogFilePortion does not hand the same bytes out twice, so
+           every deadlock in it was gone with no error naming the loss. */
+        _logs.CommitResume(chunk.Value.Resume);
+
+        return written;
+    }
+
+    /// <summary>
+    /// Parse a chunk and store what it held, or throw. Split out so the resume marker has exactly one
+    /// commit point above it: every way this can decline to store rows — empty text, a slab with no
+    /// deadlocks in it — is a legitimate zero that loses nothing, and every way it can FAIL leaves via an
+    /// exception rather than a zero the caller would have to tell apart from those.
+    /// </summary>
+    private async Task<int> StoreAsync(
+        int serverId,
+        string storageName,
+        string text,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        /* Not inside IngestAsync's tolerant catch, which covers the AWS FETCH. A parse refusal is a
+           statement about the target's configuration rather than about reaching it, and it has to reach the
+           runner to be classified.
+
+           It also has to leave WITHOUT the marker being committed, which is why this whole method sits
+           ahead of the commit rather than around it: a refused zone that consumed the window would discard
+           every report in it, and the setting that caused the refusal is fixable, so those reports are
+           worth still being there afterwards (#3008). */
+        var deadlocks = PgDeadlockLogParser.Extract(text);
 
         if (deadlocks.Count == 0)
         {

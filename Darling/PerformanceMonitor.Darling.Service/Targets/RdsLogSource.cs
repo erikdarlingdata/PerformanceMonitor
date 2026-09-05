@@ -38,6 +38,14 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// overlapping window produces the same shapes rather than duplicates — the same property the
 /// <c>pg_read_file</c> route already relies on. Persisting the marker would buy nothing and add a schema
 /// rung that could disagree with reality after a log rotation.</para>
+///
+/// <para><b>The marker only moves when the caller says so</b> (<see cref="CommitResume"/>), because that
+/// re-read tolerance is the whole reason it is safe to prefer a repeat over a loss. The transport is
+/// consume-once — <c>DownloadDBLogFilePortion</c> will not hand the same bytes out twice — so a marker that
+/// advanced inside the fetch turned any later failure into permanent data loss, while a marker that
+/// advances after the write can at worst re-store a window the store already tolerates. That is the same
+/// trade the in-memory choice above already makes across a restart; this makes the in-process behaviour
+/// match it instead of being strictly worse than it.</para>
 /// </summary>
 public sealed class RdsLogSource
 {
@@ -59,7 +67,46 @@ public sealed class RdsLogSource
     /// <param name="Text">Raw log text, to be handed to <c>PgPlanLogParser.Extract</c> unchanged.</param>
     /// <param name="MoreAvailable">RDS had more than one call's worth. The caller decides whether to keep
     /// pulling; this type does not loop, so one cycle cannot spend unbounded time on one target.</param>
-    public readonly record struct LogChunk(string Text, bool MoreAvailable);
+    /// <param name="Resume">Where the NEXT read should start, once <see cref="Text"/> has actually reached
+    /// the store. Handed back rather than recorded on the way out — see
+    /// <see cref="CommitResume"/>.</param>
+    public readonly record struct LogChunk(string Text, bool MoreAvailable, ResumeMarker Resume);
+
+    /// <summary>
+    /// A position this source can resume from, and the file it belongs to. Opaque to the caller: the
+    /// marker is a service token, not an offset, so there is nothing to compute with — a caller's only
+    /// move is to hand it back once the chunk it came with is durable.
+    /// </summary>
+    /// <param name="Key">The (instance, file) this marker belongs to.</param>
+    /// <param name="Marker">RDS's own resume token, or null when the response carried none.</param>
+    public readonly record struct ResumeMarker(string? Key, string? Marker);
+
+    /// <summary>
+    /// Advance this source past a chunk whose rows are in the store.
+    ///
+    /// <para><b>This is separate from the read on purpose, and it is the whole point of the type.</b> The
+    /// marker used to be recorded inside <see cref="ReadNewestAsync"/>, before the caller had done anything
+    /// with the text. On a consume-once transport that made every failure between the fetch and a committed
+    /// COPY a permanent loss: <c>DownloadDBLogFilePortion</c> does not hand the same bytes out twice, the
+    /// marker lives in this process, and the next call resumed past a chunk nobody stored. A parse fault, a
+    /// COPY that tripped its deadline, a dropped store connection and a cancelled cycle all lost every
+    /// report in that window with no error naming the loss.</para>
+    ///
+    /// <para>Doing nothing on an unset marker is deliberate rather than defensive: it lets a caller commit
+    /// unconditionally on its success path without first asking whether the read produced a token, which is
+    /// the shape that keeps the commit next to the write it depends on.</para>
+    /// </summary>
+    public void CommitResume(ResumeMarker resume)
+    {
+        if (string.IsNullOrEmpty(resume.Key) || string.IsNullOrEmpty(resume.Marker))
+        {
+            return;
+        }
+
+        /* Keyed by FILE as well as instance, so a log rotation starts a fresh marker instead of resuming a
+           new file at an old file's offset. */
+        _markers[resume.Key] = resume.Marker;
+    }
 
     /// <summary>
     /// The newest PostgreSQL log file's unread portion, or null when this target is not RDS at all.
@@ -114,16 +161,16 @@ public sealed class RdsLogSource
             },
             cancellationToken);
 
-        if (!string.IsNullOrEmpty(response.Marker))
-        {
-            /* Keyed by FILE as well as instance, so a log rotation starts a fresh marker instead of
-               resuming a new file at an old file's offset. */
-            _markers[key] = response.Marker;
-        }
+        /* The marker is RETURNED, not recorded. Recording it here would advance this source past text the
+           caller has not looked at yet, and on a consume-once transport that is a permanent loss rather
+           than a repeated read — see CommitResume. */
 
         /* AdditionalDataPending is bool? in the SDK. Treated as false when null: claiming more is
-               pending when the API did not say so would make a caller loop for data that is not there. */
-            return new LogChunk(response.LogFileData ?? string.Empty, response.AdditionalDataPending == true);
+           pending when the API did not say so would make a caller loop for data that is not there. */
+        return new LogChunk(
+            response.LogFileData ?? string.Empty,
+            response.AdditionalDataPending == true,
+            new ResumeMarker(key, response.Marker));
     }
 
     /* An AWS SDK response collection is NULL when the service omitted it, not an empty list, so the two
