@@ -339,6 +339,18 @@ public sealed class CommandPlaneCommandTimeoutTests
             + $"{ServiceCommandDeadlines.CommandPlaneSeconds}s. Same millisecond floor, more lopsided "
             + "asymmetry: the beacon's overrun costs the whole fleet's collection latency while its failure "
             + "costs one tick of config-change delay");
+
+        /* The one invariant this file states in prose and nothing enforced. SerialLoopSeconds bounds the
+           reload BODY, which runs only once the beacon has already seen a version change; the beacon runs
+           on every tick and is a single-row lookup, so it is the tightest thing on that thread. Its own
+           doc comment says it "must stay" looser than this one — pinned rather than trusted, because the
+           two constants now sit ten lines apart and converging them for tidiness would compile. */
+        Assert.True(
+            seconds < ServiceCommandDeadlines.SerialLoopSeconds,
+            $"reload-beacon deadline {seconds}s is not tighter than the serial loop's "
+            + $"{ServiceCommandDeadlines.SerialLoopSeconds}s, which that constant's own derivation "
+            + "requires: the beacon fires on every 15s tick while the reload body it gates runs only on a "
+            + "version change, and every command in that body is a heavier read than this one");
     }
 
     /// <summary>

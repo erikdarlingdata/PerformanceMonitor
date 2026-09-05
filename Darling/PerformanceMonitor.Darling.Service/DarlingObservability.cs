@@ -179,7 +179,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using (var command = new NpgsqlCommand(SyncEnabledStatesSql, connection))
+            using (var command = new NpgsqlCommand(SyncEnabledStatesSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
             {
                 var changed = await command.ExecuteNonQueryAsync(cancellationToken);
                 if (changed > 0)
@@ -188,7 +188,7 @@ ON CONFLICT (server_id) DO UPDATE SET
                 }
             }
 
-            using (var command = new NpgsqlCommand(DisableOrphanedServersSql, connection))
+            using (var command = new NpgsqlCommand(DisableOrphanedServersSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
             {
                 var orphaned = await command.ExecuteNonQueryAsync(cancellationToken);
                 if (orphaned > 0)
@@ -375,7 +375,7 @@ ON CONFLICT (server_id) DO UPDATE SET
             var elapsed = durationMs > int.MaxValue ? int.MaxValue : (int)durationMs;
 
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(InsertCollectionLogSql, connection);
+            using var command = new NpgsqlCommand(InsertCollectionLogSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());                                    // log_id
             command.Parameters.AddWithValue(FleetServerId);                                                   // server_id (sentinel)
             command.Parameters.AddWithValue(FleetServerName);                                                 // server_name

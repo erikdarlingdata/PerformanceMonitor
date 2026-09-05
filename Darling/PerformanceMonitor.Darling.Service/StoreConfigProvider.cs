@@ -42,6 +42,25 @@ public sealed class StoreConfigProvider
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
 
+    /// <summary>
+    /// Consecutive failed <see cref="LoadViewAsync"/> attempts, so a persistently unreachable store reports
+    /// once rather than on every tick.
+    ///
+    /// <para>Needed because the control-plane beacon now RETRIES: the <c>config_version</c> watermark
+    /// advances only after a reload applies, so a failing reload is re-attempted on each 15 s sweep tick
+    /// until it succeeds. That is the behaviour the fix wanted — an operator's change is no longer
+    /// discarded by a single failed read — but at one warning per attempt it would emit roughly 5,760 lines
+    /// a day against a store that is simply down, burying the collection errors that actually diagnose it.
+    /// Reporting the transition, then going quiet, then reporting recovery is the same shape the
+    /// <c>#1581</c>/<c>#2170</c> watchdog herd was tamed with.</para>
+    ///
+    /// <para>Instance state, and that is load-bearing rather than incidental: the worker builds exactly one
+    /// provider and keeps it for the life of the collection loop, so the streak spans ticks. A transiently
+    /// constructed provider elsewhere simply never accumulates one, which degrades to today's
+    /// once-per-call warning rather than to silence.</para>
+    /// </summary>
+    private int _viewReadFailureStreak;
+
     public StoreConfigProvider(NpgsqlDataSource postgres, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
@@ -215,7 +234,7 @@ public sealed class StoreConfigProvider
            was monitored once", which is exactly the fact that separates the two causes. Nothing purges it
            either: it is a registry, not a time series, so retention leaves it alone. */
         var everMonitored = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using (var observed = new NpgsqlCommand("SELECT display_name, server_name FROM collect.servers", connection))
+        using (var observed = new NpgsqlCommand("SELECT display_name, server_name FROM collect.servers", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
         await using (var reader = await observed.ExecuteReaderAsync(ct))
         {
             while (await reader.ReadAsync(ct))
@@ -368,7 +387,7 @@ public sealed class StoreConfigProvider
 SELECT server_id, name, host, database, auth, username, encrypt_mode, trust_server_certificate,
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd,
        alert_delivery_mode_override, engine, port, is_enabled
-FROM config_monitored_servers", connection);
+FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -901,7 +920,7 @@ FROM config_monitored_servers", connection);
     private static async Task<long> CountAsync(NpgsqlConnection connection, string table, CancellationToken ct)
     {
         /* table is a compile-time constant name, never user input — interpolation is safe. */
-        using var command = new NpgsqlCommand($"SELECT COUNT(*) FROM config.{table}", connection);
+        using var command = new NpgsqlCommand($"SELECT COUNT(*) FROM config.{table}", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
     }
 
@@ -912,7 +931,7 @@ FROM config_monitored_servers", connection);
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, config_version, updated_at, updated_by)
 VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, $12, 0, $6, 'seed')
-ON CONFLICT (id) DO NOTHING", connection);
+ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(config.CapturePlans);
         command.Parameters.AddWithValue(config.Mcp.Enabled);
         command.Parameters.AddWithValue(config.Mcp.Port);
@@ -960,7 +979,7 @@ INSERT INTO config_alert_settings (
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59)
-ON CONFLICT (id) DO NOTHING", connection);
+ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
         command.Parameters.AddWithValue(a.CpuThresholdPercent);
@@ -1043,7 +1062,7 @@ INSERT INTO config_notification (
     id, smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password, smtp_from_address,
     smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-ON CONFLICT (id) DO NOTHING", connection);
+ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(s.Host);
         command.Parameters.AddWithValue(s.Port);
         command.Parameters.AddWithValue(s.UseSsl);
@@ -1072,7 +1091,7 @@ INSERT INTO config_monitored_servers (
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, plan_force_bot_enabled, created_at, modified_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $15, $15)
-ON CONFLICT (server_id) DO NOTHING", connection);
+ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
                and this is where it is minted and made permanent. When new rows stop being hash-keyed
                (#2218), this is the write that changes; every READ already goes through the stored value. */
@@ -1145,6 +1164,17 @@ ON CONFLICT (server_id) DO NOTHING", connection);
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
             var schedules = await ReadScheduleOverridesAsync(connection, cancellationToken);
 
+            /* Recovery is reported once, and only if something was actually reported broken — otherwise
+               every ordinary reload would announce that the store is reachable. */
+            if (_viewReadFailureStreak > 0)
+            {
+                _logger?.LogInformation(
+                    "Config store readable again after {Attempts} failed attempt(s) — applying the pending control-plane reload",
+                    _viewReadFailureStreak);
+
+                _viewReadFailureStreak = 0;
+            }
+
             return new StoreConfigView
             {
                 ConfigVersion = configVersion,
@@ -1170,7 +1200,21 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger?.LogWarning("Could not read the config store — keeping the current live config: {Message}", ex.Message);
+            /* First failure of a streak is the WARNING; the rest are Debug. The count rides the message so
+               the one line an operator sees still says how long it has been going. */
+            if (++_viewReadFailureStreak == 1)
+            {
+                _logger?.LogWarning(
+                    "Could not read the config store — keeping the current live config, and the control-plane reload will retry on each sweep tick until it succeeds: {Message}",
+                    ex.Message);
+            }
+            else
+            {
+                _logger?.LogDebug(
+                    "Could not read the config store ({Attempts} consecutive attempts) — keeping the current live config: {Message}",
+                    _viewReadFailureStreak, ex.Message);
+            }
+
             return null;
         }
     }
@@ -1226,7 +1270,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, config_version FROM config_service WHERE id = 1", connection);
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, config_version FROM config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
@@ -1266,7 +1310,7 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
        store_job_cadence_warn_percent,
        file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes
-FROM config_alert_settings WHERE id = 1", connection);
+FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
@@ -1378,7 +1422,7 @@ SELECT smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_passwor
        smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy,
        generic_url, generic_headers, generic_body_template, generic_proxy,
        pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy
-FROM config_notification WHERE id = 1", connection);
+FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
@@ -1426,7 +1470,7 @@ SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, t
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
        engine, port, server_id, plan_force_bot_enabled
 FROM config_monitored_servers WHERE is_enabled = TRUE
-ORDER BY name", connection);
+ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -1501,7 +1545,7 @@ ORDER BY name", connection);
     {
         var overrides = new List<ScheduleOverride>();
         using var command = new NpgsqlCommand(
-            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled FROM config_collector_schedules", connection);
+            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled FROM config_collector_schedules", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

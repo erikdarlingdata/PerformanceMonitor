@@ -1823,7 +1823,12 @@ WITH NO DATA";
     /// <para><b>Why it is safe to run on every start.</b> The <c>IS DISTINCT FROM</c> guard compares as
     /// INTERVAL, not text, so a policy already on the right horizon matches nothing and no job is touched —
     /// this is a no-op on the second and every later start, and on a fresh store the policy was just created
-    /// with the right value. Only <c>config</c> is named, so the job's SCHEDULED state is preserved exactly:
+    /// with the right value. That is asserted rather than only claimed:
+    /// <c>EnsureRetentionPolicies_ConvergesAnOldHorizon_PreservingScheduledStateAndNextStart_AgainstDevPostgres</c>
+    /// requires the settled third sweep to report moving NOTHING, and nothing else in that test can stand in
+    /// for it — every state value it compares reads the same whether this statement was a no-op or a
+    /// re-apply of all seventeen horizons. Only <c>config</c> is named, so the job's SCHEDULED state is
+    /// preserved exactly:
     /// measured on 2.28.1 against both an armed and a held policy, each kept its state across the update while
     /// the horizon moved. That is what lets this run BEFORE the coverage gate without disturbing it — a policy
     /// #1877 is holding paused stays paused, and the #1680 discipline of never exposing an armed window is not
