@@ -1535,8 +1535,13 @@ public sealed class DarlingWorker : BackgroundService
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
            clamp-bounded outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
            never past the raw tier's horizon. Plan capture reads the same live provider the runner does. */
+        /* The extension flag reaches the backfill because its HORIZON depends on it (#3012): on a plain
+           PostgreSQL store there are no hourly rollups for a backdated row to fall out of, so the refresh
+           term does not apply and that deployment mode keeps the full raw-tier depth. Passed as a provider
+           rather than a value so it cannot capture a stale reading. */
         var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans,
-            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb));
+            () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
+            () => _timescaleAvailable);
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* The fleet concurrency gate (#1553 D2): at most N=4 per-server collection bodies open a SQL connection

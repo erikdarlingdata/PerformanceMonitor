@@ -93,16 +93,43 @@ public sealed class QueryStoreBackfillTests
     {
         var refreshReach = TimescaleSupport.HourlyRefreshStartSpan - TimescaleSupport.HourlyRefreshScheduleSpan;
 
-        Assert.Equal(TimeSpan.FromHours(23), QueryStoreBackfill.Horizon);
+        Assert.Equal(TimeSpan.FromHours(23), QueryStoreBackfill.RollupStoreHorizon);
 
-        Assert.True(QueryStoreBackfill.Horizon <= refreshReach,
+        Assert.True(QueryStoreBackfill.RollupStoreHorizon <= refreshReach,
             "a slice below the depth the next hourly refresh still reaches lands rows no rollup will ever materialize");
-        Assert.True(QueryStoreBackfill.Horizon <= RetentionTierRouter.RawMaxAge,
+        Assert.True(QueryStoreBackfill.RollupStoreHorizon <= RetentionTierRouter.RawMaxAge,
             "a slice below the raw read horizon lands rows the next purge immediately drops");
-        Assert.True(QueryStoreBackfill.Horizon < TimescaleSupport.RawRetentionSpan,
+        Assert.True(QueryStoreBackfill.RollupStoreHorizon < TimescaleSupport.RawRetentionSpan,
             "the backfill horizon must sit strictly inside raw retention, or a slice could land rows the next purge immediately drops");
-        Assert.True(QueryStoreBackfill.Horizon < TimescaleSupport.HourlyRefreshStartSpan,
+        Assert.True(QueryStoreBackfill.RollupStoreHorizon < TimescaleSupport.HourlyRefreshStartSpan,
             "the horizon must sit strictly inside the refresh window: the window slides forward by one schedule interval between runs, so its own boundary is already outside it by the time the policy next fires");
+    }
+
+    /// <summary>
+    /// The refresh term applies only where there are rollups to fall out of.
+    ///
+    /// <para>TimescaleDB is optional and auto-detected, and plain PostgreSQL is a supported configuration
+    /// rather than a degraded one. On such a store every read goes to raw, so a backdated row cannot be
+    /// stranded outside a refresh window — and narrowing the horizon for that term anyway would have cost that
+    /// deployment mode two days of catch-up reach in exchange for nothing. #3012's change narrowed
+    /// unconditionally at first; this is the pin for the correction.</para>
+    ///
+    /// <para>Asserted as an INEQUALITY between the two horizons, not just as two values: the defect shape is
+    /// the plain store silently inheriting the rollup store's narrower reach, and that reads as equal
+    /// horizons. So a future change that collapses them back is red here even if both numbers move.</para>
+    /// </summary>
+    [Fact]
+    public void PlainPostgresHorizon_KeepsTheFullRawDepth_BecauseThereAreNoRollupsToFallOutOf()
+    {
+        Assert.Equal(RetentionTierRouter.RawMaxAge, QueryStoreBackfill.PlainStoreHorizon);
+        Assert.Equal(TimeSpan.FromDays(3), QueryStoreBackfill.PlainStoreHorizon);
+
+        Assert.True(QueryStoreBackfill.PlainStoreHorizon > QueryStoreBackfill.RollupStoreHorizon,
+            "a plain-PostgreSQL store must not inherit the rollup store's narrower reach — it has no rollups, so the refresh term does not apply to it");
+
+        /* The selector is what the slice path actually calls, so it is pinned rather than only the pair. */
+        Assert.Equal(QueryStoreBackfill.RollupStoreHorizon, QueryStoreBackfill.HorizonFor(hasContinuousAggregates: true));
+        Assert.Equal(QueryStoreBackfill.PlainStoreHorizon, QueryStoreBackfill.HorizonFor(hasContinuousAggregates: false));
     }
 
     [Fact]

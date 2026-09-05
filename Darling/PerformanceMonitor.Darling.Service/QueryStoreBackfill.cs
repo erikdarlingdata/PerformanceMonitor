@@ -49,7 +49,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>The horizon.</b> Slices carry a BACKDATED collection_time (the slice ceiling), so the
 /// rows land in time buckets adjacent to their own activity — readers window on collection_time,
 /// hourly CAGGs bucket on it, and retention drops on it. That is exactly why this stage refuses to
-/// dig below <see cref="Horizon"/> (derived from the refresh window and the raw tier, not
+/// dig below <see cref="HorizonFor"/> (derived from the refresh window and the raw tier, not
 /// hand-maintained — the #1937 rule): inside it, the hourly CAGGs' refresh window re-materializes
 /// the touched buckets on their next scheduled run AND raw retention cannot immediately drop what
 /// was just shipped; below it, at least one of those stops holding, and that deeper stage is a
@@ -79,8 +79,25 @@ public sealed class QueryStoreBackfill
         TimescaleSupport.HourlyRefreshStartSpan - TimescaleSupport.HourlyRefreshScheduleSpan;
 
     /// <summary>
-    /// How far below now a backfill slice may reach — the SMALLER of the two conditions that both have to
-    /// hold, derived from each rather than hand-maintained.
+    /// How far below now a backfill slice may reach on a store WITHOUT continuous aggregates: the raw read
+    /// horizon alone.
+    ///
+    /// <para>TimescaleDB is optional and auto-detected, and plain PostgreSQL is a supported configuration
+    /// rather than a degraded one. On such a store there are no hourly rollups for a backdated row to fall
+    /// out of — every read goes to raw — so the refresh term below does not apply, and narrowing for it would
+    /// cost that deployment mode two days of catch-up reach in exchange for nothing. Raised by review; the
+    /// first version of #3012's change narrowed unconditionally.</para>
+    ///
+    /// <para>A store that LATER gains the extension is not left with a split: the aggregates are born
+    /// <c>WITH NO DATA</c> and <see cref="RetentionTierRouter"/> routes any window below a rollup's measured
+    /// floor to raw, so rows shipped while the store was plain are served from raw exactly as they were
+    /// before.</para>
+    /// </summary>
+    public static readonly TimeSpan PlainStoreHorizon = RetentionTierRouter.RawMaxAge;
+
+    /// <summary>
+    /// How far below now a backfill slice may reach on a store WITH continuous aggregates — the SMALLER of
+    /// the two conditions that both have to hold, derived from each rather than hand-maintained.
     ///
     /// <para><b>Both, not either.</b> A slice lands rows at a BACKDATED <c>collection_time</c>, so for the
     /// slice to be worth shipping two things must be true of the depth it lands at: raw retention must not
@@ -104,10 +121,18 @@ public sealed class QueryStoreBackfill
     /// refresh the buckets it wrote — which is a decision about running
     /// <c>refresh_continuous_aggregate</c> off the backfill loop, not a constant.</para>
     /// </summary>
-    public static readonly TimeSpan Horizon =
+    public static readonly TimeSpan RollupStoreHorizon =
         RetentionTierRouter.RawMaxAge <= RefreshReachableDepth
             ? RetentionTierRouter.RawMaxAge
             : RefreshReachableDepth;
+
+    /// <summary>
+    /// The horizon for THIS store. <paramref name="hasContinuousAggregates"/> is the TimescaleDB-extension
+    /// flag, which is the right question rather than a proxy for it: the hourly rollups are created by
+    /// <c>EnsureContinuousAggregatesAsync</c> under exactly that gate, so they exist if and only if it does.
+    /// </summary>
+    public static TimeSpan HorizonFor(bool hasContinuousAggregates)
+        => hasContinuousAggregates ? RollupStoreHorizon : PlainStoreHorizon;
 
     /// <summary>Candidate databases come from rows this window fresh — a database that stopped
     /// shipping Query Store rows entirely ages out of the backfill scan with them.</summary>
@@ -118,6 +143,12 @@ public sealed class QueryStoreBackfill
     private readonly CollectorDeltaCalculator _deltas;
     private readonly ILogger? _logger;
     private readonly Func<bool> _capturePlans;
+
+    /* Whether this store has TimescaleDB continuous aggregates, read LIVE rather than captured: the worker
+       sets its flag during startup detection and this class is constructed after that, but reading it through
+       a provider keeps the two from depending on construction order. Defaults to true for hosts that do not
+       say — the conservative direction, since the narrower horizon cannot produce a tier split. */
+    private readonly Func<bool> _hasContinuousAggregates;
 
     /* #2164: the per-database text budget override in MB, read live like _capturePlans. Backfill slices
        carry the SAME nvarchar(max) query-text/plan-XML payload over the same link as a live tick, so the
@@ -131,7 +162,8 @@ public sealed class QueryStoreBackfill
         CollectorDeltaCalculator deltas,
         ILogger? logger,
         Func<bool>? capturePlans = null,
-        Func<int>? textBudgetMb = null)
+        Func<int>? textBudgetMb = null,
+        Func<bool>? hasContinuousAggregates = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
@@ -140,6 +172,7 @@ public sealed class QueryStoreBackfill
         _capturePlans = capturePlans ?? (() => true);
         /* Null provider = keep the collector's compile-time budget (tests and any non-Darling host). */
         _textBudgetMb = textBudgetMb ?? (() => 0);
+        _hasContinuousAggregates = hasContinuousAggregates ?? (() => true);
     }
 
     /// <summary>
@@ -180,7 +213,7 @@ public sealed class QueryStoreBackfill
         var databases = await GetCandidateDatabasesAsync(server.ServerId, cancellationToken);
 
         var nowUtc = DateTime.UtcNow;
-        var floorLimit = nowUtc - Horizon;
+        var floorLimit = nowUtc - HorizonFor(_hasContinuousAggregates());
 
         foreach (var databaseName in databases)
         {
