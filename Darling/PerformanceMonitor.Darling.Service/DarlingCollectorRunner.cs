@@ -1422,6 +1422,7 @@ public sealed class DarlingCollectorRunner
                         definition.PerItemWallClockBudget!.Value);
                     failed++;
                     failedDatabases.Add(databaseName);
+                    CollectorFaultDatabase.Stamp(budgetFailure, databaseName);
                     firstFailure ??= budgetFailure;
 
                     /* Same #2111 stamp the generic arm makes, and it MATTERS more here: this is what turns
@@ -1452,6 +1453,13 @@ public sealed class DarlingCollectorRunner
                        routine one-database miss. */
                     failed++;
                     failedDatabases.Add(databaseName);
+                    /* #2997: which database this was, carried ON the exception. When every database fails
+                       the loop rethrows firstFailure bare, and the fault handlers upstream have only
+                       ServerRuntime.ConnectedDatabase to fall back on - an init-only field stamped once at
+                       the initial probe, which for a RunsPerDatabase collector is not the database that
+                       failed. The stamp travels with the exception through the rethrow, so a message can
+                       name the database it means. */
+                    CollectorFaultDatabase.Stamp(ex, databaseName);
                     firstFailure ??= ex;
 
                     /* #2111: the yield-to-live stamp + adaptive-shrink count for the Azure SQL DB
