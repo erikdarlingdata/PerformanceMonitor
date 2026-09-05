@@ -74,7 +74,7 @@ public sealed partial class ViewerDataService
         var items = new List<TimeSliceBucket>();
 
         await using var command = _dataSource.CreateCommand(BlockingSlicerSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -118,7 +118,7 @@ public sealed partial class ViewerDataService
         var items = new List<TimeSliceBucket>();
 
         await using var command = _dataSource.CreateCommand(DeadlockSlicerSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

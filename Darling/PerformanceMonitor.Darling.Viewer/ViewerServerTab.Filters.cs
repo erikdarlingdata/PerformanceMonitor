@@ -111,6 +111,8 @@ public partial class ViewerServerTab : UserControl
     /// </summary>
     private async Task LoadConfigurationAsync()
     {
+        using var readFanOut = ViewerReadFanOut.Of(6);
+
         var serverConfigTask = _dataService.GetLatestServerConfigAsync(_server.ServerId);
         var databaseConfigTask = _dataService.GetLatestDatabaseConfigAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
         var databaseScopedConfigTask = _dataService.GetLatestDatabaseScopedConfigAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);

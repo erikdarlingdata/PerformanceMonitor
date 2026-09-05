@@ -467,6 +467,8 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsOptimizationAsync()
     {
+        using var readFanOut = ViewerReadFanOut.Of(5);
+
         await Task.WhenAll(
             LoadFinOpsIdleDatabasesAsync(),
             LoadFinOpsTempdbSummaryAsync(),
@@ -562,6 +564,10 @@ public partial class FinOpsTab
         /* Overlay each server's collected metrics + compute the health score (mirrors Lite's
            LoadServerInventoryAsync minus the live query). memScore/storScore use Lite's inventory-path
            defaults (buffer-pool ratio / file-level free space aren't in the inventory read). */
+        /* Width is the inventory size, passed raw: the clamp to the pool ceiling belongs to
+           ViewerReadFanOut, and a hand-capped guess here would be the copied-number mistake again. */
+        using var readFanOut = ViewerReadFanOut.Of(servers.Count);
+
         await Task.WhenAll(servers.Select(async item =>
         {
             var (avgCpu, storageGb, idleDbs, status) = await _dataService.GetServerMetricsAsync(item.ServerId);

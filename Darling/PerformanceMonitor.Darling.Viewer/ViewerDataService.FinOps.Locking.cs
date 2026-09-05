@@ -113,7 +113,7 @@ LIMIT $3";
         await using var command = databaseName == null
             ? _dataSource.CreateCommand(IndexLockingAllSql)
             : _dataSource.CreateCommand(IndexLockingByDbSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
 
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         if (databaseName != null)
@@ -175,7 +175,7 @@ ORDER BY ios.database_name";
     public async Task<List<string>> GetIndexLockingDatabasesAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(IndexLockingDatabasesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
         var items = new List<string>();

@@ -564,9 +564,21 @@ public partial class MainWindow : Window
            UpdateCollectorHealthTextAsync's collector-health read) and PollAlertsAsync is another (history,
            then UpdateServerSilencedAsync's mute rules), so this fan-out is FIVE store reads before
            RefreshVisibleAsync starts — six on the fleets that ship with the AG tab hidden, which is most of
-           them. Each is capped at ViewerCommandDeadlines.InteractiveReadSeconds (15) by #2901, against a
-           ten-connection pool, on an interval an operator can set to 10s — so the deadline bounds how long
-           one of them holds a permit and the guards are what stop ticks from stacking. */
+           them. They run TOGETHER, so each one's deadline has to cover contending with the other five for
+           the ten-connection pool rather than a solo read's — hence the declared width, on an interval an
+           operator can set to 10s. The deadline bounds how long one of them holds a permit and the guards are
+           what stop ticks from stacking.
+
+           This is a fan-out without a Task.WhenAll: nothing joins these, they are simply all in flight at
+           once. ViewerCommandTimeoutTests can only scan the WhenAll shape, so this site and the connect-path
+           pair below are the two the width is declared on by hand.
+
+           The scope deliberately runs to the end of the tick rather than closing after the three starts: the
+           visible-tab load below begins while these are still in flight, so it really is contending with
+           them, and a tab load that declares its own fan-out nests to the pool ceiling — which is the width
+           the concurrent measurement actually covers. */
+        using var readFanOut = ViewerReadFanOut.Of(6);
+
         _ = RefreshServerStatusAsync();
         _ = RefreshStoreSizeAsync();
 
@@ -1027,7 +1039,12 @@ public partial class MainWindow : Window
                answer: this path runs on connect and after every add/edit/remove, and a freshness dictionary
                fetched before a server was registered has no entry for it — the row it paints after the fleet
                rebuild reads as never-collected. Dropping that would leave a just-added server's dot wrong for
-               a whole interval. The store-size read takes no scope, so it drops like any other caller. */
+               a whole interval. The store-size read takes no scope, so it drops like any other caller.
+
+               Three reads in flight together — the freshness pair plus the store size — so the width is
+               declared for the same reason the fleet timer's is. */
+            using var readFanOut = ViewerReadFanOut.Of(3);
+
             _ = RefreshServerStatusAsync(replayIfBusy: true);
             _ = RefreshStoreSizeAsync();
         }
@@ -1407,6 +1424,9 @@ public partial class MainWindow : Window
 
         var service = _dataService;
         var nowUtc = DateTime.UtcNow;
+        /* Width is the fleet size, passed raw — see the inventory overlay in FinOpsTab.Loaders. */
+        using var readFanOut = ViewerReadFanOut.Of(list.Count);
+
         var summaries = await Task.WhenAll(list.Select(async server =>
         {
             try
@@ -1422,6 +1442,9 @@ public partial class MainWindow : Window
                 return null;
             }
         }));
+
+        /* The per-server reads are done; the fleet-totals read below does not contend with them. */
+        readFanOut.Release();
 
         var built = summaries.OfType<ServerSummaryItem>().ToList();
         StampTagPills(built);

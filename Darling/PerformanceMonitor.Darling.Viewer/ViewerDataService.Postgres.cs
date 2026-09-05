@@ -102,7 +102,7 @@ public sealed partial class ViewerDataService
         }
 
         await using var command = _dataSource.CreateCommand(PostgresCollectorHealthSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         /* Kind-Unspecified at the bind, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then zone-shifts these naive columns to compare them, so

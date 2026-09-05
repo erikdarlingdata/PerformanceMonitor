@@ -99,7 +99,7 @@ public sealed partial class ViewerDataService
         var rows = new List<PlanCorrectionRow>();
 
         await using var command = _dataSource.CreateCommand(PlanCorrectionsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -147,7 +147,7 @@ public sealed partial class ViewerDataService
         var rows = new List<AutomaticTuningRow>();
 
         await using var command = _dataSource.CreateCommand(AutomaticTuningSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

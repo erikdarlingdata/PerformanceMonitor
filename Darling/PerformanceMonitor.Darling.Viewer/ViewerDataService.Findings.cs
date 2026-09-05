@@ -95,7 +95,7 @@ WHERE server_id = $1";
         try
         {
             await using var command = _dataSource.CreateCommand(GetAnalysisStateSql);
-            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
             await using var reader = await command.ExecuteReaderAsync();

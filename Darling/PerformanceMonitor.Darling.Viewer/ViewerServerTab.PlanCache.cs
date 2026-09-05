@@ -48,6 +48,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(2);
+
         var trendTask = _dataService.GetPlanCacheTrendAsync(_server.ServerId, startUtc, endUtc);
         /* The summary strip's totals come from a dedicated uncapped aggregate (not a capped grid),
            so "Total Plans" is exact (Dashboard parity). */

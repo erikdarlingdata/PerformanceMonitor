@@ -243,7 +243,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerBlockedProcessRow>();
 
         await using var command = _dataSource.CreateCommand(BlockedProcessReportsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -304,7 +304,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerBlockedProcessRow>();
 
         await using var command = _dataSource.CreateCommand(DmvBlockingSnapshotsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -360,7 +360,7 @@ public sealed partial class ViewerDataService
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using (var command = connection.CreateCommand())
         {
-            command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.CommandText = BlockingPairRowsSql;
             AddBlockingParameters(command, serverId, startUtc, endUtc);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -380,7 +380,7 @@ public sealed partial class ViewerDataService
             () =>
             {
                 var command = connection.CreateCommand();
-                command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+                command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
                 return command;
             },
             rows, serverId, startUtc, endUtc, cancellationToken);

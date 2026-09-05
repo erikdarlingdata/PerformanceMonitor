@@ -87,7 +87,7 @@ public sealed partial class ViewerDataService
         var samples = new List<CpuUtilizationSample>();
 
         await using var command = _dataSource.CreateCommand(CpuUtilizationSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {

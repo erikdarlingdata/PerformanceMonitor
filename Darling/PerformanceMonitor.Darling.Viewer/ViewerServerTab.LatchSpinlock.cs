@@ -60,6 +60,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(4);
+
         var latchTrendTask = _dataService.GetLatchStatsTrendAsync(_server.ServerId, startUtc, endUtc);
         var latchSnapshotTask = _dataService.GetLatchStatsSnapshotAsync(_server.ServerId, startUtc, endUtc);
         var spinlockTrendTask = _dataService.GetSpinlockStatsTrendAsync(_server.ServerId, startUtc, endUtc);

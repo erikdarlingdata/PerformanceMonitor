@@ -280,6 +280,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(5);
+
         var countsTask = _dataService.GetPgBlockingCaptureCountsAsync(_server.ServerId, startUtc, endUtc);
         var chainsTask = _dataService.GetPgBlockingChainsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var cyclesTask = _dataService.GetPgBlockingCyclesAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
@@ -295,6 +297,10 @@ public partial class ViewerServerTab
         var databasesTask = _dataService.GetPgDatabaseStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
         await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask);
+
+        /* Released here rather than at the closing brace: the six sub-tab loads at the end of this method
+           run after these five have finished, so they do not contend with them. */
+        readFanOut.Release();
 
         var counts = countsTask.Result;
         var chains = chainsTask.Result;
@@ -577,6 +583,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(5);
+
         var sessionsTask = _dataService.GetPgSessionStatesAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var xminTask = _dataService.GetPgXminHorizonAsync(_server.ServerId, startUtc, endUtc);
         var autovacuumTask = _dataService.GetPgAutovacuumAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
@@ -837,10 +845,15 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(2);
+
         var bloatTask = _dataService.GetPgTableBloatAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var indexTask = _dataService.GetPgIndexUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
         await Task.WhenAll(bloatTask, indexTask);
+
+        /* Released here — the two sub-tab loads at the end of this method do not contend with these two. */
+        readFanOut.Release();
 
         var bloat = bloatTask.Result;
         var indexes = indexTask.Result;

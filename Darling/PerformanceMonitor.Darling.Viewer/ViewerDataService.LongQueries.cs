@@ -105,7 +105,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerLongQueryRow>();
 
         await using var command = _dataSource.CreateCommand(LongQueryCompletionsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

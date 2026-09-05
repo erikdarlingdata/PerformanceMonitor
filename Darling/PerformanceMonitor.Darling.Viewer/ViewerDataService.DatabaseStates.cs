@@ -104,19 +104,19 @@ DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = false
         if (!IsReadOnly)
         {
             await using var seed = _dataSource.CreateCommand(DatabaseStateSeedSql);
-            seed.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+            seed.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             seed.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             await seed.ExecuteNonQueryAsync(cancellationToken);
 
             await using var heal = _dataSource.CreateCommand(DatabaseStateHealToOnlineSql);
-            heal.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+            heal.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             heal.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             await heal.ExecuteNonQueryAsync(cancellationToken);
         }
 
         var rows = new List<DatabaseStateExpectedRow>();
         await using var command = _dataSource.CreateCommand(DatabaseStateExpectationsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -138,7 +138,7 @@ DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = false
     public async Task SetDatabaseStateExpectedAsync(int serverId, string databaseName, string expectedState, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DatabaseStateSetExpectedSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = expectedState });
@@ -149,7 +149,7 @@ DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = false
     public async Task ResetDatabaseStateExpectedToCurrentAsync(int serverId, string databaseName, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DatabaseStateResetToCurrentSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
         await ExecuteWriteAsync(command, cancellationToken);

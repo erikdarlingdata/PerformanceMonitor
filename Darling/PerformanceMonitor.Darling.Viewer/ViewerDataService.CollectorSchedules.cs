@@ -85,7 +85,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
         var rows = new List<CollectorScheduleRow>();
 
         await using var command = _dataSource.CreateCommand(CollectorSchedulesSelectSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -126,7 +126,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     public async Task<int> ResetAllServerSchedulesAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(CollectorScheduleDeleteAllServerScopesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         return await ExecuteWriteAsync(command, cancellationToken);
     }
 
@@ -143,7 +143,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
             await using (var delete = new NpgsqlCommand(
                 serverId is null ? CollectorScheduleDeleteFleetScopeSql : CollectorScheduleDeleteServerScopeSql, connection, transaction))
             {
-                delete.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+                delete.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
                 if (serverId is int sid)
                 {
                     delete.Parameters.Add(new NpgsqlParameter<int> { TypedValue = sid });
@@ -156,7 +156,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
             {
                 await using var upsert = new NpgsqlCommand(
                     serverId is null ? CollectorScheduleFleetUpsertSql : CollectorScheduleServerUpsertSql, connection, transaction);
-                upsert.CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds;
+                upsert.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
                 if (serverId is int sid)
                 {
                     upsert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = sid });                    // $1 (server scope)
