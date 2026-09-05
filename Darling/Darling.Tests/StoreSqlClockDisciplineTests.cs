@@ -60,7 +60,7 @@ public sealed class StoreSqlClockDisciplineTests
 
     /// <summary>
     /// Column NAMES whose timestamp frame depends on which table they are in, so a name-keyed scan cannot
-    /// judge them and must not pretend to. Both are genuinely split:
+    /// judge them and must not pretend to. All three are genuinely split:
     ///
     /// <list type="bullet">
     /// <item><c>sample_time</c> — <c>cpu_utilization_stats.sample_time</c> is deliberately the MONITORED
@@ -69,7 +69,24 @@ public sealed class StoreSqlClockDisciplineTests
     /// <item><c>event_time</c> — <c>default_trace_events.event_time</c> is server-LOCAL (the .trc files
     /// store local time), while <c>system_health.event_time</c> is UTC. <c>ViewerSystemEventsTests</c> says
     /// it in one line: "system_health.event_time is UTC, default_trace.event_time is local".</item>
+    /// <item><c>last_execution_time</c> — THREE tables declare it and they do not agree.
+    /// <c>query_stats</c> and <c>procedure_stats</c> ship <c>sys.dm_exec_*_stats</c> DMV values verbatim, so
+    /// both are server-LOCAL; <c>QueryStatsCollector</c> states it outright about its sibling column —
+    /// "creation_time is in the monitored server's local time while collection times are UTC — comparing
+    /// them client-side is a timezone bug on every server that is not UTC" — and the Lite reads that window
+    /// on it correct for it explicitly, adding <c>$5 * INTERVAL '1' MINUTE</c> from the collected UTC offset.
+    /// <c>query_store_stats.last_execution_time</c> is naive UTC: Query Store returns
+    /// <c>datetimeoffset</c> and <c>QueryStoreCollector</c> normalizes through
+    /// <c>DateTimeOffset.UtcDateTime</c> before storing. So the same name is two frames across three tables,
+    /// and the analysis reads that window on it hit both.</item>
     /// </list>
+    ///
+    /// <para>Adding a name here REMOVES it from the discriminator, which is a real cost: a future bare clock
+    /// compared against <c>query_store_stats.last_execution_time</c> would go unflagged, and there the naive-UTC
+    /// bind this scan recommends would have been the right fix. That trade is taken deliberately, because the
+    /// alternative is worse — the scan would confidently prescribe the wrong fix on two tables out of three,
+    /// and a guard that names a defect and misdirects the repair is harder to recover from than one that
+    /// declines to judge.</para>
     ///
     /// <para><c>CollectorTimestampFrameTests</c> is the authority for these, pinning the frame PER COLUMN
     /// against the read path each one protects. Its own remarks record that ITS first cut was a store-wide
@@ -79,7 +96,7 @@ public sealed class StoreSqlClockDisciplineTests
     /// with a different fix (de-skew by the server's offset, not bind naive UTC), so it belongs to that pin.
     /// Add a name here only with the same kind of evidence: a documented split, per table.</para>
     /// </summary>
-    private static readonly string[] AmbiguousFrameColumns = ["sample_time", "event_time"];
+    private static readonly string[] AmbiguousFrameColumns = ["sample_time", "event_time", "last_execution_time"];
 
     /// <summary>
     /// The one bare <c>now()</c> left in the store's SQL, and it is waived on ARITHMETIC, not on being
