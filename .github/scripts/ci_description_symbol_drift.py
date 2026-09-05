@@ -202,12 +202,11 @@ CODE_EXT = ('.cs', '.sql', '.xaml', '.ps1', '.sh', '.py', '.csproj', '.props', '
 
 
 def diff_symbols(files):
-    paths, basenames, idents = set(), set(), set()
+    basenames, idents = set(), set()
     for entry in files:
         for name in (entry.get('filename'), entry.get('previous_filename')):
             if not name:
                 continue
-            paths.add(name.lower())
             basenames.add(name.rsplit('/', 1)[-1].lower())
             idents.update(TOKEN.findall(name.rsplit('/', 1)[-1]))
         for line in (entry.get('patch') or '').splitlines():
@@ -222,7 +221,7 @@ def diff_symbols(files):
                 # whose signature is context around the edit; without these, flags rise by 4pp
                 # of pure noise.
                 idents.update(TOKEN.findall(line))
-    return paths, basenames, idents
+    return basenames, idents
 
 
 def assess(body, files):
@@ -235,12 +234,18 @@ def assess(body, files):
         # intersect against, so any verdict would be an artifact of the diff having nothing
         # to say. Abstaining is the honest answer, and it is never a warning.
         return 'abstain', [], []
-    paths, basenames, idents = diff_symbols(files)
+    basenames, idents = diff_symbols(files)
     hit, missing = [], []
     for kind, span in described_symbols(body).items():
         if kind[0] == 'file':
-            name = kind[1].lower()
-            found = name in basenames or any(name in p for p in paths)
+            # Exact basename, never substring containment against the whole path. `classify`
+            # only ever yields a bare `basename.ext`, so an exact basename test already covers
+            # a description that spelled out directories -- which leaves substring matching
+            # contributing nothing but wrong answers: `Config.cs` would count as found against
+            # a diff touching only `AppConfig.csproj`. That direction manufactures a false
+            # CLEAR, and a false clear hides the one true positive this check exists for.
+            # Measured: the two forms agree on all 110 corpus PRs, so precision here is free.
+            found = kind[1].lower() in basenames
         else:
             _, full, member = kind
             found = member in idents or full.split('.')[0] in idents
@@ -319,6 +324,13 @@ def self_test():
     check('line-cited file resolves to the file', classify('WidgetReader.cs:88') ==
           ('file', 'WidgetReader.cs'))
     # Docs-only diffs cannot support a verdict.
+    check('a same-suffix filename is not counted as found',
+          assess('`Config.cs` gains a field.',
+                 [{'filename': 'Lite/AppConfig.csproj',
+                   'patch': '@@ -1 +1 @@\n-<X/>\n+<Y/>'}])[0] == 'warn')
+    check('a description spelling out directories still matches on basename',
+          assess('`Darling/PerformanceMonitor.Darling.Service/WidgetReader.cs` changes.',
+                 FIXTURE_DIFF)[0] == 'clear')
     check('docs-only diff abstains',
           assess('`SprocketCache` now evicts.',
                  [{'filename': 'CHANGELOG.md', 'patch': '@@ -1 +1 @@\n-a\n+b'}])[0] == 'abstain')
