@@ -524,11 +524,17 @@ public class PostgresFaultOutcomeTests
         /* Never queried the target - the RDS log API and Performance Insights are both HTTPS. */
         Assert.Equal(2, Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, runClock\.ElapsedMilliseconds").Count);
 
-        /* And the file carries exactly ONE three-zero write: the log_timezone arm, whose two transports
-           disagree about which slot is correct, documented at the arm itself. Counted over the whole file
-           rather than asserted absent arm by arm, so an arm ADDED with three zeros reds HERE instead of
-           passing unnoticed until someone re-runs the census by hand. */
-        Assert.Equal(1, Regex.Matches(worker, @", 0, 0, 0,").Count);
+        /* And exactly ONE arm still writes three zeros: the log_timezone arm, whose two transports
+           disagree about which slot is correct, documented at the arm itself. Counted rather than asserted
+           absent arm by arm, so an arm ADDED with three zeros reds HERE instead of passing unnoticed until
+           someone re-runs the census by hand.
+
+           Anchored on the CALL's shape (the collector name, then a status literal or the computed `status`)
+           rather than on a bare ", 0, 0, 0," run. The bare form counts 1 today too, but it would also match
+           any unrelated four-argument call elsewhere in this 6,600-line file, and a pin that reds on a
+           change it does not guard is a pin someone eventually loosens. This form still catches a new arm
+           whether it passes a literal status or a computed one. */
+        Assert.Equal(1, Regex.Matches(worker, @"collectorName, (?:""[A-Z_]+""|status), 0, 0, 0,").Count);
         Assert.Equal(1, Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, 0, ex\.Message").Count);
     }
 
