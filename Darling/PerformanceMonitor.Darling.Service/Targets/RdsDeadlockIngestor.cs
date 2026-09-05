@@ -51,6 +51,11 @@ public sealed class RdsDeadlockIngestor
     /// <param name="host">The target's connection host. A non-RDS host is skipped silently — that target
     /// uses the <c>pg_read_file</c> route instead, and there is nothing to report.</param>
     /// <returns>Rows stored, or zero when this target is not RDS or had nothing new.</returns>
+    /// <exception cref="PgLogTimezoneUnsupportedException">The log is stamped in a non-UTC zone, so its
+    /// timestamps are local and nothing in it can be stored (#2993). Propagated for the same reason
+    /// <see cref="RdsLogUnavailableException"/> is: the runner classifies it and names the setting, where
+    /// swallowing it would return zero rows and be recorded as a log that was read and held no
+    /// deadlocks.</exception>
     public async Task<int> IngestAsync(
         int serverId,
         string storageName,
@@ -114,6 +119,14 @@ public sealed class RdsDeadlockIngestor
             return 0;
         }
 
+        /* Not inside IngestAsync's tolerant catch, which covers the AWS FETCH. A parse refusal is a
+           statement about the target's configuration rather than about reaching it, and it has to reach the
+           runner to be classified.
+
+           It also has to leave WITHOUT the marker being committed, which is why this whole method sits
+           ahead of the commit rather than around it: a refused zone that consumed the window would discard
+           every report in it, and the setting that caused the refusal is fixable, so those reports are
+           worth still being there afterwards (#3008). */
         var deadlocks = PgDeadlockLogParser.Extract(text);
 
         if (deadlocks.Count == 0)

@@ -60,6 +60,11 @@ public sealed class RdsDeadlockIngestorTests
         + "\tBEGIN; UPDATE dl SET v=v+1 WHERE id=2; SELECT pg_sleep(2); UPDATE dl SET v=v+1 WHERE id=1; COMMIT;\n"
         + "2026-08-26 22:25:24.100 UTC [1549] 322048460535975151HINT:  See server log for query details.\n";
 
+    /* The same report with a non-zero-offset zone in the prefix. PgDeadlockLogParser refuses the whole
+       read on this rather than storing local timestamps as UTC (#2993). */
+    private static readonly string NonUtcDeadlockText =
+        DeadlockText.Replace(" UTC ", " EST ", StringComparison.Ordinal);
+
     /* A window with log traffic but no deadlock in it — the ordinary quiet cycle, and the positive control
        for the commit firing at all. */
     private const string QuietText =
@@ -249,6 +254,34 @@ public sealed class RdsDeadlockIngestorTests
         Assert.Null(client.Downloads[0].Marker);
         Assert.Equal("MARKER-1", client.Downloads[1].Marker);
         Assert.Equal(0, client.Downloads[1].NumberOfLines);
+    }
+
+    /// <summary>
+    /// The parse-refusal case, and the one the defect was found through: a log stamped in a non-UTC zone
+    /// makes <see cref="PgDeadlockLogParser"/> throw <see cref="PgLogTimezoneUnsupportedException"/>
+    /// (#2993), which abandons the whole read — siblings included. The marker must not move, because
+    /// <c>log_timezone</c> is a setting somebody can fix, and every report in that window is worth still
+    /// being there when they do.
+    ///
+    /// <para>This is the shape the pre-#3008 order was worst for: the refusal is not a fault anybody
+    /// caused at collection time, it recurs every cycle until the GUC changes, and each occurrence consumed
+    /// a fresh window on the way past.</para>
+    /// </summary>
+    [Fact]
+    public async Task ARefusedLogTimezoneDoesNotAdvanceTheMarker()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var (ingestor, client, logs) = Build(store, new FakeRds { FirstBody = NonUtcDeadlockText });
+
+        await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            () => ingestor.IngestAsync(1, "target-a", Host));
+
+        /* Still reachable, byte for byte — so the reports survive the setting being corrected. */
+        var again = await logs.ReadNewestAsync(Host);
+
+        Assert.Equal(NonUtcDeadlockText, again!.Value.Text);
+        Assert.Equal(2, client.Downloads.Count);
+        Assert.All(client.Downloads, d => Assert.Null(d.Marker));
     }
 
     /// <summary>
