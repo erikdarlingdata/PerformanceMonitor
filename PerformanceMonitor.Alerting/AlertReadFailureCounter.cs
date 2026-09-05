@@ -153,9 +153,16 @@ public sealed class AlertReadFailureCounter
     /// anything. What the denominator is FOR is telling three failures over two hundred passes apart
     /// from three over four.
     /// </summary>
-    /// <remarks>Nullable for symmetry with <see cref="RecordReadFailure"/>, but no caller passes null
-    /// today: both SKUs' passes are per-server, and the fleet-scoped store self-alerts are polled on
-    /// their own cadences rather than as a pass over a server.</remarks>
+    /// <remarks>
+    /// <para>Three callers today, all per-server: the shared engine's <c>EvaluateCoreAsync</c>, Darling's
+    /// <c>DarlingSelfAlertEvaluator.EvaluateStoreAlertsAsync</c>, and Darling's PostgreSQL predictor group
+    /// <c>DarlingWorker.EvaluatePostgresAlertsAsync</c>. Each is one PASS containing many independently
+    /// failure-isolated checks — isolation granularity is not pass granularity, which is why the engine's
+    /// fourteen checks and the predictor group's six are one pass each rather than twenty.</para>
+    /// <para>Nullable for symmetry with <see cref="RecordReadFailure"/>, but no caller passes null today:
+    /// every pass is per-server, and the fleet-scoped store self-alerts are polled on their own cadences
+    /// rather than as a pass over a server.</para>
+    /// </remarks>
     public void RecordPass(string? serverKey)
     {
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? _fleet : Bucket(serverKey!);
@@ -309,5 +316,9 @@ public sealed class AlertReadFailureCounter
         + "fleet-scoped store self-alerts (disk pressure, compression-job health, store-job cadence, "
         + "retention holds), which belong to no server and so appear in no per-server count. "
         + "server_alert_passes is a denominator for judging whether the failure count is large, not a rate: a "
-        + "pass issues many reads, and Darling runs two passes per sweep where Lite runs one.";
+        + "pass issues many reads, and the number of passes per sweep differs by host and by target engine: a "
+        + "Darling sweep of a SQL Server target runs two (the shared engine's conditions and the service's "
+        + "own store-polled self-alerts), a PostgreSQL target runs three (those two plus the PostgreSQL "
+        + "predictor group), and a Lite sweep runs one. So this denominator is comparable between servers "
+        + "on the same host and engine, and NOT across engines or across SKUs.";
 }

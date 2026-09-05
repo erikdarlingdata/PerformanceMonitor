@@ -383,6 +383,90 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.True(duplicates.Count == 0, $"duplicate read name(s): {string.Join(", ", duplicates)}");
     }
 
+    /// <summary>
+    /// Every alert EVALUATION PASS records itself in the denominator.
+    ///
+    /// <para>The census above proves each swallowed read is counted. It says nothing about whether the
+    /// pass that issued it is counted, and those are different claims: the PostgreSQL predictor group
+    /// shipped in review with all six of its read sites counted and no <c>RecordPass</c> at all, so a
+    /// PostgreSQL target reported two passes for three while its failures landed in the numerator
+    /// normally. A numerator guarded and a denominator unguarded is a worse instrument than neither,
+    /// because the pair still renders and now understates its own exposure.</para>
+    ///
+    /// <para><b>One pass per GROUP, not per check.</b> The engine dispatches fourteen independently
+    /// failure-isolated <c>Check*Async</c> calls inside one pass and the predictor group dispatches six;
+    /// isolation granularity is not pass granularity. So the assertion is per entry point, and the
+    /// tree-wide count of <c>RecordPass</c> sites is asserted equal to the number of entry points so a
+    /// fourth pass added without recording itself fails here, and a <c>RecordPass</c> added somewhere that
+    /// is not a pass entry point fails too.</para>
+    /// </summary>
+    [Fact]
+    public void EveryAlertEvaluationPass_RecordsItselfInTheDenominator()
+    {
+        /* (file, the member that IS the pass). Named rather than derived, like AlertPassCommandTimeoutTests'
+           own entry points: "is a pass" is a claim about dispatch that no pattern over source expresses. The
+           count assertion below is what makes the list safe. */
+        var passEntryPoints = new[]
+        {
+            (File: Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), Member: "EvaluateCoreAsync"),
+            (File: Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"),
+             Member: "EvaluateStoreAlertsAsync"),
+            (File: Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"),
+             Member: "EvaluatePostgresAlertsAsync"),
+        };
+
+        foreach (var (file, member) in passEntryPoints)
+        {
+            var raw = ReadSource(file);
+            var stripped = CSharpSourceWalker.StripCommentsAndStrings(raw);
+            var (start, end) = MemberBody(stripped, member);
+            var body = stripped[start..end];
+
+            Assert.True(
+                body.Contains("RecordPass(", StringComparison.Ordinal),
+                $"{member} in {Path.GetFileName(file)} is an alert evaluation pass that does not record "
+                + "itself, so every read failure it swallows lands in the numerator with nothing added to "
+                + "the denominator");
+        }
+
+        /* Both directions. A new pass that forgets to record fails the loop above; a RecordPass placed
+           anywhere that is not one of these entry points fails this count, which is what stops the
+           denominator from being padded by something that is not a pass. */
+        var recordPassSites = 0;
+        foreach (var file in new[]
+        {
+            Path.Combine("PerformanceMonitor.Alerting", "AlertReadFailureCounter.cs"),
+            Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"),
+            Path.Combine("Lite", "MainWindow.xaml.cs"),
+            Path.Combine("Lite", "MainWindow.AlertEngine.cs"),
+        })
+        {
+            var stripped = CSharpSourceWalker.StripCommentsAndStrings(ReadSource(file));
+
+            /* Every mention, minus the declaration — which is not a call site. Counted as a plain
+               subtraction rather than as a lookbehind on the match, because doing BOTH excludes the
+               declaration twice and reports one call site fewer than exist. That is not hypothetical:
+               this pin's first run failed 2-against-3 on exactly that arithmetic, which is the reason
+               the count is asserted rather than the presence. */
+            recordPassSites += Regex.Matches(stripped, @"\bRecordPass\s*\(").Count
+                - Regex.Matches(stripped, @"void\s+RecordPass\s*\(").Count;
+        }
+
+        Assert.Equal(passEntryPoints.Length, recordPassSites);
+
+        /* And the SHIPPED note has to describe the inventory it now has, or the surface states a pass count
+           that stopped being true the moment a third pass was added — which is how this defect reached
+           review in the first place. */
+        Assert.Contains("runs three", AlertReadFailureCounter.WindowNote, StringComparison.Ordinal);
+        Assert.Contains("NOT across engines", AlertReadFailureCounter.WindowNote, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Darling runs two passes per sweep where Lite runs one",
+            AlertReadFailureCounter.WindowNote,
+            StringComparison.Ordinal);
+    }
+
     /* ---------------- the surfaces ---------------- */
 
     [Fact]

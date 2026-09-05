@@ -3225,6 +3225,14 @@ public sealed class DarlingWorker : BackgroundService
             return;
         }
 
+        /* #3013: the PostgreSQL predictor group is a THIRD alert evaluation pass, and it has to say so
+           or a PostgreSQL target's denominator reports two passes for three. One pass for the whole
+           group, not one per check: the six checks below are independently failure-isolated exactly as
+           AlertEngine's fourteen Check*Async calls are, and those fourteen are one pass. Isolation
+           granularity is not pass granularity. Recorded AFTER the guard above for the same reason the
+           engine records after its master switch — a pass that cannot reach the store is not one. */
+        _readFailures.RecordPass(snapshot.ServerKey);
+
         try
         {
             var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
