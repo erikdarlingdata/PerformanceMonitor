@@ -21,12 +21,17 @@ namespace PerformanceMonitor.Collectors;
 /// report carries the full wait graph, every participant's complete statement text, and the relation and
 /// tuple the conflict landed on.</para>
 ///
-/// <para><b>Nothing has to be configured on the target</b>, which is what makes this different from plan
+/// <para><b>Nothing has to be ENABLED on the target</b>, which is what makes this different from plan
 /// capture. <c>auto_explain</c> needs a preload and a restart — on a managed fleet that is a
-/// parameter-group change and a reboot — while a deadlock report is unconditional: there is no setting that
-/// suppresses it, and <c>log_lock_waits</c> governs ordinary lock waits rather than this. The only
-/// precondition is being able to READ the log, which <see cref="PgPlanCaptureCollector"/> already
-/// established and <c>pg_plan_capture_readiness</c> already reports on.</para>
+/// parameter-group change and a reboot — while a deadlock report is written at default settings, and
+/// <c>log_lock_waits</c> governs ordinary lock waits rather than this.</para>
+///
+/// <para><b>Two preconditions, though, not one.</b> The log has to be READABLE, which
+/// <see cref="PgPlanCaptureCollector"/> already established and <c>pg_plan_capture_readiness</c> already
+/// reports on. It also has to be verbose enough to carry the report: <c>log_error_verbosity = terse</c>
+/// drops the DETAIL field, which is the entire graph, leaving the <c>ERROR</c> line and nothing for the
+/// parser to match. A perfectly readable log at terse verbosity yields zero rows and reads as a server
+/// that does not deadlock (#3030).</para>
 ///
 /// <para>Reads the same bounded tail of the same file as plan capture, by the same two routes: this
 /// definition where there is a filesystem, and the RDS log API at a managed target, chosen at dispatch.

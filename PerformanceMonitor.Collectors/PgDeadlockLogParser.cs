@@ -25,9 +25,17 @@ namespace PerformanceMonitor.Collectors;
 /// deadlock graph gives — it names every participant's SQL, where the SQL Server graph frequently leaves the
 /// non-victim side as a handle.</para>
 ///
-/// <para><b>Always available, unlike plan capture.</b> There is no setting that suppresses a deadlock report
-/// — <c>log_lock_waits</c> governs ordinary lock waits, not this — so unlike <c>auto_explain</c> this needs
-/// nothing configured on the target and works on a managed fleet today.</para>
+/// <para><b>Nothing to ENABLE, unlike plan capture.</b> A deadlock report needs no preload, no restart and
+/// no extension — <c>log_lock_waits</c> governs ordinary lock waits, not this — so unlike
+/// <c>auto_explain</c> this needs nothing turned on at the target and works on a managed fleet
+/// today.</para>
+///
+/// <para><b>Which is not the same as unsuppressable, and the difference is where this parser's silence
+/// comes from.</b> <c>log_error_verbosity = terse</c> drops the DETAIL field, and DETAIL is the whole
+/// graph — every wait edge and every participant's SQL. The <c>ERROR:  deadlock detected</c> line is still
+/// written, so the log LOOKS like it holds deadlocks while the block pattern, which requires the DETAIL
+/// group, matches nothing. Zero rows from a server that is deadlocking, in the shape of a server that is
+/// not. Check the verbosity parameter before believing an empty result (#3030).</para>
 /// </summary>
 public static class PgDeadlockLogParser
 {
