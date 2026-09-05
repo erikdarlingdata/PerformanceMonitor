@@ -203,7 +203,7 @@ public sealed class AlertReadFailureSurfaceTests
     };
 
     private const int WorkerCountedSites = 9;
-    private const int WorkerExemptSites = 6;
+    private const int WorkerExemptSites = 7;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -226,6 +226,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["could not read the store volume free space"] = "a local filesystem read, not a store read",
         ["could not read pg_database_size"] = "context for the alert text, not the evidence the alert is judged on",
         ["Store self-metrics sweep did not finish"] = "a metrics write sweep; no alert is judged on its result",
+        ["Store log capture failed"] = "a telemetry write sweep (#3021); no alert is judged on its result, and the capture gap it leaves is reported by get_store_log's own denominator",
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
         ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
@@ -299,7 +300,7 @@ public sealed class AlertReadFailureSurfaceTests
         /* The whole-tree totals, so a site MOVED between the scoped regions still has to be re-counted by
            a person rather than netting out silently. */
         Assert.Equal(27, totalCounted);
-        Assert.Equal(17, totalExempt);
+        Assert.Equal(18, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
