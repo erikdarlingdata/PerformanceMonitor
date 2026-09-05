@@ -57,6 +57,19 @@ public sealed class ViewerCommandTimeoutTests
         @"\.CreateCommand\s*[,)]",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// A joined fan-out — the shape whose reads run concurrently and therefore cannot be bounded by a
+    /// deadline derived from one read in isolation (#3004).
+    /// </summary>
+    private static readonly Regex s_joinedFanOut = new(
+        @"Task\s*\.\s*WhenAll\s*\(",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>The declaration that tells those reads how many of them there are.</summary>
+    private static readonly Regex s_fanOutDeclaration = new(
+        @"ViewerReadFanOut\s*\.\s*Of\s*\(",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     [Fact]
     public void EveryViewerCommand_SetsAnExplicitDeadline()
     {
@@ -344,6 +357,216 @@ public sealed class ViewerCommandTimeoutTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
 
         Assert.Equal(expectedSite, s_commandCtor.IsMatch(code));
+    }
+
+    /// <summary>
+    /// Every joined fan-out in this project declares how wide it is, so the reads inside it are bounded by
+    /// <see cref="ViewerCommandDeadlines.FanOutReadSeconds"/> rather than by a solo read's ceiling (#3004).
+    ///
+    /// <para><b>Paired POSITIONALLY, not by enclosing block.</b> The obvious rule — the declaration must sit
+    /// in the same block as the <c>Task.WhenAll</c> — is wrong on this codebase's real shape:
+    /// <c>CorrelatedTimelineLanesControl</c> declares its width in the outer <c>try</c> and awaits the join
+    /// inside a nested one, so a single-level backward walk finds the inner brace and reports the widest
+    /// fan-out in the project as an offender. Requiring instead that the k-th join in a file be preceded by
+    /// at least k declarations is immune to nesting, still order-sensitive, and still fails if any one
+    /// declaration is deleted — which is the property being bought.</para>
+    ///
+    /// <para><b>What this does NOT cover, stated because the gap is real.</b> A fan-out does not need a
+    /// <c>Task.WhenAll</c>: <c>MainWindow.OnRefreshTimerTick</c> fires five or six store reads unawaited and
+    /// joins none of them, and the connect path fires three. Nothing lexical distinguishes those from the
+    /// twenty other unawaited single reads in this project, which are single-flight-guarded and not
+    /// fan-outs at all, so a scan for that shape would be mostly false positives. Both real sites declare
+    /// their width by hand and carry a comment saying so; this test is the guard for the joined shape
+    /// ONLY.</para>
+    /// </summary>
+    [Fact]
+    public void EveryViewerFanOut_DeclaresItsWidth()
+    {
+        var offenders = new List<string>();
+        var joins = 0;
+
+        foreach (var path in ViewerSources())
+        {
+            var text = File.ReadAllText(path);
+
+            /* Stripped, for the same reason the command scans are: this file's own prose names
+               Task.WhenAll and ViewerReadFanOut.Of repeatedly, and a scan reading raw text would pair a
+               join against an explanation of a declaration. */
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+            var declarations = s_fanOutDeclaration.Matches(code).Select(m => m.Index).ToArray();
+            var seen = 0;
+
+            foreach (Match join in s_joinedFanOut.Matches(code))
+            {
+                joins++;
+                seen++;
+
+                if (declarations.Count(index => index < join.Index) < seen)
+                {
+                    var line = text.Take(join.Index).Count(c => c == '\n') + 1;
+                    offenders.Add($"{Path.GetFileName(path)}:{line}");
+                }
+            }
+        }
+
+        Assert.True(joins >= 10, $"the fan-out scan matched only {joins} joins — the sweep is not reading the project");
+
+        Assert.True(
+            offenders.Count == 0,
+            $"{offenders.Count} joined fan-out(s) run their reads concurrently without declaring a width, so each "
+            + "read is bounded by a ceiling derived from a read measured ALONE — which the ten-wide case sits "
+            + "entirely above. Declare the width with ViewerReadFanOut.Of(n) before the first read: "
+            + string.Join(", ", offenders));
+    }
+
+    /// <summary>
+    /// The two ceilings answer different questions, and this is the pin that says so in the only terms
+    /// available without a store: where each one sits relative to the CONCURRENT band #2901 measured
+    /// (24.4-64.1 s per read for ten concurrent 30-day reads, against 3.01 s for the same read alone).
+    ///
+    /// <para>Deliberately NOT a timing test. The failure it guards needs a Windows host and a store dense
+    /// enough to reach the band; a test that measured anything here would pass on a fast machine and prove
+    /// nothing. What it asserts instead is arithmetic on shipped constants, which holds identically
+    /// everywhere.</para>
+    /// </summary>
+    [Fact]
+    public void TheFanOutDeadline_IsDerivedFromTheConcurrentBand_NotTheSoloOne()
+    {
+        var solo = ViewerCommandDeadlines.InteractiveReadSeconds;
+        var widest = ViewerCommandDeadlines.FanOutReadSeconds(ViewerSettings.ManagedMaxPoolSize);
+
+        Assert.True(
+            solo < 24,
+            $"the solo read deadline {solo}s has risen into the concurrent band (24.4-64.1 s). Either it is no "
+            + "longer derived from the 3.01 s solo measurement, or the two regimes have been collapsed back "
+            + "into one constant — which is the defect #3004 exists to undo, in the other direction");
+
+        Assert.True(
+            widest > 64,
+            $"the fan-out deadline at the pool ceiling is {widest}s, which does not cover the 64.1 s worst read "
+            + "measured for ten concurrent 30-day reads on a store at production density. A ceiling under the "
+            + "measurement it is supposed to bound fails every read in the widest fan-out on every attempt, "
+            + "auto-refresh included — a deadline nothing can finish under is not a deadline");
+    }
+
+    /// <summary>
+    /// The fan-out ceiling can only ever grant MORE time than a solo read gets, and it stops growing where
+    /// the permits run out. The clamp is what lets the two unbounded per-server fan-outs
+    /// (<c>FinOpsTab.Loaders</c>'s inventory overlay, <c>MainWindow</c>'s overview cards) hand over a raw
+    /// fleet count instead of a hand-capped guess, so it is load-bearing rather than defensive.
+    /// </summary>
+    [Fact]
+    public void TheFanOutDeadline_IsMonotonicAndClampedAtThePool()
+    {
+        var pool = ViewerSettings.ManagedMaxPoolSize;
+        var previous = 0;
+
+        for (var width = -3; width <= pool * 4; width++)
+        {
+            var seconds = ViewerCommandDeadlines.FanOutReadSeconds(width);
+
+            Assert.True(
+                seconds >= ViewerCommandDeadlines.InteractiveReadSeconds,
+                $"width {width} yields {seconds}s, under the solo floor — a declared fan-out must never buy a "
+                + "read LESS time than the same read issued alone");
+
+            Assert.True(seconds >= previous, $"width {width} yields {seconds}s, below width {width - 1}'s {previous}s");
+
+            previous = seconds;
+        }
+
+        Assert.Equal(
+            ViewerCommandDeadlines.FanOutReadSeconds(pool),
+            ViewerCommandDeadlines.FanOutReadSeconds(pool * 4));
+    }
+
+    /// <summary>
+    /// The ambient width itself: one when nobody declared a fan-out (so an unscoped read keeps exactly the
+    /// solo ceiling), the declared value inside a scope, the enclosing value again after it, and the PRODUCT
+    /// when scopes nest — because a read two scopes deep really does contend with both widths.
+    /// </summary>
+    [Fact]
+    public void TheFanOutWidth_DefaultsToOne_AndNestsByMultiplying()
+    {
+        Assert.Equal(1, ViewerReadFanOut.CurrentWidth);
+
+        using (ViewerReadFanOut.Of(3))
+        {
+            Assert.Equal(3, ViewerReadFanOut.CurrentWidth);
+
+            using (ViewerReadFanOut.Of(2))
+            {
+                Assert.Equal(6, ViewerReadFanOut.CurrentWidth);
+            }
+
+            Assert.Equal(3, ViewerReadFanOut.CurrentWidth);
+        }
+
+        Assert.Equal(1, ViewerReadFanOut.CurrentWidth);
+
+        /* A count from a runtime collection, which is what the two per-server fan-outs pass. */
+        using (ViewerReadFanOut.Of(ViewerSettings.ManagedMaxPoolSize * 7))
+        {
+            Assert.Equal(ViewerSettings.ManagedMaxPoolSize, ViewerReadFanOut.CurrentWidth);
+        }
+
+        using (ViewerReadFanOut.Of(0))
+        {
+            Assert.Equal(1, ViewerReadFanOut.CurrentWidth);
+        }
+    }
+
+    /// <summary>
+    /// No command site stamps the solo constant directly. The sites take
+    /// <see cref="ViewerCommandDeadlines.CurrentInteractiveReadSeconds"/> uniformly — including the reads no
+    /// fan-out currently reaches, where the two are the same number — so that a future <c>Task.WhenAll</c>
+    /// over any of them is bounded the day it is written rather than silently inheriting a solo ceiling.
+    /// That uniformity is the whole reason the previous test's arithmetic reaches the reads at all, so it
+    /// needs a pin of its own; without it a single new site spelled the old way is invisible.
+    /// </summary>
+    [Fact]
+    public void NoViewerCommand_StampsTheSoloDeadlineDirectly()
+    {
+        var offenders = new List<string>();
+        var stamps = 0;
+
+        foreach (var path in ViewerSources())
+        {
+            var text = File.ReadAllText(path);
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+            stamps += code.Split("CurrentInteractiveReadSeconds").Length - 1;
+
+            var at = 0;
+            while (true)
+            {
+                /* The solo name is a PREFIX of nothing, but it is a SUFFIX of the fan-out-aware one, so a
+                   plain search for it matches every correct site too. Anchored on the assignment to make the
+                   two distinguishable. */
+                var index = code.IndexOf(
+                    "CommandTimeout = ViewerCommandDeadlines.InteractiveReadSeconds",
+                    at,
+                    System.StringComparison.Ordinal);
+
+                if (index < 0)
+                {
+                    break;
+                }
+
+                offenders.Add($"{Path.GetFileName(path)}:{text.Take(index).Count(c => c == '\n') + 1}");
+                at = index + 1;
+            }
+        }
+
+        Assert.True(stamps >= 150, $"only {stamps} site(s) stamp the fan-out-aware deadline — the sweep is not reading the project");
+
+        Assert.True(
+            offenders.Count == 0,
+            $"{offenders.Count} command site(s) stamp InteractiveReadSeconds directly. That constant bounds a read "
+            + "issued ALONE; a site spelled this way is not bounded by any fan-out it is called inside. Use "
+            + "ViewerCommandDeadlines.CurrentInteractiveReadSeconds: "
+            + string.Join(", ", offenders));
     }
 
     private static IEnumerable<string> ViewerSources()
