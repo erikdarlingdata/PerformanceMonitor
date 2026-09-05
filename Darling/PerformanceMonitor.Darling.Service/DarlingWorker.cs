@@ -6298,6 +6298,13 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, status, 0, 0, 0, explanation, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        /* yieldsOnLockTimeout: false is deliberate, and matches the general catch below rather than the
+           PostgresException arm above. That flag only ever decides the 55P03 branch inside Classify, so it
+           cannot change a CommandTimeout answer - passing the collector's real value here would read as
+           though the yield question were relevant to this filter, and it is not. Both of the plain-Exception
+           filters in this method ask a single narrow question of the classifier and pass false for the same
+           reason; the SQLSTATE arm passes the real value because it dispatches on the whole fault map,
+           55P03 included. */
         catch (Exception ex) when (
             server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql
             && PostgresTargetProvider.Instance.Classify(ex, yieldsOnLockTimeout: false)
