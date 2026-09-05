@@ -73,6 +73,7 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
            CREATE would fail the test on a duplicate and an unconditional DROP would be the single most
            destructive thing in the repository. Owning only what we made keeps both outcomes impossible. */
         var weCreatedRdsadmin = false;
+        var bodySucceeded = false;
 
         try
         {
@@ -111,15 +112,26 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
                cross-class flake is the exact failure LivePostgresCollectionHygieneTests exists to stop. */
             Assert.DoesNotContain("template0", enumerated);
             Assert.DoesNotContain("template1", enumerated);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DropAsync(cs!, CustomerDatabase);
-
-            if (weCreatedRdsadmin)
+            /* Through LiveStoreCleanup (#1902), on its own fresh connection. Hand-rolling this would earn
+               the #1902 ratchet's exact complaint — a throw from a finally replaces the body's in-flight
+               exception — and a bare catch-and-swallow would trade that for the opposite fault: a database
+               this test leaked would then go unreported even on a passing run, and the NEXT run would find
+               rdsadmin already present, not create it, and so never drop it either. RunAsync stays silent
+               only while the body's own failure is in flight. */
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await DropAsync(cs!, ManagedMaintenanceDatabase);
-            }
+                await DropAsync(cleanup, CustomerDatabase, cleanupCt);
+
+                if (weCreatedRdsadmin)
+                {
+                    await DropAsync(cleanup, ManagedMaintenanceDatabase, cleanupCt);
+                }
+            });
         }
     }
 
@@ -150,23 +162,20 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
     }
 
     /// <summary>
-    /// Best-effort teardown with <c>WITH (FORCE)</c>, matching <c>ScratchPostgres</c>: a throw from this
-    /// finally would replace the body's in-flight exception and hide the real failure (#1794).
+    /// Drops on the cleanup connection the caller supplies, and does NOT swallow — the masking rule lives
+    /// in <see cref="LiveStoreCleanup.RunAsync"/>, which is the only place that knows whether the body
+    /// already failed. A <c>catch</c> here would apply it unconditionally and hide a real leak.
+    /// <para><c>WITH (FORCE)</c> so a pooled connection somewhere cannot wedge the drop, matching the
+    /// scratch-database helper's teardown. <c>IF EXISTS</c> because the create is conditional.</para>
+    /// <para>The helper is named in prose only, never as a bare identifier: the #1902 ratchet exempts any
+    /// file whose text contains that type's name, so mentioning it would have taken this class out of
+    /// scope of the very rule it now satisfies — passing for the wrong reason instead of complying.</para>
     /// </summary>
-    private static async Task DropAsync(string adminConnectionString, string databaseName)
+    private static async Task DropAsync(
+        NpgsqlConnection connection, string databaseName, CancellationToken cancellationToken)
     {
-        try
-        {
-            await using var admin = new NpgsqlConnection(adminConnectionString);
-            await admin.OpenAsync();
-            await using var drop = new NpgsqlCommand(
-                $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", admin);
-            await drop.ExecuteNonQueryAsync();
-        }
-        catch
-        {
-            /* A leaked database on a throwaway CI cluster is harmless, and failing a passing test in its
-               cleanup would invert the signal. */
-        }
+        await using var drop = new NpgsqlCommand(
+            $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", connection);
+        await drop.ExecuteNonQueryAsync(cancellationToken);
     }
 }
