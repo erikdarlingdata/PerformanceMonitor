@@ -37,7 +37,10 @@ public sealed class ViewerOverviewSqlTests
         Assert.Contains("sqlserver_cpu_utilization", sql, StringComparison.Ordinal);
         Assert.Contains("other_process_cpu_utilization", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY sample_time DESC", sql, StringComparison.Ordinal);
+        /* The partition column leads, sample_time is the within-batch tiebreak — see
+           LatestCpuReadShapeSqlTests for why, and for the tree-wide guard that keeps all three
+           latest-CPU reads on this one shape. */
+        Assert.Contains("ORDER BY collection_time DESC, sample_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
     }
 
