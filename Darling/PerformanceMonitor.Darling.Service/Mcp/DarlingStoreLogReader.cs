@@ -78,7 +78,7 @@ SELECT
     min(w.capture_time)                                             AS first_capture_at,
     max(w.capture_time)                                             AS last_capture_at,
     (SELECT p.bytes_pending FROM newest AS p)                       AS bytes_pending,
-    coalesce(array_agg(DISTINCT w.log_file), '{}'::text[])          AS log_files
+    coalesce(array_agg(DISTINCT w.log_file ORDER BY w.log_file), '{}'::text[]) AS log_files
 FROM windowed AS w";
 
     /// <summary>

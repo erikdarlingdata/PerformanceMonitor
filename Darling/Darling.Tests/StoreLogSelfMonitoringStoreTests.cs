@@ -256,6 +256,21 @@ public class StoreLogSelfMonitoringStoreTests
         Assert.Contains("StoreSelfMetrics.SweepAsync", body, StringComparison.Ordinal);
         Assert.Contains("StoreLogSweep.SweepAsync", body, StringComparison.Ordinal);
 
+        /* And it has its OWN catch, which the two passes either side of it do not. This is the only pass
+           on the tick whose PRIVILEGE is not guaranteed - reading the log needs pg_read_server_files plus
+           EXECUTE on pg_read_binary_file, which a bring-your-own store's owner may not have granted - so
+           sharing the outer catch would let one permanent condition cost the collector-cost flush BELOW it
+           every hour forever. Asserted by position: a catch has to sit between the two calls. */
+        var logSweep = body.IndexOf("StoreLogSweep.SweepAsync", StringComparison.Ordinal);
+        var costFlush = body.IndexOf("_collectorCost.FlushAsync", StringComparison.Ordinal);
+        var innerCatch = body.IndexOf("catch (Exception ex) when", logSweep, StringComparison.Ordinal);
+
+        Assert.True(costFlush > logSweep, "the collector-cost flush no longer follows the store-log sweep");
+        Assert.True(
+            innerCatch > logSweep && innerCatch < costFlush,
+            "the store-log sweep has no catch of its own between it and the collector-cost flush, so a "
+            + "store whose role cannot read the log would cost the flush too");
+
         /* No second timer: a new cadence field would put the two series on different grids, which is the
            thing riding this tick buys. */
         Assert.DoesNotContain("_nextStoreLog", worker, StringComparison.Ordinal);
