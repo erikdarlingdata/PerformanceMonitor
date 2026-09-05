@@ -98,9 +98,10 @@ public partial class MainWindow
     /// One pass is TWO store reads — the freshness query plus <see cref="UpdateCollectorHealthTextAsync"/>'s own
     /// — each capped at <see cref="ViewerCommandDeadlines.CurrentInteractiveReadSeconds"/>, which is the solo
     /// 15 s when this is called on its own and the wider figure when a caller has declared a fan-out around it
-    /// (both fleet-timer callers do). So an unguarded pass could hold a permit for twice that against a pool of
-    /// <see cref="ViewerSettings.ManagedMaxPoolSize"/> while the next tick started another. A deadline caps how
-    /// long one stacked read holds a permit; it cannot stop the stacking, which is what this does.</para>
+    /// (both fleet-timer callers do). So an unguarded pass could hold a permit for twice that against the store
+    /// connection pool (<see cref="ViewerStorePool.MaxPoolSize"/> — ten on a managed seat, the operator's value
+    /// on a bring-your-own one) while the next tick started another. A deadline caps how long one stacked read
+    /// holds a permit; it cannot stop the stacking, which is what this does.</para>
     ///
     /// <para><paramref name="replayIfBusy"/> is why this is not <c>_alertPollInFlight</c>'s plain drop. A
     /// PERIODIC caller drops, because the next tick IS its retry and replaying one would delete the interval's
