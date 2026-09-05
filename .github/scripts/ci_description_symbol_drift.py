@@ -238,6 +238,13 @@ def self_test():
     check('a body of only absent-heading sections abstains',
           assess('## Not changed\n\n`SprocketCache` is byte-identical.', FIXTURE_DIFF)[0]
           == 'abstain')
+    # AFFIRMATIVE_SECTIONS is a tuned window, not a free parameter: widening it costs power
+    # (48% -> 34%) by giving accidental matches more chances to land, so pin how far it reads.
+    # Without this, changing the constant moves the flag rate and no assertion notices.
+    check('only the first affirmative section is read',
+          not any(span == 'SprocketCache' for span in described_symbols(
+              '`WidgetReader` changes.\n\n## The fix\n\n`StoreDeadlines` moves.\n\n'
+              '## The shape\n\n`SprocketCache` is the sibling.').values()))
     # Fenced code, blockquotes and measurement tables are not claims.
     for label, body in (('fenced code', '```\n`SprocketCache`\n```\n'),
                         ('blockquote', '> `SprocketCache` per review\n'),
