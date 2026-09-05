@@ -106,6 +106,13 @@ def claim_scope(body, sections=AFFIRMATIVE_SECTIONS):
             continue
         if taken >= sections:
             break
+        # The heading TITLE counts, not just the body under it. "## Changes to `WidgetReader.cs`"
+        # is a claim, and it is a natural way to write one -- three corpus bodies name a symbol
+        # only in a heading. Dropping it can invert a verdict rather than merely lose coverage:
+        # if the heading holds the one symbol that IS in the diff, the body's remaining spans are
+        # all misses and a clear becomes a warning. Only reached for affirmative headings, since
+        # both guards above have already run.
+        kept.append(mark.group(2))
         kept.append(text[mark.end():end])
         taken += 1
     return '\n'.join(kept)
@@ -319,6 +326,15 @@ def self_test():
           assess('`WidgetReader` gains a deadline.\n\n## Not verified\n\n`SprocketCache` was '
                  'not exercised.\n\n## Red-first\n\n`GadgetPool.cs` was mutated and restored.',
                  FIXTURE_DIFF)[0] == 'clear')
+    check('a symbol named only in an affirmative heading is read',
+          assess('## Changes to `WidgetReader.cs`\n\nProse that names nothing.',
+                 FIXTURE_DIFF)[0] == 'clear')
+    # The counterpart risk of reading heading titles: an ABSENT heading must not leak its own
+    # symbols back in. `Not verified` sections exist to name things the diff does not contain,
+    # and their titles are no different.
+    check('a symbol named only in an absent-section heading is not read',
+          not any(span == 'SprocketCache' for span in described_symbols(
+              '`WidgetReader` changes.\n\n## Not verified: `SprocketCache`\n\nProse.').values()))
     check('a body of only absent-heading sections abstains',
           assess('## Not changed\n\n`SprocketCache` is byte-identical.', FIXTURE_DIFF)[0]
           == 'abstain')
