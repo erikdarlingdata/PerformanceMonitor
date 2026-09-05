@@ -62,8 +62,14 @@ jobs:
           # page. Emitting elements and re-slurping flattens to one array at any page count.
           if ! gh api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[]' \
                2>diffdesc-lookup-error.txt | jq -s . > diffdesc-files.json; then
+            # Flatten before slicing. A workflow command is single-line -- GitHub honours the
+            # `::warning ...::` prefix only up to the first newline -- and gh's error text is
+            # routinely multi-line (rate-limit bodies, pretty-printed JSON). Embedding it raw
+            # would split the annotation and render the useful half as untitled log text. Same
+            # invariant the symbol extractor holds on its side by rejecting CR and LF outright.
+            detail=$(tr '\r\n' '  ' < diffdesc-lookup-error.txt | head -c 300)
             echo "::warning title=Description drift lookup failed::gh api (pulls/$PR/files) failed:"\
-              "$(head -c 300 diffdesc-lookup-error.txt). The description was NOT compared against"\
+              "${detail}. The description was NOT compared against"\
               "the diff on this run -- re-run this check to get a verdict."
             # An empty list is what the script reads as "no diff to compare", which it reports as
             # an abstention rather than as a finding.
