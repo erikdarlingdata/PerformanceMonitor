@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Data.SqlClient;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -229,6 +230,62 @@ public class TargetProviderTests
 
         Assert.Contains("datallowconn", query.Text, StringComparison.Ordinal);
         Assert.Contains("NOT datistemplate", query.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2995: the third screen, and the one the other two cannot make. RDS leaves
+    /// <c>datallowconn = true</c> and <c>datistemplate = false</c> on <c>rdsadmin</c>, so it enumerates
+    /// looking exactly like a user database, and then <c>pg_hba.conf</c> rejects the connection for every
+    /// principal a customer can hold. Without this the five per-database collectors attempted it once per
+    /// database-cycle on every managed target and failed every time — fleet-measured at
+    /// <c>note_count == total_runs</c> on 250 of 250 collector-instances.
+    /// <para>Asserted against the constant rather than a retyped literal: a test that spells the name out
+    /// again passes when the constant is misspelled, which is the one mistake the screen can actually make.</para>
+    /// </summary>
+    [Fact]
+    public void PostgresDatabaseList_SkipsTheManagedMaintenanceDatabase()
+    {
+        var (_, query) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora;Database=postgres", null);
+
+        Assert.Equal("rdsadmin", PostgresTargetProvider.ManagedMaintenanceDatabase);
+        Assert.Contains(
+            $"datname <> '{PostgresTargetProvider.ManagedMaintenanceDatabase}'", query.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The other half of #2995, and the half worth more than the fix: the screen has to be EXACTLY one
+    /// name. #2623 built the survivors note to mean "this cycle's rows are partial — read this", and the
+    /// cheap ways to silence the rdsadmin noise all destroy it — suppressing the note, or dropping every
+    /// database that fails to connect, would take a genuinely-broken customer database with them and
+    /// leave the same silent partial collection #2623 was filed for.
+    /// <para>So: one hardcoded name in the query, and none of the databases that legitimately enumerate.
+    /// <c>postgres</c> in particular is a real collection target on RDS — <c>pg_extension_availability</c>
+    /// returns rows there — and is the obvious casualty of a "screen the system-looking ones" fix.</para>
+    /// </summary>
+    [Fact]
+    public void PostgresDatabaseList_ScreensExactlyOneNameAndNoLegitimateDatabase()
+    {
+        var (_, query) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora;Database=postgres", null);
+
+        /* One quoted literal in the whole enumeration: the managed maintenance database and nothing else.
+           Counts quotes rather than listing names, so a name added here without field evidence fails this
+           even though nobody thought to assert against that particular name. */
+        Assert.Equal(2, query.Text.Count(c => c == '\''));
+
+        foreach (var legitimate in new[] { "postgres", "template1", "appdb" })
+        {
+            Assert.DoesNotContain($"'{legitimate}'", query.Text, StringComparison.Ordinal);
+        }
+
+        /* The note mechanism is untouched and must stay that way: a real customer database failing out of
+           the surviving set still composes the survivors-ONLY warning, with its own name in it. */
+        var note = EnumeratedCollectorDriver.BuildPartialFailureNote(
+            failed: 1, attempted: 3, failedDatabases: new[] { "appdb" }, firstError: "28000: connection refused");
+
+        Assert.NotNull(note);
+        Assert.Contains("1 of 3", note, StringComparison.Ordinal);
+        Assert.Contains("appdb", note, StringComparison.Ordinal);
+        Assert.Contains("survivors ONLY", note, StringComparison.Ordinal);
     }
 
     /// <summary>

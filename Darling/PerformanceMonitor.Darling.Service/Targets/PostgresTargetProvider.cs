@@ -131,11 +131,24 @@ public sealed class PostgresTargetProvider : ITargetProvider
     /// <summary>
     /// Enumerates from wherever the service is already connected — <c>pg_database</c> is a shared
     /// catalog, so unlike SQL Server there is no equivalent of hopping to <c>master</c> first.
-    /// <para>Both filters are load-bearing. <c>datistemplate</c> excludes <c>template0</c> and
-    /// <c>template1</c>; <c>template0</c> in particular is frozen and rejects connections outright, so
-    /// including it would guarantee one failed connection per collection cycle forever. <c>datallowconn</c>
-    /// excludes any database an administrator has deliberately closed — most often one mid-restore or
-    /// being retired, exactly the databases where an extra connection attempt is least welcome.</para>
+    /// <para>All three filters are load-bearing, and each screens a different kind of database that
+    /// cannot be collected from. <c>datistemplate</c> excludes <c>template0</c> and <c>template1</c>;
+    /// <c>template0</c> in particular is frozen and rejects connections outright, so including it would
+    /// guarantee one failed connection per collection cycle forever. <c>datallowconn</c> excludes any
+    /// database an administrator has deliberately closed — most often one mid-restore or being retired,
+    /// exactly the databases where an extra connection attempt is least welcome.</para>
+    /// <para><c>rdsadmin</c> is the managed-platform maintenance database, and it needs its own screen
+    /// because the other two cannot see it: RDS leaves <c>datallowconn = true</c> and
+    /// <c>datistemplate = false</c> on it, so it enumerates like a user database, and then
+    /// <c>pg_hba.conf</c> rejects the connection (SQLSTATE 28000) for every principal a customer can
+    /// hold. Excluded by name rather than behind a managed-mode gate, matching the SQL Server screen
+    /// (#1565), which lists the vendor management databases unconditionally on the same reasoning: the
+    /// names are vendor-controlled, so they cannot collide with real customer data, and no target flag
+    /// has to be threaded down here to be trusted. Self-hosted PostgreSQL has no such database, so the
+    /// filter removes nothing there.</para>
+    /// <para>A name literal, not a parameter, precisely because it is not operator input — the
+    /// <c>excludedDatabases</c> parameters carry configured names, and keeping this out of that set
+    /// leaves an empty exclusion list producing no parameters at all.</para>
     /// </summary>
     public (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
         string connectionString, IReadOnlyList<string>? excludedDatabases)
@@ -148,8 +161,19 @@ SELECT datname
 FROM pg_database
 WHERE datallowconn
 AND   NOT datistemplate
+AND   datname <> '{ManagedMaintenanceDatabase}'
 {exclusionClause}
 ORDER BY datname",
             exclusionParameters));
     }
+
+    /// <summary>
+    /// The managed-platform maintenance database screened out of per-database fan-out.
+    /// <para>Named rather than inlined so the exclusion is assertable by identity: a test that retypes
+    /// the string proves the transcription, not the screen. Deliberately one name and not a list — the
+    /// field evidence (#2995) is that the failure is always exactly this database, and the other
+    /// providers' equivalents (<c>cloudsqladmin</c>, <c>azure_maintenance</c>) have never been measured
+    /// on a monitored target, so adding them would be excluding databases nobody has seen.</para>
+    /// </summary>
+    internal const string ManagedMaintenanceDatabase = "rdsadmin";
 }
