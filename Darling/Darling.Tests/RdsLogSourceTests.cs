@@ -80,6 +80,11 @@ public class RdsLogSourceTests
                     "absent" => null,
                     "empty" => new List<DescribeDBLogFilesDetails>(),
                     "unnamed" => new List<DescribeDBLogFilesDetails> { new() { LastWritten = 9999 } },
+                    "unnamed-newest" => new List<DescribeDBLogFilesDetails>
+                    {
+                        new() { LogFileName = LogName, LastWritten = 1000 },
+                        new() { LastWritten = 9999 },
+                    },
                     _ => new List<DescribeDBLogFilesDetails>
                     {
                         new() { LogFileName = "error/postgresql.log.2026-08-09-01", LastWritten = 1000 },
@@ -224,6 +229,22 @@ public class RdsLogSourceTests
 
         /* And nothing was downloaded — the branch is decided before a byte is asked for. */
         Assert.Empty(client.Downloads);
+    }
+
+    /// <summary>
+    /// The positive control for the test above, and the reason the read looks for the newest NAMED file
+    /// rather than the newest one: a nameless entry alongside real ones is not "nothing to open", so it
+    /// falls through to the newest file that can be named instead of refusing a log that is right there.
+    /// Without this the three refusals above would pass just as well over a read that refused everything.
+    /// </summary>
+    [Fact]
+    public async Task ANamelessNewestEntryFallsThroughToTheNewestNamedFile()
+    {
+        var (source, client) = Build(new FakeRds { LogFileShape = "unnamed-newest" });
+
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+
+        Assert.Equal("error/postgresql.log.2026-08-25-18", client.Downloads[0].LogFileName);
     }
 
     /// <summary>
