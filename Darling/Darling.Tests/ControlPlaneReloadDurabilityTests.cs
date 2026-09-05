@@ -214,10 +214,18 @@ public sealed class ControlPlaneReloadDurabilityTests
     /// rather than exercised. It is a WIRING invariant, and wiring is invisible to a logic test.
     ///
     /// <para>Asserted structurally, not by string equality: the assignment to <c>_lastConfigVersion</c>
-    /// must sit INSIDE the braces of the <c>if (await ReloadFromStoreAsync(...))</c> that guards it. A
-    /// scan for "does the assignment appear after the call" would pass on the defect the moment someone
-    /// moved the call one line up, which is exactly the count-invariant relocation this sweep keeps
-    /// finding.</para>
+    /// must sit INSIDE the braces of the <c>if (appliedVersion.HasValue)</c> that guards it, and the
+    /// <c>appliedVersion</c> it reads must come from the <c>ReloadFromStoreAsync</c> call immediately
+    /// above. A scan for "does the assignment appear after the call" would pass on the defect the moment
+    /// someone moved the call one line up, which is exactly the count-invariant relocation this sweep
+    /// keeps finding.</para>
+    ///
+    /// <para>It also pins WHICH version is stamped, not merely that one is. The version of this fix that
+    /// #2946 shipped stamped <c>configVersion.Value</c> — the beacon's own earlier read — while
+    /// <c>ReloadFromStoreAsync</c> re-reads <c>config_version</c> inside <c>LoadViewAsync</c>, so a write
+    /// landing between the two left the watermark behind a config that was already live. This test froze
+    /// that imprecision until review caught it, which is why the negative against the outer read is here
+    /// and is positive-controlled.</para>
     /// </summary>
     [Fact]
     public void TheConfigVersionWatermark_AdvancesOnlyInsideTheReloadSuccessBranch()
