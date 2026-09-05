@@ -148,7 +148,7 @@ public sealed class PlanCorrectionCollector : CollectorDefinitionBase<PlanCorrec
     ///
     /// <para>
     /// Correcting the record, because it was wrong once and cost a round trip: #2760 removed both hints
-    /// on the theory that ~4,237ms of avg CPU seen on prod-pos-use1-multi-45/Demo was compile cost. That
+    /// on the theory that ~4,237ms of avg CPU seen on <host>/<database> was compile cost. That
     /// attribution was never verified — it was inferred from a CPU-heavy/low-read/low-row telemetry
     /// signature. The cost was the LIVE Query Store catalog-view joins that #2764 then replaced with
     /// staged temps. Removing RECOMPILE never addressed it; staging did.
