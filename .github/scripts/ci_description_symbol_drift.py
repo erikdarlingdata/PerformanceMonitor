@@ -113,6 +113,13 @@ def claim_scope(body, sections=AFFIRMATIVE_SECTIONS):
 
 # ---------------------------------------------------------------- what counts as a symbol
 BACKTICK = re.compile(r'``([^`]+)``|`([^`\n]+)`')
+# Build outputs and assets, rejected on their CASE-FOLDED suffix. The `islower()` test below
+# covers any lowercase suffix, so this list exists purely for the capitalized spelling: `Dll`
+# is not `islower()`, and a capitalized extension is shape-indistinguishable from a member
+# name, which is why enumeration rather than a rule. The first twelve are the repo's own
+# declared binary set from `.gitattributes`, so the two stay in step by construction.
+NON_SOURCE_EXT = ('png', 'jpg', 'jpeg', 'gif', 'ico', 'dll', 'exe', 'pdb', 'snk', 'parquet',
+                  'zip', 'duckdb', 'nupkg', 'msi', 'bak', 'log', 'dmp', 'sqlplan')
 SOURCE_EXT = ('cs', 'csproj', 'sql', 'xaml', 'json', 'props', 'targets', 'sln', 'ps1', 'sh',
               'yml', 'yaml', 'md', 'cff', 'config', 'py')
 # A case hump is what separates a symbol from a prose word. The second alternative is for
@@ -153,14 +160,20 @@ def classify(span):
         suffix = named_file.group(2)
         if suffix.lower() in SOURCE_EXT:
             return ('file', named_file.group(1) + '.' + suffix)
-        # An all-lowercase suffix is a FILE extension, so a name wearing one that is not a
-        # source extension is a build output or an asset -- `MyLib.dll`, `WidgetHost.exe`.
-        # Rejecting it here matters because the MEMBER branch below would otherwise accept it
-        # and take the EXTENSION as the member name, so `MyLib.dll` would count as found
-        # against any diff whose text contains the token `dll`: a false clear, from a span
-        # naming something that is not source at all. A member path is safe from this test
-        # because its last component carries a capital (`ServerTimeHelper.UtcOffsetMinutes`).
-        if suffix.islower():
+        # A name wearing a non-source extension is a build output or an asset, and must be
+        # rejected HERE: the MEMBER branch below would otherwise accept it and take the
+        # EXTENSION as the member name, so `MyLib.dll` would count as found against any diff
+        # whose text contains the token `dll` -- a false clear, from a span naming something
+        # that is not source at all.
+        #
+        # Two tests, because neither covers the other. `islower()` catches any lowercase
+        # suffix, listed or not, which is the common spelling and the open-ended half.
+        # NON_SOURCE_EXT catches the capitalized spelling, `MyLib.Dll`, which `islower()`
+        # cannot see -- and no shape rule can, because a capitalized extension is
+        # indistinguishable from a member name. Real member paths survive both, since their
+        # last component is neither lowercase nor a known extension
+        # (`ServerTimeHelper.UtcOffsetMinutes`, `DarlingWebEndpoints.MapAll`).
+        if suffix.islower() or suffix.lower() in NON_SOURCE_EXT:
             return None
     if '/' in text:
         return None
@@ -346,15 +359,23 @@ def self_test():
     # Docs-only diffs cannot support a verdict.
     # A non-source extension must be rejected outright, not fall through to MEMBER, which would
     # take the extension as the member name and match any diff mentioning that token.
-    for span in ('MyLib.dll', 'WidgetHost.exe', 'Payload.zip', 'Icon.ico'):
+    for span in ('MyLib.dll', 'WidgetHost.exe', 'Payload.zip', 'Icon.ico',
+                 # The CAPITALIZED spelling is a separate rejection path: `Dll` is not
+                 # `islower()`, so without NON_SOURCE_EXT these fall into MEMBER and take the
+                 # extension as the member name. `MyLib.dll` passing is no evidence for these.
+                 'MyLib.Dll', 'WidgetHost.Exe', 'Payload.Zip', 'Screenshot.PNG',
+                 # An UNLISTED lowercase extension is what islower() still earns its place on.
+                 'MyLib.foo'):
         check(f'rejected as a symbol: {span}', classify(span) is None)
     # Abstain, not warn: the span contributes no symbol at all, so there is nothing to check.
     # What matters is that it is not CLEAR -- before the suffix test this body counted as
     # described-and-found purely because the patch text contained the token `dll`.
-    check('a build output does not clear a diff that merely mentions its extension',
-          assess('`MyLib.dll` is rebuilt.',
-                 [{'filename': 'Lite/Services/Loader.cs',
-                   'patch': '@@ -1 +1 @@\n-var a = 1;\n+// load the dll here'}])[0] == 'abstain')
+    for span, token in (('MyLib.dll', 'dll'), ('MyLib.Dll', 'Dll')):
+        check(f'a build output does not clear a diff that merely mentions `{token}`',
+              assess(f'`{span}` is rebuilt.',
+                     [{'filename': 'Lite/Services/Loader.cs',
+                       'patch': f'@@ -1 +1 @@\n-var a = 1;\n+// load the {token} here'}])[0]
+              == 'abstain')
     # A member path survives that test because its last component carries a capital.
     check('a dotted member path is not mistaken for a file',
           classify('ServerTimeHelper.UtcOffsetMinutes')
