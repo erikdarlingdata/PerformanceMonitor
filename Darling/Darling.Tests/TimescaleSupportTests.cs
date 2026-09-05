@@ -1042,6 +1042,193 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         }
     }
 
+    /// <summary>
+    /// THE REFRESH-WINDOW PIN (#3012), live — the half that reaches already-deployed stores, which is the
+    /// only population the incident was reported from.
+    ///
+    /// <para><b>What it would mean for this test not to exist.</b>
+    /// <c>add_continuous_aggregate_policy(if_not_exists =&gt; true)</c> returns -1 against a policy the store
+    /// already has and changes nothing about it, so a store still on the 3-day window keeps re-materializing
+    /// three days every hour and the fix is INERT while the whole suite stays green. That failure direction is
+    /// worse than a red one, not milder: an inert fix with a passing suite is a fix nobody looks at again.
+    /// String-shape assertions on the SQL cannot see it, because they never run the statement.</para>
+    ///
+    /// <para><b>The four assumptions only a live store can settle</b>, all named as unverified when the change
+    /// was written: that <c>alter_job</c> takes <c>fixed_schedule</c> and <c>initial_start</c> together on this
+    /// runtime; that <c>jsonb_set</c> produces a <c>start_offset</c> TimescaleDB then honours; that the
+    /// <c>jobs</c> → <c>continuous_aggregates</c> join on materialization-hypertable schema/name recovers
+    /// <c>view_name</c> for a refresh policy; and that a policy CREATED with <c>initial_start</c> comes back
+    /// <c>fixed_schedule = true</c> — on which the converge's own no-op-ness rests, because a fresh store whose
+    /// jobs read <c>false</c> would be re-altered on every start forever.</para>
+    ///
+    /// <para><b>The fixed schedule is not a refinement.</b> Measured on the production store roughly two hours
+    /// after the offsets were applied by hand: every job read <c>fixed_schedule = f</c> and only one of six
+    /// hourly refreshes was still on the minute it was set to. TimescaleDB computes the next start from the
+    /// previous FINISH when <c>initial_start</c> is absent, so a hand-applied stagger decays back into
+    /// coincidence within hours — correct at apply time and gone by the afternoon. A stagger that drifts is not
+    /// a stagger, which is why <c>fixed_schedule</c> is asserted here rather than only the minute.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_HourlyRefreshWindow_ConvergesAThreeDayFinishToStartPolicy_AndLeavesTheDailyTierAlone_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live refresh-window converge test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* Two REAL views, because the converge is scoped by membership of HourlyRefreshPhaseOrder and a
+           throwaway name would be skipped — which is a property worth having, and is asserted at the end. */
+        const string Hourly = TimescaleSupport.QueryStatsHourlyView;
+        const string Daily = TimescaleSupport.QueryStatsDailyView;
+
+        /* This test MUTATES the shared fixture's shape (creating the hourly/daily CAGGs changes compose's tier
+           routing), so it restores it: snapshot what already exists and drop only what it creates. */
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var createLog = new CapturingTestLogger();
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct);
+
+            /* ---- (1) A policy as an OLDER BUILD left it: 3-day window, no initial_start. ---- */
+            await ExecAsync(connection, $"SELECT remove_continuous_aggregate_policy('collect.{Hourly}', if_exists => true)", ct);
+            await ExecAsync(connection,
+                $"SELECT add_continuous_aggregate_policy('collect.{Hourly}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
+
+            var legacy = await RefreshPolicyStateAsync(connection, Hourly, ct);
+            Assert.NotNull(legacy);
+            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, legacy!.StartOffsetSeconds);
+
+            /* MEASURED, not assumed: omitting initial_start is what leaves a job on finish-to-start
+               scheduling, which is the mechanism by which the production store's hand-set offsets drifted. */
+            Assert.False(legacy.FixedSchedule,
+                "a policy created without initial_start is expected to be finish-to-start on this runtime");
+
+            /* ---- (2) The CREATE statement ALONE cannot fix it — if_not_exists skips outright. ---- */
+            await ExecAsync(connection, TimescaleSupport.AddHourlyRefreshPolicySql(Hourly), ct);
+            var afterCreate = await RefreshPolicyStateAsync(connection, Hourly, ct);
+            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, afterCreate!.StartOffsetSeconds);
+            Assert.False(afterCreate.FixedSchedule);
+
+            /* ---- (3) THE ASSERTION THE WHOLE CHANGE COMES DOWN TO: the deployed store converges. ---- */
+            var convergeLog = new CapturingTestLogger();
+            var converged = await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, convergeLog, ct);
+            Assert.True(converged >= 1,
+                $"expected the 3-day finish-to-start policy on {Hourly} to be moved; {convergeLog.Joined}");
+
+            var moved = await RefreshPolicyStateAsync(connection, Hourly, ct);
+            Assert.NotNull(moved);
+            Assert.Equal(TimescaleSupport.HourlyRefreshStartSpan.TotalSeconds, moved!.StartOffsetSeconds);
+            Assert.True(moved.FixedSchedule,
+                $"the converge must pin the schedule, or the phase drifts back to coincidence within hours; {convergeLog.Joined}");
+            Assert.Equal(TimescaleSupport.RefreshPhaseMinutesFor(Hourly), moved.PhaseMinutes);
+
+            /* end_offset must survive untouched — the converge writes start_offset with jsonb_set against the
+               job's OWN config, so losing a sibling key here would mean it replaced the config wholesale. */
+            Assert.Equal(TimeSpan.FromHours(1), moved.EndOffset);
+
+            /* The rendered line names the view and the window it is on now, because that line IS the
+               operator's evidence the store changed. A structured-logging placeholder/argument mismatch would
+               render it wrong with no error anywhere — the one defect asserting on the return value cannot see. */
+            Assert.Contains($"moved {Hourly}'s refresh policy to a {TimescaleSupport.HourlyRefreshStartOffset} window",
+                convergeLog.Joined, StringComparison.Ordinal);
+
+            /* ---- (4) Idempotent: a converged store finds nothing, so this never churns alter_job. ---- */
+            Assert.Equal(0, await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct));
+
+            /* ---- (5) The CREATE path on a store with no policy yet: both halves from the start. ---- */
+            await ExecAsync(connection, $"SELECT remove_continuous_aggregate_policy('collect.{Hourly}', if_exists => true)", ct);
+            await ExecAsync(connection, TimescaleSupport.AddHourlyRefreshPolicySql(Hourly), ct);
+
+            var fresh = await RefreshPolicyStateAsync(connection, Hourly, ct);
+            Assert.NotNull(fresh);
+            Assert.Equal(TimescaleSupport.HourlyRefreshStartSpan.TotalSeconds, fresh!.StartOffsetSeconds);
+            Assert.True(fresh.FixedSchedule,
+                "passing initial_start is expected to put the job on a fixed schedule; if it does not, the converge re-alters every hourly policy on every start");
+            Assert.Equal(TimescaleSupport.RefreshPhaseMinutesFor(Hourly), fresh.PhaseMinutes);
+
+            /* And therefore the converge is a no-op against a FRESH store too, not only a settled one. */
+            Assert.Equal(0, await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct));
+
+            /* ---- (6) SCOPE: the DAILY tier keeps its 3-day window and its finish-to-start schedule. ---- */
+            var daily = await RefreshPolicyStateAsync(connection, Daily, ct);
+            Assert.NotNull(daily);
+            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, daily!.StartOffsetSeconds);
+            Assert.False(daily.FixedSchedule, "the daily tier is deliberately left on finish-to-start scheduling");
+
+            /* Deliberately AFTER a converge has run and reported 0: "the daily policy is still on 3 days" is
+               trivially true if the converge never looked at anything, so the check has to follow a pass that
+               did look at the hourly policies and chose not to touch this one. */
+            await ExecAsync(connection,
+                $@"SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{{start_offset}}', to_jsonb('3 days'::text)))
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  ca.materialization_hypertable_schema = j.hypertable_schema
+  AND ca.materialization_hypertable_name = j.hypertable_name
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'
+AND   ca.view_name = '{Daily}'", ct);
+
+            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds,
+                (await RefreshPolicyStateAsync(connection, Daily, ct))!.StartOffsetSeconds);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropContinuousAggregatesAsync(
+                    (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt));
+        }
+    }
+
+    /// <summary>One continuous aggregate's live refresh-policy state, read the same way
+    /// <see cref="TimescaleSupport.ContinuousAggregateRefreshStateSql"/> reads it — by VIEW NAME, recovered
+    /// through the materialization-hypertable join, never by job id.</summary>
+    private sealed record RefreshPolicyState(double StartOffsetSeconds, bool FixedSchedule, int? PhaseMinutes, TimeSpan? EndOffset);
+
+    private static async Task<RefreshPolicyState?> RefreshPolicyStateAsync(
+        NpgsqlConnection connection, string view, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand($@"
+SELECT
+    EXTRACT(EPOCH FROM (j.config->>'start_offset')::interval)::double precision,
+    j.fixed_schedule,
+    CASE
+        WHEN j.initial_start IS NULL THEN NULL
+        ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
+    END,
+    (j.config->>'end_offset')::interval
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  ca.materialization_hypertable_schema = j.hypertable_schema
+  AND ca.materialization_hypertable_name = j.hypertable_name
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'
+AND   ca.view_name = '{view}'", connection);
+
+        using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+        {
+            return null;
+        }
+
+        return new RefreshPolicyState(
+            reader.GetDouble(0),
+            !reader.IsDBNull(1) && reader.GetBoolean(1),
+            reader.IsDBNull(2) ? null : reader.GetInt32(2),
+            reader.IsDBNull(3) ? null : reader.GetFieldValue<TimeSpan>(3));
+    }
+
     /* ---- #1778 live-test helpers: throwaway hypertables shaped like a collector table ---- */
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)

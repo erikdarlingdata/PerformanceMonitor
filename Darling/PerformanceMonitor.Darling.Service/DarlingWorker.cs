@@ -1248,9 +1248,9 @@ public sealed class DarlingWorker : BackgroundService
                 await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);
 
                 /* #1757: the baseline aggregates ship WITH NO DATA and their refresh policy only ever covers
-                   the trailing TimescaleSupport.HourlyRefreshStartOffset, so without this they would answer a
-                   30-day question with a day of supply. DELIBERATELY LAUNCHED, NOT AWAITED: it is a bulk materialization whose cost scales
-                   with however much history the store already had, and every step below this block — the
+                   the trailing 1-day refresh window, so without this they would answer a 30-day question with
+                   a day of supply. DELIBERATELY LAUNCHED, NOT AWAITED: it is a bulk materialization whose
+                   cost scales with however much history the store already had, and every step below — the
                    composer tuning, the delta re-seed, the collection loop itself — is sequenced after it.
                    Awaiting it here would take a restarted service dark for as long as the backfill runs,
                    which is exactly when an operator is most likely to be restarting it. Coverage-gated, so it
