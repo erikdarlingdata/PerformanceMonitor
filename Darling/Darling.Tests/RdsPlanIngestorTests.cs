@@ -173,12 +173,37 @@ public sealed class RdsPlanIngestorTests
         await using var store = NpgsqlDataSource.Create(DeadStore);
         var (ingestor, client, _) = Build(store, new FakeRds { FirstBody = QuietText });
 
-        Assert.Equal(0, await ingestor.IngestAsync(1, "target-a", Host));
-        Assert.Equal(0, await ingestor.IngestAsync(1, "target-a", Host));
+        Assert.Equal(RdsIngestOutcome.Read(0), await ingestor.IngestAsync(1, "target-a", Host));
+        Assert.Equal(RdsIngestOutcome.Read(0), await ingestor.IngestAsync(1, "target-a", Host));
 
         Assert.Equal(2, client.Downloads.Count);
         Assert.Null(client.Downloads[0].Marker);
         Assert.Equal("MARKER-1", client.Downloads[1].Marker);
         Assert.Equal(0, client.Downloads[1].NumberOfLines);
+    }
+
+    /// <summary>
+    /// A non-RDS host reaches nothing, and the outcome says so rather than reporting an empty log (#3017).
+    /// That target reads its log through <c>pg_read_file</c> instead, so no log file was listed and none was
+    /// downloaded — "no new auto_explain plans in the RDS log window" would be a claim about a log this
+    /// cycle never opened.
+    ///
+    /// <para>Sits directly beside <see cref="AQuietCycleAdvancesTheMarker"/> on purpose: that one reaches
+    /// the log and finds nothing worth storing, this one never reaches it, and the pair is what makes the
+    /// over-exclusion direction visible too — a reached-but-empty cycle must NOT be reported as
+    /// unreached.</para>
+    /// </summary>
+    [Fact]
+    public async Task ANonRdsHost_ReportsTheSourceUnreached_WithNoAwsCall()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var (ingestor, client, _) = Build(store);
+
+        var outcome = await ingestor.IngestAsync(1, "target-a", "db.internal.example.com");
+
+        Assert.Equal(RdsIngestOutcome.NotReached, outcome);
+        Assert.False(outcome.SourceReached);
+        Assert.NotEqual(RdsIngestOutcome.Read(0), outcome);
+        Assert.Empty(client.Downloads);
     }
 }

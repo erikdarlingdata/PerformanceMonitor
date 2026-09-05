@@ -45,6 +45,14 @@ jobs:
   build:
     runs-on: windows-latest
 
+    # Whether THIS job ran Darling.Tests, taken from the step's own outcome rather than restated as
+    # a copy of the step's path gate. The darling-tree-guards job at the bottom of this file runs
+    # the suite when this reads `skipped`; a second list of paths there would be free to fall out
+    # of agreement with the list here, and area lists falling out of agreement with what a guard
+    # reads is the thing that job exists to stop.
+    outputs:
+      darling-tests: ${{ steps.darling-tests.outcome }}
+
     steps:
       - uses: actions/checkout@v7
 
@@ -328,6 +336,7 @@ jobs:
         run: dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
 
       - name: Run Darling tests
+        id: darling-tests
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
 
@@ -945,3 +954,121 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
+
+  # Darling.Tests is not only Darling's test suite: some of its guards take the WHOLE REPOSITORY as
+  # input rather than the Darling tree.
+  # MigrationUpgradeLadderLiveTests.TheMostRecentRelease_HasALadderFixture derives the ladder
+  # fixture it requires from CHANGELOG.md's newest released heading, so a release cut committed as a
+  # CHANGELOG-only change is precisely the input it exists to fail on; FleetIdentifierScrubTests
+  # enumerates every tracked file carrying one of nine extensions, `.md` among them.
+  #
+  # The build job's `darling`, `core` and `root` filters describe Darling PRODUCT code, which is
+  # what they are for: they decide what to compile and publish. They are not a description of what
+  # those guards read, so the two sets differ, and a change confined to markdown or to `.github/`
+  # leaves all three false and the suite unrun. Measured over the last 100 pull requests: 92 lit
+  # one of the three, 8 lit none, and 7 of those 8 changed markdown.
+  #
+  # So the gate here is the COMPLEMENT of the build job's, read off that job's own step outcome
+  # rather than written out again as a second set of paths. A second set is what would drift: an
+  # enumerated area list stops covering the next tree added, which #2114, #2830 and #2839 each hit
+  # in turn. `steps.darling-tests.outcome` is `skipped` exactly when the build job did not run the
+  # suite, so there is no pair of lists to keep in agreement.
+  #
+  # Being the complement, it never double-runs the suite - 92 of those 100 PRs report here without
+  # spinning up .NET at all - and it needs no upkeep as the area filters change. It ALSO runs
+  # whenever this workflow changes, so a change to the gate is exercised by the gate, the same
+  # self-validation darling-pg takes.
+  #
+  # No PostgreSQL here, deliberately. The whole-tree guards need none, and standing up a throwaway
+  # TimescaleDB cluster would make a documentation change depend on the flakiest part of CI
+  # (#1862's compression flake failed twice in two unrecognizably different ways). Runs on every
+  # non-cancelled event and always reports a result, so it can be a required check.
+  darling-tree-guards:
+    name: Darling whole-tree guards
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    # Measured on a warm NuGet cache: ~40s of .NET setup, ~10s restore, ~95s to build
+    # Darling.Tests, ~35s for the suite. 20 minutes is ~6x that, past which something is hung and a
+    # shared-pool Windows runner is being held for nothing.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Feeds the self-validation arm below only. Skipped on release for the same reason the other
+      # jobs skip it there: a release has no diff to classify.
+      - name: Detect changed paths
+        id: filter
+        if: github.event_name != 'release'
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: |
+            workflow:
+              - '.github/workflows/build.yml'
+
+      # Names the arm that decided, out loud, either way. A job reporting success having quietly run
+      # nothing is indistinguishable from one that ran everything, and that indistinguishability is
+      # the whole reason this job exists.
+      #
+      # An EMPTY outcome is its own arm rather than part of the else. A job's declared outputs do not
+      # reach a downstream consumer when the producing job's conclusion is failure, so a build job
+      # that fails - at Lite.Tests, before ever reaching the Darling step, or at the Darling step
+      # itself - can leave this reading empty no matter what that step actually did. Folding that
+      # into the else would print "the suite has already run on this commit" for a commit where it
+      # may not have run at all, which is the same dishonest-log failure this job exists to close.
+      # Skipping is still right there: a red build blocks the merge on its own, and re-running the
+      # suite on a commit nothing can merge buys no decision and would cost three minutes on every
+      # failing build. So the arm skips and says why, and which log holds the real answer.
+      - name: Decide whether the whole-tree guards run here
+        id: gate
+        shell: bash
+        env:
+          DARLING_TESTS: ${{ needs.build.outputs.darling-tests }}
+          WORKFLOW: ${{ steps.filter.outputs.workflow }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Whole-tree guards skipped::Release event - the build job compiles and runs every suite unconditionally."
+          elif [ "${DARLING_TESTS:-}" = "skipped" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Whole-tree guards running::The build job's path filters left Darling.Tests unrun, so the guards that read the whole repository run here."
+          elif [ "${WORKFLOW:-}" = "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Whole-tree guards running::build.yml changed, so this job's own gate is exercised by the gate."
+          elif [ -z "${DARLING_TESTS:-}" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Whole-tree guards not decided here::The build job published no outcome for its 'Run Darling tests' step, which is what a failed build job leaves behind - so whether the suite ran on this commit is not knowable from here. Read it off the build job's own log; that job is not green, so nothing merges on this result."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Whole-tree guards skipped::The build job's 'Run Darling tests' step reported '${DARLING_TESTS}', so the suite has already run on this commit."
+          fi
+
+      - name: Setup .NET 10.0
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore Darling.Tests
+        if: steps.gate.outputs.run == 'true'
+        run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+
+      - name: Build Darling.Tests
+        if: steps.gate.outputs.run == 'true'
+        run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      # The FULL suite, not a class filter naming the whole-tree guards. Such a filter would be one
+      # more enumeration: a guard added tomorrow would not be in it, and this job would report green
+      # having skipped exactly the test it was added for. DARLING_TEST_PG and DARLING_TEST_SQL stay
+      # unset, so the gated-live classes skip here just as they do in the build job.
+      - name: Run the whole-tree guards
+        if: steps.gate.outputs.run == 'true'
+        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build

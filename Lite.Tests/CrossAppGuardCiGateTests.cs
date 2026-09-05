@@ -93,6 +93,53 @@ public class CrossAppGuardCiGateTests
             string.Join("\n  ", failures));
     }
 
+    /// <summary>
+    /// The suite that reads the whole tree has to run on the whole tree.
+    ///
+    /// <para><see cref="EveryCrossAppSourceRead_IsReachableByTheFilterThatGatesItsSuite"/> above covers reads
+    /// of a NAMED path, which is what a cross-app guard does — there is a path, so a filter can name it. Some
+    /// guards in <c>Darling.Tests</c> take the repository ITSELF as input instead: <c>FleetIdentifierScrubTests</c>
+    /// enumerates every tracked file carrying one of nine extensions, and <c>MigrationUpgradeLadderLiveTests</c>
+    /// derives the fixture it requires from <c>CHANGELOG.md</c>. Those have no path to add, and
+    /// <c>darling</c> / <c>core</c> / <c>root</c> describe Darling product code rather than the tree.</para>
+    ///
+    /// <para>So <c>build.yml</c> answers it from the other side: the <c>build</c> job publishes whether it ran
+    /// the suite, and a second job runs the suite when that reads <c>skipped</c>. Three pieces of wiring carry
+    /// that, and losing any one of them leaves a job reporting success having run nothing — the step must
+    /// carry the id, the job must publish its outcome, and the consuming job must actually invoke the suite.
+    /// Pinned here rather than in <c>Darling.Tests</c> because the failure being pinned is a suite that does
+    /// not run: a pin inside it would be gated by the thing it is checking.</para>
+    /// </summary>
+    [Fact]
+    public void TheDarlingSuite_RunsWhereTheAreaFiltersDoNotReach()
+    {
+        var yaml = ReadBuildYaml(RepoRoot());
+
+        var step = yaml.IndexOf("- name: Run Darling tests", StringComparison.Ordinal);
+        Assert.True(step > 0, "the step that runs Darling.Tests was renamed — re-point this assertion before editing it");
+        Assert.Contains(
+            "id: darling-tests",
+            yaml[step..Math.Min(step + 200, yaml.Length)],
+            StringComparison.Ordinal);
+
+        Assert.Contains("darling-tests: ${{ steps.darling-tests.outcome }}", yaml, StringComparison.Ordinal);
+
+        var consumer = yaml.IndexOf("needs.build.outputs.darling-tests", StringComparison.Ordinal);
+        Assert.True(
+            consumer > 0,
+            "nothing reads the build job's Darling.Tests outcome, so the suite runs only where the area "
+          + "filters reach and a markdown-only or .github-only change runs none of it");
+
+        /* From the consumer onward, so this cannot be satisfied by the darling-pg job's invocation earlier
+           in the file — the job that reads the outcome is the one that has to run the suite. */
+        var consumingJob = yaml[consumer..];
+        Assert.Contains("= \"skipped\"", consumingJob, StringComparison.Ordinal);
+        Assert.Contains(
+            "dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj",
+            consumingJob,
+            StringComparison.Ordinal);
+    }
+
     private static void Check(
         string repo,
         string yaml,
