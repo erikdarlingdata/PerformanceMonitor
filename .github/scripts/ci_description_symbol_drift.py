@@ -121,7 +121,7 @@ BACKTICK = re.compile(r'``([^`]+)``|`([^`\n]+)`')
 NON_SOURCE_EXT = ('png', 'jpg', 'jpeg', 'gif', 'ico', 'dll', 'exe', 'pdb', 'snk', 'parquet',
                   'zip', 'duckdb', 'nupkg', 'msi', 'bak', 'log', 'dmp', 'sqlplan')
 SOURCE_EXT = ('cs', 'csproj', 'sql', 'xaml', 'json', 'props', 'targets', 'sln', 'ps1', 'sh',
-              'yml', 'yaml', 'md', 'cff', 'config', 'py')
+              'yml', 'yaml', 'md', 'cff', 'config', 'py', 'js', 'css', 'html')
 # A case hump is what separates a symbol from a prose word. The second alternative is for
 # acronym-prefixed names -- IOException, IPAddress, DbCommand -- which have no lowercase-to-
 # uppercase transition anywhere and were read as prose without it.
@@ -224,8 +224,11 @@ DEPENDENCY_MANIFEST = re.compile(
 # adding it moves no verdict on 110 merged PRs (none is json-only), and turns the one lock-file
 # change in that corpus from abstain into a warning naming a type in the upgraded package.
 # `sln`, `config` and `cff` are excluded for the same reason with even less vocabulary.
+# The web assets earn their place by measurement: the Darling service ships `wwwroot/js`, 8 of
+# 110 corpus PRs touch one, and admitting them improves every axis -- abstains 6 to 4, wholesale
+# power 60% to 62%, empty-diff 99% to 100%, flag rate unmoved at zero.
 CODE_EXT = ('.cs', '.sql', '.xaml', '.ps1', '.sh', '.py', '.csproj', '.props', '.targets',
-            '.yml', '.yaml')
+            '.yml', '.yaml', '.js', '.css', '.html')
 
 
 def diff_symbols(files):
@@ -383,6 +386,30 @@ def self_test():
     # Acronym-prefixed type names have no lowercase-to-uppercase transition at all.
     for span in ('IOException', 'IPAddress', 'DbCommand'):
         check(f'accepted as a symbol: {span}', classify(span) is not None)
+    # A KNOWN GAP, asserted so it stays visible rather than latent: a snake_case T-SQL
+    # identifier is not read as a symbol, because it carries no case hump. A description naming
+    # only `dbo.collect_memory_pressure` therefore contributes nothing and the verdict abstains,
+    # which is CONTRIBUTING.md's own commit-message spelling for a procedure.
+    #
+    # Not fixed, on the measurement: accepting underscore-separated lowercase words costs 4
+    # points of wholesale power (60% to 56%) and buys no abstains back, because in a C#-shaped
+    # body snake_case is what column names, wait types and config keys look like -- the
+    # named-for-context class that drives false positives. The corpus cannot settle the T-SQL
+    # side either way: ZERO of its 110 PRs touch `install/` or a `.sql` file, so the gain is
+    # unmeasurable here while the loss is measured. Re-run the ladder once the corpus carries
+    # install/ PRs and this may well flip.
+    for span in ('collect_memory_pressure', 'dbo.collect_memory_pressure',
+                 'collect.memory_pressure_events'):
+        check(f'known gap, snake_case SQL identifier is not a symbol: {span}',
+              classify(span) is None)
+    # The web assets ARE read, both as described names and on the diff side.
+    check('a web asset is read as a file symbol',
+          classify('alerts.js') == ('file', 'alerts.js'))
+    check('a js-only diff supports a verdict rather than abstaining',
+          assess('`renderAlertRow` moves.',
+                 [{'filename': 'Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/alerts.js',
+                   'patch': '@@ -1 +1 @@\n-function renderAlertRow() {}\n'
+                            '+function renderAlertRow(row) {}'}])[0] == 'clear')
     check('a same-suffix filename is not counted as found',
           assess('`Config.cs` gains a field.',
                  [{'filename': 'Lite/AppConfig.csproj',
