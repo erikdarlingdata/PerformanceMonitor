@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgDeadlockTools
 {
-    [McpServerTool(Name = "get_pg_deadlocks"), Description("Gets PostgreSQL deadlocks that were reported in the window, newest first, with the victim process, how many sessions were in the cycle, the lock modes and resources involved, and the victim's full statement text. PostgreSQL writes a complete deadlock report to its server log unconditionally - there is no setting that suppresses it - so this needs nothing configured on the target, unlike plan capture. Each row is one DISTINCT deadlock, and a deadlock that genuinely recurred appears as a separate row because the participating process IDs differ. times_seen counts how often the collector saw that SAME report, and what a value means depends on the transport. Where the collector reads the log file itself it re-reads an overlapping tail every cycle on purpose, so one report is seen several times and times_seen climbs while it stays in the window. On RDS and Aurora the log API is consume-once, so a report is seen once and times_seen is 1 and stays 1: there, 1 means 'this is all there will ever be', NOT 'seen once so far, expect more'. Do not read a low times_seen as a partial count without knowing which transport the server uses. Use get_pg_deadlock_detail with a deadlock_hash for the full wait graph and every participant's SQL.")]
+    [McpServerTool(Name = "get_pg_deadlocks"), Description("Gets PostgreSQL deadlocks that were reported in the window, newest first, with the victim process, how many sessions were in the cycle, the lock modes and resources involved, and the victim's full statement text. PostgreSQL writes a complete deadlock report to its server log unconditionally - there is no setting that suppresses it - so this needs nothing configured on the target, unlike plan capture. Each row is one DISTINCT deadlock, and a deadlock that genuinely recurred appears as a separate row because the participating process IDs differ. times_seen counts how often the collector saw that SAME report, and what a value means depends on the transport. Where the collector reads the log file itself it re-reads an overlapping tail every cycle on purpose, so one report is seen several times and times_seen climbs while it stays in the window. On RDS and Aurora the log API is consume-once, so a report is normally seen once and times_seen normally stays 1: there a low value is the ordinary state and NOT a partial count, so do not read 1 as 'seen once so far, expect more'. It is not guaranteed to be 1 there either - the collector holds its resume position in memory, so a restart re-reads a bounded tail, and a window whose write did not land is offered again - so treat times_seen as a sighting count whose meaning depends on the transport, and never as a count of deadlocks on either. Use get_pg_deadlock_detail with a deadlock_hash for the full wait graph and every participant's SQL.")]
     public static async Task<string> GetPgDeadlocks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -70,8 +70,10 @@ public sealed class DarlingMcpPgDeadlockTools
                      + "process IDs. What a given value MEANS depends on the transport: reading the log file "
                      + "directly re-reads an overlapping tail, so times_seen climbs while the report stays "
                      + "in the window and is a property of that read window. On RDS and Aurora the log API "
-                     + "is consume-once, so times_seen is 1 and stays 1 - there it is not a partial count "
-                     + "and no further sightings are coming.",
+                     + "is consume-once, so times_seen is normally 1 and a low value there is the ordinary "
+                     + "state rather than a partial count. It is not guaranteed to be 1 there: the resume "
+                     + "position lives in the collector process, so a restart re-reads a bounded tail, and "
+                     + "a window whose write did not land is offered again.",
                 deadlocks = rows.Select(r => new
                 {
                     occurred_at = r.OccurredAtUtc,
