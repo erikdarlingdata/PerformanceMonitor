@@ -191,6 +191,68 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains("failed to DELIVER", descriptions[0], StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The fleet-scoped inventory is what the counter actually records, in both directions.
+    ///
+    /// <para>The hand-maintained version of this list was wrong twice over: it named store DISK PRESSURE,
+    /// whose two feed reads are both exempt so it can never contribute a failure, and it omitted the
+    /// collector-cost regression self-alert, which does. Both errors point the same way for an operator —
+    /// a nonzero instance total, every server at zero, and a documented list that does not name the cause.</para>
+    ///
+    /// <para>So the set is derived from SOURCE (every <c>RecordReadFailure(null, ...)</c> call, matched
+    /// across line breaks because those calls are wrapped) and each one must be represented in the single
+    /// constant every surface now concatenates. A sixth fleet-scoped site fails here until the constant
+    /// names it.</para>
+    /// </summary>
+    [Fact]
+    public void TheFleetScopedInventory_MatchesWhatTheCounterActuallyRecords()
+    {
+        var root = RepoRoot();
+        var nullKeyReads = new List<string>();
+
+        foreach (var relative in new[]
+        {
+            Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"),
+        })
+        {
+            var src = File.ReadAllText(Path.Combine(root, relative));
+
+            /* Singleline, because both of these calls are wrapped across lines — a line-bound pattern found
+               one of the two and would have "proved" a single fleet-scoped site. */
+            foreach (Match m in Regex.Matches(src, @"RecordReadFailure\(\s*null\s*,\s*""([^""]+)""", RegexOptions.Singleline))
+            {
+                nullKeyReads.Add(m.Groups[1].Value);
+            }
+        }
+
+        Assert.Equal(2, nullKeyReads.Count);
+
+        var inventory = AlertReadFailureCounter.FleetScopedReads;
+
+        /* Each recorded site is represented. Keyed on the distinguishing word rather than the whole read
+           name, because the constant is prose for an operator and the read name is a label for a log. */
+        Assert.Contains(nullKeyReads, r => r.Contains("collector-cost", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("background-job health", StringComparison.Ordinal));
+        Assert.Contains("collector-cost regression", inventory, StringComparison.Ordinal);
+        Assert.Contains("background-job health", inventory, StringComparison.Ordinal);
+
+        /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
+           pg_database_size read that is context for the alert text — so naming it here would send an
+           operator after a read that cannot fail into this number. */
+        Assert.DoesNotContain("disk pressure", inventory, StringComparison.OrdinalIgnoreCase);
+
+        /* The constant is what every surface concatenates, so this is also the cross-surface tie. */
+        foreach (var file in CollectionHealthToolFiles())
+        {
+            Assert.Contains(
+                "AlertReadFailureCounter.FleetScopedReads",
+                File.ReadAllText(file),
+                StringComparison.Ordinal);
+        }
+    }
+
     /* ---------------- helpers ---------------- */
 
     /// <summary>The field names inside a tool's <c>alert_read_health = new { … }</c> initializer.</summary>
@@ -238,16 +300,47 @@ public sealed class AlertReadFailureSurfaceTests
         return names;
     }
 
+    /// <summary>
+    /// The tool's description as the CLIENT sees it, reassembled from however the literal is spelled.
+    ///
+    /// <para>It is no longer one literal: both descriptions concatenate
+    /// <see cref="AlertReadFailureCounter.FleetScopedReads"/> so the fleet-scoped set cannot drift
+    /// between them. A pattern that captured a single quoted run would simply stop matching, which is at
+    /// least loud — but it would also stop comparing the halves either side of the constant, so the
+    /// segments are concatenated and the constant substituted in its place.</para>
+    /// </summary>
     private static string ToolDescription(string source)
     {
-        var m = Regex.Match(
+        var call = Regex.Match(
             source,
-            @"\[McpServerTool\(Name = ""get_collection_health""\), Description\(""(.*?)""\)\]",
+            @"\[McpServerTool\(Name = ""get_collection_health""\), Description\((.*?)\)\]",
             RegexOptions.Singleline);
 
-        Assert.True(m.Success, "a get_collection_health tool has no Description attribute in the expected shape");
+        Assert.True(call.Success, "a get_collection_health tool has no Description attribute in the expected shape");
 
-        return m.Groups[1].Value;
+        var assembled = new System.Text.StringBuilder();
+        foreach (var piece in Regex.Split(call.Groups[1].Value, @"\s*\+\s*"))
+        {
+            var trimmed = piece.Trim();
+
+            if (trimmed.StartsWith("\"", StringComparison.Ordinal) && trimmed.EndsWith("\"", StringComparison.Ordinal))
+            {
+                assembled.Append(trimmed[1..^1]);
+            }
+            else if (trimmed.EndsWith("FleetScopedReads", StringComparison.Ordinal))
+            {
+                assembled.Append(AlertReadFailureCounter.FleetScopedReads);
+            }
+            else
+            {
+                Assert.Fail($"unrecognised piece in the Description concatenation: {trimmed}");
+            }
+        }
+
+        var text = assembled.ToString();
+        Assert.True(text.Length > 5000, $"the reassembled description is only {text.Length} chars — the split lost content");
+
+        return text;
     }
 
     private static string ReadSource(string relative)

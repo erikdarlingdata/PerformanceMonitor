@@ -1566,8 +1566,17 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter, and the only counted-looking site that is
+               deliberately not counted. Nothing reachable in this try is a STORE read. The fetcher reads
+               the MONITORED SERVER's msdb over its own connection and timeout - the same population
+               DarlingWorker.FetchFailedJobsAsync is exempted for, and counting it here while exempting it
+               there would put a target-side outage into a number an operator reads as store contention.
+               The one store operation in the block is SaveFailedJobWatermarkAsync, a WRITE, and both
+               implementations swallow it (PgAlertStateStore and DuckDbAlertHistoryStore each log "Could
+               not persist failed-job watermark" without rethrowing), so it cannot reach this catch at
+               all. The write sitting inside this try where the blocking, deadlock and database-state
+               checks keep theirs outside is a real asymmetry and an inert one. */
             _logger?.LogError("Failed to check failed jobs for {Server}: {Message}", serverName, ex.Message); /* :715 */
-            _readFailures?.RecordReadFailure(key, "failed jobs");
         }
 
         return conditionPresent;

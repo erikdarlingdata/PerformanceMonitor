@@ -3173,9 +3173,45 @@ public sealed class DarlingWorker : BackgroundService
             return;
         }
 
+        /* #3013: the latest-CPU read is isolated from the sweep it feeds, for TWO reasons that point the
+           same way.
+
+           Correctness of the instrument: this read runs on AlertPassCommandTimeoutSeconds and is the
+           first store read of the pass, so under the contention #3013 measures it is the first to fail.
+           Inside the sweep's try it took engine.EvaluateServerAsync down with it, which meant
+           AlertEngine.EvaluateCoreAsync never ran and never recorded its pass - while the catch below
+           still recorded a read failure. Numerator up, denominator unchanged, worst exactly when the
+           counter matters most. That is a third route to the same defect the PostgreSQL predictor group
+           had: not omission and not placement, but REACHABILITY - a pass site that is real and
+           correctly placed and simply never entered.
+
+           Correctness of the ALERTING, which is the bigger half: a single failed CPU read aborted the
+           whole shared sweep for this server this tick, so blocking, deadlocks, poison waits,
+           long-running queries, TempDB, low disk, PVS, file growth, jobs, database state and forced
+           plans were none of them evaluated. The snapshot already documents a null CPU pair as a normal
+           input ("null when no SQL sample") and CheckCpuAsync gates on alertCpuValue.HasValue, so
+           degrading to (null, null) costs this tick its CPU alert and nothing else. */
+        double? sqlCpu = null;
+        double? totalCpu = null;
+
         try
         {
-            var (sqlCpu, totalCpu) = await ReadLatestCpuAsync(runtime.ServerId, cancellationToken);
+            (sqlCpu, totalCpu) = await ReadLatestCpuAsync(runtime.ServerId, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("[{Server}] Latest-CPU read for the alert pass failed: {Message}",
+                server.Config.DisplayName, ex.Message);
+            _readFailures.RecordReadFailure(
+                runtime.ServerId.ToString(CultureInfo.InvariantCulture), "latest-CPU read");
+        }
+
+        try
+        {
             var snapshot = new AlertServerSnapshot(
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                 runtime.Config.DisplayName,
@@ -3206,7 +3242,7 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogError("[{Server}] Alert sweep failed: {Message}", server.Config.DisplayName, ex.Message);
             _readFailures.RecordReadFailure(
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
-                "alert pass (latest-CPU read and the shared engine sweep)");
+                "shared engine sweep");
         }
     }
 

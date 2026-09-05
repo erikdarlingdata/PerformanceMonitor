@@ -55,8 +55,8 @@ namespace PerformanceMonitor.Alerting;
 /// <c>serverId.ToString(CultureInfo.InvariantCulture)</c>; Lite: <c>serverId.ToString()</c>). Both are
 /// same-process reads of the same rendering, so they agree by construction — and
 /// <c>AlertReadFailureSurfaceTests</c> pins the agreement from source rather than trusting it. Failures
-/// belonging to no server (the fleet-scoped store self-alerts — disk pressure, compression-job health,
-/// store-job cadence, retention holds) are recorded with a null key: they land in the instance total and
+/// belonging to no server (the fleet-scoped conditions <see cref="FleetScopedReads"/> names) are
+/// recorded with a null key: they land in the instance total and
 /// in no server's count, which is why the surface reports BOTH numbers. A per-server-only figure would
 /// have given those conditions no home at all, reproducing #3013's own defect one level down.</para>
 ///
@@ -292,6 +292,25 @@ public sealed class AlertReadFailureCounter
     }
 
     /// <summary>
+    /// The conditions whose swallowed reads belong to NO server, named once so the note, the class
+    /// remarks and both SKUs' tool descriptions cannot disagree about the set.
+    ///
+    /// <para>Referenced rather than repeated: both <c>get_collection_health</c> descriptions
+    /// concatenate this constant into their <c>Description</c> attribute, which is legal because a
+    /// const-string concatenation is a compile-time constant — so the set cannot grow in one place and
+    /// go stale in three. The first draft hand-maintained it and was wrong in both directions at once:
+    /// it listed store DISK PRESSURE, whose two feed reads are both exempt (a local filesystem read,
+    /// and a <c>pg_database_size</c> read that is context for the alert text rather than the evidence
+    /// it is judged on), so that condition can never contribute a failure here; and it omitted the
+    /// collector-cost regression self-alert, which does. An operator reading the phantom list would
+    /// have hunted a disk-pressure read that cannot fail into this number, and would not have thought
+    /// to check the one that can.</para>
+    /// </summary>
+    public const string FleetScopedReads =
+        "the collector-cost regression self-alert, and the store background-job health reads behind "
+        + "compression-job health, store-job cadence and retention holds";
+
+    /// <summary>
     /// The window these figures cover, and the window they do NOT.
     ///
     /// <para>Said out loud because this block is the one part of <c>get_collection_health</c> that is not
@@ -313,8 +332,8 @@ public sealed class AlertReadFailureCounter
         + "surface: they are not collector runs and write no collection_log row. It does NOT count fired "
         + "alerts that failed to DELIVER, and it makes no claim about them — that is the alert-history read's "
         + "question, not this one. instance_read_failures spans every server on this service plus the "
-        + "fleet-scoped store self-alerts (disk pressure, compression-job health, store-job cadence, "
-        + "retention holds), which belong to no server and so appear in no per-server count. "
+        + "fleet-scoped conditions that belong to no server and so appear in no per-server count: "
+        + FleetScopedReads + ". "
         + "server_alert_passes is a denominator for judging whether the failure count is large, not a rate: a "
         + "pass issues many reads, and the number of passes per sweep differs by host and by target engine: a "
         + "Darling sweep of a SQL Server target runs two (the shared engine's conditions and the service's "

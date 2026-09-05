@@ -148,7 +148,8 @@ public sealed class AlertReadFailureSurfaceTests
             "restart takes it to zero",              /* why the zero can be small */
             "deliberately not persisted",            /* and why it is in memory */
             "failed to DELIVER",                     /* the claim it refuses to make */
-            "fleet-scoped store self-alerts",        /* what the instance total covers */
+            "fleet-scoped conditions",              /* what the instance total covers */
+            "collector-cost regression",            /* named because it is counted and was omitted */
             "not a rate",                            /* what the denominator is not */
         })
         {
@@ -169,7 +170,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 3),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 4),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 5, 7),
     };
 
@@ -201,7 +202,7 @@ public sealed class AlertReadFailureSurfaceTests
         "FetchFailedJobsAsync",
     };
 
-    private const int WorkerCountedSites = 8;
+    private const int WorkerCountedSites = 9;
     private const int WorkerExemptSites = 6;
 
     /// <summary>
@@ -227,6 +228,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store self-metrics sweep did not finish"] = "a metrics write sweep; no alert is judged on its result",
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
         ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
+        ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
     };
 
     /// <summary>
@@ -297,7 +299,7 @@ public sealed class AlertReadFailureSurfaceTests
         /* The whole-tree totals, so a site MOVED between the scoped regions still has to be re-counted by
            a person rather than netting out silently. */
         Assert.Equal(27, totalCounted);
-        Assert.Equal(16, totalExempt);
+        Assert.Equal(17, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
@@ -619,6 +621,74 @@ public sealed class AlertReadFailureSurfaceTests
             offenders.Count == 0,
             "cancellation catch block(s) log an error without rethrowing, so a swallowed read is hiding "
             + $"behind the one caught type the census does not examine: {string.Join(", ", offenders)}");
+    }
+
+    /// <summary>
+    /// A counted read must not share a <c>try</c> with the dispatch of a pass, or the pass is unreachable
+    /// exactly when that read fails — numerator up, denominator unchanged.
+    ///
+    /// <para>The third route to the denominator defect, and the one neither of the other two arms can see.
+    /// <see cref="EveryAlertEvaluationPass_RecordsItselfInTheDenominator"/> covers OMISSION (no
+    /// <c>RecordPass</c>) and PLACEMENT (the call sitting after the reads it should precede). This covers
+    /// REACHABILITY: a <c>RecordPass</c> that is present, correctly placed inside its own method, and simply
+    /// never entered because an earlier statement in the CALLER's try threw first.</para>
+    ///
+    /// <para>It was real. <c>DarlingWorker.EvaluateAlertsAsync</c> read the latest CPU sample — a store read
+    /// on the alert-pass deadline, so the first read to fail under the contention #3013 measures — inside the
+    /// same try as <c>engine.EvaluateServerAsync</c>. A failed CPU read skipped the engine sweep entirely, so
+    /// <c>EvaluateCoreAsync</c> never recorded its pass while the caller's catch still recorded a failure. It
+    /// also cost the server every other condition that tick, which was the larger half.</para>
+    /// </summary>
+    [Fact]
+    public void NoCountedRead_SharesATryWithThePassItWouldSkip()
+    {
+        var raw = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var stripped = CSharpSourceWalker.StripCommentsAndStrings(raw);
+        var (start, end) = MemberBody(stripped, "EvaluateAlertsAsync");
+        var body = stripped[start..end];
+
+        /* The pass dispatches this method performs, and the counted reads it performs itself. Both must be
+           present or the pin is describing a method that no longer exists. */
+        var dispatch = body.IndexOf("engine.EvaluateServerAsync", StringComparison.Ordinal);
+        var cpuRead = body.IndexOf("ReadLatestCpuAsync", StringComparison.Ordinal);
+
+        Assert.True(dispatch > 0, "EvaluateAlertsAsync no longer dispatches the shared engine sweep");
+        Assert.True(cpuRead > 0, "EvaluateAlertsAsync no longer performs the latest-CPU read");
+
+        /* Which try block, if any, encloses each. Computed by brace-balancing every try in the body rather
+           than by comparing offsets to a single try, because this method now has two and the whole point is
+           that these two statements are in different ones. */
+        var enclosing = new List<(int Index, int Start, int End)>();
+        foreach (Match m in Regex.Matches(body, @"\btry\s*\{"))
+        {
+            var open = body.IndexOf('{', m.Index);
+            var block = CSharpSourceWalker.BraceBalanced(body, open);
+            enclosing.Add((enclosing.Count, open, open + block.Length));
+        }
+
+        Assert.True(enclosing.Count >= 2, $"EvaluateAlertsAsync has {enclosing.Count} try block(s); the CPU read is no longer isolated from the sweep");
+
+        int TryOf(int offset)
+        {
+            foreach (var (index, s2, e2) in enclosing)
+            {
+                if (offset > s2 && offset < e2)
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
+
+        var cpuTry = TryOf(cpuRead);
+        var dispatchTry = TryOf(dispatch);
+
+        Assert.NotEqual(-1, dispatchTry);
+        Assert.NotEqual(
+            cpuTry,
+            dispatchTry);
     }
 
     /* ---------------- the surfaces ---------------- */
