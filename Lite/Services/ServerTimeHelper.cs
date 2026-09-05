@@ -32,10 +32,13 @@ public static class ServerTimeHelper
     /// Converts a local DateTime (from date picker) to server time.
     /// Use when the user picks dates in their local timezone but the database stores server time.
     /// </summary>
-    private static DateTime LocalToServerTime(DateTime localTime)
+    private static DateTime LocalToServerTime(DateTime localTime) =>
+        LocalToServerTime(localTime, _utcOffsetMinutes);
+
+    private static DateTime LocalToServerTime(DateTime localTime, int utcOffsetMinutes)
     {
         var utcTime = localTime.ToUniversalTime();
-        return utcTime.AddMinutes(_utcOffsetMinutes);
+        return utcTime.AddMinutes(utcOffsetMinutes);
     }
 
     /// <summary>
@@ -67,10 +70,24 @@ public static class ServerTimeHelper
     /// <summary>
     /// Converts a display-mode DateTime back to server time. Reverse of ConvertForDisplay.
     /// </summary>
-    public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode) => mode switch
+    public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode) =>
+        DisplayTimeToServerTime(displayTime, mode, _utcOffsetMinutes);
+
+    /// <summary>
+    /// Converts a display-mode DateTime back to the local time of a NAMED server, rather than of
+    /// whichever server the desktop currently has selected.
+    ///
+    /// <para>For a caller that then hands the result to a read windowing on that same server: the read
+    /// converts server time back out to UTC with the server's offset, so the offset given here has to be
+    /// the one the read will use. Under <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> this conversion
+    /// and the read's cancel each other and the window survives unchanged; under <c>ServerTime</c>, the
+    /// default, this conversion is the identity and only the read's applies. Two different servers'
+    /// offsets across the pair therefore skews the window in every mode, not just the default.</para>
+    /// </summary>
+    public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode, int utcOffsetMinutes) => mode switch
     {
-        TimeDisplayMode.LocalTime => LocalToServerTime(displayTime),
-        TimeDisplayMode.UTC => displayTime.AddMinutes(_utcOffsetMinutes),
+        TimeDisplayMode.LocalTime => LocalToServerTime(displayTime, utcOffsetMinutes),
+        TimeDisplayMode.UTC => displayTime.AddMinutes(utcOffsetMinutes),
         _ => displayTime
     };
 
