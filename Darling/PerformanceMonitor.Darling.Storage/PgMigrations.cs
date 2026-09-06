@@ -167,6 +167,7 @@ public static class PgMigrations
         new Migration(108, "collection-log-phase-split", V108Sql),
         new Migration(109, "collection-log-drain-forensics", V109Sql),
         new Migration(110, "collection-log-fetch-phase-sums", V110Sql),
+        new Migration(111, "store-log-self-monitoring", V111Sql),
     };
 
     /// <summary>
@@ -2487,6 +2488,98 @@ ALTER TABLE collect.collection_log
 CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
 
     /// <summary>
+    /// V111 — the store's own server log as a self-monitoring source (#3021): a per-class census
+    /// (<c>collect.store_log_events</c>), the capture denominator that qualifies it
+    /// (<c>collect.store_log_captures</c>), and the per-file resume marker
+    /// (<c>config.store_log_read_marker</c>).
+    ///
+    /// <para>NOT a collector, the V53 / V105 shape: this is INTERNAL self-telemetry written by the worker's
+    /// hourly self-metrics tick, so all three tables are deliberately absent from
+    /// <c>CollectorCatalog.All</c> — which is what keeps the catalog-driven hypertable conversion and the
+    /// catalog retention purge off the tables that observe them — and hand-written DDL is therefore correct
+    /// rather than a generator-parity miss. Plain tables, bounded by
+    /// <see cref="StoreLogSweep.RetentionDays"/>'s own DELETEs.</para>
+    ///
+    /// <para><b>Why a census and not one row per line.</b> A production day of the store's log holds ~1,100
+    /// <c>ERROR:  canceling statement due to user request</c> entries — the store's rendering of a
+    /// client-side <c>CommandTimeout</c> cancel, which is the ordinary consequence of having timeouts and
+    /// not a fault. <c>occurrences</c> per class per capture is the shape that answers the question those
+    /// lines are actually asked ("did the rate move") without producing 1,100 rows a day nobody reads.
+    /// <c>message_text</c> and <c>sample_line</c> are NULL for the classes that are counted only, and that
+    /// NULL is the record that the class is a counted floor rather than a missing measurement — see
+    /// <see cref="StoreLogClassifier"/> for the class-by-class argument.</para>
+    ///
+    /// <para><b>Why <c>store_log_captures</c> is its own table.</b> Every other sampled read in the product
+    /// borrows its denominator from <c>collection_log</c> — <c>get_pg_blocking</c> reports
+    /// <c>captures_total</c> beside <c>captures_with_blocking</c> precisely because an absent capture and a
+    /// capture that found nothing are the same absence of rows. This source writes no
+    /// <c>collection_log</c> row (it is not in the catalog), so it has no denominator to borrow and must
+    /// carry its own. <c>offset_reset</c> and <c>groups_dropped</c> ride here for the same reason: a marker
+    /// discarded because the weekday ring truncated, and a distinct-message budget that folded rows, are
+    /// both facts about the capture's COVERAGE, and a coverage fact that is not recorded is one the reader
+    /// silently assumes away.</para>
+    ///
+    /// <para><b>Why the marker is in <c>config</c> and keyed by file.</b> It is state the operator's store
+    /// owns rather than collected data, so it is not subject to the census' retention DELETE — a marker
+    /// aged out would re-read a whole file. Keyed by file because rotation is by WEEKDAY NAME
+    /// (<c>postgresql-%a.log</c>), so a rotation must start a fresh marker instead of resuming a new file at
+    /// an old file's offset — the same key shape the RDS log route uses, for the same reason.
+    /// <c>last_size</c> is beside <c>byte_offset</c> rather than derived from it because
+    /// <c>log_truncate_on_rotation</c> means the file SHRINKS, and comparing the current size against the
+    /// size at the last read is what detects that (see <see cref="StoreLogSlab.ResolveResume"/>).</para>
+    ///
+    /// <para><b>No Lite twin, and the reasoning is structural rather than a deferral.</b> The parity rule
+    /// exists so state added to one store does not read as permanently empty on the other. Lite has no
+    /// embedded PostgreSQL store — its store is DuckDB, which has no server log to read — so there is no
+    /// file for a twin to point at. This is <c>get_store_metrics</c>' situation, not <c>get_deadlocks</c>'.</para>
+    ///
+    /// <para>Timestamps are naive UTC per the store contract, and they are the SWEEP's clock rather than the
+    /// log's. That is deliberate: PostgreSQL renders <c>%m</c> in <c>log_timezone</c>, which
+    /// <c>DarlingManagedPostgres</c>' v9 block leaves to the host (it pins the session <c>timezone</c> only,
+    /// asserted by <c>DarlingManagedPostgresTests</c>), so the store's own log stamps are host-local. The
+    /// server's own rendering survives verbatim inside <c>sample_line</c>, uninterpreted.</para>
+    /// </summary>
+    private const string V111Sql = @"
+CREATE TABLE IF NOT EXISTS collect.store_log_events
+(
+    capture_time timestamp NOT NULL,
+    event_class text NOT NULL,
+    severity text NOT NULL,
+    occurrences integer NOT NULL,
+    message_text text,
+    sample_line text
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_log_events_time
+    ON collect.store_log_events(capture_time);
+
+CREATE INDEX IF NOT EXISTS idx_store_log_events_class
+    ON collect.store_log_events(event_class, capture_time);
+
+CREATE TABLE IF NOT EXISTS collect.store_log_captures
+(
+    capture_time timestamp NOT NULL,
+    log_file text NOT NULL,
+    bytes_read bigint NOT NULL,
+    bytes_pending bigint NOT NULL,
+    lines_read integer NOT NULL,
+    entries_read integer NOT NULL,
+    offset_reset boolean NOT NULL,
+    groups_dropped integer NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_log_captures_time
+    ON collect.store_log_captures(capture_time);
+
+CREATE TABLE IF NOT EXISTS config.store_log_read_marker
+(
+    log_file text NOT NULL PRIMARY KEY,
+    byte_offset bigint NOT NULL,
+    last_size bigint NOT NULL,
+    updated_at timestamp NOT NULL
+);";
+
+    /// <summary>
     /// V110 — the PER-DATABASE fetch split, summed across the fan-out and persisted on the run's row (#2860).
     /// V108's twin one path over: V108 decomposed a SERVER-scoped collector's <c>sql_duration_ms</c>, and this
     /// decomposes the deferred plan/text fetch that only the ENUMERATED path performs.
@@ -4080,8 +4173,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// stopping token directly instead of through a cancel-request round trip. Each attempt is a statement
     /// that cannot block, so nothing about this budget depends on a cancel being delivered at all.</para>
     ///
-    /// <para><b>Lower bound — the total the lock can legitimately be held for.</b> Of the 109 rungs in
-    /// <see cref="Scripts"/> (V1-V110, V45 permanently absent), SIX touch data an earlier rung created, and
+    /// <para><b>Lower bound — the total the lock can legitimately be held for.</b> Of the 110 rungs in
+    /// <see cref="Scripts"/> (V1-V111, V45 permanently absent), SIX touch data an earlier rung created, and
     /// FOUR of those are big enough to spend any of this budget: V22 (index built over every existing chunk
     /// of the populated <c>index_object_stats</c> hypertable), V23 (<c>create_hypertable</c> with
     /// <c>migrate_data =&gt; true</c>, rewriting <c>collection_log</c>'s rows into chunks), V39 (two partial
