@@ -274,6 +274,13 @@ public sealed class PgRegistryPanelPlacementTests
         foreach (var tab in chain.Registry)
         {
             Assert.StartsWith("Pg", chain.XamlTabAt[tab.InnerTabIndex], StringComparison.Ordinal);
+
+            /* And it is the tab the registry MEANT. The index-to-TabItem step is the one place a silent
+               off-by-one could put a whole entry's collectors against the wrong tab, and the header is the
+               registry's own second description of the same tab. Read off the parsed DOM here, where
+               ViewerPostgresTabsTests reads it off the line shape — two different readings agreeing is the
+               point. */
+            Assert.Equal(tab.Header, chain.XamlHeaderAt[tab.InnerTabIndex]);
         }
 
         Assert.Equal(chain.Registry.Count, chain.Registry.Select(t => t.XamlTabName).Distinct(StringComparer.Ordinal).Count());
@@ -325,6 +332,7 @@ public sealed class PgRegistryPanelPlacementTests
     private sealed record PlacementChain(
         IReadOnlyList<RegistryTab> Registry,
         IReadOnlyDictionary<int, string> XamlTabAt,
+        IReadOnlyDictionary<int, string> XamlHeaderAt,
         IReadOnlyDictionary<string, string> TabOf,
         IReadOnlyDictionary<string, IReadOnlySet<string>> NamedBy,
         IReadOnlyDictionary<string, IReadOnlySet<string>> PanelsOf,
@@ -337,6 +345,16 @@ public sealed class PgRegistryPanelPlacementTests
 
         public IReadOnlyList<string> Collectors { get; } =
             Registry.SelectMany(t => t.Collectors).Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>
+    /// A tab named the way the registry names it — <c>PgStorageTab (the 'storage' entry, "Storage")</c> — so
+    /// an offender line reads in the vocabulary of the file that has to be edited to resolve it.
+    /// </summary>
+    private static string Vocabulary(PlacementChain chain, string xamlTabName)
+    {
+        var tab = chain.Registry.FirstOrDefault(t => string.Equals(t.XamlTabName, xamlTabName, StringComparison.Ordinal));
+        return tab is null ? xamlTabName : $"{xamlTabName} (the '{tab.Id}' entry, \"{tab.Header}\")";
     }
 
     /// <summary>Every loader method that names <paramref name="collector"/>.</summary>
@@ -382,8 +400,8 @@ public sealed class PgRegistryPanelPlacementTests
 
                 if (!string.Equals(declaredIn, registryTab, StringComparison.Ordinal))
                 {
-                    offenders.Add($"{collector} is registered on {registryTab} but its panel {panel} is "
-                                  + $"declared inside {declaredIn} (resolved through "
+                    offenders.Add($"{collector} is registered on {Vocabulary(chain, registryTab)} but its "
+                                  + $"panel {panel} is declared inside {declaredIn} (resolved through "
                                   + $"{string.Join(", ", Methods(chain, collector))})");
                 }
             }
@@ -422,7 +440,8 @@ public sealed class PgRegistryPanelPlacementTests
                 continue;
             }
 
-            offenders.Add($"{collector} is registered on {registryTab} but its panels are filled by "
+            offenders.Add($"{collector} is registered on {Vocabulary(chain, registryTab)} but its panels are "
+                          + "filled by "
                           + (fillers.Count == 0
                               ? "no tab's load path at all"
                               : $"{string.Join(" and ", fillers)}")
@@ -441,10 +460,12 @@ public sealed class PgRegistryPanelPlacementTests
            Header="Blocking" - the SQL Server tab and the PostgreSQL sub-tab - so indexing on the header
            picks whichever comes first. */
         var innerTabs = doc.Descendants().Single(e => e.Attribute(x)?.Value == "InnerTabs");
-        var xamlTabAt = innerTabs.Elements()
+        var tops = innerTabs.Elements()
             .Where(e => e.Name.LocalName == "TabItem")
-            .Select((e, i) => (Index: i, Name: e.Attribute(x)?.Value ?? string.Empty))
-            .ToDictionary(p => p.Index, p => p.Name);
+            .Select((e, i) => (Index: i, Name: e.Attribute(x)?.Value ?? string.Empty, Header: e.Attribute("Header")?.Value ?? string.Empty))
+            .ToList();
+        var xamlTabAt = tops.ToDictionary(p => p.Index, p => p.Name);
+        var xamlHeaderAt = tops.ToDictionary(p => p.Index, p => p.Header);
 
         var tabOf = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var element in doc.Descendants())
@@ -527,7 +548,7 @@ public sealed class PgRegistryPanelPlacementTests
             loadPathOf[tab] = Transitive(arm.Groups["loader"].Value, bodies, new HashSet<string>(StringComparer.Ordinal));
         }
 
-        return new PlacementChain(registry, xamlTabAt, tabOf, namedBy, panelsOf, loadPathOf);
+        return new PlacementChain(registry, xamlTabAt, xamlHeaderAt, tabOf, namedBy, panelsOf, loadPathOf);
     }
 
     /// <summary>Every <c>LoadPg…Async</c> reachable from <paramref name="method"/>, itself included.</summary>
