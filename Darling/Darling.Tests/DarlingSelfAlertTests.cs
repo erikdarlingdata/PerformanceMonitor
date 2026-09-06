@@ -2611,11 +2611,14 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             $"a default of {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}% is earlier than it has to be "
             + $"for {TimescaleSupport.RefreshPhaseSlots} slots");
 
-        /* The seed must survive its own clamp. A step fine enough to drive the derived default below the
-           [5, 100] floor would have the clamp silently raise it back above one slot — the same defect in a
-           new place, so the clamp is tied to the grid here rather than left to be discovered. */
-        var clamped = Math.Clamp(TimescaleSupport.RefreshSlotPercentOfHourlyCadence, 5, 100);
-        Assert.Equal(TimescaleSupport.RefreshSlotPercentOfHourlyCadence, clamped);
+        /* The seed must survive its own clamp, asserted through the REAL clamp rather than a copy of its
+           bounds — a step fine enough to drive the derived default below the floor would have the clamp
+           silently raise it back above one slot, which is the same defect in a new place. */
+        var config = new DarlingConfig();
+        config.Alerts.StoreJobCadenceWarnPercent = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotPercentOfHourlyCadence,
+            new DarlingAlertSettings(config).StoreJobCadenceWarnPercent);
 
         /* V57's column default is the already-applied twin of the C# seed and cannot move without a rung;
            the store column wins on a fresh store, so a derived seed that drifts from it would ship a default
