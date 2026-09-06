@@ -221,6 +221,38 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV9 = "# Managed by PerformanceMonitor Darling (v9 session time zone) -- do not remove this block";
 
     /// <summary>
+    /// Marker for the v10 message-locale block (#3053): pin <c>lc_messages</c> so the server writes its own
+    /// messages — <b>and its severity labels</b> — untranslated. A TENTH independently versioned block, for
+    /// the same reason v9 is separate from v3: an existing cluster gains it by the marker being absent on its
+    /// next service-owned start, which is what carries the pin to the stores already in the field.
+    ///
+    /// <para><b>The severity label is the part that bites.</b> initdb takes <c>lc_messages</c> from the host
+    /// OS, and PostgreSQL translates the label as well as the body — a German host writes <c>FEHLER:</c>
+    /// where an English one writes <c>ERROR:</c>. <see cref="StoreLogClassifier"/> anchors on that field and
+    /// its residue class is gated on <see cref="StoreLogClassifier.IsAtLeastWarning"/>, so a token it does
+    /// not recognise cannot reach <c>unclassified</c>-retained and lands in <c>routine</c>, counted with its
+    /// text dropped. The design's property is that a rule the table forgot costs a heading and never a row;
+    /// under a translated label it costs the row. The store is product-managed, so making the English
+    /// assumption true belongs here rather than in each parser.</para>
+    ///
+    /// <para><c>C</c> rather than <c>en_US.UTF-8</c>: <c>C</c> is guaranteed present with no locale
+    /// installed on the host, and it is the locale under which PostgreSQL emits its untranslated message
+    /// catalogue. Nothing in this product renders PostgreSQL message text to an end user in their own
+    /// language — it goes to parsers and to English-throughout operator diagnostics — so the pin costs
+    /// nothing it does not buy back. It is <c>lc_messages</c> ALONE: <c>lc_monetary</c>, <c>lc_numeric</c>
+    /// and <c>lc_time</c> govern how the server renders values the product reads as typed parameters, not as
+    /// text, and would be a behaviour change with no defect behind it.</para>
+    ///
+    /// <para><c>lc_messages</c> is a SIGHUP-context setting and this append runs before pg_ctl start, so it
+    /// takes effect on the very start that writes it — the v9 story. The one exception is the adopted-listener
+    /// path in <see cref="EnsureRunningAsync"/>: when a postmaster is already running this service neither
+    /// stops nor signals it, so the pin waits for the next service-owned start. Nothing here reloads, and the
+    /// class's only <c>pg_ctl reload</c> is gated on pg_hba.conf changing, so it cannot be relied on to
+    /// carry this.</para>
+    /// </summary>
+    public const string ConfMarkerV10 = "# Managed by PerformanceMonitor Darling (v10 message locale) -- do not remove this block";
+
+    /// <summary>
     /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
     /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
     /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
@@ -796,6 +828,24 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
+    /* ===================== v10 message locale ===================== */
+
+    /// <summary>
+    /// The v10 block: pin the cluster's <c>lc_messages</c> to <c>C</c> so the server writes its messages, and
+    /// the severity label that <see cref="StoreLogClassifier"/> anchors on, untranslated. See
+    /// <see cref="ConfMarkerV10"/> for why, why <c>C</c> and not a named English locale, and what this
+    /// deliberately does not pin. Carries no fingerprint line, so the v8 staleness check's invariant about
+    /// what it reads is untouched.
+    /// </summary>
+    public static string BuildMessageLocaleConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV10).Append('\n');
+        builder.Append("lc_messages = 'C'\n");
+        return builder.ToString();
+    }
+
     /// <summary>
     /// The derived managed-mode connection string: <c>127.0.0.1</c> + port + darling/darling + the
     /// generated password, carrying the collect/config <see cref="SearchPath"/> so every pooled connection
@@ -1363,13 +1413,26 @@ public sealed class DarlingManagedPostgres
 
         /* Checked independently of v1-v8, and placed AFTER v8 on purpose: v8 keys on the last fingerprint
            line in the text it read at the top of this method, so a block appended before it must not carry
-           one. This block carries only `timezone`, but sitting last means the ordering cannot be broken by
-           editing it. Effective on this start (SIGHUP-context, appended before pg_ctl start). */
+           one. Every block from here down carries no sizing and no fingerprint, which is what keeps that
+           check reading what it thinks it reads. Effective on this start (SIGHUP-context, appended before
+           pg_ctl start). */
         if (!conf.Contains(ConfMarkerV9, StringComparison.Ordinal))
         {
             File.AppendAllText(confPath, BuildTimeZoneConfAppend());
             _logger.LogInformation(
                 "Appended v9 session time zone to postgresql.conf (timezone = 'UTC'): the store's timestamp columns hold naive UTC, so a host-derived session zone would shift any comparison against now() and render timestamptz output on a different clock than the collected data.");
+        }
+
+        /* Checked independently of v1-v9: an existing cluster heals by GAINING the message-locale block
+           (#3053). initdb takes lc_messages from the host OS and PostgreSQL translates the SEVERITY LABEL as
+           well as the body, so a non-English host writes a token StoreLogClassifier does not recognise —
+           which then cannot reach its unclassified-retained residue class and is counted as routine with its
+           text dropped. SIGHUP-context and appended before pg_ctl start, so effective on this very start. */
+        if (!conf.Contains(ConfMarkerV10, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildMessageLocaleConfAppend());
+            _logger.LogInformation(
+                "Appended v10 message locale to postgresql.conf (lc_messages = 'C'): PostgreSQL translates its severity labels under the host locale, and the store's own log parser matches them as English tokens.");
         }
     }
 
