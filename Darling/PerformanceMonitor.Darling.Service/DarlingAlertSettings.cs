@@ -75,9 +75,28 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int SelfDiskFreeWarnPercent => Math.Clamp(_config.Alerts.SelfDiskFreeWarnPercent, 0, 100);
     public int CollectionStaleMinutes => Math.Clamp(_config.Alerts.CollectionStaleMinutes, 5, 1440);
 
-    /// <summary>#2136: the Store Job Over Cadence warning percent. Clamped [5, 100] — below 5 would fire
-    /// on healthy jobs (the production worst runs ~7% of cadence), and at 100 the Warning tier merges
-    /// into the fixed Critical tier, so higher values would only disable the warning silently.</summary>
+    /// <summary>#2136: the Store Job Over Cadence warning percent. Clamped [5, 100].
+    ///
+    /// <para><b>The ceiling is structural.</b> At 100 the Warning tier merges into the fixed Critical tier,
+    /// so higher values would only disable the warning silently.</para>
+    ///
+    /// <para><b>The floor is 5 because the distribution is bimodal, NOT because the worst job runs ~7% of
+    /// cadence</b> — #2136 said the latter and it is measurably wrong (#3060). Measured over
+    /// <c>collect.store_metrics</c>' <c>object_kind = 'background_job'</c> series on both production
+    /// 42-server stores: the store carrying the Query Store workload has p50 0.003%, p90 0.056%, p99 6.1%,
+    /// p99.9 69.6% and a MAXIMUM of 369.5% of cadence over 48,030 readings (2026-08-17 to 2026-09-06); its
+    /// sibling has p50 0.003%, p90 0.016%, p99 0.29% and a maximum of 62.6% over 64,646 readings
+    /// (2026-08-09 to 2026-09-06). So the worst is 53x the figure #2136 cited, and the tail is owned almost
+    /// entirely by the continuous-aggregate refresh family.</para>
+    ///
+    /// <para><b>Which changes the reasoning and not the number.</b> A floor exists to stop a setting that
+    /// fires on the healthy body of the distribution, and 5 is still ~90x the 90th percentile and three
+    /// orders of magnitude above the median — 1.1% of readings on the busier store reach it at all. Moving
+    /// it buys nothing in either direction: only 73 of those 48,030 readings sit in [5, 7), so raising the
+    /// floor to the old rationale's own number would change almost no outcome, and lowering it would admit
+    /// settings that fire on compression policies doing ordinary work. Left at 5 deliberately — an
+    /// operator-facing knob's bound is not something to move as a side effect of correcting the sentence
+    /// that justified it.</para></summary>
     public int StoreJobCadenceWarnPercent => Math.Clamp(_config.Alerts.StoreJobCadenceWarnPercent, 5, 100);
     public int CollectionFailureThreshold => Math.Clamp(_config.Alerts.CollectionFailureThreshold, 1, 1000);
 
