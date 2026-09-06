@@ -2704,9 +2704,14 @@ LIMIT 1", connection))
 
             Assert.True(rows <= 1, $"the read returned {rows} rows for one view; it must identify at most one policy");
 
-            /* (2) The independent corroboration: the policy EXISTS, counted on nothing this read joins on. */
+            /* (2) The independent corroboration, in two steps so a failure at (3) names ONE cause instead of
+                   a plausible-sounding guess. First: refresh jobs exist at all, counted on nothing this read
+                   joins on. Second: the heaviest view exists as a continuous aggregate, so "the fixture did
+                   not build THIS view" is separated from "the join cannot reach it". */
             Assert.True(await RefreshPolicyCountAsync(connection, ct) > 0,
                 "no continuous-aggregate refresh job exists at all — the fixture did not build the aggregates");
+
+            Assert.Contains(Heaviest, await ExistingCaggsAsync(connection, ct), StringComparer.Ordinal);
 
             /* (3) The join finds THAT policy. The shipped text with only its status filter spliced out, so
                    this cannot pass against a statement the product does not ship. */
@@ -2718,9 +2723,16 @@ LIMIT 1", connection))
             using (var probe = new NpgsqlCommand(relaxed, connection))
             {
                 using var reader = await probe.ExecuteReaderAsync(ct);
+                /* The message states what was observed and offers the candidates as candidates — it must not
+                   assert a cause it has not established, the discipline this file's own converge catch is
+                   written to. The two checks above have already ruled out an empty store and a missing view. */
                 Assert.True(await reader.ReadAsync(ct),
-                    $"the OR-join found no refresh policy for {Heaviest} even though the store has refresh jobs — "
-                    + "this is the materialization-only-join defect, which reads back nothing");
+                    $"the OR-join found no refresh policy for {Heaviest}, though refresh jobs exist and the view "
+                    + "does too. Candidates, not a conclusion: this runtime reports a continuous-aggregate job's "
+                    + "identity under neither of the two names the join matches (the materialization-only form "
+                    + "shipped once and read back nothing this way), or the view has no refresh policy of its own "
+                    + "because EnsureContinuousAggregatesAsync's per-aggregate try swallowed a failure for it, or "
+                    + "a sibling test on this shared fixture removed it.");
                 Assert.Equal(Heaviest, reader.GetString(0));
             }
 
