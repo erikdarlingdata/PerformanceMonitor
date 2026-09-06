@@ -135,6 +135,9 @@ public sealed class StoreSqlClockDisciplineTests
             var text = File.ReadAllText(path);
             var name = Path.GetFileName(path);
 
+            /* Built at most once per file, and only when a finding needs a name. */
+            CSharpMemberMap.MemberMap? members = null;
+
             foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
             {
                 literals++;
@@ -148,8 +151,14 @@ public sealed class StoreSqlClockDisciplineTests
 
                 foreach (var finding in MixedClockComparisons(body, columns))
                 {
-                    var member = EnclosingMember(text, start);
+                    members ??= CSharpMemberMap.Of(text);
+                    var member = CSharpMemberMap.EnclosingMember(members, start);
 
+                    /* The waiver key is file:member, so a wrong member name is a wrong DECISION here and
+                       not merely a wrong message: it can miss a legitimate waiver, or collide with an
+                       unrelated one and swallow a real finding. #3094 replaced the copy of the resolver
+                       this file used to carry, which answered `if`, `using`, `while`, `Select` and
+                       `NpgsqlCommand` at 21 sites in this very tree. */
                     if (Waived.Contains(name + ":" + member))
                     {
                         continue;
@@ -685,29 +694,6 @@ public sealed class StoreSqlClockDisciplineTests
         }
 
         return sb.ToString();
-    }
-
-    /// <summary>The member a literal belongs to, for the waiver key and the failure message: the nearest
-    /// declaration above it.</summary>
-    private static string EnclosingMember(string text, int offset)
-    {
-        var head = text[..Math.Min(offset, text.Length)];
-
-        var matches = Regex.Matches(
-            head,
-            @"(?:const\s+string|static\s+string|string)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:=|=>)|(?<name2>[A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*(?:=>|\{)");
-
-        for (var i = matches.Count - 1; i >= 0; i--)
-        {
-            var name = matches[i].Groups["name"].Success ? matches[i].Groups["name"].Value : matches[i].Groups["name2"].Value;
-
-            if (!string.IsNullOrEmpty(name))
-            {
-                return name;
-            }
-        }
-
-        return "<unknown>";
     }
 
     private static string Collapse(string span)
