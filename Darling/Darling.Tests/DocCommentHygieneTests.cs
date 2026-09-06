@@ -406,6 +406,31 @@ public sealed class DocCommentHygieneTests
         IReadOnlySet<string> CodeIdentifiers);
 
     /// <summary>
+    /// The real tree scanned ONCE per test run: the repo root, the solution's project directories, and the
+    /// census over both.
+    ///
+    /// <para><b>Why cached.</b> A scan reads and comment-strips every <c>.cs</c> file in the repository,
+    /// and eleven members here plus one nineteen-row <c>[Theory]</c> need the same answer — thirty walks of
+    /// the same unchanged tree per run, which is most of this class's cost, and the review bot on #3086
+    /// counted them before anyone timed them. The result is a pure function of on-disk state and nothing in
+    /// a test run changes that state. Measured on the local harness: 34s to 3.5s.</para>
+    ///
+    /// <para><b>What deliberately does NOT come through here.</b> Every pin that drives the sweep with an
+    /// ARRANGED population calls <see cref="BuildCrefCensus"/> directly, because a census built from a
+    /// fixture is the only way to assert that a floor reds on a starved one or that literal text is
+    /// excluded. Routing those through the cache would replace each of those claims with the tree's own
+    /// answer, which is the claim they exist to be independent of.</para>
+    /// </summary>
+    private static readonly Lazy<(string Root, IReadOnlyList<string> Projects, CrefCensus Census)>
+        RepositoryScan = new(() =>
+        {
+            var root = RepoRootOrFail();
+            var projects = SolutionProjectDirectories(root);
+
+            return (root, projects, BuildCrefCensus(RepoSources(root), projects));
+        });
+
+    /// <summary>
     /// One cref, anchored on the ELEMENT that carries it rather than on the attribute alone.
     ///
     /// <para><b>Why the element, which cost a round to learn.</b> A cref is only a reference when it is an
@@ -777,9 +802,7 @@ public sealed class DocCommentHygieneTests
     [Fact]
     public void EveryCrefTargetResolvesOrIsBounded()
     {
-        var root = RepoRootOrFail();
-        var projects = SolutionProjectDirectories(root);
-        var census = BuildCrefCensus(RepoSources(root), projects);
+        var (root, projects, census) = RepositoryScan.Value;
 
         /* The floors first, and inside this test rather than only in the one below it: a floor that lives
            somewhere else does not protect THIS assertion, and this is the assertion that reports zero
@@ -840,11 +863,9 @@ public sealed class DocCommentHygieneTests
     [Fact]
     public void ThePopulationIsFlooredPerSolutionProject()
     {
-        var root = RepoRootOrFail();
-        var projects = SolutionProjectDirectories(root);
+        var (_, projects, census) = RepositoryScan.Value;
 
-        AssertCrefPopulationFloors(
-            BuildCrefCensus(RepoSources(root), projects), projects, SolutionProjectsWithoutCrefs.Keys);
+        AssertCrefPopulationFloors(census, projects, SolutionProjectsWithoutCrefs.Keys);
     }
 
     /// <summary>
@@ -858,8 +879,7 @@ public sealed class DocCommentHygieneTests
     [Fact]
     public void TheDerivedProjectListCoversEveryProjectInTheTree()
     {
-        var root = RepoRootOrFail();
-        var solution = SolutionProjectDirectories(root);
+        var (root, solution, _) = RepositoryScan.Value;
 
         Assert.All(solution, project => Assert.True(
             Directory.Exists(Path.Combine(root, project.Replace('/', Path.DirectorySeparatorChar))),
@@ -899,9 +919,7 @@ public sealed class DocCommentHygieneTests
     [Fact]
     public void TheSweepReadsEveryFileUnderEverySolutionProject()
     {
-        var root = RepoRootOrFail();
-        var projects = SolutionProjectDirectories(root);
-        var census = BuildCrefCensus(RepoSources(root), projects);
+        var (root, projects, census) = RepositoryScan.Value;
 
         foreach (var project in projects)
         {
@@ -938,8 +956,7 @@ public sealed class DocCommentHygieneTests
     [Fact]
     public void TheRedundantArmsOfTheResolverRestOnPinnedProperties()
     {
-        var root = RepoRootOrFail();
-        var census = BuildCrefCensus(RepoSources(root), SolutionProjectDirectories(root));
+        var census = RepositoryScan.Value.Census;
 
         Assert.NotEmpty(census.CodeIdentifiers);
 
@@ -1077,8 +1094,7 @@ public sealed class DocCommentHygieneTests
     [Fact]
     public void TheElementsCarryingACrefAreTheOnesThisExtractorKnows()
     {
-        var root = RepoRootOrFail();
-        var census = BuildCrefCensus(RepoSources(root), SolutionProjectDirectories(root));
+        var census = RepositoryScan.Value.Census;
 
         Assert.Equal(
             CrefCarryingElements.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray(),
@@ -1118,10 +1134,12 @@ public sealed class DocCommentHygieneTests
                 .Select(m => m.Groups["target"].Value)
                 .ToArray());
 
-        var root = RepoRootOrFail();
-        var sources = RepoSources(root).ToArray();
-        var inDocComments = BuildCrefCensus(sources, SolutionProjectDirectories(root)).Sites.Count;
-        var anywhere = sources.Sum(s => CrefReference.Matches(s.Text).Count);
+        var (root, _, census) = RepositoryScan.Value;
+        var inDocComments = census.Sites.Count;
+
+        /* Re-read for the OTHER population — every cref-shaped reference in the file rather than only the
+           ones in a doc comment — which the census by construction does not carry. */
+        var anywhere = RepoSources(root).Sum(s => CrefReference.Matches(s.Text).Count);
 
         Assert.True(anywhere > inDocComments,
             $"every cref-shaped reference in the tree is inside a /// doc comment ({anywhere} found either "
@@ -1222,13 +1240,13 @@ public sealed class DocCommentHygieneTests
         Assert.Empty(splitTarget.Split('\n').SelectMany(l => CrefReference.Matches(l)));
         Assert.Empty(splitElement.Split('\n').SelectMany(l => CrefReference.Matches(l)));
 
-        var root = RepoRootOrFail();
-        var sources = RepoSources(root).ToArray();
-        var census = BuildCrefCensus(sources, SolutionProjectDirectories(root));
+        var (root, _, census) = RepositoryScan.Value;
 
         Assert.Contains(census.Sites, site => site.Target.Contains('\n', StringComparison.Ordinal));
 
-        var perDocLine = sources.Sum(s => s.Text.Split('\n')
+        /* Re-read for the per-LINE population, which is the comparison this pin is about and which the
+           census cannot supply. */
+        var perDocLine = RepoSources(root).Sum(s => s.Text.Split('\n')
             .Where(l => l.TrimStart().StartsWith("///", StringComparison.Ordinal))
             .Sum(l => CrefReference.Matches(l).Count));
 
@@ -1278,8 +1296,7 @@ public sealed class DocCommentHygieneTests
     [InlineData(false, "Z:CollectorCatalog")]
     public void TheResolverCannotLaunderAMalformedTarget(bool resolves, string target)
     {
-        var root = RepoRootOrFail();
-        var census = BuildCrefCensus(RepoSources(root), SolutionProjectDirectories(root));
+        var census = RepositoryScan.Value.Census;
 
         Assert.True(census.CodeIdentifiers.Contains("CollectorCatalog"),
             "the identifier universe does not contain a type this repository certainly declares, so every "
@@ -1339,9 +1356,7 @@ public sealed class DocCommentHygieneTests
     [Fact]
     public void TheBoundedSetIsComparedForEquality()
     {
-        var root = RepoRootOrFail();
-        var projects = SolutionProjectDirectories(root);
-        var census = BuildCrefCensus(RepoSources(root), projects);
+        var (root, projects, census) = RepositoryScan.Value;
         var real = UnresolvedTargets(census).Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray();
 
         void Compare(IEnumerable<string> expected) => Assert.Equal(
@@ -1424,8 +1439,7 @@ public sealed class DocCommentHygieneTests
     [Fact]
     public void TheRecordedLimitsAreExercised()
     {
-        var root = RepoRootOrFail();
-        var census = BuildCrefCensus(RepoSources(root), SolutionProjectDirectories(root));
+        var census = RepositoryScan.Value.Census;
 
         /* The accepted shapes. The third row is a negative control, so "everything resolves" cannot pass
            this. */
