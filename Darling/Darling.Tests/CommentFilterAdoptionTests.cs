@@ -51,14 +51,18 @@ namespace Darling.Tests;
 ///
 /// <para><b>No <c>build.yml</c> filter entry, deliberately.</b> This reads BOTH test projects, so a
 /// <c>Lite.Tests</c>-only change fires <c>lite</c> and not <c>darling</c>, and the "Run Darling tests" step
-/// is skipped. Naming <c>Lite.Tests/**</c> in the <c>darling</c> filter would fix that and also gate the
-/// live-Postgres <c>darling-pg</c> job on all 298 of Lite's test files, which is a real cost for a guard
-/// that reads source. It belongs instead in the category <c>build.yml</c>'s <c>whole-tree-guards</c> job
-/// already exists for — guards whose input is the repository rather than a path, like
-/// <c>FleetIdentifierScrubTests</c> — and that job runs this suite exactly when the build job's step reports
-/// <c>skipped</c>. Note that <c>CrossAppGuardCiGateTests</c> cannot see this reference either way:
-/// its detector keys on <c>Lite/</c> and <c>Darling/</c>, and <c>Lite.Tests</c> is a sibling of <c>Lite</c>
-/// rather than a directory inside it.</para>
+/// is skipped. Naming <c>Lite.Tests/**</c> in the build job's <c>darling</c> filter would fix that and buy
+/// nothing: what that filter decides is which products get COMPILED AND PUBLISHED, so every file in Lite's
+/// test project would gate a Darling Viewer build and both Darling publishes, while the suite that reads
+/// them runs on such a change either way. It belongs instead in the category <c>build.yml</c>'s
+/// <c>darling-tree-guards</c> job already exists for — guards whose input is the repository rather than a
+/// path, like <c>FleetIdentifierScrubTests</c> — and that job runs this suite exactly when the build job's
+/// step reports <c>skipped</c>. The <c>darling-pg</c> job is not part of that trade: it declares its OWN
+/// <c>darling</c> filter, naming only <c>Darling/**</c> and the two workflow files, so no entry added to
+/// the build job's filter can stand up its throwaway cluster. <c>CrossAppGuardCiGateTests</c> does see the
+/// two <c>Lite.Tests</c> keys below — #3067 widened its anchor past the app directory, since
+/// <c>Lite.Tests</c> is a sibling of <c>Lite</c> rather than a directory inside it — and exempts them on
+/// this same reasoning, under the same bound.</para>
 /// </summary>
 public sealed class CommentFilterAdoptionTests
 {
