@@ -85,10 +85,23 @@ public sealed class PgPanelTabOwnershipTests
     /// A grid's <c>x:Name</c> in the raw XAML text, for the population cross-check in
     /// <see cref="EveryPgGridOnAPgTab_IsFilledBySomePgTabsLoadPath"/>. Deliberately a second reading of the
     /// same file that shares no code with the <see cref="XDocument"/> walk: the rule's success condition is
-    /// an EMPTY offender list, and a walk that resolved no grids would satisfy it without checking anything.
+    /// an EMPTY offender list, and a walk that resolved no grids — or some of them — would satisfy it
+    /// without checking anything.
     /// </summary>
     private static readonly Regex XamlGridName = new(
         @"x:Name=""(?<name>Pg[A-Za-z]+Grid)""", RegexOptions.Compiled);
+
+    /// <summary>
+    /// An XML comment, removed before <see cref="XamlGridName"/> reads the markup.
+    ///
+    /// <para>This file's whole subject one artifact over, and it was worth measuring rather than assuming:
+    /// <c>XDocument.Descendants()</c> yields <c>XElement</c> only, so a commented-out declaration is
+    /// invisible to the walk, while a regex over raw text reads it as live. The shipped markup carries 147
+    /// XML comment nodes and none of them holds a grid name today; planted, one made the cross-check red
+    /// with a bare collection diff on markup that was perfectly correct. A commented-out declaration is not
+    /// a declaration on either side of the comparison.</para>
+    /// </summary>
+    private static readonly Regex XamlComment = new(@"<!--.*?-->", RegexOptions.Compiled | RegexOptions.Singleline);
 
     [Fact]
     public void EveryPanelAPgTabLoadPathFills_IsDeclaredInsideThatTab()
@@ -100,34 +113,7 @@ public sealed class PgPanelTabOwnershipTests
         Assert.True(tabOf.Count >= 40, $"Only {tabOf.Count} named controls resolved to a Pg tab; the XAML walk is not finding the tree.");
         Assert.True(loadPaths.Count >= 6, $"Only {loadPaths.Count} dispatcher arms found; the tab-to-loader map is not being read.");
 
-        var offenders = new List<string>();
-        var exemptionsSeen = new HashSet<string>(StringComparer.Ordinal);
-
-        foreach (var (tab, panels) in loadPaths.OrderBy(p => p.Key, StringComparer.Ordinal))
-        {
-            Assert.True(panels.Count > 0, $"{tab}'s load path assigns no panel at all, so nothing about it is verified.");
-
-            foreach (var panel in panels.OrderBy(p => p, StringComparer.Ordinal))
-            {
-                if (!tabOf.TryGetValue(panel, out var declaredIn))
-                {
-                    continue; /* not declared in this XAML at all — another file's control, not this rule's business */
-                }
-
-                if (declaredIn == tab)
-                {
-                    continue;
-                }
-
-                if (KnownOffTab.TryGetValue(panel, out var issue))
-                {
-                    exemptionsSeen.Add(panel);
-                    continue;
-                }
-
-                offenders.Add($"{panel} is filled by {tab}'s load path but is declared inside {declaredIn}");
-            }
-        }
+        var (offenders, exemptionsSeen) = OffTabPanels(tabOf, loadPaths);
 
         Assert.True(offenders.Count == 0,
             "A PostgreSQL panel is filled by one tab's load path and rendered on another, so it is empty "
@@ -177,7 +163,8 @@ public sealed class PgPanelTabOwnershipTests
            resolved no grids would pass it vacuously; and a walk that resolved SOME of them would pass it
            just as quietly. Equality rather than a floor, because both readings answer the same question
            over the same file and a disagreement is a finding either way. */
-        var declaredInMarkup = XamlGridName.Matches(ViewerFile("ViewerServerTab.xaml"))
+        var markup = XamlComment.Replace(ViewerFile("ViewerServerTab.xaml"), string.Empty);
+        var declaredInMarkup = XamlGridName.Matches(markup)
             .Select(m => m.Groups["name"].Value)
             .ToHashSet(StringComparer.Ordinal);
 
@@ -186,8 +173,23 @@ public sealed class PgPanelTabOwnershipTests
             + "The PostgreSQL surface ships more grids than that, so the markup is not being read and every "
             + "assertion below would be over the remainder.");
 
-        Assert.Equal(declaredInMarkup.OrderBy(g => g, StringComparer.Ordinal).ToList(),
-                     grids.OrderBy(g => g, StringComparer.Ordinal).ToList());
+        var walkMissed = declaredInMarkup.Except(grids, StringComparer.Ordinal)
+                                         .OrderBy(g => g, StringComparer.Ordinal).ToList();
+        var walkInvented = grids.Except(declaredInMarkup, StringComparer.Ordinal)
+                                .OrderBy(g => g, StringComparer.Ordinal).ToList();
+
+        Assert.True(walkMissed.Count == 0,
+            "The markup declares these grids but the XDocument walk did not resolve any of them to a "
+            + "PostgreSQL TabItem, so the rule below silently stops covering them. Either the walk is "
+            + "broken, or the grid really is declared outside the PostgreSQL tabs — which is worth "
+            + "deciding rather than absorbing, because a control named Pg…Grid somewhere else is confusing "
+            + "on its own terms:\n  " + string.Join("\n  ", walkMissed));
+
+        Assert.True(walkInvented.Count == 0,
+            "The XDocument walk resolved these grid names but the raw markup does not declare them in the "
+            + "form this cross-check reads (x:Name=\"…\"). The two readings answer the same question over "
+            + "the same file, so a disagreement means one of them is no longer reading it:\n  "
+            + string.Join("\n  ", walkInvented));
 
         var filled = loadPaths.Values.SelectMany(p => p).ToHashSet(StringComparer.Ordinal);
         var unfilled = grids.Where(g => !filled.Contains(g)).OrderBy(g => g, StringComparer.Ordinal).ToList();
@@ -219,23 +221,48 @@ public sealed class PgPanelTabOwnershipTests
         }
     }
 
+    /// <summary>
+    /// Plant an off-tab panel into the real tree and require the rule's OWN evaluation to report it.
+    ///
+    /// <para><b>It used to re-implement the predicate inline</b>, which made it a control that could not
+    /// fail: measured on this tree, a single <c>continue;</c> at the top of the rule's inner loop — the rule
+    /// reporting nothing at all, ever — left every test in this file green, this one included. A control
+    /// that re-implements the thing it controls cannot distinguish "the rule fires" from "my copy of the
+    /// rule fires", and it converts an open question into false confidence. It now calls
+    /// <see cref="OffTabPanels"/>, which is the rule.</para>
+    ///
+    /// <para>The DIFFERENCE between the unplanted and planted evaluations is what is asserted, not that the
+    /// planted one reports exactly one pair. Whether the shipped tree is clean is the rule's to say; making
+    /// one misplaced panel red this test as well would cost a reader the attribution.</para>
+    /// </summary>
     [Fact]
     public void TheDetector_FindsAnOffTabPanelPlantedIntoTheRealTree()
     {
-        /* Without this the rule above passes on any tree where the walk quietly returns nothing, and the
-           exemptions would be the only evidence it ever fires. Plant a panel that IS declared on one tab
-           and IS assigned by another tab's loader, and require it to be reported. */
         var (tabOf, loadPaths) = Read();
 
-        var vacuumPanel = tabOf.First(kv => kv.Value == "PgVacuumTab" && !KnownOffTab.ContainsKey(kv.Key)).Key;
-        var activityPanels = new HashSet<string>(loadPaths["PgActivityTab"], StringComparer.Ordinal) { vacuumPanel };
+        var vacuumPanel = tabOf.Where(kv => kv.Value == "PgVacuumTab" && !KnownOffTab.ContainsKey(kv.Key))
+                               .Select(kv => kv.Key)
+                               .OrderBy(p => p, StringComparer.Ordinal)
+                               .First();
 
-        var reported = activityPanels
-            .Where(p => tabOf.TryGetValue(p, out var t) && t != "PgActivityTab" && !KnownOffTab.ContainsKey(p))
-            .ToList();
+        var planted = loadPaths.ToDictionary(
+            p => p.Key,
+            p => new HashSet<string>(p.Value, StringComparer.Ordinal),
+            StringComparer.Ordinal);
 
-        Assert.Contains(vacuumPanel, reported);
-        Assert.Single(reported);
+        /* If the panel were already on Activity's load path, planting it would change nothing and this
+           control would pass against the unplanted tree — the fixture would have no arranged fact in it. */
+        Assert.True(planted["PgActivityTab"].Add(vacuumPanel),
+            $"{vacuumPanel} is already assigned by PgActivityTab's load path, so planting it arranges "
+            + "nothing. Pick a PgVacuumTab panel that Activity does not already fill.");
+
+        var (before, _) = OffTabPanels(tabOf, loadPaths);
+        var (after, _) = OffTabPanels(tabOf, planted);
+
+        var added = after.Except(before, StringComparer.Ordinal).ToList();
+
+        Assert.Single(added);
+        Assert.StartsWith($"{vacuumPanel} is filled by PgActivityTab's load path", added[0], StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -367,6 +394,53 @@ public sealed class PgPanelTabOwnershipTests
 
         var regexNames = ControlAssignment.Matches(lineCommentsOnly).Select(m => m.Groups["name"].Value).ToList();
         Assert.Equal(new[] { "PgWraparoundGrid", "PgProbeGrid" }, regexNames);
+    }
+
+    /// <summary>
+    /// The rule's evaluation, in one place: every (panel, tab) pair
+    /// <see cref="EveryPanelAPgTabLoadPathFills_IsDeclaredInsideThatTab"/> would report, and the exemptions
+    /// it consumed on the way.
+    ///
+    /// <para>A helper rather than the rule's own inline loop so that
+    /// <see cref="TheDetector_FindsAnOffTabPanelPlantedIntoTheRealTree"/> runs THIS and not a second copy of
+    /// it. The per-tab floor lives here too, because it is part of the same evaluation: a tab whose load
+    /// path assigns nothing has no pairs to disagree about, and an empty pair set is indistinguishable from
+    /// a clean one.</para>
+    /// </summary>
+    private static (List<string> Offenders, HashSet<string> ExemptionsSeen) OffTabPanels(
+        IReadOnlyDictionary<string, string> tabOf,
+        IReadOnlyDictionary<string, HashSet<string>> loadPaths)
+    {
+        var offenders = new List<string>();
+        var exemptionsSeen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var (tab, panels) in loadPaths.OrderBy(p => p.Key, StringComparer.Ordinal))
+        {
+            Assert.True(panels.Count > 0, $"{tab}'s load path assigns no panel at all, so nothing about it is verified.");
+
+            foreach (var panel in panels.OrderBy(p => p, StringComparer.Ordinal))
+            {
+                if (!tabOf.TryGetValue(panel, out var declaredIn))
+                {
+                    continue; /* not declared in this XAML at all - another file's control, not this rule's business */
+                }
+
+                if (declaredIn == tab)
+                {
+                    continue;
+                }
+
+                if (KnownOffTab.ContainsKey(panel))
+                {
+                    exemptionsSeen.Add(panel);
+                    continue;
+                }
+
+                offenders.Add($"{panel} is filled by {tab}'s load path but is declared inside {declaredIn}");
+            }
+        }
+
+        return (offenders, exemptionsSeen);
     }
 
     private static string ViewerDirectory()
