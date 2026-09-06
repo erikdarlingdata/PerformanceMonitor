@@ -107,7 +107,7 @@ public sealed class TsqlConventionGuardTests
             ["Keywords"] = new(
                 Covered: Array.Empty<string>(),
                 Uncovered: new[] { UppercaseKeywords },
-                Phrases: new[] { "UPPERCASE" },
+                Phrases: new[] { "UPPERCASE", "`SELECT`" },
                 Note: "Needs enough parsing to tell a keyword from an identifier that contains one. "
                     + "`FROM sys.dm_os_waiting_tasks AS owt` and the prose in a block comment above it are the "
                     + "same words to a regex, and this codebase's SQL comments are long and discuss SQL."),
@@ -115,7 +115,7 @@ public sealed class TsqlConventionGuardTests
             ["Data types"] = new(
                 Covered: new[] { LowercaseTypes },
                 Uncovered: new[] { UnabbreviatedTypes },
-                Phrases: new[] { "lowercase", "never abbreviated", "integer", "nvarchar(max)" },
+                Phrases: new[] { "lowercase", "never abbreviated", "`integer`", "`nvarchar(max)`", "`nvarchar(MAX)`" },
                 Note: "The CASE half is checked. The ABBREVIATION half is not, and the reason is remediation "
                     + "cost rather than detectability: `int` where `integer` is meant measured at 33 sites in "
                     + "7 files when this landed, all of them inside T-SQL that runs against monitored "
@@ -130,7 +130,7 @@ public sealed class TsqlConventionGuardTests
             ["Object names"] = new(
                 Covered: Array.Empty<string>(),
                 Uncovered: new[] { SysnameForIdentifiers },
-                Phrases: new[] { "sysname" },
+                Phrases: new[] { "`sysname`" },
                 Note: "Depends on what the column MEANS. `nvarchar(128)` is correct for a wait type and wrong "
                     + "for a database name, and nothing in the text says which one a given column is."),
 
@@ -145,7 +145,7 @@ public sealed class TsqlConventionGuardTests
             ["Table aliases"] = new(
                 Covered: Array.Empty<string>(),
                 Uncovered: new[] { AliasWithAs },
-                Phrases: new[] { "AS" },
+                Phrases: new[] { "Always use `AS`", "`FROM dbo.table AS t`" },
                 Note: "Finding the alias slot means knowing where the FROM list ends, which means parsing. "
                     + "A bare `FROM sys.dm_os_wait_stats w` and a table-valued function call with two "
                     + "arguments are the same token sequence to anything short of that."),
@@ -153,7 +153,7 @@ public sealed class TsqlConventionGuardTests
             ["Column aliases"] = new(
                 Covered: Array.Empty<string>(),
                 Uncovered: new[] { ColumnAliasForm },
-                Phrases: new[] { "column_name = expression" },
+                Phrases: new[] { "`column_name = expression`" },
                 Note: "A style SHAPE rather than a token: telling `wait_type AS wait` from a comparison in a "
                     + "predicate needs the clause boundaries."),
 
@@ -167,7 +167,7 @@ public sealed class TsqlConventionGuardTests
             ["Comments"] = new(
                 Covered: new[] { BlockComments },
                 Uncovered: Array.Empty<string>(),
-                Phrases: new[] { "/* ... */", "never" },
+                Phrases: new[] { "`/* ... */`", "never `--`" },
                 Note: "Checked by tokenising, not by line prefix. This codebase does not put an asterisk on a "
                     + "block comment's continuation lines, so a prefix filter reads that prose as code and a "
                     + "comment mentioning the banned form becomes an offender — the #3052 defect "
@@ -177,7 +177,7 @@ public sealed class TsqlConventionGuardTests
             ["Functions"] = new(
                 Covered: new[] { CountBig, RowcountBig },
                 Uncovered: Array.Empty<string>(),
-                Phrases: new[] { "COUNT_BIG()", "COUNT()", "ROWCOUNT_BIG()", "@@ROWCOUNT" },
+                Phrases: new[] { "`COUNT_BIG()`", "not `COUNT()`", "`ROWCOUNT_BIG()`", "not `@@ROWCOUNT`" },
                 Note: "The bullet #3078 violated. Both halves are single tokens with a single correct "
                     + "replacement, which is what makes them worth a guard."),
         };
@@ -412,16 +412,7 @@ public sealed class TsqlConventionGuardTests
 
         Assert.Equal(bullets.Count, bullets.Select(b => b.Heading).Distinct(StringComparer.Ordinal).Count());
 
-        foreach (var (heading, body) in bullets)
-        {
-            foreach (var phrase in RuleBullets[heading].Phrases)
-            {
-                Assert.True(
-                    body.Contains(phrase, StringComparison.Ordinal),
-                    $"CONTRIBUTING.md's \"{heading}\" bullet no longer contains \"{phrase}\", which is wording "
-                    + $"a check here was derived from. Bullet text now: {body}");
-            }
-        }
+        VerifyBulletPhrases(bullets);
 
         /* Neither side of the split may hold a rule the other list has never heard of, and every covered rule
            must be one Findings can actually emit. A rule id present in the map and absent from the detector
@@ -435,6 +426,64 @@ public sealed class TsqlConventionGuardTests
             RuleBullets.Values.SelectMany(b => b.Uncovered).OrderBy(r => r, StringComparer.Ordinal).ToArray());
 
         Assert.Empty(CoveredRules.Intersect(UncoveredRules, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Non-vacuity for every required phrase, one at a time, because a phrase check is a
+    /// <c>Contains</c> — and a <c>Contains</c> is exactly the shape a longer token satisfies by accident.
+    /// This test was written after a mutation survived: <c>Phrases</c> for the Functions bullet asked for
+    /// <c>COUNT_BIG()</c>, and rewriting the document's <c>COUNT_BIG()</c> to <c>COUNTBIG()</c> stayed green
+    /// because <c>ROWCOUNT_BIG()</c> two words later still contains <c>COUNT_BIG()</c> as a substring. The
+    /// phrases now carry their backticks, and this holds each of them individually rather than trusting that
+    /// they are all distinct enough.
+    ///
+    /// <para>Driven with the REAL bullet text and one phrase deleted from it, so a phrase that the document
+    /// does not actually contain fails <see cref="TheDispositionMap_PartitionsTheBulletsContributingStates"/>
+    /// first — the two together mean each phrase is both present and load-bearing.</para>
+    /// </summary>
+    [Fact]
+    public void EveryRequiredPhrase_IsLoadBearingOnItsOwn()
+    {
+        var bullets = ContributingTsqlBullets();
+        var exercised = 0;
+
+        foreach (var (heading, body) in bullets)
+        {
+            foreach (var phrase in RuleBullets[heading].Phrases)
+            {
+                var without = bullets
+                    .Select(b => b.Heading == heading
+                        ? (b.Heading, Body: b.Body.Replace(phrase, "…", StringComparison.Ordinal))
+                        : b)
+                    .ToArray();
+
+                Assert.NotEqual(body, without.Single(b => b.Heading == heading).Body);
+                Assert.ThrowsAny<Exception>(() => VerifyBulletPhrases(without));
+                exercised++;
+            }
+        }
+
+        Assert.Equal(RuleBullets.Values.Sum(b => b.Phrases.Length), exercised);
+        Assert.True(exercised > 0, "no phrase was exercised, so this pin says nothing");
+    }
+
+    /// <summary>
+    /// Each bullet still contains the wording its checks were derived from. Separated from the map so
+    /// <see cref="EveryRequiredPhrase_IsLoadBearingOnItsOwn"/> can drive it with a doctored bullet and show
+    /// the check reds — which reading the real document could never show.
+    /// </summary>
+    private static void VerifyBulletPhrases(IReadOnlyList<(string Heading, string Body)> bullets)
+    {
+        foreach (var (heading, body) in bullets)
+        {
+            foreach (var phrase in RuleBullets[heading].Phrases)
+            {
+                Assert.True(
+                    body.Contains(phrase, StringComparison.Ordinal),
+                    $"CONTRIBUTING.md's \"{heading}\" bullet no longer contains \"{phrase}\", which is wording "
+                    + $"a check here was derived from. Bullet text now: {body}");
+            }
+        }
     }
 
     /* ───────────────────────── the detector, pinned in both directions ───────────────────────── */
