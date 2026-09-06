@@ -37,6 +37,16 @@ namespace Darling.Tests;
 /// <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/>) or from the SERIES THE COMMENT ITSELF PUBLISHES.
 /// A pin that restated the summary would go stale by precisely the mechanism it exists to stop.</para>
 ///
+/// <para><b>Which numeral KIND these are, because the repo handles two differently and neither #3072 nor
+/// #3073 says so out loud.</b> A numeral that restates an adjacent list gets DELETION offered in its
+/// failure message — dropping the sentence is as correct an outcome as correcting the figure — while a
+/// numeral that is program output gets "fix the pattern rather than the count", because a transcript has
+/// to keep showing what the tool really prints. <c>ReadmeDerivedCountPinTests</c> implements both halves
+/// and states neither, so the rule has to be inferred from the disagreement between two of its own
+/// failure texts. All thirteen patterns here are the first kind — derived arithmetic restated in prose —
+/// which is why deletion is offered throughout; and this paragraph is NARRATION of an existing rule, not
+/// a counted claim, so nothing checks it and nothing should.</para>
+///
 /// <para><b>What is deliberately NOT pinned, said plainly rather than left looking covered.</b> The two
 /// snapshot readings are quoted evidence, not derived quantities — nothing in the code can know them — so
 /// they are held only by the DISJOINTNESS the paragraph is about (see
