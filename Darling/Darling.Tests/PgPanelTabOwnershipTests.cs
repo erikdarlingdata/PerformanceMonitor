@@ -459,6 +459,11 @@ public sealed class PgPanelTabOwnershipTests
 
     /// <summary>
     /// (control -> outermost named Pg tab, tab -> every panel its load path assigns).
+    ///
+    /// <para>The population floors and the body-scan integrity assertions live here rather than in each
+    /// rule, because every rule divides by this chain and a rule's own floor cannot save it: "no offender"
+    /// and "no unfilled grid" are both satisfied by a read that resolved nothing. A parse that finds
+    /// nothing has to fail here, once, naming what it could not read.</para>
     /// </summary>
     private static (Dictionary<string, string> TabOf, Dictionary<string, HashSet<string>> LoadPaths) Read()
     {
@@ -506,9 +511,10 @@ public sealed class PgPanelTabOwnershipTests
 
         Assert.True(declarations.Count >= 15,
             $"Only {declarations.Count} LoadPg…Async declarations were found in ViewerServerTab.Postgres.cs. "
-            + "There is one per dispatcher arm plus the helpers they call, so the declaration regex is no "
-            + "longer matching the file — and every assertion below is over what it found, including the "
-            + "ones whose success condition is an empty list.");
+            + "The dispatcher arms' entry points are checked by name below, so this floor is aimed at the "
+            + "helpers they call: the regex could resolve every entry point while losing every helper, and "
+            + "every assertion below is over what it found — including those whose success condition is "
+            + "an empty list.");
 
         var dropped = declarations.Where(d => !ranges.ContainsKey(d))
                                   .OrderBy(d => d, StringComparer.Ordinal)
