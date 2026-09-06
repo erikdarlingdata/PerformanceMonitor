@@ -384,7 +384,7 @@ public sealed class PgRegistryPanelPlacementTests
         var rawBody = truncates[raw["LoadPgProbeAsync"].Start..raw["LoadPgProbeAsync"].End];
         Assert.Contains("PgProbeNote", rawBody, StringComparison.Ordinal);
         Assert.DoesNotContain("PgProbeGrid", rawBody, StringComparison.Ordinal);
-        Assert.Equal(1, ControlAssignment.Matches(rawBody).Count);
+        Assert.Single(ControlAssignment.Matches(rawBody));
 
         /* And the guard in Read() is what turns that truncation into a red rather than a quieter rule. */
         var w = walked["LoadPgProbeAsync"];
@@ -407,7 +407,7 @@ public sealed class PgRegistryPanelPlacementTests
 
         Assert.True(MethodRanges(CSharpSourceWalker.StripCommentsAndStrings(drops)).ContainsKey("LoadPgProbeAsync"));
         Assert.Empty(MethodRanges(drops));
-        Assert.Equal(1, MethodDeclaration.Matches(drops).Count);
+        Assert.Single(MethodDeclaration.Matches(drops));
     }
 
     // ── The chain ────────────────────────────────────────────────────────────────────────────────
