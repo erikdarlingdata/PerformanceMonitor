@@ -76,9 +76,10 @@ namespace Darling.Tests;
 /// another" among the spellings it cannot see, and the bare <c>"Lite"</c> in <see cref="ScannedTrees"/> is
 /// that shape. So the ANCHOR paths carry the claim: each is a separator-bearing path literal, which is that
 /// matcher's first arm, so <c>Lite/Services/LocalDataService.FinOps.Recommendations.cs</c> is in its found
-/// set and has to stay filter-reachable. Measured: with the anchors in place, pointing one at a
-/// <c>Lite.Tests</c> path reds that guard; before they existed the same injection changed nothing, which is
-/// how the gap was found rather than assumed.</para>
+/// set and has to stay filter-reachable. Measured: with the anchors in place, pointing the Lite one at a
+/// <c>Lite.Tests</c> path reds that guard by name; before they existed the same injection changed nothing,
+/// which is how the gap was found rather than assumed. The injected path has to EXIST — that guard drops
+/// references which do not resolve on disk, so a made-up filename is a red-proof that proves nothing.</para>
 /// </summary>
 public sealed class TsqlConventionGuardTests
 {
