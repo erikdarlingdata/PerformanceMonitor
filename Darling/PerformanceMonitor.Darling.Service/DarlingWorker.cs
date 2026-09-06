@@ -4363,6 +4363,19 @@ LIMIT 1";
                 DateTime.UtcNow,
                 _logger);
 
+            /* #3044: the heaviest hourly refresh's runtime against the SLOT it has to fit inside, which is a
+               different bound from #2136's below and the one the compression phase grid rests on. The build-time
+               assertion on HeaviestHourlyRefreshObservedCeilingSeconds bounds a CONSTANT; the thing it bounds is
+               a runtime that moves with data volume, so it fires when someone edits the constant and never when
+               reality changes underneath it. This is that bound applied to the live figure, on the sweep that
+               already reads the job catalog — no new collector, no new timer, and the per-run history is already
+               in collect.store_metrics. A log line rather than a band or an alert: see
+               TimescaleSupport.LogHeaviestRefreshSlotHeadroom for why, including why #2136's knob happening to
+               equal one slot today is not a substitute. */
+            TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
+                await TimescaleSupport.ReadHeaviestRefreshRuntimeAsync(connection, _logger, cancellationToken),
+                _logger);
+
             var stuckJobs = await TimescaleSupport.ReadStuckCompressionJobsAsync(
                 connection, DateTime.UtcNow, _logger, cancellationToken);
             await _selfAlerts!.EvaluateCompressionJobsAsync(

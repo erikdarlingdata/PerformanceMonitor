@@ -2358,6 +2358,256 @@ LIMIT 1", connection))
             TimescaleSupport.CompressionPhaseMinutes.Count);
     }
 
+    /* ─────────────────── #3044: the watch on the LIVE figure, not the constant ─────────────────── */
+
+    /// <summary>
+    /// The slot and the watch line are DERIVED from
+    /// <see cref="TimescaleSupport.RefreshPhaseStepMinutes"/>, so a moved grid moves them.
+    ///
+    /// <para><b>Both forms, because either alone is passable by the wrong code.</b> The literals are what
+    /// make a moved line loud — a re-derivation-only test agrees with any derivation, including a hardcoded
+    /// one. The identities are what make it MOVE: a warning line frozen at a literal 750 satisfies the
+    /// literal pin and fails <c>RefreshSlotWarningSeconds * 6 == RefreshPhaseSlotSeconds * 5</c> the moment
+    /// the step changes. That identity is stated as a cross-multiplication rather than a division so it is
+    /// exact at every step — <c>RefreshPhaseStepMinutes * 60</c> is divisible by 6 for any integer step.</para>
+    /// </summary>
+    [Fact]
+    public void TheRefreshSlotWatchLines_AreDerivedFromTheStep_NotWrittenDown()
+    {
+        Assert.Equal(900, TimescaleSupport.RefreshPhaseSlotSeconds);
+        Assert.Equal(TimescaleSupport.RefreshPhaseStepMinutes * 60, TimescaleSupport.RefreshPhaseSlotSeconds);
+
+        Assert.Equal(750, TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(
+            TimescaleSupport.RefreshPhaseSlotSeconds * 5 / 6,
+            TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(
+            TimescaleSupport.RefreshPhaseSlotSeconds * 5,
+            TimescaleSupport.RefreshSlotWarningSeconds * 6);
+
+        /* The slot the watch is against is the SAME expression the build-time envelope assertion bounds
+           the recorded ceiling with, so the two can never disagree about where the wall is. */
+        Assert.True(
+            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
+            "the recorded ceiling no longer fits the slot the runtime watch is against");
+
+        /* And the watch line is strictly inside the wall, with real lead time — the whole point of having
+           a second line rather than only the wall. */
+        Assert.True(
+            TimescaleSupport.RefreshSlotWarningSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
+            "the watch line is at or past the slot it is meant to give warning of");
+        Assert.Equal(150, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
+    }
+
+    /// <summary>
+    /// The classifier's bands, pinned on the numbers #3044 was filed on rather than on invented ones.
+    ///
+    /// <para><b>The load-bearing assertion is the one on the recorded ceiling.</b> 864 s classifies as
+    /// APPROACHING, which is the entire issue expressed as a test: the constant the compression grid is sized
+    /// against is already inside the warning band, 36 seconds clear of invalidating itself, and until now
+    /// nothing in the product looked at the live figure at all. The five readings taken during #3044's review
+    /// all classify INSIDE, which is the anti-crying-wolf half — including the 594 s peak, at 66.0% of the
+    /// slot.</para>
+    ///
+    /// <para>Both boundaries are pinned inclusive on purpose: the wall matches the build-time assertion's
+    /// <c>&lt;</c>, so a value AT the slot width fails both.</para>
+    /// </summary>
+    [Fact]
+    public void TheRefreshSlotClassifier_BandsTheLiveReadings_AndPutsTheRecordedCeilingInTheWarningBand()
+    {
+        /* The five live readings from #3044's review, in the order they were taken. */
+        foreach (var seconds in new double[] { 335, 594, 465, 359, 293 })
+        {
+            Assert.Equal(
+                TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+                TimescaleSupport.ClassifyRefreshSlotHeadroom(seconds));
+        }
+
+        /* THE ISSUE, as an assertion: the number the grid is sized against is itself a warning. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(
+                TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds));
+
+        /* Boundaries, inclusive both times. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshSlotWarningSeconds - 1));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshSlotWarningSeconds));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshPhaseSlotSeconds - 1));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.SlotExceeded,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshPhaseSlotSeconds));
+
+        /* The pre-narrowing band (#3012's 3,301-6,330 s) is what invalidation looks like. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.SlotExceeded,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(3301));
+
+        /* An impossible catalog reading costs the line, never the sweep. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(-1));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(double.NaN));
+    }
+
+    /// <summary>
+    /// The reading carries the derived answers, so a caller cannot log the seconds and drop the verdict — and
+    /// the headroom goes NEGATIVE past the wall rather than clamping, because how far through the wall a run
+    /// went is what sizes the re-derivation.
+    /// </summary>
+    [Fact]
+    public void TheRefreshSlotReading_CarriesItsOwnVerdict_AndReportsOverrunAsNegativeHeadroom()
+    {
+        var atTheCeiling = new HeaviestRefreshSlotReading(
+            TimescaleSupport.HeaviestHourlyRefreshView,
+            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
+
+        Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot, atTheCeiling.Headroom);
+        Assert.Equal(36, atTheCeiling.ClearOfSlotSeconds);
+        Assert.Equal(96.0, atTheCeiling.PercentOfSlot, 1);
+
+        /* The 594 s peak: 66.0% of the slot, 306 s clear — the figures #3044 calibrated against. */
+        var peak = new HeaviestRefreshSlotReading(TimescaleSupport.HeaviestHourlyRefreshView, 594);
+        Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.InsideSlot, peak.Headroom);
+        Assert.Equal(306, peak.ClearOfSlotSeconds);
+        Assert.Equal(66.0, peak.PercentOfSlot, 1);
+
+        var through = new HeaviestRefreshSlotReading(TimescaleSupport.HeaviestHourlyRefreshView, 1200);
+        Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.SlotExceeded, through.Headroom);
+        Assert.Equal(-300, through.ClearOfSlotSeconds);
+    }
+
+    /// <summary>
+    /// The log level is proportionate: Debug for the routine band (an hourly Information line about a healthy
+    /// job is how a signal gets buried), Warning while the grid's precondition still holds, Error once it is
+    /// false. A null reading — a fresh store, a plain-PostgreSQL store, a swallowed read — says NOTHING rather
+    /// than logging a zero, which would read as "finished instantly".
+    /// </summary>
+    [Fact]
+    public void TheRefreshSlotLogLine_IsLeveledByBand_AndSaysNothingWithoutAReading()
+    {
+        var quiet = new CapturingTestLogger();
+        TimescaleSupport.LogHeaviestRefreshSlotHeadroom(null, quiet);
+        Assert.Equal("(no log lines captured)", quiet.Joined);
+
+        var inside = new CapturingTestLogger();
+        TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
+            new HeaviestRefreshSlotReading(TimescaleSupport.HeaviestHourlyRefreshView, 594), inside);
+        Assert.StartsWith("Debug:", inside.Joined, StringComparison.Ordinal);
+        Assert.Contains(TimescaleSupport.HeaviestHourlyRefreshView, inside.Joined, StringComparison.Ordinal);
+
+        var approaching = new CapturingTestLogger();
+        TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
+            new HeaviestRefreshSlotReading(
+                TimescaleSupport.HeaviestHourlyRefreshView,
+                TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds),
+            approaching);
+        Assert.StartsWith("Warning:", approaching.Joined, StringComparison.Ordinal);
+
+        var exceeded = new CapturingTestLogger();
+        TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
+            new HeaviestRefreshSlotReading(
+                TimescaleSupport.HeaviestHourlyRefreshView, TimescaleSupport.RefreshPhaseSlotSeconds),
+            exceeded);
+        Assert.StartsWith("Error:", exceeded.Joined, StringComparison.Ordinal);
+
+        /* The breach line names the REMEDY the code's own envelope states — re-derive #3035's grid — and not
+           #2136's "extend the job's schedule_interval", which for this job changes what the aggregate
+           materializes (the hourly schedule interval is also its end_offset) and does nothing about the
+           slot. */
+        Assert.Contains("#3035", exceeded.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("schedule_interval", exceeded.Joined, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The runtime read is keyed on the VIEW, through
+    /// <see cref="TimescaleSupport.ContinuousAggregateRefreshStateSql"/>'s MEASURED OR-join.
+    ///
+    /// <para>Three properties, each of which was a live defect somewhere in this file's history. The
+    /// materialization-hypertable identity alone reads back nothing, so both arms have to be present. A job
+    /// id would name a different job on any other deployment, so the read must not be keyed on one. And a
+    /// failed run's duration is not an envelope reading, which is why #2136's <c>last_run_status</c> filter is
+    /// carried here too.</para>
+    /// </summary>
+    [Fact]
+    public void TheHeaviestRefreshRuntimeRead_IsKeyedOnTheView_ThroughTheMeasuredJoin()
+    {
+        var sql = TimescaleSupport.HeaviestRefreshRuntimeSql;
+
+        Assert.Contains("j.proc_name = 'policy_refresh_continuous_aggregate'", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            $"ca.view_name = '{TimescaleSupport.HeaviestHourlyRefreshView}'", sql, StringComparison.Ordinal);
+        Assert.Contains("ca.view_schema = 'collect'", sql, StringComparison.Ordinal);
+
+        /* BOTH arms of the measured OR-join — the materialization-only form shipped once and found nothing. */
+        Assert.Contains(
+            "ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name",
+            sql, StringComparison.Ordinal);
+        Assert.Contains(
+            "ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name",
+            sql, StringComparison.Ordinal);
+
+        /* The duration comes from job_stats and only from a SUCCESSFUL run. */
+        Assert.Contains("js.last_run_duration", sql, StringComparison.Ordinal);
+        Assert.Contains("js.last_run_status = 'Success'", sql, StringComparison.Ordinal);
+
+        /* Not keyed on a job id, which is per-deployment. */
+        Assert.DoesNotContain("job_id =", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The reason #3044 is a LOG LINE and not a second self-alert, pinned so the coincidence it rests on
+    /// cannot rot silently.
+    ///
+    /// <para>#2136's Store Job Over Cadence warns at a store-backed percent of a job's OWN schedule interval,
+    /// default 25. For an hourly job that is 900 s — exactly one refresh slot, because a slot is the hourly
+    /// cadence divided by <see cref="TimescaleSupport.RefreshPhaseSlots"/>. So an alert at the slot width
+    /// would double-fire with #2136 on the same job, the same reading and the same hour, which is what rules
+    /// the alert form out.</para>
+    ///
+    /// <para><b>But the equality is arithmetic, not design, and this test says which way it breaks.</b> The
+    /// knob is clamped [5, 100] with no relationship to <see cref="TimescaleSupport.RefreshPhaseStepMinutes"/>:
+    /// at the clamp's top it lands at 3,600 s, four slots past invalidation. That is the whole argument for a
+    /// bound derived from the step instead — and if a future step makes the default knob fire BELOW the slot,
+    /// this pin is where that gets noticed.</para>
+    /// </summary>
+    [Fact]
+    public void TheJobCadenceKnob_EqualsOneSlotOnlyByArithmetic_WhichIsWhyTheSlotWatchIsSeparate()
+    {
+        var hourlyCadenceSeconds = (int)TimescaleSupport.HourlyRefreshScheduleSpan.TotalSeconds;
+
+        Assert.Equal(3600, hourlyCadenceSeconds);
+        Assert.Equal(
+            TimescaleSupport.RefreshPhaseSlotSeconds,
+            hourlyCadenceSeconds / TimescaleSupport.RefreshPhaseSlots);
+
+        /* #2136's shipped default, and where it lands on an hourly job today: exactly the slot. */
+        const int ShippedWarnPercent = 25;
+        Assert.Equal(
+            ShippedWarnPercent, new DarlingConfig().Alerts.StoreJobCadenceWarnPercent);
+        Assert.Equal(
+            TimescaleSupport.RefreshPhaseSlotSeconds,
+            hourlyCadenceSeconds * ShippedWarnPercent / 100);
+
+        /* And where the knob's own clamp lets an operator move it to — four slots past the wall, with the
+           grid's precondition broken and nothing said. */
+        Assert.Equal(
+            4 * TimescaleSupport.RefreshPhaseSlotSeconds,
+            hourlyCadenceSeconds * 100 / 100);
+
+        /* The slot watch fires first either way, which is the property that makes it worth having. */
+        Assert.True(
+            TimescaleSupport.RefreshSlotWarningSeconds < hourlyCadenceSeconds * ShippedWarnPercent / 100,
+            "the slot watch no longer fires before #2136's default cadence warning, so it adds no lead time");
+    }
+
     /// <summary>
     /// Every hypertable this product owns gets a minute on the grid, and they stay SPREAD across it.
     ///
