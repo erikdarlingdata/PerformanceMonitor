@@ -23,7 +23,7 @@ namespace Darling.Tests;
 /// <para><c>CONTRIBUTING.md</c>'s <b>T-SQL Style</b> list opens "All T-SQL code must follow", and until #3081
 /// nothing enforced any of it. PR #3078 introduced <c>COUNT(*)</c> and <c>COUNT(DISTINCT …)</c> into a new
 /// collector query — a violation of the bullet at <c>CONTRIBUTING.md:355</c> — and passed the Linux build, the
-/// PostgreSQL tests, all four whole-tree guards, the command-deadline family, <c>review</c> and
+/// PostgreSQL tests, every whole-tree guard, the command-deadline family, <c>review</c> and
 /// <c>verify</c>. A review bot reading the diff was the only thing that objected.</para>
 ///
 /// <para><b>This guard covers PART of that list and says which part.</b> The bullets are not equally checkable
@@ -65,7 +65,7 @@ namespace Darling.Tests;
 /// <para><b>Both SKUs, and one class rather than two.</b> The scan reads the shared libraries, all of
 /// <c>Darling/</c> and all of <c>Lite/</c> — the #3078 violation landed in <c>PerformanceMonitor.Collectors</c>,
 /// which both products build on, and Lite's <c>RemoteCollectorService</c> and <c>LocalDataService.FinOps.*</c>
-/// send T-SQL of their own. Each of the three trees is floored SEPARATELY in
+/// send T-SQL of their own. Each scanned tree is floored SEPARATELY in
 /// <see cref="NoTsqlStatementViolatesACoveredConvention"/>, spelled identically, because an arm written as a
 /// special case is how the next tree inherits the sibling bug #3067 was filed for. Duplicating the class into
 /// <c>Lite.Tests</c> would buy nothing and drift: the <c>darling</c> path filter reaches
@@ -109,9 +109,12 @@ public sealed class TsqlConventionGuardTests
     /// not, and <c>Phrases</c> is the wording the checks were derived FROM — asserted still present, so an
     /// edit to the rule cannot leave a check enforcing something the document no longer says.
     ///
-    /// <para>Three bullets are split rather than all-or-nothing, and saying so is the point of the shape.
-    /// <b>Data types</b> states two independent properties and only one of them is checked here.
-    /// <b>Indentation</b> bans tabs and prescribes a depth; the ban is a token, the depth is a shape.
+    /// <para><b><c>Data types</c> and <c>Indentation</c> are split</b> rather than all-or-nothing, and
+    /// saying so is the point of the shape. <c>Data types</c> states two independent properties and only
+    /// one of them is checked here. <c>Indentation</c> bans tabs and prescribes a depth; the ban is a
+    /// token, the depth is a shape. That pair is NAMED rather than counted, and
+    /// <see cref="TheDispositionMap_PartitionsTheBulletsContributingStates"/> holds the naming, so a
+    /// third split bullet cannot leave this prose quietly incomplete.
     /// A bullet with entries on both sides is honest about covering half of itself; a bullet listed as covered
     /// when it is not is the shape this issue was filed about.</para>
     /// </summary>
@@ -132,8 +135,8 @@ public sealed class TsqlConventionGuardTests
                 Phrases: new[] { "lowercase", "never abbreviated", "`integer`", "`nvarchar(max)`", "`nvarchar(MAX)`" },
                 Note: "The CASE half is checked. The ABBREVIATION half is not, and the reason is remediation "
                     + "cost rather than detectability: `int` where `integer` is meant stands at 33 sites in 7 "
-                    + "files, all of them inside T-SQL that runs against monitored production servers, and "
-                    + "two of them are sp_executesql parameter declarations "
+                    + "files, all of them inside T-SQL that runs against monitored production servers, some "
+                    + "in sp_executesql parameter declarations "
                     + "(`N'@h varbinary(64), @stmt_start int, @stmt_end int'`) that nothing in this repository "
                     + "executes. Rewriting live query strings belongs in a change whose subject is that "
                     + "rewrite. That figure is DERIVED and pinned by "
@@ -141,7 +144,7 @@ public sealed class TsqlConventionGuardTests
                     + "cannot quietly stop describing the tree — and when it reaches zero that pin says to "
                     + "move this rule to the Covered side. A waiver list was considered and rejected: its key "
                     + "would have to collapse repeated spellings within one member, so a 34th "
-                    + "`CONVERT(int, NULL)` beside the ten already there would satisfy it — a guard claiming "
+                    + "`CONVERT(int, NULL)` beside the ones already there would satisfy it — a guard claiming "
                     + "the rule while under-covering it, which is the shape #3081 was filed about."),
 
             ["Object names"] = new(
@@ -287,7 +290,7 @@ public sealed class TsqlConventionGuardTests
                 }
             }
 
-            /* Per tree, spelled the same way for all three. A union floored only in total passes while one
+            /* Per tree, spelled the same way for every tree. A union floored only in total passes while one
                tree contributes nothing, and the tree that goes dark is the one nobody is looking at. */
             Assert.True(
                 statementsInTree > 0,
@@ -464,6 +467,16 @@ public sealed class TsqlConventionGuardTests
             RuleBullets.Values.SelectMany(b => b.Uncovered).OrderBy(r => r, StringComparer.Ordinal).ToArray());
 
         Assert.Empty(CoveredRules.Intersect(UncoveredRules, StringComparer.Ordinal));
+
+        /* The split bullets, NAMED in RuleBullets' own summary rather than counted there. A third one
+           would leave that prose incomplete without contradicting it, which is the quiet direction. */
+        Assert.Equal(
+            new[] { "Data types", "Indentation" },
+            RuleBullets
+                .Where(b => b.Value.Covered.Length > 0 && b.Value.Uncovered.Length > 0)
+                .Select(b => b.Key)
+                .OrderBy(k => k, StringComparer.Ordinal)
+                .ToArray());
     }
 
     /// <summary>
@@ -570,7 +583,8 @@ public sealed class TsqlConventionGuardTests
     /// Known answers for every covered rule, and for the benign forms this repository's own T-SQL contains
     /// that a first cut of each check flagged. Each hazard is a real spelling: the two <c>COUNT(*)</c> sites
     /// in <c>DatabaseSizeStatsCollector</c>, the one inside <c>sp_executesql</c> in Lite's FinOps
-    /// recommendations, <c>DarlingServerConnector</c>'s <c>--</c>, and the four uppercase type spellings.
+    /// recommendations, <c>DarlingServerConnector</c>'s <c>--</c>, and the data types not spelled in
+    /// lowercase.
     ///
     /// <para>The rule COVERAGE of the hazard set is asserted at set equality, not counted: a covered rule with
     /// no hazard fixture is a check nothing exercises, and adding one to <see cref="Findings"/> without a
@@ -647,7 +661,9 @@ public sealed class TsqlConventionGuardTests
                name and stays visible, which is what keeps 'NVARCHAR(MAX)' there checkable. */
             "SELECT o = fr.n.value('let $c := . return count(../frame[. << $c])', 'integer')\nFROM sys.fn_xe_file_target_read_file(N'x', NULL, NULL, NULL) AS f\nCROSS APPLY f.event_data.nodes('//frame') AS fr(n) OPTION(RECOMPILE);",
             /* The block-comment continuation line, which is the #3052 defect this check must not have: this
-               codebase writes no asterisk on continuation lines, and six files carry a `--` inside one. */
+               codebase writes no asterisk on continuation lines, and collector SQL here
+               carries a `--` inside one - MemoryPressureEventsCollector and DmvBlockingSnapshotCollector
+               among them. */
             "SELECT d.name\n/* memory_pressure_events.sample_time is naive UTC -- Darling passes it to\n   the viewer unchanged, so the frame is the collector's. */\nFROM sys.databases AS d OPTION(RECOMPILE);",
             /* A `--` AFTER a nested block comment closes but still inside the outer one. T-SQL nests block
                comments; a non-nesting walk ends the outer comment at the inner `*​/` and reads everything
@@ -661,8 +677,9 @@ public sealed class TsqlConventionGuardTests
             /* The same thing AFTER a '' escape, which is what makes this fixture worth its line: a walk that
                consumes one quote and then looks at the next character closes the span on the escape and
                reads the remainder as code, so the `--` becomes a line comment. Every piece of dynamic SQL
-               in this repository doubles its quotes — LocalDataService.FinOps.Recommendations has four
-               N''…'' literals inside one sp_executesql — so the walk has to survive the form. */
+               in this repository doubles its quotes — LocalDataService.FinOps.Recommendations wraps a
+               CASE expression full of N''…'' literals inside one sp_executesql — so the walk has to
+               survive the form. */
             "SELECT d.name FROM sys.databases AS d WHERE d.name <> N'a''--b' OPTION(RECOMPILE);",
             /* A tab inside a string value is data too — the rule is about indentation. */
             "SELECT s = REPLACE(d.name, N'\t', N' ') FROM sys.databases AS d OPTION(RECOMPILE);",
