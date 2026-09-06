@@ -43,10 +43,20 @@ namespace PerformanceMonitor.Collectors;
 /// <para><b>Why a message locale is a readiness facet (#3061).</b> Reading a captured plan is still
 /// #2566/#2567's and this claims nothing about it — but one PRECONDITION for reading is a configuration
 /// state on the target, which is exactly what this collector reports. Every log read this product performs
-/// matches PostgreSQL's ENGLISH message text, and <c>lc_messages</c> decides whether the target writes any:
-/// a German catalogue writes <c>FEHLER:</c> where an English one writes <c>ERROR:</c>, and the severity
-/// label is translated along with everything else. The <c>message_locale</c> facet reports that setting so
-/// an empty read becomes a NAMED unmet precondition rather than a silent zero.</para>
+/// matches PostgreSQL's ENGLISH message text, and <c>lc_messages</c> decides whether the target writes any.
+/// The <c>message_locale</c> facet reports that setting so an empty read becomes a NAMED unmet precondition
+/// rather than a silent zero.</para>
+///
+/// <para><b>Measured, not inferred</b> — PostgreSQL 17.11 with <c>lc_messages = 'de_DE.UTF-8'</c>, a real
+/// deadlock provoked and read back out of the server log. The line is
+/// <c>FEHLER:  Verklemmung (Deadlock) entdeckt</c>: the severity label AND the message body. <c>HINT:</c>
+/// becomes <c>TIPP:</c> and <c>CONTEXT:</c> becomes <c>ZUSAMMENHANG:</c>, while <c>DETAIL:</c> comes
+/// through UNCHANGED — so a translated catalogue does not mean every label differs, and nothing here should
+/// rest on that. It does not help the parser: the block pattern needs the <c>ERROR:</c> line and the
+/// <c>DETAIL:</c> line together, so the surviving half matches and the report is still lost whole. Against
+/// one log holding a German report and an English one, <c>PgDeadlockLogParser.Extract</c> returned ONE —
+/// the English — and a caller cannot tell a partial answer from a complete one. The mode also renders
+/// <c>ShareLock-Sperre</c>, whose hyphen the edge pattern's <c>[A-Za-z ]+</c> group excludes.</para>
 ///
 /// <para><b>It is the deadlock read, not the plan read, that makes this urgent.</b> Zero rows is the healthy
 /// resting state for <c>pg_deadlocks</c>, so a locale-blinded parser and a server that simply did not

@@ -333,9 +333,9 @@ public sealed class PgTargetMessageLocaleFacetTests
     /// <summary>
     /// The RELATION between the parsers and the facet, which is what makes this more than a spelling pin:
     /// every target-side reader that anchors on PostgreSQL's own message text is discovered FROM SOURCE, and
-    /// each anchored severity label must be one of the untranslated upper-case tokens the satisfied locale
-    /// set guarantees. A fifth reader anchored on a token outside that vocabulary fails here; so does
-    /// widening the facet to a locale that would translate one.
+    /// each anchored log label must be one the satisfied locale set actually guarantees. A fifth reader
+    /// anchored on a label outside that vocabulary fails here; so does widening the facet to a locale that
+    /// would not write one.
     ///
     /// <para>Discovery is derived rather than listed, and the discovered set is asserted non-empty in its
     /// own right — a source walk that silently finds nothing would make this pass on an empty set, which is
@@ -356,16 +356,44 @@ public sealed class PgTargetMessageLocaleFacetTests
         var sql = Sql();
         var collectorDir = Path.Combine(RepoRoot(), "PerformanceMonitor.Collectors");
 
-        /* PostgreSQL's untranslated severity vocabulary at the head of a log entry. Upper-case ASCII on
-           purpose: under any locale the facet calls satisfied these are what error_severity() writes, and
-           under one it does not they are precisely what it does NOT write. */
-        var untranslated = new[] { "DEBUG", "LOG", "INFO", "NOTICE", "WARNING", "ERROR", "FATAL", "PANIC", "DETAIL", "STATEMENT", "HINT", "CONTEXT" };
+        /* The log labels PostgreSQL writes under a locale the facet calls SATISFIED. That is deliberately
+           the only claim this list makes, because the converse is false and was measured rather than
+           assumed: on PostgreSQL 17.11 under lc_messages = 'de_DE.UTF-8', `ERROR:` becomes `FEHLER:`,
+           `HINT:` becomes `TIPP:` and `CONTEXT:` becomes `ZUSAMMENHANG:` - but `DETAIL:` comes through
+           UNCHANGED. So "translated locale" does not mean "every label differs", and a guard resting on
+           that would be resting on something untrue.
+
+           It does not save the parser. PgDeadlockLogParser's block regex requires BOTH the
+           `ERROR:  deadlock detected` line AND the `DETAIL:  ` line, so the surviving half matches while
+           the report is still lost whole - the same all-or-nothing the parser's own doc comment describes
+           for log_error_verbosity = terse. Measured: the shipped Extract() over a real server log holding
+           one German and one English report returned ONE, the English one.
+
+           And a German report would lose its edges even if the block matched: the mode renders as
+           `ShareLock-Sperre`, and the edge pattern's mode group is `[A-Za-z ]+`, which excludes the
+           hyphen. */
+        var englishLabels = new[] { "DEBUG", "LOG", "INFO", "NOTICE", "WARNING", "ERROR", "FATAL", "PANIC", "DETAIL", "STATEMENT", "HINT", "CONTEXT" };
 
         var anchored = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
 
         foreach (var file in Directory.EnumerateFiles(collectorDir, "Pg*.cs", SearchOption.TopDirectoryOnly))
         {
             var text = File.ReadAllText(file);
+
+            /* Is this file a log reader at all? Gated on the SQL function that reads the log rather than
+               on a filename list, which would rot, and rather than on the labels themselves, which would
+               be circular. All four readers #3061 enumerated name pg_read_file; nothing else in this
+               directory does.
+
+               This gate is load-bearing and was added because the test caught its own author: the
+               readiness collector's type header quotes the real German line, double space and all, to
+               document what was measured - and the walk found FEHLER there and correctly failed. The file
+               that REPORTS the precondition is not a file that rests on it, and asking whether it reads a
+               log is the honest way to tell those apart. */
+            if (!text.Contains("pg_read_file", StringComparison.Ordinal))
+            {
+                continue;
+            }
 
             /* A log-message anchor is an upper-case label followed by the DOUBLE SPACE PostgreSQL writes
                after it. That double space is what makes this specific enough not to collect the product's
@@ -397,11 +425,10 @@ public sealed class PgTargetMessageLocaleFacetTests
             foreach (var label in labels)
             {
                 Assert.True(
-                    untranslated.Contains(label, StringComparer.Ordinal),
-                    $"{file} anchors on the log label '{label}', which is not one of the untranslated "
-                    + "tokens PostgreSQL writes under the locales pg_plan_capture_readiness calls "
-                    + "satisfied. Either the token is wrong or the facet's satisfied set no longer "
-                    + "guarantees it.");
+                    englishLabels.Contains(label, StringComparer.Ordinal),
+                    $"{file} anchors on the log label '{label}', which is not one PostgreSQL writes under "
+                    + "the locales pg_plan_capture_readiness calls satisfied. Either the token is wrong or "
+                    + "the facet's satisfied set no longer guarantees it.");
             }
         }
 
