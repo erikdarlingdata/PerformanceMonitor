@@ -560,16 +560,20 @@ public sealed class TsqlConventionGuardTests
 
         Assert.Empty(CoveredRules.Intersect(UncoveredRules, StringComparer.Ordinal));
 
-        /* The abbreviation ratchet, both directions and against the BULLET rather than the flattened
-           lists. The set equalities above are over a union, so they cannot see WHICH bullet a rule sits
-           under: moving UnabbreviatedTypes to the Functions bullet's Covered array satisfies every one of
-           them while the disposition map claims this check enforces a sentence the document does not have
-           it enforcing. Naming both sides is also what keeps the rule from drifting back to Uncovered
-           while the detector still emits it — a rule that fires under bookkeeping calling it unguarded is
-           the same defect class as a limitation nothing exercises. */
+        /* The abbreviation ratchet, at the BULLET rather than through the flattened lists. Both
+           equalities above are over a UNION of every bullet's arrays, so neither can see which bullet a
+           rule sits under: moving UnabbreviatedTypes to the Functions bullet's Covered array satisfies
+           all of them, and the map then claims this guard enforces a sentence CONTRIBUTING.md does not
+           have it enforcing. This is the direction nothing else holds.
+
+           The OTHER direction — the rule drifting back to Uncovered while Findings still emits it — is
+           already held, and stating where is what keeps a decorative assertion from being added here
+           later. Putting it back on the Uncovered side makes the flattened Uncovered union disagree with
+           UncoveredRules two assertions up; adding it to UncoveredRules as well instead trips the
+           disjointness one line up, because Covered still holds it. A DoesNotContain here could
+           therefore never be the assertion that reds, and an assertion that cannot fail is the shape
+           #3081 was filed about. */
         Assert.Contains(UnabbreviatedTypes, RuleBullets["Data types"].Covered);
-        Assert.DoesNotContain(UnabbreviatedTypes, RuleBullets["Data types"].Uncovered);
-        Assert.DoesNotContain(UnabbreviatedTypes, UncoveredRules);
 
         /* The split bullets, NAMED in RuleBullets' own summary rather than counted there. A second one
            would leave that prose incomplete without contradicting it, which is the quiet direction. */
