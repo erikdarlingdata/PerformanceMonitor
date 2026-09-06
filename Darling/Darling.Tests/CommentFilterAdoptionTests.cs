@@ -32,12 +32,12 @@ namespace Darling.Tests;
 /// filter hands to the scanner as code, so a comment mentioning the thing being banned becomes an
 /// offender.</para>
 ///
-/// <para><b>The shape is not banned, because three legitimate uses of it exist.</b> Collecting a <c>///</c>
-/// run is not the same act as excluding comments from a code scan — a doc comment IS prefixed on every line,
-/// so the prefix is the definition of the thing being gathered rather than an approximation of it. Reading a
-/// bound off a named file is legitimate too, when the bound is stated and measured. And a filter over SQL
-/// text is not this problem at all, because the C# walk cannot read SQL. So each site is listed with its
-/// reason and the build re-derives the set, the same agreement
+/// <para><b>The shape is not banned, because legitimate uses of it exist.</b> Collecting a <c>///</c> run is
+/// not the same act as excluding comments from a code scan — a doc comment IS prefixed on every line, so the
+/// prefix is the definition of the thing being gathered rather than an approximation of it. Reading a bound
+/// off a named file is legitimate too, when the bound is stated and measured. And a filter over SQL text is
+/// not this problem at all, because the C# walk cannot read SQL. So each site is listed with its reason and
+/// the build re-derives the set, the same agreement
 /// <see cref="CommandDeadlineScannerAdoptionTests"/> holds over the command-timeout family.</para>
 ///
 /// <para><b>The failure direction, since it decides how much this is worth.</b> Every instance #3052 found
@@ -48,6 +48,17 @@ namespace Darling.Tests;
 /// the number nearly produced a wrong verdict about whether that PR touched code. <b>The same filter is loud
 /// when it drives an assertion and silent when it drives a number</b>, and the silent half lives in ad-hoc
 /// review checks that no test can reach. This guard covers the half that is committed.</para>
+///
+/// <para><b>No <c>build.yml</c> filter entry, deliberately.</b> This reads BOTH test projects, so a
+/// <c>Lite.Tests</c>-only change fires <c>lite</c> and not <c>darling</c>, and the "Run Darling tests" step
+/// is skipped. Naming <c>Lite.Tests/**</c> in the <c>darling</c> filter would fix that and also gate the
+/// live-Postgres <c>darling-pg</c> job on all 298 of Lite's test files, which is a real cost for a guard
+/// that reads source. It belongs instead in the category <c>build.yml</c>'s <c>whole-tree-guards</c> job
+/// already exists for — guards whose input is the repository rather than a path, like
+/// <c>FleetIdentifierScrubTests</c> — and that job runs this suite exactly when the build job's step reports
+/// <c>skipped</c>. Note that <c>CrossAppGuardCiGateTests</c> cannot see this reference either way:
+/// its detector keys on <c>Lite/</c> and <c>Darling/</c>, and <c>Lite.Tests</c> is a sibling of <c>Lite</c>
+/// rather than a directory inside it.</para>
 /// </summary>
 public sealed class CommentFilterAdoptionTests
 {
