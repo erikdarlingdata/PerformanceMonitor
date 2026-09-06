@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgDeadlockTools
 {
-    [McpServerTool(Name = "get_pg_deadlocks"), Description("Gets PostgreSQL deadlocks that were reported in the window, newest first, with the victim process, how many sessions were in the cycle, the lock modes and resources involved, and the victim's full statement text. PostgreSQL writes a complete deadlock report to its server log at default settings and needs nothing ENABLED on the target, unlike plan capture - but that is not the same as unsuppressable. log_error_verbosity = terse drops the DETAIL field, which is where the wait graph and every participant's SQL live, so the ERROR line is still logged and this tool still returns nothing. If this comes back empty, check log_error_verbosity on the target (and log_min_messages) before concluding the server does not deadlock; get_pg_database_stats' cumulative deadlock counter is the independent test. Each row is one DISTINCT deadlock, and a deadlock that genuinely recurred appears as a separate row because the participating process IDs differ. times_seen counts how often the collector saw that SAME report, and what a value means depends on the transport. Where the collector reads the log file itself it re-reads an overlapping tail every cycle on purpose, so one report is seen several times and times_seen climbs while it stays in the window. On RDS and Aurora the log API is consume-once, so a report is normally seen once and times_seen normally stays 1: there a low value is the ordinary state and NOT a partial count, so do not read 1 as 'seen once so far, expect more'. It is not guaranteed to be 1 there either - the collector holds its resume position in memory, so a restart re-reads a bounded tail, and a window whose write did not land is offered again - so treat times_seen as a sighting count whose meaning depends on the transport, and never as a count of deadlocks on either. Use get_pg_deadlock_detail with a deadlock_hash for the full wait graph and every participant's SQL.")]
+    [McpServerTool(Name = "get_pg_deadlocks"), Description("Gets PostgreSQL deadlocks that were reported in the window, newest first, with the victim process, how many sessions were in the cycle, the lock modes and resources involved, and the victim's full statement text. PostgreSQL writes a complete deadlock report to its server log at default settings and needs nothing ENABLED on the target, unlike plan capture - but that is not the same as unsuppressable. log_error_verbosity = terse drops the DETAIL field, which is where the wait graph and every participant's SQL live, so the ERROR line is still logged and this tool still returns nothing. If this comes back empty, check log_error_verbosity on the target (and log_min_messages) before concluding the server does not deadlock; get_pg_database_stats' cumulative deadlock counter is the independent test. There is a third precondition and it is the least visible: lc_messages. PostgreSQL translates its own messages under a non-English locale, the SEVERITY LABEL INCLUDED, so a target writing FEHLER: rather than ERROR: matches nothing here and returns the same empty result a quiet server does. get_pg_server_config carries the target's lc_messages (pass include_defaults if it does not appear, because the compiled default is the empty value - and empty is itself inconclusive rather than safe, since the server then takes its language from its own environment, which no query can see). The pg_plan_capture_readiness collector judges it as the message_locale facet. Each row is one DISTINCT deadlock, and a deadlock that genuinely recurred appears as a separate row because the participating process IDs differ. times_seen counts how often the collector saw that SAME report, and what a value means depends on the transport. Where the collector reads the log file itself it re-reads an overlapping tail every cycle on purpose, so one report is seen several times and times_seen climbs while it stays in the window. On RDS and Aurora the log API is consume-once, so a report is normally seen once and times_seen normally stays 1: there a low value is the ordinary state and NOT a partial count, so do not read 1 as 'seen once so far, expect more'. It is not guaranteed to be 1 there either - the collector holds its resume position in memory, so a restart re-reads a bounded tail, and a window whose write did not land is offered again - so treat times_seen as a sighting count whose meaning depends on the transport, and never as a count of deadlocks on either. Use get_pg_deadlock_detail with a deadlock_hash for the full wait graph and every participant's SQL.")]
     public static async Task<string> GetPgDeadlocks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -49,12 +49,18 @@ public sealed class DarlingMcpPgDeadlockTools
                     ?? McpHelpers.Status(
                         "no_deadlocks",
                         $"No deadlock was reported on {resolved.ServerName} in the last {hours_back} "
-                        + "hour(s). Two different things produce that and they are worth telling apart: the "
-                        + "server had no deadlocks, which is the healthy answer; or the log could not be "
-                        + "read, which get_pg_plan_capture_readiness reports on because plan capture reads "
-                        + "the same file the same way. pg_stat_database's cumulative deadlock counter, in "
-                        + "get_pg_database_stats, is the independent check - if it moved and nothing is "
-                        + "here, the log is the problem rather than the server.");
+                        + "hour(s). THREE different things produce that and they are worth telling apart: "
+                        + "the server had no deadlocks, which is the healthy answer; the log could not be "
+                        + "read; or the log was read and PostgreSQL did not write it in English. The "
+                        + "pg_plan_capture_readiness collector judges all three, because plan capture reads "
+                        + "the same file the same way - the last one as its message_locale facet (#3061). "
+                        + "That third cause is the one nothing else hints at: lc_messages translates "
+                        + "PostgreSQL's own messages including the severity label, so a target writing "
+                        + "FEHLER: rather than ERROR: matches nothing and looks exactly like a quiet "
+                        + "server. get_pg_server_config carries the target's lc_messages. "
+                        + "pg_stat_database's cumulative deadlock counter, in get_pg_database_stats, is "
+                        + "the independent check for all three - if it moved and nothing is here, the log "
+                        + "is the problem rather than the server.");
             }
 
             return JsonSerializer.Serialize(new
@@ -121,9 +127,11 @@ public sealed class DarlingMcpPgDeadlockTools
                       ?? McpHelpers.Status(
                           "empty",
                           $"No deadlock graph is stored for {resolved.ServerName}. Either the server had no "
-                          + "deadlocks, which is the healthy answer, or its log could not be read - "
+                          + "deadlocks, which is the healthy answer, or its log could not be read, or it "
+                          + "was read in a language this does not match - PostgreSQL translates its own "
+                          + "messages under a non-English lc_messages, severity label included (#3061). "
                           + "get_pg_database_stats carries pg_stat_database's cumulative deadlock counter, "
-                          + "which tells those apart.")
+                          + "which tells the healthy case from the other two.")
                     : McpHelpers.Status(
                           "empty",
                           $"No deadlock with hash '{deadlock_hash}' is stored for {resolved.ServerName}. A "
