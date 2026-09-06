@@ -2064,6 +2064,43 @@ public sealed class DarlingCollectorRunner
 
                 using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
                 var itemToken = itemBudget?.Token ?? cancellationToken;
+
+                /* #2880: the out-of-band arm. Started BEFORE the open and on its own clock, because the
+                   forensics found the degradation presents at ExecuteReaderAsync as well as in the drain —
+                   the four cheapest collectors' open_ms ran 3x to 152x their own baselines in the body
+                   before each abandoned run — so a watchdog scoped to the drain alone would miss the phase
+                   that names the cause. Inert for every collector that declares no wall-clock budget and for
+                   every non-SQL-Server target; see StallProbeArm.Start.
+
+                   The counting reader is read from the arm's thread without synchronisation, deliberately.
+                   Its counters are plain longs written by the drain's read loop, so a torn or stale read
+                   mis-states a diagnostic figure by at most one row — and putting a lock in the hot read
+                   loop of 66 collectors to serve a once-per-stall sample would be the wrong trade by a wide
+                   margin. */
+                var readWatch = Stopwatch.StartNew();
+                DrainCountingDataReader? countingForProbe = null;
+                using var stallProbeArm = StallProbeArm.Start(
+                    server.Target.Engine,
+                    definition.PerItemWallClockBudget,
+                    observe: () => new StallProbeObservation(
+                        readWatch.ElapsedMilliseconds,
+                        countingForProbe?.RowsRead ?? -1,
+                        countingForProbe?.PayloadBytes ?? -1,
+                        countingForProbe?.LastReadElapsedMs ?? -1),
+                    fire: observation => StallWaitProbeRunner.RunAsync(
+                        _postgres,
+                        server,
+                        definition.Name,
+                        definition.PerItemWallClockBudget!.Value,
+                        observation,
+                        _logger,
+                        cancellationToken),
+                    onDecision: decision => _logger?.LogDebug(
+                        "Stall probe for {Collector} on '{Server}': {Verdict} — {Reason} (#2880)",
+                        definition.Name, server.Config.DisplayName,
+                        decision.Fire ? "firing" : "not firing", decision.Reason),
+                    cancellationToken: cancellationToken);
+
                 try
                 {
                     using var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
@@ -2115,6 +2152,14 @@ public sealed class DarlingCollectorRunner
                        collector cannot forget to count, and the counters ride the SAME drainWatch so the
                        last-read reading and the drain figure it is subtracted from share one clock. */
                     var counting = new DrainCountingDataReader(reader, drainWatch);
+
+                    /* #2880: hand the arm the live counters. Assigned here rather than passed in because the
+                       arm is started before the open, where this reader does not exist yet — until then the
+                       arm observes -1, which Decide reads as "still executing" and fires on, since a read
+                       still inside ExecuteReaderAsync at a quarter of its budget is exactly what is worth a
+                       sample. */
+                    countingForProbe = counting;
+
                     try
                     {
                         rows = await definition.ReadAsync(counting, context, itemToken);
@@ -2146,6 +2191,14 @@ public sealed class DarlingCollectorRunner
                         collectionNote = probes.Note;
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }
+
+                    /* #2880: disarm the moment the READ is over rather than when this branch ends.
+                       The `using` above guarantees disposal on the exception paths, but it would not
+                       run until after the storage and watermark phases — long enough for a probe to
+                       fire against a target the sweep has already stopped reading from, and to record
+                       trigger evidence that included time no reader was waiting on. Dispose is
+                       idempotent for exactly this pairing. */
+                    stallProbeArm.Dispose();
                 }
                 catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
                 {
