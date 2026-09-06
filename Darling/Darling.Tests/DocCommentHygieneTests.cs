@@ -410,10 +410,12 @@ public sealed class DocCommentHygieneTests
     /// census over both.
     ///
     /// <para><b>Why cached.</b> A scan reads and comment-strips every <c>.cs</c> file in the repository,
-    /// and eleven members here plus one nineteen-row <c>[Theory]</c> need the same answer — thirty walks of
-    /// the same unchanged tree per run, which is most of this class's cost, and the review bot on #3086
-    /// counted them before anyone timed them. The result is a pure function of on-disk state and nothing in
-    /// a test run changes that state. Measured on the local harness: 34s to 3.5s.</para>
+    /// and every real-tree pin here needs the same answer, one of them once per row of a
+    /// <c>[Theory]</c> — dozens of walks of the same unchanged tree per run, which was most of this class's
+    /// cost. Deliberately not stated as a count: it is a number nothing derives, and this class already
+    /// carries one sentence rewritten for going stale by exactly that. The result is a pure function of
+    /// on-disk state and nothing in a test run changes that state. Measured on the local harness, same
+    /// suite either way: 34.2s to 3.4s.</para>
     ///
     /// <para><b>What deliberately does NOT come through here.</b> Every pin that drives the sweep with an
     /// ARRANGED population calls <see cref="BuildCrefCensus"/> directly, because a census built from a
