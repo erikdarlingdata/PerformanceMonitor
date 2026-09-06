@@ -36,7 +36,17 @@ namespace Darling.Tests;
 /// question this screen answers — and the registry is the only artifact that records it in those terms,
 /// beside the prose explaining why those panels sit together. The XAML and the load path are both
 /// implementations of that decision, so "they disagree" is not the finding; "neither of them is what was
-/// declared" is.</para>
+/// declared" is. #3048 is what that costs: it was resolved through five circumstantial signals — the load
+/// path, a doc comment in another file, subject matter, a spacer-row convention, a XAML comment — which
+/// reached the right answer the long way while the authoritative source sat unread.</para>
+///
+/// <para><b>The class nothing else can see, measured rather than argued.</b>
+/// <c>PgPanelTabOwnershipTests</c> reds on all three of those historical defects, because in each of them
+/// the two implementations disagreed with EACH OTHER. Move the deadlock pair onto Vacuum in the XAML AND
+/// move the <c>LoadPgDeadlocksAsync</c> call into the Vacuum load path, and it goes green: the two agree,
+/// and they are both wrong. That mutation reds only the two rules here, naming <c>pg_deadlocks</c>, the tab
+/// the registry gives it and the tab it moved to. A panel can be consistently in the wrong place, and
+/// consistency is exactly what the other pin measures.</para>
 ///
 /// <para><b>Collector to panel, and why not by name.</b> Each panel block is loaded by a
 /// <c>LoadPg…Async</c> method that names its own collector — <c>PgCollectorIsGatedOff("pg_deadlocks")</c> to
