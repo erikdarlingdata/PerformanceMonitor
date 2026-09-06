@@ -639,8 +639,7 @@ public sealed class AlertsConfig
     /// refresh slot — rather than a literal, so it moves with <c>RefreshPhaseStepMinutes</c>. It computed to
     /// the same 25 this shipped with; see that constant for why the equality was previously an accident and
     /// what the derivation guarantees. V57's column default is the already-applied twin of this seed and
-    /// cannot move without a rung, which
-    /// DarlingSelfAlertTests pins.</para></summary>
+    /// cannot move without a rung, which DarlingSelfAlertTests pins.</para></summary>
     [JsonPropertyName("storeJobCadenceWarnPercent")]
     public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
 
