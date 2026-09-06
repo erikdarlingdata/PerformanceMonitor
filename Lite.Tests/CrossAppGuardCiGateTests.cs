@@ -125,6 +125,57 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>
+    /// Both MSBuild spellings, because MSBuild accepts both and the element one is the common form.
+    ///
+    /// <para><c>HintPath</c> is item METADATA, and metadata may be written as an attribute or as a child
+    /// element — the element form being what Visual Studio emits for a legacy <c>&lt;Reference&gt;</c>.
+    /// Reading only the attribute form would be #3063 recurring one attribute over: the scan would
+    /// advertise a population wider than the one it has, which is the actual shape of that defect.
+    /// <c>Include</c>, <c>Update</c> and <c>Import</c>'s <c>Project</c> are item operations rather than
+    /// metadata and have no element spelling.</para>
+    ///
+    /// <para>Fed the shipped matchers rather than a retyped copy, so the pin cannot pass while the code
+    /// drifts underneath it.</para>
+    /// </summary>
+    [Fact]
+    public void TheMsBuildMatchers_ReadBothSpellings()
+    {
+        const string Xml = """
+            <Project>
+              <ItemGroup>
+                <Compile Include="..\Other\A.cs" Link="A.cs" />
+                <None Update='..\Other\B.xml' />
+                <Reference Include="SomeLib">
+                  <HintPath>..\Other\bin\SomeLib.dll</HintPath>
+                </Reference>
+                <Reference Include="Other" HintPath="..\Other\C.dll" />
+                <Compile Remove="..\Other\Removed.cs" />
+              </ItemGroup>
+              <Import Project="..\Other\D.props" />
+            </Project>
+            """;
+
+        Assert.Equal(
+            new[]
+            {
+                @"..\Other\A.cs",
+                @"..\Other\B.xml",
+                "SomeLib",
+                "Other",
+                @"..\Other\C.dll",
+                @"..\Other\D.props",
+
+                /* The element spelling is collected after the attributes, and is the case the attribute
+                   matcher alone cannot see at all. */
+                @"..\Other\bin\SomeLib.dll",
+            },
+            MsBuildPaths(Xml));
+
+        /* Remove= is absent by design: dropping an item from a glob is not a read of it. */
+        Assert.DoesNotContain(@"..\Other\Removed.cs", MsBuildPaths(Xml));
+    }
+
+    /// <summary>
     /// A reference counts only when the path it resolved to spells it back, on every host.
     ///
     /// <para><c>Directory.Exists</c> answers according to the HOST's path rules, and Windows trims
@@ -389,6 +440,16 @@ public class CrossAppGuardCiGateTests
         "\\b(?:Include|Update|Project|HintPath)\\s*=\\s*(?:\"(?<dq>[^\"]*)\"|'(?<sq>[^']*)')",
         RegexOptions.Compiled);
 
+    /* HintPath is item METADATA, and MSBuild lets metadata be written as an attribute OR as a child
+       element — the element form being what Visual Studio emits for a legacy <Reference>. Reading only
+       the attribute spelling would be this issue recurring one attribute over: a cross-app assembly
+       reference written the ordinary way, silently invisible. Include, Update and Import's Project are
+       item operations rather than metadata and have no element spelling, so this one matcher covers the
+       whole difference between the two grammars. */
+    private static readonly Regex MsBuildPathElement = new(
+        "<HintPath\\s*>([^<]*)</HintPath\\s*>",
+        RegexOptions.Compiled);
+
     /// <summary>Repo-relative paths naming <paramref name="otherApp"/> that a test in
     /// <paramref name="project"/> reads, paired with a concrete file path to test coverage against.</summary>
     private static CrossAppScan Scan(string repo, string project, string otherApp)
@@ -542,6 +603,14 @@ public class CrossAppGuardCiGateTests
         return (probed, found);
     }
 
+    /// <summary>Every path-bearing value one MSBuild file's XML names, in both spellings MSBuild
+    /// accepts. Shared by the walk and by the pin that reads it back, so the pin cannot drift from what
+    /// ships.</summary>
+    private static IEnumerable<string> MsBuildPaths(string xml) =>
+        MsBuildPathAttribute.Matches(xml)
+            .Select(m => m.Groups["dq"].Success ? m.Groups["dq"].Value : m.Groups["sq"].Value)
+            .Concat(MsBuildPathElement.Matches(xml).Select(m => m.Groups[1].Value.Trim()));
+
     /// <summary>The <paramref name="otherApp"/> paths one MSBuild file names, repo-rooted into
     /// <paramref name="seen"/>.</summary>
     private static void ReadMsBuildPaths(
@@ -556,10 +625,8 @@ public class CrossAppGuardCiGateTests
         var origin = Rooted(repo, file);
         var thisFileDir = Path.GetDirectoryName(file)! + Path.DirectorySeparatorChar;
 
-        foreach (Match m in MsBuildPathAttribute.Matches(text))
+        foreach (var raw in MsBuildPaths(text))
         {
-            var raw = m.Groups["dq"].Success ? m.Groups["dq"].Value : m.Groups["sq"].Value;
-
             /* The two properties a hand-written cross-app include actually uses. */
             var expanded = raw
                 .Replace("$(MSBuildThisFileDirectory)", thisFileDir, StringComparison.Ordinal)
