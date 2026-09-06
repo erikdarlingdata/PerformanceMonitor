@@ -15,6 +15,7 @@ using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Darling.Tests;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using Xunit;
@@ -93,30 +94,30 @@ public sealed class AnalysisPassTokenThreadingTests
     {
         var offenders = new List<string>();
 
-        foreach (var (file, lines) in AnalysisSources())
+        foreach (var (file, code, source) in AnalysisSources())
         {
             var enclosing = string.Empty;
 
-            for (var i = 0; i < lines.Length; i++)
+            for (var i = 0; i < code.Length; i++)
             {
-                var declaration = s_memberDeclaration.Match(lines[i]);
+                var declaration = s_memberDeclaration.Match(code[i]);
                 if (declaration.Success)
                 {
                     enclosing = declaration.Groups["name"].Value;
                 }
 
-                if (!s_untokenedStoreCall.IsMatch(lines[i]))
+                if (!s_untokenedStoreCall.IsMatch(code[i]))
                 {
                     continue;
                 }
 
                 if (s_exempt.ContainsKey(enclosing)
-                    && DocBlockAbove(lines, IndexOfDeclaration(lines, i)).Contains(ExemptionMarker, StringComparison.Ordinal))
+                    && DocBlockAbove(source, IndexOfDeclaration(code, i)).Contains(ExemptionMarker, StringComparison.Ordinal))
                 {
                     continue;
                 }
 
-                offenders.Add($"{file}:{i + 1} in {enclosing}(): {lines[i].Trim()}");
+                offenders.Add($"{file}:{i + 1} in {enclosing}(): {source[i].Trim()}");
             }
         }
 
@@ -138,25 +139,25 @@ public sealed class AnalysisPassTokenThreadingTests
         var untokenedBy = new Dictionary<string, int>(StringComparer.Ordinal);
         var markedMethods = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var (_, lines) in AnalysisSources())
+        foreach (var (_, code, source) in AnalysisSources())
         {
             var enclosing = string.Empty;
             var enclosingAt = -1;
 
-            for (var i = 0; i < lines.Length; i++)
+            for (var i = 0; i < code.Length; i++)
             {
-                var declaration = s_memberDeclaration.Match(lines[i]);
+                var declaration = s_memberDeclaration.Match(code[i]);
                 if (declaration.Success)
                 {
                     enclosing = declaration.Groups["name"].Value;
                     enclosingAt = i;
-                    if (DocBlockAbove(lines, enclosingAt).Contains(ExemptionMarker, StringComparison.Ordinal))
+                    if (DocBlockAbove(source, enclosingAt).Contains(ExemptionMarker, StringComparison.Ordinal))
                     {
                         markedMethods.Add(enclosing);
                     }
                 }
 
-                if (s_untokenedStoreCall.IsMatch(lines[i]) && enclosingAt >= 0)
+                if (s_untokenedStoreCall.IsMatch(code[i]) && enclosingAt >= 0)
                 {
                     untokenedBy[enclosing] = untokenedBy.TryGetValue(enclosing, out var n) ? n + 1 : 1;
                 }
@@ -188,18 +189,18 @@ public sealed class AnalysisPassTokenThreadingTests
             @"^\s*catch\s*\(\s*Exception\s+ex\s*\)\s*when\s*\(\s*!AnalysisAbandon\.IsExpected\(",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-        foreach (var (file, lines) in AnalysisSources())
+        foreach (var (file, code, source) in AnalysisSources())
         {
             if (!Path.GetFileName(file).StartsWith("DuckDbFactCollector.", StringComparison.Ordinal))
             {
                 continue;
             }
 
-            for (var i = 0; i < lines.Length; i++)
+            for (var i = 0; i < code.Length; i++)
             {
-                if (opensCatch.IsMatch(lines[i]) && !classified.IsMatch(lines[i]))
+                if (opensCatch.IsMatch(code[i]) && !classified.IsMatch(code[i]))
                 {
-                    bare.Add($"{file}:{i + 1}: {lines[i].Trim()}");
+                    bare.Add($"{file}:{i + 1}: {source[i].Trim()}");
                 }
             }
         }
@@ -213,7 +214,7 @@ public sealed class AnalysisPassTokenThreadingTests
            straight to the pass, which is the same outcome by a shorter route. */
         Assert.Equal(27, AnalysisSources()
             .Where(s => Path.GetFileName(s.File).StartsWith("DuckDbFactCollector.", StringComparison.Ordinal))
-            .SelectMany(s => s.Lines)
+            .SelectMany(s => s.Code)
             .Count(line => classified.IsMatch(line)));
     }
 
@@ -362,7 +363,11 @@ public sealed class AnalysisPassTokenThreadingTests
         return 0;
     }
 
-    /// <summary>The contiguous <c>///</c> block immediately above a declaration, as one string.</summary>
+    /// <summary>The contiguous <c>///</c> block immediately above a declaration, as one string. Reads the
+    /// file AS WRITTEN, not the walked code: the exemption marker lives in a comment, so stripping comments
+    /// is exactly what must not happen here. The <c>///</c> prefix is the right test for the same reason —
+    /// a doc comment is prefixed on every line by definition, which is what a block comment's body in this
+    /// codebase is not.</summary>
     private static string DocBlockAbove(string[] lines, int declarationLine)
     {
         var doc = new List<string>();
@@ -374,7 +379,18 @@ public sealed class AnalysisPassTokenThreadingTests
         return string.Join("\n", doc);
     }
 
-    private static IEnumerable<(string File, string[] Lines)> AnalysisSources()
+    /// <summary>
+    /// Two views of each file, line-for-line aligned. <c>Code</c> is
+    /// <c>CSharpSourceWalker.StripCommentsAndStrings</c>'s output and is what every regex here reads, so a
+    /// commented-out call and a doc comment naming <c>ReadAsync()</c> are neither offenders nor counted.
+    /// <c>Source</c> is the file as written, and exists for the two things that are ABOUT the prose:
+    /// <see cref="DocBlockAbove"/>, which reads the exemption marker out of a doc comment, and the offender
+    /// messages, which should quote what someone will find when they open the file.
+    ///
+    /// <para>The alignment is what makes one index serve both: the walk blanks comments and literal text to
+    /// spaces and leaves every newline in place, so line <c>i</c> is line <c>i</c> in either view.</para>
+    /// </summary>
+    private static IEnumerable<(string File, string[] Code, string[] Source)> AnalysisSources()
     {
         var files = Directory.GetFiles(AnalysisDirectory(), "*.cs", SearchOption.TopDirectoryOnly);
         Assert.NotEmpty(files);
@@ -382,8 +398,12 @@ public sealed class AnalysisPassTokenThreadingTests
         foreach (var file in files.OrderBy(f => f, StringComparer.Ordinal))
         {
             /* The working copy is CRLF; split on the LF so a line never carries a stray CR. */
-            yield return (Path.GetFileName(file),
-                File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'));
+            var source = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+
+            yield return (
+                Path.GetFileName(file),
+                CSharpSourceWalker.StripCommentsAndStrings(source).Split('\n'),
+                source.Split('\n'));
         }
     }
 

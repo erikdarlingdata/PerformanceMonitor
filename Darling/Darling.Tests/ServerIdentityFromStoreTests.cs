@@ -135,10 +135,16 @@ public sealed class ServerIdentityFromStoreTests
         var root = FindRepoRoot();
         Assert.True(root is not null, "repo root not found -- the source pin cannot run");
 
-        var offenders = File.ReadAllLines(Path.Combine(root!, relativePath))
+        /* Comments name the helper on purpose (the cadence-jitter doc explains what its input is), so the
+           scan reads CODE only. Walked rather than filtered by line prefix: a `///` filter sees doc comments
+           and nothing else, and a block comment's continuation lines in this codebase carry no asterisk, so
+           an explanatory note about the helper reads as a call to it. Line numbers still line up because the
+           walk preserves every newline. */
+        var offenders = CSharpSourceWalker
+            .StripCommentsAndStrings(File.ReadAllText(Path.Combine(root!, relativePath)))
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n')
             .Select((line, index) => (Line: line, Number: index + 1))
-            /* Doc comments name the helper on purpose (the cadence-jitter doc explains what its input is). */
-            .Where(l => !l.Line.TrimStart().StartsWith("///", StringComparison.Ordinal))
             .Where(l => l.Line.Contains("GetDeterministicHashCode(", StringComparison.Ordinal))
             .Select(l => $"{relativePath}:{l.Number}")
             .ToList();
@@ -176,10 +182,11 @@ public sealed class ServerIdentityFromStoreTests
             .SelectMany(dir => Directory.EnumerateFiles(Path.Combine(root!, dir), "*.cs", SearchOption.AllDirectories))
             .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
                         && !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(path => File.ReadAllLines(path)
-                .Any(line => !line.TrimStart().StartsWith("///", StringComparison.Ordinal)
-                          && !line.TrimStart().StartsWith("*", StringComparison.Ordinal)
-                          && line.Contains("GetDeterministicHashCode(", StringComparison.Ordinal)))
+            /* Same walk, same reason as the pin above: a block comment naming the helper would otherwise
+               mint a fourth allocation site out of prose. */
+            .Where(path => CSharpSourceWalker
+                .StripCommentsAndStrings(File.ReadAllText(path))
+                .Contains("GetDeterministicHashCode(", StringComparison.Ordinal))
             .Select(path => Path.GetRelativePath(root!, path).Replace(Path.DirectorySeparatorChar, '/'))
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
