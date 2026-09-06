@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -128,15 +129,18 @@ public sealed class TsqlConventionGuardTests
                 Uncovered: new[] { UnabbreviatedTypes },
                 Phrases: new[] { "lowercase", "never abbreviated", "`integer`", "`nvarchar(max)`", "`nvarchar(MAX)`" },
                 Note: "The CASE half is checked. The ABBREVIATION half is not, and the reason is remediation "
-                    + "cost rather than detectability: `int` where `integer` is meant measured at 33 sites in "
-                    + "7 files when this landed, all of them inside T-SQL that runs against monitored "
-                    + "production servers, and one of them is an sp_executesql parameter declaration "
+                    + "cost rather than detectability: `int` where `integer` is meant stands at 33 sites in 7 "
+                    + "files, all of them inside T-SQL that runs against monitored production servers, and "
+                    + "two of them are sp_executesql parameter declarations "
                     + "(`N'@h varbinary(64), @stmt_start int, @stmt_end int'`) that nothing in this repository "
-                    + "executes. Rewriting 33 live query strings belongs in a change whose subject is that "
-                    + "rewrite. Carrying them in a waiver list instead was considered and rejected: the key "
-                    + "would have to collapse repeated spellings within one member, so a 34th `CONVERT(int, "
-                    + "NULL)` beside the ten already there would satisfy it — a guard claiming the rule while "
-                    + "under-covering it, which is exactly the shape #3081 was filed about."),
+                    + "executes. Rewriting live query strings belongs in a change whose subject is that "
+                    + "rewrite. That figure is DERIVED and pinned by "
+                    + "TheAbbreviationScopeNote_CountsTheSitesItClaims rather than written down once, so it "
+                    + "cannot quietly stop describing the tree — and when it reaches zero that pin says to "
+                    + "move this rule to the Covered side. A waiver list was considered and rejected: its key "
+                    + "would have to collapse repeated spellings within one member, so a 34th "
+                    + "`CONVERT(int, NULL)` beside the ten already there would satisfy it — a guard claiming "
+                    + "the rule while under-covering it, which is the shape #3081 was filed about."),
 
             ["Object names"] = new(
                 Covered: Array.Empty<string>(),
@@ -226,9 +230,10 @@ public sealed class TsqlConventionGuardTests
     /// of the same idea: a per-SITE requirement derived from the catalog, which a total can never give.</para>
     ///
     /// <para><b>There is deliberately no waiver list.</b> The nine pre-existing violations of the covered
-    /// subset — three <c>COUNT(*)</c>, one <c>--</c>, five uppercase data types — were fixed in the change that
-    /// added this file, so the covered subset measures zero on the tree with no exceptions carried. A waiver
-    /// mechanism nobody needs is a mechanism the next exception takes for granted.</para>
+    /// subset — three <c>COUNT(*)</c>, one <c>--</c> comment, three type names spelled in capitals and two
+    /// <c>(MAX)</c> length specs — were fixed in the change that added this file, so the covered subset
+    /// measures zero on the tree with no exceptions carried. A waiver mechanism nobody needs is a mechanism
+    /// the next exception takes for granted.</para>
     /// </summary>
     [Fact]
     public void NoTsqlStatementViolatesACoveredConvention()
@@ -457,6 +462,46 @@ public sealed class TsqlConventionGuardTests
             RuleBullets.Values.SelectMany(b => b.Uncovered).OrderBy(r => r, StringComparer.Ordinal).ToArray());
 
         Assert.Empty(CoveredRules.Intersect(UncoveredRules, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// The abbreviation rule is out of scope on a COST, and a cost stated once is a claim that goes stale by
+    /// exactly the mechanism this guard exists to stop. So the figure in
+    /// <see cref="RuleBullets"/>'s <c>Data types</c> note is derived from the same population the enforced
+    /// checks read, and compared to what the note says.
+    ///
+    /// <para><b>The direction that matters is DOWNWARD.</b> If those 33 sites get fixed, the reason for
+    /// leaving the rule out disappears and this pin says so — a rule left uncovered because remediation was
+    /// expensive, after the remediation, is just an unguarded rule. The detector for it lives here and runs;
+    /// it is <see cref="Findings"/> that deliberately does not emit it.</para>
+    ///
+    /// <para>Non-vacuous in both halves: a scan that found nothing reds on the floor rather than agreeing
+    /// with a note that had also drifted to zero, and a note whose figures stopped being parseable reds
+    /// rather than comparing nothing.</para>
+    /// </summary>
+    [Fact]
+    public void TheAbbreviationScopeNote_CountsTheSitesItClaims()
+    {
+        var (sites, files) = AbbreviatedTypeSites();
+
+        Assert.True(
+            sites > 0,
+            "no abbreviated data type is left in the corpus. That is the good outcome and it makes the "
+            + "scope note wrong: move UnabbreviatedTypes from the Data types bullet's Uncovered side to its "
+            + "Covered side, emit it from Findings, and give it a hazard fixture. If instead the count is "
+            + "zero because the scan broke, NoTsqlStatementViolatesACoveredConvention's floors will say so.");
+
+        var note = RuleBullets["Data types"].Note;
+        var claim = Regex.Match(note, @"(?<sites>\d+) sites in (?<files>\d+) files");
+
+        Assert.True(
+            claim.Success,
+            "the Data types note no longer states its cost as \"<n> sites in <n> files\", so nothing holds "
+            + "the figure it rests on. Keep the phrasing parseable, or drop the number from the note and "
+            + "delete this pin with it. Note text: " + note);
+
+        Assert.Equal(sites, int.Parse(claim.Groups["sites"].Value, CultureInfo.InvariantCulture));
+        Assert.Equal(files, int.Parse(claim.Groups["files"].Value, CultureInfo.InvariantCulture));
     }
 
     /// <summary>
@@ -956,6 +1001,56 @@ public sealed class TsqlConventionGuardTests
         }
 
         return findings;
+    }
+
+    /// <summary>
+    /// <c>int</c> where <c>CONTRIBUTING.md</c> says <c>integer</c> — the one rule whose detector lives here
+    /// and whose findings <see cref="Findings"/> deliberately does not emit. Kept so the out-of-scope
+    /// decision rests on a measurement that is re-taken on every run rather than on a number somebody wrote
+    /// down once, and so switching the rule on later is a one-line change instead of a rediscovery.
+    ///
+    /// <para><c>int</c> is the only abbreviation the bullet's own examples name and the only one this corpus
+    /// contains; <c>dec</c> for <c>decimal</c> and <c>double precision</c> for <c>float</c> are the others
+    /// T-SQL accepts, and neither appears. That is a stated bound on the FIGURE, not on the rule.</para>
+    /// </summary>
+    private static readonly Regex AbbreviatedTypeUse = new(
+        @"(?<![A-Za-z0-9_@#$.])int(?![A-Za-z0-9_])",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>How many abbreviated data types the corpus holds, and in how many files. Reads the SAME
+    /// population and the SAME code view as the enforced checks, so the cost recorded for leaving the rule
+    /// out is the cost the rule would actually find.</summary>
+    private static (int Sites, int Files) AbbreviatedTypeSites()
+    {
+        var sites = 0;
+        var files = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var (_, roots, _) in ScannedTrees)
+        {
+            foreach (var path in SourceFiles(roots))
+            {
+                foreach (var (_, body) in CSharpSourceWalker.StringLiteralBodies(File.ReadAllText(path)))
+                {
+                    if (!IsTsqlStatement(body))
+                    {
+                        continue;
+                    }
+
+                    var view = Blank(
+                        CodeAndDynamicSql(body, SpanKinds(body)),
+                        TypeNameClauseCollisions);
+                    var found = AbbreviatedTypeUse.Matches(view).Count;
+
+                    if (found > 0)
+                    {
+                        sites += found;
+                        files.Add(path);
+                    }
+                }
+            }
+        }
+
+        return (sites, files.Count);
     }
 
     private static bool IsLowercase(string token) =>
