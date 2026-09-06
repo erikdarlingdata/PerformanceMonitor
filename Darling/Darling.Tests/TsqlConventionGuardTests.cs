@@ -1114,7 +1114,9 @@ public sealed class TsqlConventionGuardTests
     /// and <c>foreach</c> are not member names in any C# program, so a label that is one is wrong without
     /// anything having to agree about how members are found. <see cref="Unknown"/> is the other arm, and it
     /// is the resolver's own admission — it is what a shape the declaration regex cannot read resolves to,
-    /// which is why the regex is allowed to be narrow.</para>
+    /// which is why that regex is allowed to be narrow. The two arms bracket the resolver from both sides:
+    /// one refuses a wrong answer, the other refuses no answer, and there is no third thing it can
+    /// return.</para>
     /// </summary>
     [Fact]
     public void EveryTsqlLiteralInTheCorpus_IsAttributedToADeclaredMember()
@@ -1144,7 +1146,7 @@ public sealed class TsqlConventionGuardTests
                     map ??= MemberMapOf(text);
                     var member = EnclosingMember(map, start);
 
-                    if (member == Unknown || CSharpStatementKeywords.Contains(member))
+                    if (member == Unknown || CSharpKeywords.Contains(member))
                     {
                         offenders.Add(
                             $"{Path.GetRelativePath(repo, path).Replace('\\', '/')}:{LineOf(text, start)} "
@@ -1173,15 +1175,33 @@ public sealed class TsqlConventionGuardTests
     }
 
     /// <summary>
-    /// Statement keywords, which no member can be named. The independent half of the assertion above:
-    /// it agrees with nothing in the resolver, so it cannot pass because the resolver and the check make
-    /// the same mistake. Every one of these was a real label on the tree as it shipped except where noted.
+    /// Every C# reserved keyword, none of which can be an identifier and therefore none of which can be a
+    /// member name.
+    ///
+    /// <para><b>The independent half of the assertion above.</b> It agrees with nothing in the resolver, so
+    /// it cannot pass by the resolver and the check making the same mistake — which a second derivation of
+    /// "what are this file's members" would be free to do. The whole reserved set rather than the statement
+    /// keywords that were actually observed (<c>if</c>, <c>catch</c>, <c>foreach</c>): a resolver that
+    /// starts returning a MODIFIER or a built-in type name is the same defect one token over, and
+    /// <c>readonly</c> is the measured instance — dropping the "a parameter list directly follows the
+    /// name" test in <see cref="DeclaredName"/> makes a tuple-typed field resolve to <c>readonly</c>, which
+    /// a list of statement keywords would have let through.</para>
     /// </summary>
-    private static readonly HashSet<string> CSharpStatementKeywords = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> CSharpKeywords = new(StringComparer.Ordinal)
     {
-        "if", "else", "for", "foreach", "while", "do", "switch", "case", "default", "try", "catch",
-        "finally", "using", "lock", "return", "throw", "new", "checked", "unchecked", "fixed", "await",
-        "yield", "break", "continue", "goto", "var", "get", "set", "init", "add", "remove", "when",
+        "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char", "checked", "class",
+        "const", "continue", "decimal", "default", "delegate", "do", "double", "else", "enum", "event",
+        "explicit", "extern", "false", "finally", "fixed", "float", "for", "foreach", "goto", "if",
+        "implicit", "in", "int", "interface", "internal", "is", "lock", "long", "namespace", "new",
+        "null", "object", "operator", "out", "override", "params", "private", "protected", "public",
+        "readonly", "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc", "static",
+        "string", "struct", "switch", "this", "throw", "true", "try", "typeof", "uint", "ulong",
+        "unchecked", "unsafe", "ushort", "using", "virtual", "void", "volatile", "while",
+
+        /* Contextual, and every one of them can begin a statement or an accessor, so a label that is one
+           is a scan that stopped at the wrong token rather than a member with an unusual name. */
+        "add", "async", "await", "get", "init", "partial", "record", "remove", "required", "set", "var",
+        "when", "where", "yield",
     };
 
     /// <summary>
@@ -1330,6 +1350,17 @@ public sealed class TsqlConventionGuardTests
             {
                 private const string Preceding = "SELECT 1 FROM sys.databases;";
 
+                private static readonly (string Name, string Sql)[] Table =
+                {
+                    ("first", "SELECT 5 FROM sys.tables;"),
+                };
+
+                public string Constrained<T>(T value)
+                    where T : class
+                {
+                    return "SELECT 6 FROM sys.types;" + value?.ToString();
+                }
+
                 public string First(string database)
                 {
                     const string sql = "SELECT 2 FROM sys.objects;";
@@ -1364,7 +1395,7 @@ public sealed class TsqlConventionGuardTests
         /* Both members were read, and read as members — a map that resolved neither would satisfy every
            equality below by returning <unknown> twice, which is not the same answer. */
         Assert.Equal(
-            new[] { "First", "Preceding", "Second" },
+            new[] { "Constrained", "First", "Preceding", "Second", "Table" },
             map.Declarations.Where(d => d.Kind == DeclarationKind.Member)
                             .Select(d => d.Name)
                             .OrderBy(n => n, StringComparer.Ordinal)
@@ -1387,6 +1418,20 @@ public sealed class TsqlConventionGuardTests
 
         /* And below all four of them at once, which no single real site arranges. */
         Assert.Equal("Second", EnclosingMember(map, source.IndexOf("SELECT 4", StringComparison.Ordinal)));
+
+        /* A TUPLE-TYPED field, whose first ( belongs to the type rather than to a parameter list. This is
+           the shape that decides how the name is read at all: "the identifier before the first paren"
+           answers readonly here, and readonly is a modifier, not a member. ScannedTrees and
+           DefinitionsWithoutSql in this very file are both this shape. */
+        Assert.Equal("Table", EnclosingMember(map, source.IndexOf("SELECT 5", StringComparison.Ordinal)));
+
+        /* A GENERIC member with a constraint, where the parameter list follows the > that closed the type
+           parameters rather than the name itself. Left unhandled the scan reads past the parameter list
+           into the constraint and answers class. Nine members in the scanned trees carry a where-clause,
+           so the shape is real; none of them holds T-SQL, which is why it is arranged here. */
+        Assert.Equal(
+            "Constrained",
+            EnclosingMember(map, source.IndexOf("SELECT 6", StringComparison.Ordinal)));
 
         /* The difference. Move the same literal text from the second member into the first and the answer
            has to follow it; an answer driven by the nearest name above would not move, because the names
@@ -2282,9 +2327,17 @@ public sealed class TsqlConventionGuardTests
     /// and before <c>=</c> on a field. A single regex for all three has to guess which <c>(</c> it is
     /// looking at, and <c>ScannedTrees</c> is the counter-example that decides it — a
     /// <c>(string, string[], string)[]</c> tuple type whose FIRST <c>(</c> is part of the type, so "the
-    /// identifier before the first paren" reads <c>readonly</c>. Here a <c>(</c> only ends the scan when it
-    /// directly follows an identifier, which is what a parameter list does and what a tuple type does
-    /// not.</para>
+    /// identifier before the first paren" reads <c>readonly</c>. The scan tells them apart by position
+    /// rather than by shape: a type's parentheses come before any identifier has been read, a parameter
+    /// list's come after one.</para>
+    ///
+    /// <para><b>Every branch here is load-bearing, which took measuring rather than reasoning.</b> An
+    /// earlier draft also required the <c>(</c> to follow the name with only whitespace between, and moved
+    /// the name's end onto the <c>&gt;</c> that closed a generic argument list so that a generic method
+    /// would still qualify. Both were removed after dumping all 20,308 declarations in the scanned trees
+    /// with and without them and diffing: identical, every name, every file. They were a pair that only
+    /// existed to cancel each other out, and no mutation of either one could red a test — which is the
+    /// tell.</para>
     /// </summary>
     private static (string Name, DeclarationKind Kind) DeclaredName(string code, int from)
     {
@@ -2298,7 +2351,6 @@ public sealed class TsqlConventionGuardTests
         }
 
         string? last = null;
-        var lastEnd = -1;
         var paren = 0;
         var bracket = 0;
         var angle = 0;
@@ -2319,7 +2371,6 @@ public sealed class TsqlConventionGuardTests
                 if (paren == 0 && bracket == 0 && angle == 0)
                 {
                     last = code[i..j];
-                    lastEnd = j;
                 }
 
                 i = j - 1;
@@ -2329,11 +2380,17 @@ public sealed class TsqlConventionGuardTests
             switch (c)
             {
                 case '(':
-                    /* A parameter list directly follows the name; a tuple type does not follow one at
-                       all, and a generic method's name is followed by the >  that closed its type
-                       parameters — which is why lastEnd moves onto that > below. */
-                    if (paren == 0 && bracket == 0 && angle == 0 && last is not null
-                        && code.AsSpan(lastEnd, i - lastEnd).IsWhiteSpace())
+                    /* A parameter list ends the name; a TYPE's parentheses do not, and the difference is
+                       that a type's come before any identifier has been read. That is the whole reason
+                       this is a scan and not a regex — ScannedTrees and DefinitionsWithoutSql in this file
+                       are (string, string[], string)[] tuples whose first ( belongs to the type, so
+                       "the identifier before the first paren" answers readonly.
+
+                       It has to return here rather than fall through to = / { / ; : a generic member's
+                       constraint clause sits between the parameter list and the body, and where T : class
+                       is three more depth-zero identifiers. Constrained in
+                       TheResolver_AttributesByScope_NotByTheNearestNameAbove is the pin. */
+                    if (paren == 0 && bracket == 0 && angle == 0 && last is not null)
                     {
                         return (last, DeclarationKind.Member);
                     }
@@ -2353,9 +2410,13 @@ public sealed class TsqlConventionGuardTests
                     bracket--;
                     break;
 
+                /* Type arguments, tracked so a ( or a ; inside one cannot end the name — Func<(int, int)>
+                   is the shape, and TheResolver_AttributesByScope_NotByTheNearestNameAbove reds without
+                   this on the plainer Dictionary<,> form. Only opened directly after an identifier, so a
+                   comparison operator in an initialiser cannot open one; a stray > cannot drive the depth
+                   negative and strand every check below it. */
                 case '<':
-                    if (paren == 0 && bracket == 0 && angle == 0 && last is not null
-                        && code.AsSpan(lastEnd, i - lastEnd).IsWhiteSpace())
+                    if (paren == 0 && bracket == 0 && angle == 0 && last is not null)
                     {
                         angle++;
                     }
@@ -2366,11 +2427,6 @@ public sealed class TsqlConventionGuardTests
                     if (angle > 0)
                     {
                         angle--;
-
-                        if (angle == 0)
-                        {
-                            lastEnd = i + 1;
-                        }
                     }
 
                     break;
@@ -2460,9 +2516,17 @@ public sealed class TsqlConventionGuardTests
     /// <summary>
     /// The member a literal belongs to: the innermost member declaration whose range CONTAINS the offset.
     ///
-    /// <para>Containment is the whole change. The predecessor took the nearest matching name ABOVE the
-    /// offset with no containment test at all, so a name from the member above leaked into the member below
-    /// it and a local variable declared two lines up outranked the method holding both.</para>
+    /// <para><b>Containment is not what fixed the measured sites, and saying so precisely matters.</b> The
+    /// predecessor had no containment test at all — whatever matched last before the offset won, inside the
+    /// literal's member or not — but what actually produced the 48 wrong labels was the pattern it matched
+    /// WITH, and <see cref="DeclarationHead"/> is where that is fixed. Measured over the corpus: asking for
+    /// the innermost CONTAINING member and asking for the nearest member declaration ABOVE the offset give
+    /// the same answer at all 160 T-SQL sites. So containment is hardening, for the one direction the
+    /// declaration regex cannot cover — a literal that is inside no member at all (an attribute argument,
+    /// or anything below a body the brace walk lost) resolves to <see cref="Unknown"/> here instead of
+    /// borrowing the name of whichever member happens to sit above it. It is pinned by
+    /// <see cref="TheMemberScan_ReadsABodyWhoseLiteralHoldsABrace_AndARawCountDoesNot"/>, which is an
+    /// arranged case rather than a site on the tree, and that is the honest status of it.</para>
     /// </summary>
     private static string EnclosingMember(MemberMap map, int offset)
     {
