@@ -15,6 +15,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
 
@@ -632,9 +633,16 @@ public sealed class AlertsConfig
 
     /// <summary>#2136: the Store Job Over Cadence warning threshold — a store background job whose
     /// last run reaches this percent of its own schedule interval fires the Warning tier. The
-    /// Critical tier is fixed at 100 (a job outrunning its cadence compounds refresh lag).</summary>
+    /// Critical tier is fixed at 100 (a job outrunning its cadence compounds refresh lag).
+    ///
+    /// <para>#3060: the default is <see cref="TimescaleSupport.RefreshSlotPercentOfHourlyCadence"/> — one
+    /// refresh slot — rather than a literal, so it moves with <c>RefreshPhaseStepMinutes</c>. It computed to
+    /// the same 25 this shipped with; see that constant for why the equality was previously an accident and
+    /// what the derivation guarantees. V57's column default is the already-applied twin of this seed and
+    /// cannot move without a rung, which
+    /// DarlingSelfAlertTests pins.</para></summary>
     [JsonPropertyName("storeJobCadenceWarnPercent")]
-    public int StoreJobCadenceWarnPercent { get; set; } = 25;
+    public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
 
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;

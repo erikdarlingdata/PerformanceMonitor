@@ -1650,6 +1650,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// threshold. A job with no schedule interval or no completed run yet has no cadence to breach and is
     /// skipped without touching its standing state (no signal, the agent-status discipline). Gated on the
     /// master alerts switch. Internal so it pins directly with a recording deliverer + controllable clock.
+    ///
+    /// <para><b>The remedy names one exception, and does not hedge for everyone else (#3060).</b> "Extend
+    /// the job's schedule_interval" is right for a compression or retention policy and actively wrong for a
+    /// continuous-aggregate refresh, whose interval is also its <c>end_offset</c> — an operator following it
+    /// there alters what the store materializes in order to quiet an alert. The branch is
+    /// <see cref="TimescaleSupport.ScheduleIntervalDoublesAsEndOffset"/>, keyed on the policy proc, so the
+    /// one family that cannot take the advice is told the lever that does work while the other three keep
+    /// the concrete sentence. Softening it for all four instead would have made every alert vaguer to fix
+    /// one of them.</para>
     /// </summary>
     internal async Task ApplyStoreJobCadenceAsync(
         IReadOnlyList<StoreJobCadenceReading> jobs, CancellationToken cancellationToken)
@@ -1692,8 +1701,16 @@ internal sealed class DarlingSelfAlertEvaluator
                                 : "These runtimes scale with raw data volume, so this is the early warning that the " +
                                   "store is outgrowing its job schedule — an onboarding wave moves this number first. ") +
                             "Compare the job's duration series in collect.store_metrics (object_kind = " +
-                            "'background_job') to see the trend, and either reduce raw volume, extend the job's " +
-                            "schedule_interval deliberately, or scale the store host.",
+                            "'background_job') to see the trend, and " +
+                            (TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(job.JobName)
+                                ? "either reduce raw volume or scale the store host. Do NOT widen this job's " +
+                                  "schedule_interval: on a continuous-aggregate refresh policy it is also the " +
+                                  "aggregate's end_offset, so widening it changes what the refresh " +
+                                  "materializes — a wider still-filling tail is left unmaterialized, and on " +
+                                  "the hourly tier the Query Store backfill horizon derived from it shortens " +
+                                  "too. Narrow the refresh window or re-phase the grid instead."
+                                : "either reduce raw volume, extend the job's schedule_interval deliberately, " +
+                                  "or scale the store host."),
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} ran {percent:F0}% of its schedule interval",
                         numericCurrentValue: Math.Round(percent, 1),

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -173,8 +174,10 @@ public sealed class DarlingSelfAlertTests
         /// <summary>#1696 (V37): AG disconnect re-fire minutes. Default 0 = off, the shipped behavior.</summary>
         public int AgDisconnectRefireMinutes { get; set; }
 
-        /// <summary>#2136 (V57): the Store Job Over Cadence warning percent. Default is the shipped 25.</summary>
-        public int StoreJobCadenceWarnPercent { get; set; } = 25;
+        /// <summary>#2136 (V57): the Store Job Over Cadence warning percent. Default is the shipped one,
+        /// taken from the product rather than restated — a literal here would let the harness agree with a
+        /// frozen default and hide exactly the drift #3060's pins exist to catch.</summary>
+        public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
 
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
@@ -2537,25 +2540,90 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
 
     /* ---------------- #2136 Store Job Over Cadence ---------------- */
 
+    /* The cadence every hourly store policy has, and the denominator the warning knob is a share of. */
+    private const long HourlyCadenceMs = 3_600_000;
+
+    /* ONE refresh slot, in ms, derived from the grid rather than written down — 3,600,000 divided by
+       RefreshPhaseSlots. #3060: the shipped knob default is that same quotient expressed as a percent, so
+       every boundary case below moves with RefreshPhaseStepMinutes instead of agreeing with it by accident. */
+    private const long RefreshSlotMs = HourlyCadenceMs / TimescaleSupport.RefreshPhaseSlots;
+
     private static StoreJobCadenceReading CadenceJob(
-        long id = 1028, long? durMs = 900_000, long schedMs = 3_600_000,
+        long id = 1028, long? durMs = RefreshSlotMs, long schedMs = HourlyCadenceMs,
         string name = "policy_compression query_store_stats") =>
         new(id, name, durMs, schedMs);
 
+    /* A refresh policy's label, in the shape JobCadenceReadSql builds it: proc_name first, then the
+       hypertable. Whether the remedy text may say "extend schedule_interval" turns on this. */
+    private static StoreJobCadenceReading RefreshCadenceJob(long? durMs = RefreshSlotMs) =>
+        CadenceJob(id: 1054, durMs: durMs,
+            name: TimescaleSupport.RefreshPolicyProcName + " query_store_stats_interval_hourly");
+
     [Fact]
-    public async Task JobOverCadence_WarningTier_FiresAtTheKnobPercent()
+    public async Task JobOverCadence_WarningTier_FiresAtOneRefreshSlot_TheShippedDefault()
     {
         var h = new Harness();
         var e = h.Build();
 
-        /* 900s of 3600s = exactly 25%, the shipped default — the boundary is inclusive. */
+        /* A run of exactly one refresh slot against the shipped default, which IS one slot as a percent of
+           cadence (#3060). The boundary is inclusive, and BOTH sides derive from RefreshPhaseSlots — so a
+           grid moved to a different step moves the reading and the threshold together and this stays the
+           boundary case rather than falling silently to one side of a frozen literal. */
         await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.JobCadenceMetric, fired.MetricName);
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
         Assert.Equal("storejob:1028", fired.ServerKey);  /* prefixed so it never parses as a server_id */
-        Assert.Contains("25% of its schedule interval", fired.ShortMessage, StringComparison.Ordinal);
+
+        /* The threshold the alert reports is the derived default, not a coincident 25. */
+        Assert.Equal(
+            $"{TimescaleSupport.RefreshSlotPercentOfHourlyCadence}%", fired.ThresholdValue);
+
+        var renderedPercent = (100.0 * RefreshSlotMs / HourlyCadenceMs).ToString("F0", CultureInfo.InvariantCulture);
+        Assert.Contains($"{renderedPercent}% of its schedule interval", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3060: the shipped default is one refresh slot, and the derivation is what makes that a decision
+    /// rather than the accident it was. Cross-multiplied on purpose — two literals agreeing is exactly what a
+    /// change that freezes one of them produces, so the assertion has to be the identity and not the pair.
+    /// </summary>
+    [Fact]
+    public void JobCadenceDefault_IsOneRefreshSlot_AndFiresNoLaterThanOne()
+    {
+        /* The product's own seed, so the harness above cannot agree with a stale product default. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotPercentOfHourlyCadence,
+            new AlertsConfig().StoreJobCadenceWarnPercent);
+
+        /* Fires at or BEFORE one slot, for any grid step: percent * slots <= 100. This is the guarantee the
+           issue was filed on — a knob unrelated to the step fires AFTER the point it exists to precede. */
+        Assert.True(
+            TimescaleSupport.RefreshSlotPercentOfHourlyCadence * TimescaleSupport.RefreshPhaseSlots <= 100,
+            $"a default of {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}% over "
+            + $"{TimescaleSupport.RefreshPhaseSlots} slots fires past one slot — after the compression grid's "
+            + "stated precondition is already false, which is the failure #3060 is about");
+
+        /* And is the LATEST value that does, so the derivation buys the guarantee without buying noise. */
+        Assert.True(
+            (TimescaleSupport.RefreshSlotPercentOfHourlyCadence + 1) * TimescaleSupport.RefreshPhaseSlots > 100,
+            $"a default of {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}% is earlier than it has to be "
+            + $"for {TimescaleSupport.RefreshPhaseSlots} slots");
+
+        /* The seed must survive its own clamp. A step fine enough to drive the derived default below the
+           [5, 100] floor would have the clamp silently raise it back above one slot — the same defect in a
+           new place, so the clamp is tied to the grid here rather than left to be discovered. */
+        var clamped = Math.Clamp(TimescaleSupport.RefreshSlotPercentOfHourlyCadence, 5, 100);
+        Assert.Equal(TimescaleSupport.RefreshSlotPercentOfHourlyCadence, clamped);
+
+        /* V57's column default is the already-applied twin of the C# seed and cannot move without a rung;
+           the store column wins on a fresh store, so a derived seed that drifts from it would ship a default
+           nobody chose. */
+        var v57 = PgMigrations.Scripts.Single(m => m.Version == 57);
+        Assert.Contains(
+            $"store_job_cadence_warn_percent integer NOT NULL DEFAULT {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}",
+            v57.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2564,11 +2632,91 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var h = new Harness();
         var e = h.Build();
 
-        /* 249s of 3600s ≈ 7% — the production store's worst job today. Must not fire at the default 25. */
+        /* 249s of 3600s ≈ 6.9% — inside the body of the measured distribution on both production stores
+           (p99 is 6.1% on the busier one, #3060), so it must not fire at the shipped default. */
         await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 249_000) }, Ct);
 
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// #3060, the user-facing half: the remedy an operator reads must not tell them to widen an interval
+    /// that doubles as an <c>end_offset</c>. Asserted on BOTH arms in one test, because the claim is a
+    /// difference — a test that only checked the refresh arm would pass just as well if the advice had been
+    /// softened for every job, which is the outcome that was rejected.
+    /// </summary>
+    [Fact]
+    public async Task JobOverCadence_RemedyOmitsTheIntervalOnlyForRefreshPolicies()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreJobCadenceAsync(new[] { RefreshCadenceJob() }, Ct);
+        var refresh = Assert.Single(h.Deliverer.Outcomes);
+
+        Assert.DoesNotContain("extend the job's schedule_interval", refresh.DetailText, StringComparison.Ordinal);
+        Assert.Contains("Do NOT widen this job's schedule_interval", refresh.DetailText, StringComparison.Ordinal);
+        Assert.Contains("end_offset", refresh.DetailText, StringComparison.Ordinal);
+        /* Naming the lever that does work is the point; "don't do that" alone leaves the operator nowhere. */
+        Assert.Contains("Narrow the refresh window", refresh.DetailText, StringComparison.Ordinal);
+
+        /* A compression policy has no end_offset, so it keeps the concrete advice unhedged. */
+        var h2 = new Harness();
+        var e2 = h2.Build();
+        await e2.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        var compression = Assert.Single(h2.Deliverer.Outcomes);
+
+        Assert.Contains("extend the job's schedule_interval deliberately", compression.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("end_offset", compression.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The predicate behind that branch, and the fact it reports. Both refresh tiers pass the SAME constant
+    /// as <c>end_offset</c> and <c>schedule_interval</c>, read out of the emitted statement rather than
+    /// restated — so the predicate cannot outlive the equality, and a policy builder changed to pass
+    /// different values goes red here instead of shipping advice that has quietly become correct.
+    /// </summary>
+    [Fact]
+    public void RefreshPolicies_PassTheScheduleIntervalAsTheEndOffsetToo_WhichThePredicateReports()
+    {
+        foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
+        {
+            AssertEndOffsetEqualsScheduleInterval(TimescaleSupport.AddHourlyRefreshPolicySql(view));
+        }
+
+        AssertEndOffsetEqualsScheduleInterval(
+            TimescaleSupport.AddDailyRefreshPolicySql("query_store_stats_daily"));
+
+        /* The label the read builds is proc_name FIRST, which is the whole basis of the match. */
+        Assert.Contains("j.proc_name || coalesce(' ' || j.hypertable_name, '')",
+            TimescaleSupport.JobCadenceReadSql, StringComparison.Ordinal);
+
+        Assert.True(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(
+            TimescaleSupport.RefreshPolicyProcName + " query_store_stats_interval_hourly"));
+        /* The telemetry label carries a [job_id] suffix; same leading token, same answer. */
+        Assert.True(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(
+            TimescaleSupport.RefreshPolicyProcName + " query_store_stats_interval_hourly [1054]"));
+        /* A hypertable-less job is the bare proc name. */
+        Assert.True(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(TimescaleSupport.RefreshPolicyProcName));
+
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset("policy_compression query_store_stats"));
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset("policy_retention query_store_stats"));
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset("policy_telemetry"));
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(null));
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(""));
+        /* Prefix, not substring: a hypertable named after the policy must not borrow its answer. */
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(
+            "policy_compression " + TimescaleSupport.RefreshPolicyProcName));
+    }
+
+    private static void AssertEndOffsetEqualsScheduleInterval(string policySql)
+    {
+        var endOffset = Regex.Match(policySql, @"end_offset => INTERVAL '([^']+)'");
+        var schedule = Regex.Match(policySql, @"schedule_interval => INTERVAL '([^']+)'");
+
+        Assert.True(endOffset.Success && schedule.Success, $"could not read both intervals out of: {policySql}");
+        Assert.Equal(endOffset.Groups[1].Value, schedule.Groups[1].Value);
     }
 
     [Fact]
