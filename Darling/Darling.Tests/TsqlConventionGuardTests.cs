@@ -560,6 +560,17 @@ public sealed class TsqlConventionGuardTests
 
         Assert.Empty(CoveredRules.Intersect(UncoveredRules, StringComparer.Ordinal));
 
+        /* The abbreviation ratchet, both directions and against the BULLET rather than the flattened
+           lists. The set equalities above are over a union, so they cannot see WHICH bullet a rule sits
+           under: moving UnabbreviatedTypes to the Functions bullet's Covered array satisfies every one of
+           them while the disposition map claims this check enforces a sentence the document does not have
+           it enforcing. Naming both sides is also what keeps the rule from drifting back to Uncovered
+           while the detector still emits it — a rule that fires under bookkeeping calling it unguarded is
+           the same defect class as a limitation nothing exercises. */
+        Assert.Contains(UnabbreviatedTypes, RuleBullets["Data types"].Covered);
+        Assert.DoesNotContain(UnabbreviatedTypes, RuleBullets["Data types"].Uncovered);
+        Assert.DoesNotContain(UnabbreviatedTypes, UncoveredRules);
+
         /* The split bullets, NAMED in RuleBullets' own summary rather than counted there. A second one
            would leave that prose incomplete without contradicting it, which is the quiet direction. */
         Assert.Equal(
