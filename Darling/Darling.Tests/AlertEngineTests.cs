@@ -10,12 +10,12 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -1993,19 +1993,6 @@ public sealed class AlertEngineTests
 
     private static string ReadStateStoreSource() =>
         ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgAlertStateStore.cs"));
-
-    /// <summary>Reads a repo-relative source file, walking up from this test file to find the repo root.</summary>
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
-    }
 
     [Fact]
     public async Task DatabaseState_Disabled_DoesNotFetch()

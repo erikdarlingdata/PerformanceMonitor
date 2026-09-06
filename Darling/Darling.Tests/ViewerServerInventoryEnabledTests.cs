@@ -9,8 +9,8 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -152,17 +152,4 @@ public class ViewerServerInventoryEnabledTests
         Assert.DoesNotContain("StaticResource", column, StringComparison.Ordinal);
     }
 
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
-    }
 }

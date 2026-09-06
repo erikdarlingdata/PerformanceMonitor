@@ -416,9 +416,17 @@ public class CrossAppGuardCiGateTests
                 """),
 
             /* Segments handed to a user-defined helper, with no Path.Combine and no file API anywhere in
-               the expression. FileGrowthAlertStoreTests reads Lite/Services this way, and the helper name
-               is not a token anything can anchor on: measured at #3082, Darling.Tests carries 34 separate
-               private ReadRepoFile declarations, one per class, with differing signatures. */
+               the expression. FileGrowthAlertStoreTests reads Lite/Services this way.
+
+               The objection at #3082 was that the helper name is not a token anything can anchor on,
+               because Darling.Tests then carried a separate private ReadRepoFile declaration per class,
+               with differing signatures. Those were consolidated onto one shared reader whose
+               single-declaration invariant RepoFileAdoptionTests asserts, so the name IS anchorable now:
+               an arm keyed on it, with a root literal in its first segment argument, would be structure
+               rather than the semantic pass the remaining shapes need. That is a DECISION and not a free
+               improvement, and it is not taken here — the widening still buys a name for coverage that is
+               already correct, since this shape's reference lands under a tree the filter gating this
+               suite reaches. CSharpPaths' doc comment carries what each widening has cost. */
             ("VariadicSegmentHelper", LiteTrees.AppDir, """
                 var lite = ReadRepoFile("Lite", "Services", "LocalDataService.FileGrowth.cs");
                 """),

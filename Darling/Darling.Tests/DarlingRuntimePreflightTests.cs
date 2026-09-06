@@ -12,6 +12,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -320,24 +321,4 @@ public class DarlingRuntimePreflightTests
         return string.Empty;
     }
 
-    /// <summary>Walks up from the test output directory to the repo root (the directory holding
-    /// <c>PerformanceMonitor.sln</c>).</summary>
-    private static string ReadRepoFile(string relativePath)
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        for (var i = 0; i < 10 && directory is not null; i++)
-        {
-            if (File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
-            {
-                var path = Path.Combine(directory.FullName, relativePath);
-                Assert.True(File.Exists(path), $"expected {path} to exist");
-                return File.ReadAllText(path);
-            }
-
-            directory = directory.Parent;
-        }
-
-        Assert.Fail("could not find the repo root (the directory holding PerformanceMonitor.sln)");
-        return string.Empty;
-    }
 }

@@ -9,11 +9,11 @@
 using System;
 using System.Data;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -316,16 +316,4 @@ public sealed class DarlingEnumerationProbeFailureTests
         return dataSet.CreateDataReader();
     }
 
-    /* Locate the repo from this file — the DarlingLockTimeoutYieldTests idiom; no build-output copying. */
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
-    }
 }

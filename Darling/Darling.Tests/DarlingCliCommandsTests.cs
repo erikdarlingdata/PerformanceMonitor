@@ -9,7 +9,6 @@
 using System;
 using System.Linq;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,6 +18,7 @@ using PerformanceMonitor.Darling.Service.Hosting;
 using Xunit;
 using Host = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService;
 using WebHost = PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -1629,19 +1629,6 @@ public sealed class DarlingMissingCredentialMessageTests
             }
             """);
         return configPath;
-    }
-
-    /* Locate the repo from this file — the DarlingEnumerationProbeFailureTests idiom; no build-output copying. */
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
     }
 
     private static int CountOccurrences(string haystack, string needle)

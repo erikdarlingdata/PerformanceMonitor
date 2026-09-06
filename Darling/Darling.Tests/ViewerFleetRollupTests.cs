@@ -18,6 +18,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -1134,17 +1135,4 @@ public sealed class ViewerFleetDeadlockCoverageTests
         return count;
     }
 
-    private static string ReadRepoFile(string relative) =>
-        File.ReadAllText(Path.Combine(RepoRoot(), relative));
-
-    private static string RepoRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new InvalidOperationException("PerformanceMonitor.sln not found above the test output directory.");
-    }
 }

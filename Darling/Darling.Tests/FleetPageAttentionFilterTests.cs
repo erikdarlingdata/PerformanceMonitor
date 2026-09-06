@@ -10,11 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -43,7 +43,7 @@ public sealed class FleetPageAttentionFilterTests
 {
     /// <summary>The shipped module, newlines normalised so a multi-line anchor holds whether the checkout gave
     /// this file CRLF (.gitattributes says it does) or LF.</summary>
-    private static string FleetJs => ReadRepoFile(Path.Combine(
+    private static string FleetJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "fleet.js"));
 
     /// <summary>
@@ -136,7 +136,7 @@ public sealed class FleetPageAttentionFilterTests
         Assert.Contains("\"all \" + total + \" matching servers are healthy\"", FleetJs, StringComparison.Ordinal);
         Assert.Contains("attentionCountText(shown, total, term !== \"\")", FleetJs, StringComparison.Ordinal);
 
-        var viewer = ReadRepoFile(Path.Combine(
+        var viewer = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Fleet.cs"));
         Assert.Contains("$\"showing {shown} of {total}\"", viewer, StringComparison.Ordinal);
         Assert.Contains("$\"all {total} servers are healthy\"", viewer, StringComparison.Ordinal);
@@ -164,7 +164,7 @@ public sealed class FleetPageAttentionFilterTests
            util.js's noticeStrip idiom for the same kind of non-fatal live notice. Also raised in review. */
         Assert.Contains("role: \"status\"", FleetJs, StringComparison.Ordinal);
 
-        var css = ReadRepoFile(Path.Combine(
+        var css = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
         Assert.Contains(".attention-note.warn", css, StringComparison.Ordinal);
         Assert.Contains(".attention-note.ok", css, StringComparison.Ordinal);
@@ -195,7 +195,7 @@ public sealed class FleetPageAttentionFilterTests
     [Fact]
     public void FleetAndViewCardGrids_StretchWithAutoFit_NotAutoFill()
     {
-        var app = ReadRepoFile(Path.Combine(
+        var app = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
         /* .grid keeps its 1fr max (shared with triage); .server-grid also has a 260px min now, but its max is
            460px, so this 1fr-specific string still pins .grid alone. */
@@ -203,7 +203,7 @@ public sealed class FleetPageAttentionFilterTests
         /* No grid track in app.css uses auto-fill (the .stats comment says the word but not "repeat(auto-fill"). */
         Assert.DoesNotContain("repeat(auto-fill", app, StringComparison.Ordinal);
 
-        var editor = ReadRepoFile(Path.Combine(
+        var editor = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "editor.css"));
         Assert.Contains("repeat(auto-fit, minmax(260px, 1fr))", editor, StringComparison.Ordinal);
         Assert.DoesNotContain("repeat(auto-fill", editor, StringComparison.Ordinal);
@@ -225,7 +225,7 @@ public sealed class FleetPageAttentionFilterTests
     [Fact]
     public void FleetServerCardGrids_CapTrackWidth_AndKeepTheScopeOffTriage()
     {
-        var app = ReadRepoFile(Path.Combine(
+        var app = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
         Assert.Contains(".server-grid {", app, StringComparison.Ordinal);
         /* Cap + centre asserted as a contiguous block, so the centring is pinned to .server-grid rather than
@@ -246,14 +246,14 @@ public sealed class FleetPageAttentionFilterTests
         Assert.Contains(".tag-group-grid { margin: 0.5rem 0 0.2rem; justify-content: start; }", app, StringComparison.Ordinal);
 
         /* Both server-card grids (flat + tag-group) must carry the class, or the cap misses one view. */
-        var fleet = ReadRepoFile(Path.Combine(
+        var fleet = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "fleet.js"));
         Assert.Contains("class: \"grid server-grid\"", fleet, StringComparison.Ordinal);
         Assert.Contains("class: \"grid server-grid tag-group-grid\"", fleet, StringComparison.Ordinal);
 
         /* Scope guard: the triage grid stays bare .grid (full-width span-2 cards + notice strips), so a global
            cap must not have leaked onto it — the reason the cap is a class, not a change to .grid. */
-        var triage = ReadRepoFile(Path.Combine(
+        var triage = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "triage.js"));
         Assert.DoesNotContain("server-grid", triage, StringComparison.Ordinal);
     }
@@ -371,7 +371,7 @@ public sealed class FleetPageAttentionFilterTests
 
         /* One shared builder: the detail header RENDERS the same metricBands (the load-bearing call, not just
            the import), so the fix covers both surfaces and they cannot drift. */
-        var server = ReadRepoFile(Path.Combine(
+        var server = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js"));
         Assert.Contains("import { metricBands }", server, StringComparison.Ordinal);
         Assert.Contains("metricBands(card)", server, StringComparison.Ordinal);
@@ -389,17 +389,4 @@ public sealed class FleetPageAttentionFilterTests
         return count;
     }
 
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate).Replace("\r\n", "\n", StringComparison.Ordinal);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
-    }
 }

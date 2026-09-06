@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -690,21 +691,4 @@ public sealed class MigrationDataMovingRungCensusPins
                 $"  V{f.Version.ToString(CultureInfo.InvariantCulture)} ({f.Name}): {f.Shape} on "
                 + $"{f.Table}, created by {f.CreatedBy}"));
 
-    /// <summary>
-    /// Reads a repo-relative source file by walking up from the test binary — the same delivery
-    /// <c>CollectionLogDrainForensicsStoreTests</c> uses for this very file, so the pin reads the REAL
-    /// constant rather than a copy that could go stale in the direction the pin exists to catch.
-    /// </summary>
-    private static string ReadRepoFile(string relativePath)
-    {
-        var dir = AppContext.BaseDirectory;
-
-        while (dir is not null && !File.Exists(Path.Combine(dir, relativePath)))
-        {
-            dir = Directory.GetParent(dir)?.FullName;
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relativePath));
-    }
 }

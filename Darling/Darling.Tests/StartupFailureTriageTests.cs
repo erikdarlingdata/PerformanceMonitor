@@ -11,11 +11,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Sockets;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -351,7 +351,7 @@ public class StartupFailureTriageTests
     public void TheApplierCommitsEachRungsDdlAndItsStampInOneTransaction()
     {
         var applier = Slice(
-            ReadRepoFile("Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs"),
+            ReadRepoFileLf("Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs"),
             "private static async Task<int> MigrateLockedAsync",
             "\n    }\n");
 
@@ -628,7 +628,7 @@ public class StartupFailureTriageTests
         var storeSite = ExtractRetrySite(worker, "storeRetryBudget");
         Assert.Contains("StartupFailureTriage", storeSite, StringComparison.Ordinal);
 
-        var guard = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/Program.cs");
+        var guard = ReadRepoFileLf("Darling/PerformanceMonitor.Darling.Service/Program.cs");
         var guardArm = Slice(guard, "Another PerformanceMonitor Darling service instance already holds", "return 4;");
         Assert.DoesNotContain("StartupFailureTriage", guardArm, StringComparison.Ordinal);
     }
@@ -698,29 +698,6 @@ public class StartupFailureTriageTests
     }
 
     private static string ReadWorkerSource()
-        => ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
+        => ReadRepoFileLf("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
 
-    private static string ReadRepoFile(string relative)
-    {
-        var path = Path.Combine(RepoRoot(), relative.Replace('/', Path.DirectorySeparatorChar));
-        Assert.True(File.Exists(path), $"source not found, this pin would read nothing: {path}");
-        /* Normalised to LF. The checkout is CRLF (.gitattributes is eol=crlf) but an anchor that
-           embeds the wrong newline matches NOTHING and reads as clean, so no anchor in this file
-           carries a line ending at all. */
-        return File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal);
-    }
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null
-               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
-               && !Directory.Exists(Path.Combine(dir, ".git")))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return dir!;
-    }
 }

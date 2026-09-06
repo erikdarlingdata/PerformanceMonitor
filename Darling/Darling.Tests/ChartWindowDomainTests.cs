@@ -8,8 +8,8 @@
 
 using System;
 using System.IO;
-using System.Runtime.CompilerServices;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -38,25 +38,25 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ChartWindowDomainTests
 {
-    private static string ChartsJs => ReadRepoFile(Path.Combine(
+    private static string ChartsJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "charts.js"));
 
-    private static string UtilJs => ReadRepoFile(Path.Combine(
+    private static string UtilJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js"));
 
-    private static string PanelsJs => ReadRepoFile(Path.Combine(
+    private static string PanelsJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
 
-    private static string ServerTabsJs => ReadRepoFile(Path.Combine(
+    private static string ServerTabsJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
-    private static string ComposeJs => ReadRepoFile(Path.Combine(
+    private static string ComposeJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "compose.js"));
 
-    private static string EndpointsCs => ReadRepoFile(Path.Combine(
+    private static string EndpointsCs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
 
-    private static string ComposeSpecCs => ReadRepoFile(Path.Combine(
+    private static string ComposeSpecCs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeSpec.cs"));
 
     /// <summary>
@@ -173,17 +173,4 @@ public sealed class ChartWindowDomainTests
         Assert.Contains("public const int MaxWindowHours = 24 * 90;", ComposeSpecCs, StringComparison.Ordinal);
     }
 
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate).Replace("\r\n", "\n", StringComparison.Ordinal);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
-    }
 }

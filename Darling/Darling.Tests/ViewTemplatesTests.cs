@@ -10,10 +10,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -38,10 +38,10 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewTemplatesTests
 {
-    private static string TemplatesJs => ReadRepoFile(Path.Combine(
+    private static string TemplatesJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "view-templates.js"));
 
-    private static string ViewsJs => ReadRepoFile(Path.Combine(
+    private static string ViewsJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "views.js"));
 
     /// <summary>
@@ -246,17 +246,4 @@ public sealed class ViewTemplatesTests
         Assert.DoesNotContain("get_query_store_top", js, StringComparison.Ordinal);
     }
 
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate).Replace("\r\n", "\n", StringComparison.Ordinal);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
-    }
 }

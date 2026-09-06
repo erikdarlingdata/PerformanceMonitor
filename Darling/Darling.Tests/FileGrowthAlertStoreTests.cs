@@ -11,6 +11,7 @@ using System.Linq;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -147,17 +148,4 @@ public class FileGrowthAlertStoreTests
     private static string ReadViewerSource() =>
         ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
 
-    private static string ReadRepoFile(params string[] parts)
-    {
-        var relative = System.IO.Path.Combine(parts);
-        var dir = System.IO.Path.GetDirectoryName(ThisFile())!;
-        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, relative)))
-        {
-            dir = System.IO.Path.GetDirectoryName(dir);
-        }
-
-        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relative));
-    }
-
-    private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
 }
