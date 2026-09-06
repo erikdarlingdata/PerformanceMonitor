@@ -557,6 +557,12 @@ public sealed class TsqlConventionGuardTests
             "SELECT n = COUNT_BIG(DISTINCT owt.wait_type) FROM sys.dm_os_waiting_tasks AS owt OPTION(RECOMPILE);",
             "UPDATE t SET x = 1 FROM sys.databases AS d; SELECT rows_touched = ROWCOUNT_BIG();",
             "SET NOCOUNT ON; SELECT d.name FROM sys.databases AS d OPTION(RECOMPILE);",
+            /* An identifier that ENDS in Count and is then called, which is the only thing the COUNT(
+               pattern's lookbehind actually decides — COUNT_BIG( and ROWCOUNT_BIG() are both rescued by the
+               `_` that follows COUNT, not by what precedes it, and @@ROWCOUNT is never followed by `(`. So
+               without a fixture of this shape the lookbehind changed no answer and read as load-bearing
+               while nothing held it. Synthetic: ordinary SQL, absent from this corpus. */
+            "SELECT n = dbo.RowCount(d.database_id) FROM sys.databases AS d OPTION(RECOMPILE);",
             /* XQuery, and it is why the code view blanks an XML method's FIRST argument only. XQuery's
                function is count() and there is no COUNT_BIG in it; both spellings ship in
                DeadlocksCollector and BlockedProcessReportCollector. The SECOND argument is a T-SQL type
