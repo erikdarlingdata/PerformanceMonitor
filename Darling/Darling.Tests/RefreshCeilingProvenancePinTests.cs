@@ -138,19 +138,7 @@ public sealed class RefreshCeilingProvenancePinTests
         yield return (
             "the slot-clearance contrast",
             CeilingDeclaration,
-            @"largest of the ([0-9]+) clears the slot by ([0-9]+) s, where this constant clears it by ([0-9]+) s",
-            true);
-
-        yield return (
-            "the issue's median figure",
-            CeilingDeclaration,
-            @"median of the same window as ~([0-9]+) s",
-            true);
-
-        yield return (
-            "why the issue's median is not reproducible",
-            CeilingDeclaration,
-            @"([0-9]+) is the midpoint of ([0-9]+) and ([0-9]+), so a median over ([0-9]+) of the ([0-9]+) rather than the ([0-9]+) clean",
+            @"clears the slot by ([0-9]+) s, where this constant clears it by ([0-9]+) s",
             true);
 
         /* ARITY-FREE, and that is the point rather than a convenience. This list gains a reading every hour
@@ -464,22 +452,8 @@ public sealed class RefreshCeilingProvenancePinTests
         Require(summary[4] == middle, $"stated middle {summary[4]} s against {middle} s computed");
 
         var clearance = Read("the slot-clearance contrast");
-        Require(clearance[0] == clean.Length, $"stated clean count {clearance[0]} against {clean.Length} listed");
-        Require(clearance[1] == Slot - max, $"stated clearance {clearance[1]} s against {Slot - max} s derived");
-        Require(clearance[2] == Slot - Ceiling, $"stated margin {clearance[2]} s against {Slot - Ceiling} s derived");
-
-        var statedMedian = Read("the issue's median figure");
-        var why = Read("why the issue's median is not reproducible");
-        Require(why[0] == statedMedian[0],
-            $"the paragraph explains {why[0]} s while quoting the issue's figure as {statedMedian[0]} s");
-        Require(why[1] + why[2] == 2 * why[0],
-            $"{why[0]} is not the midpoint of {why[1]} and {why[2]}, so the explanation is arithmetically wrong");
-        Require(clean.Contains(why[1]) && clean.Contains(why[2]),
-            $"the midpoint pair {why[1]}/{why[2]} is not drawn from the published series {Join(clean)}");
-        Require(why[3] == clean.Length - 1,
-            $"an even-count median over the published rows drops one, so {clean.Length - 1} not {why[3]}");
-        Require(why[4] == series.Length, $"stated total {why[4]} against {series.Length} listed");
-        Require(why[5] == clean.Length, $"stated clean count {why[5]} against {clean.Length} listed");
+        Require(clearance[0] == Slot - max, $"stated clearance {clearance[0]} s against {Slot - max} s derived");
+        Require(clearance[1] == Slot - Ceiling, $"stated margin {clearance[1]} s against {Slot - Ceiling} s derived");
 
         var downward = Read("the downward-edit consequence");
         Require(downward[0] == max, $"stated observed maximum {downward[0]} s against {max} s listed");

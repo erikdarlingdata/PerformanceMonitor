@@ -1802,10 +1802,11 @@ WITH NO DATA";
     /// <c>864, 194, 222, 225, 335, 594, 465, 359, 293, 355</c> seconds. Set the first aside for the reason
     /// above and the remaining 9 run from <b>194 s to 594 s</b>, mean <b>338 s</b>, middle reading
     /// <b>335 s</b> — every one of them below <see cref="RefreshSlotWarningSeconds"/>. The largest of the 9
-    /// clears the slot by <b>306 s</b>, where this constant clears it by 36 s. (#3069 records the median of
-    /// the same window as ~<b>347 s</b>; the rows published there do not produce that — 347 is the midpoint
-    /// of 335 and 359, so a median over 8 of the 10 rather than the 9 clean ones — which is why the figure
-    /// held here is the one the listed series yields.)</para>
+    /// clears the slot by <b>306 s</b>, where this constant clears it by 36 s. (#3069 quotes ~347 s as the
+    /// median of the same window. The rows published there do not reproduce it, so the figure held here is
+    /// the one the listed series yields — which is what the middle reading above is pinned to. The quoted
+    /// figure is left as a quotation rather than re-derived here, because an arithmetic aside about a
+    /// superseded external number is coupling with nothing behind it.)</para>
     ///
     /// <para><b>The hole.</b> The run starting near <c>00:35:05</c> was never observed: by the next look
     /// the catalog's last-run figure had already advanced past it. That is a gap in the ten above, not a
