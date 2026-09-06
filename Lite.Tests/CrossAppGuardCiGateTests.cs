@@ -189,6 +189,31 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>
+    /// A value this scan cannot resolve has to be reported, not dropped.
+    ///
+    /// <para>An unrecognised MSBuild expression is the worst case for this guard: it falls through as a
+    /// literal relative path, resolves to nothing, and vanishes from the found set — silently, which is
+    /// the direction #3063 exists to close. So the classification covers every form MSBuild evaluates
+    /// rather than the two that happen to be common. There are three, and no fourth: a property or
+    /// property function, item metadata, and an item list or transform.</para>
+    /// </summary>
+    [Fact]
+    public void TheEvaluabilityCheck_CoversEveryMsBuildExpressionForm()
+    {
+        Assert.True(NeedsMsBuildToEvaluate(@"$(RepoRoot)Darling\X.cs"));
+        Assert.True(NeedsMsBuildToEvaluate(@"$([MSBuild]::GetPathOfFileAbove('Directory.Build.props'))"));
+        Assert.True(NeedsMsBuildToEvaluate(@"%(RecursiveDir)X.cs"));
+
+        /* An item list, and an item transform - neither carries $( or %( anywhere. */
+        Assert.True(NeedsMsBuildToEvaluate("@(SharedSources)"));
+        Assert.True(NeedsMsBuildToEvaluate(@"@(SharedSources->'..\Darling\%(Filename)%(Extension)')"));
+
+        /* A literal path is readable, and so is one that merely contains the sigils unparenthesised. */
+        Assert.False(NeedsMsBuildToEvaluate(@"..\Darling\Darling.Tests\CSharpSourceWalker.cs"));
+        Assert.False(NeedsMsBuildToEvaluate("Fixtures/100%-coverage@home.xml"));
+    }
+
+    /// <summary>
     /// A reference counts only when the path it resolved to spells it back, on every host.
     ///
     /// <para><c>Directory.Exists</c> answers according to the HOST's path rules, and Windows trims
@@ -622,6 +647,16 @@ public class CrossAppGuardCiGateTests
         return (probed, found);
     }
 
+    /* Every expression form MSBuild evaluates, and there is no fourth: a property or property function,
+       item metadata, and an item list or transform. Anything carrying one of these is a path this scan
+       cannot read, and it has to say so rather than let the value fall through as a literal relative
+       path that resolves to nothing and disappears. */
+    private static readonly string[] MsBuildExpressionForms = { "$(", "%(", "@(" };
+
+    /// <summary>Whether a path attribute's value can only be resolved by MSBuild itself.</summary>
+    private static bool NeedsMsBuildToEvaluate(string path) =>
+        MsBuildExpressionForms.Any(form => path.Contains(form, StringComparison.Ordinal));
+
     /// <summary>Every path-bearing value one MSBuild file's XML names, in both spellings MSBuild
     /// accepts. Shared by the walk and by the pin that reads it back, so the pin cannot drift from what
     /// ships.</summary>
@@ -651,11 +686,12 @@ public class CrossAppGuardCiGateTests
                 .Replace("$(MSBuildThisFileDirectory)", thisFileDir, StringComparison.Ordinal)
                 .Replace("$(MSBuildProjectDirectory)", projectDir, StringComparison.Ordinal);
 
-            if (expanded.Contains("$(", StringComparison.Ordinal) ||
-                expanded.Contains("%(", StringComparison.Ordinal))
+            if (NeedsMsBuildToEvaluate(expanded))
             {
                 /* Only MSBuild can evaluate what is left. Recorded rather than dropped, so the caller
-                   can be loud about a path this guard cannot read. */
+                   can be loud about a path this guard cannot read. An unrecognised expression would
+                   otherwise fall through as a literal relative path, resolve to nothing, and vanish —
+                   which is this guard's own defect class. */
                 unevaluable.Add($"{origin}: {raw}");
                 continue;
             }
