@@ -15,6 +15,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using Xunit;
+using static Darling.Tests.CSharpMemberMap;
 
 namespace Darling.Tests;
 
@@ -293,7 +294,7 @@ public sealed class TsqlConventionGuardTests
 
                     foreach (var (rule, detail) in Findings(body))
                     {
-                        members ??= MemberMapOf(text);
+                        members ??= Of(text);
                         offenders.Add(
                             $"{name}:{LineOf(text, start)} in {EnclosingMember(members, start)} "
                             + $"[{rule}] {detail}");
@@ -1062,7 +1063,7 @@ public sealed class TsqlConventionGuardTests
                 + "not the file.");
 
             var text = File.ReadAllText(path);
-            var map = MemberMapOf(text);
+            var map = Of(text);
 
             /* The offset is DERIVED from the anchor, through the same literal walk the scan uses, so the
                site cannot drift onto a different literal and cannot be pinned to a stale integer. */
@@ -1175,7 +1176,7 @@ public sealed class TsqlConventionGuardTests
 
                     literals++;
                     inTree++;
-                    map ??= MemberMapOf(text);
+                    map ??= Of(text);
                     var member = EnclosingMember(map, start);
 
                     if (member == Unknown || CSharpKeywords.Contains(member))
@@ -1275,7 +1276,7 @@ public sealed class TsqlConventionGuardTests
 
             foreach (var path in SourceFiles(roots))
             {
-                var map = MemberMapOf(File.ReadAllText(path));
+                var map = Of(File.ReadAllText(path));
                 var relative = Path.GetRelativePath(repo, path).Replace('\\', '/');
                 var previousEnd = -1;
                 var previousName = string.Empty;
@@ -1424,7 +1425,7 @@ public sealed class TsqlConventionGuardTests
             }
             """;
 
-        var map = MemberMapOf(source);
+        var map = Of(source);
 
         /* Both members were read, and read as members — a map that resolved neither would satisfy every
            equality below by returning <unknown> twice, which is not the same answer. */
@@ -1484,7 +1485,7 @@ public sealed class TsqlConventionGuardTests
         Assert.NotEqual(source, moved);
         Assert.Equal(
             "First",
-            EnclosingMember(MemberMapOf(moved), moved.IndexOf("SELECT 4", StringComparison.Ordinal)));
+            EnclosingMember(Of(moved), moved.IndexOf("SELECT 4", StringComparison.Ordinal)));
     }
 
     /// <summary>
@@ -1519,12 +1520,12 @@ public sealed class TsqlConventionGuardTests
 
         var offset = source.IndexOf("SELECT 2", StringComparison.Ordinal);
 
-        Assert.Equal("Body", EnclosingMember(MemberMapOf(source), offset));
+        Assert.Equal("Body", EnclosingMember(Of(source), offset));
 
         /* The same declaration walk over RAW source, which is what every copy of this idiom did before
            #3052 extracted the walker. The literal's } closes Body early, so the offset lands outside every
            member range and resolves to nothing at all. */
-        var raw = RawDeclarations(source);
+        var raw = OfRawSourceForControlTestsOnly(source);
         var body = raw.Declarations.Single(d => d.Name == "Body");
 
         Assert.True(
@@ -1565,7 +1566,7 @@ public sealed class TsqlConventionGuardTests
             }
             """;
 
-        var mid = MemberMapOf(midFile);
+        var mid = Of(midFile);
         var first = mid.Declarations.Single(d => d.Name == "First");
 
         Assert.Equal(RangeShape.OverExtended, ShapeOf(first));
@@ -1584,7 +1585,7 @@ public sealed class TsqlConventionGuardTests
                     return "SELECT 1 FROM sys.databases;";
             """;
 
-        var tail = MemberMapOf(atEndOfFile);
+        var tail = Of(atEndOfFile);
         var only = tail.Declarations.Single(d => d.Name == "Only");
 
         Assert.Equal(RangeShape.Unterminated, ShapeOf(only));
@@ -1593,36 +1594,6 @@ public sealed class TsqlConventionGuardTests
            the comparison the mid-file case turns on cannot fire. */
         Assert.True(only.End < 0);
         Assert.False(only.End > only.NextStart);
-    }
-
-    /// <summary>
-    /// The declaration walk over RAW source, for
-    /// <see cref="TheMemberScan_ReadsABodyWhoseLiteralHoldsABrace_AndARawCountDoesNot"/> only.
-    ///
-    /// <para>It exists so that control can assert the walker is what saves the scan, in both directions,
-    /// with a one-token difference from the shipped path — <see cref="MemberMapOf"/> is this function with
-    /// <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> applied first. Nothing else calls it.</para>
-    /// </summary>
-    private static MemberMap RawDeclarations(string text)
-    {
-        var heads = DeclarationHead.Matches(text);
-        var declarations = new List<DeclaredRange>(heads.Count);
-
-        for (var i = 0; i < heads.Count; i++)
-        {
-            var head = heads[i];
-            var after = head.Index + head.Length;
-            var (name, kind) = DeclaredName(text, after);
-
-            declarations.Add(new DeclaredRange(
-                name,
-                kind,
-                head.Index,
-                DeclarationEnd(text, after),
-                i + 1 < heads.Count ? heads[i + 1].Index : text.Length));
-        }
-
-        return new MemberMap(text, declarations);
     }
 
     /* ───────────────────────── the checks ───────────────────────── */
@@ -2247,447 +2218,6 @@ public sealed class TsqlConventionGuardTests
 
         return bullets;
     }
-
-    /* ───────────────────────── which member a literal sits in ───────────────────────── */
-
-    /// <summary>
-    /// The start of a MEMBER declaration at type scope: an access modifier at the beginning of a line,
-    /// followed by any run of the other modifiers.
-    ///
-    /// <para><b>The access modifier is the whole discriminator, and requiring it is what this regex is
-    /// for.</b> Its predecessor took "the nearest name above the literal" from a pattern that also matched
-    /// <c>if (…) {</c>, <c>catch (…) {</c>, <c>new SqlConnectionStringBuilder(…) {</c> and any local
-    /// <c>string x =</c>. Measured on the tree it shipped against (#3094), 48 of the corpus's 160 T-SQL
-    /// literals were labelled with a bare keyword or nothing at all, and several more with a local
-    /// variable or the type being constructed — a figure about a resolver that no longer exists, which is
-    /// why it is the one number written down here. A local cannot
-    /// carry an access modifier and neither can a statement keyword, so anchoring on one excludes every
-    /// shape that misattributed rather than blacklisting them one at a time.</para>
-    ///
-    /// <para><b>What it therefore cannot see, stated rather than discovered later.</b> A member with no
-    /// access modifier (an <c>enum</c> or <c>interface</c> member, or a field written
-    /// <c>static readonly …</c>) is not a declaration here, and neither is an attribute argument, which
-    /// sits above its own member's declaration line. A literal in one of those resolves to
-    /// <see cref="Unknown"/> — and <see cref="EveryTsqlLiteralInTheCorpus_IsAttributedToADeclaredMember"/>
-    /// reds on it by name. Widening the modifier list to admit a bare <c>const</c> or <c>static</c> would
-    /// re-admit the local-variable case, so the resolution fails toward the worse label instead: an honest
-    /// <c>&lt;unknown&gt;</c> a reader escalates, not a plausible name a reader trusts.</para>
-    ///
-    /// <para><b>That widening is guarded by this comment and by five fixture rows, and by nothing else.</b>
-    /// A re-admitted local produces an identifier-shaped label, and
-    /// <see cref="EveryTsqlLiteralInTheCorpus_IsAttributedToADeclaredMember"/> can only see a label that
-    /// is a keyword or nothing — so it would report a clean run across the rest of the corpus. Its doc
-    /// comment states the same bound from the other side; if you are here to widen the list, read
-    /// it.</para>
-    ///
-    /// <para><b>The trailing lookahead excludes an ACCESSOR</b>, which is the one place an access modifier
-    /// appears INSIDE another member's body. <c>ArchiveService.IsArchiving</c> is the whole population and
-    /// the reason the exclusion is here rather than in a comment: its <c>private set =&gt; …</c> matched as
-    /// a declaration of its own, which put a declaration start inside the property that holds it and made
-    /// <see cref="TheMemberScan_ReadsEveryDeclarationWhole"/> report the property as over-extended. It is
-    /// the only accessor in the scanned trees carrying an access modifier — which is why the exclusion is
-    /// here rather than in a note saying it might one day be needed, and why no count of them is written
-    /// down: that number changes on any commit and nothing would hold it true. An accessor is not a member
-    /// a literal is attributed to; the property is.</para>
-    /// </summary>
-    private static readonly Regex DeclarationHead = new(
-        @"^[ \t]*(?:public|private|protected|internal)\b"
-        + @"(?:[ \t]+(?:public|private|protected|internal|abstract|async|const|event|explicit|extern"
-        + @"|implicit|new|override|partial|readonly|required|sealed|static|unsafe|virtual|volatile))*[ \t]+"
-        + @"(?!(?:get|set|init|add|remove)\b[ \t]*(?:=>|\{|;))",
-        RegexOptions.Multiline | RegexOptions.Compiled);
-
-    /// <summary>What <see cref="EnclosingMember"/> reports when no member declaration contains the
-    /// offset.</summary>
-    private const string Unknown = "<unknown>";
-
-    /// <summary>
-    /// Whether a declaration can hold a literal (a method, property, field, constructor) or only other
-    /// declarations (a <c>class</c>, <c>record</c>, <c>enum</c>, …).
-    ///
-    /// <para>Types are in the declaration list rather than filtered out of it because a member's range is
-    /// bounded by the NEXT declaration of either kind, and a nested type is the next thing after the member
-    /// above it. They are excluded from attribution and from
-    /// <see cref="TheMemberScan_ReadsEveryDeclarationWhole"/>: a type's body legitimately contains every
-    /// declaration below it, which is the exact shape that assertion calls an over-run.</para>
-    /// </summary>
-    private enum DeclarationKind
-    {
-        /// <summary>A method, property, field, event or constructor — something a literal can be inside.</summary>
-        Member,
-
-        /// <summary>A <c>class</c>, <c>struct</c>, <c>record</c>, <c>interface</c>, <c>enum</c> or
-        /// <c>delegate</c>.</summary>
-        Type,
-    }
-
-    /// <summary>
-    /// One declaration as a half-open range over walked source, plus where the NEXT declaration starts.
-    ///
-    /// <para><c>NextStart</c> is carried because it is the one bound on <c>End</c> that does not come from
-    /// the brace walk: it is a regex match offset, so it can DISAGREE with a brace count that ran past the
-    /// method it was reading. #3089 found the same thing about the same shape — a re-check that reads the
-    /// same text and repeats the same walk is a tautology, not a check.</para>
-    ///
-    /// <para><c>End</c> is <c>-1</c> when the brace walk never closed the body.</para>
-    /// </summary>
-    private readonly record struct DeclaredRange(
-        string Name,
-        DeclarationKind Kind,
-        int Start,
-        int End,
-        int NextStart);
-
-    /// <summary>Every declaration in one file, beside the walked source they are offsets into.</summary>
-    private sealed record MemberMap(string Code, IReadOnlyList<DeclaredRange> Declarations);
-
-    /// <summary>
-    /// Every declaration in <paramref name="text"/>, read through <see cref="CSharpSourceWalker"/> so a
-    /// modifier in a comment and a brace in a literal are neither of them code (#2913, #3052). The walk
-    /// preserves every character position, so an offset into the walked text is the same offset into the
-    /// file — which is what lets <see cref="EnclosingMember"/> take the literal offset the scan already has.
-    /// </summary>
-    private static MemberMap MemberMapOf(string text)
-    {
-        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
-        var heads = DeclarationHead.Matches(code);
-        var declarations = new List<DeclaredRange>(heads.Count);
-
-        for (var i = 0; i < heads.Count; i++)
-        {
-            var head = heads[i];
-            var after = head.Index + head.Length;
-            var (name, kind) = DeclaredName(code, after);
-
-            declarations.Add(new DeclaredRange(
-                name,
-                kind,
-                head.Index,
-                DeclarationEnd(code, after),
-                i + 1 < heads.Count ? heads[i + 1].Index : code.Length));
-        }
-
-        return new MemberMap(code, declarations);
-    }
-
-    /// <summary>
-    /// The declared name and kind, reading forward from just past the modifiers.
-    ///
-    /// <para>Tokenised rather than pattern-matched because the name's position depends on the shape: it is
-    /// the identifier before the parameter list on a method, before <c>=&gt;</c> or <c>{</c> on a property,
-    /// and before <c>=</c> on a field. A single regex for all three has to guess which <c>(</c> it is
-    /// looking at, and <c>ScannedTrees</c> is the counter-example that decides it — a
-    /// <c>(string, string[], string)[]</c> tuple type whose FIRST <c>(</c> is part of the type, so "the
-    /// identifier before the first paren" reads <c>readonly</c>. The scan tells them apart by position
-    /// rather than by shape: a type's parentheses come before any identifier has been read, a parameter
-    /// list's come after one.</para>
-    ///
-    /// <para><b>Every branch here is load-bearing, which took measuring rather than reasoning.</b> An
-    /// earlier draft also required the <c>(</c> to follow the name with only whitespace between, and moved
-    /// the name's end onto the <c>&gt;</c> that closed a generic argument list so that a generic method
-    /// would still qualify. Both were removed after dumping EVERY declaration in the scanned trees with
-    /// and without them and diffing: identical, every name, every file. They were a pair that only existed
-    /// to cancel each other out — and because each masked the other's removal, testing them one at a time
-    /// reported both as benign. No mutation of either could red a test, which is the tell.</para>
-    /// </summary>
-    private static (string Name, DeclarationKind Kind) DeclaredName(string code, int from)
-    {
-        var typeKeyword = Regex.Match(
-            code[from..Math.Min(from + 64, code.Length)],
-            @"^(?:(?:record|partial|readonly|ref)[ \t]+)*(?<kw>class|struct|record|interface|enum|delegate)\b[ \t]+(?<name>[A-Za-z_][A-Za-z0-9_]*)");
-
-        if (typeKeyword.Success)
-        {
-            return (typeKeyword.Groups["name"].Value, DeclarationKind.Type);
-        }
-
-        string? last = null;
-        var paren = 0;
-        var bracket = 0;
-        var angle = 0;
-
-        for (var i = from; i < code.Length; i++)
-        {
-            var c = code[i];
-
-            if (char.IsLetter(c) || c == '_')
-            {
-                var j = i;
-
-                while (j < code.Length && (char.IsLetterOrDigit(code[j]) || code[j] == '_'))
-                {
-                    j++;
-                }
-
-                if (paren == 0 && bracket == 0 && angle == 0)
-                {
-                    last = code[i..j];
-                }
-
-                i = j - 1;
-                continue;
-            }
-
-            switch (c)
-            {
-                case '(':
-                    /* A parameter list ends the name; a TYPE's parentheses do not, and the difference is
-                       that a type's come before any identifier has been read. That is the whole reason
-                       this is a scan and not a regex — ScannedTrees and DefinitionsWithoutSql in this file
-                       are (string, string[], string)[] tuples whose first ( belongs to the type, so
-                       "the identifier before the first paren" answers readonly.
-
-                       It has to return here rather than fall through to = / { / ; : a generic member's
-                       constraint clause sits between the parameter list and the body, and where T : class
-                       is three more depth-zero identifiers. Constrained in
-                       TheResolver_AttributesByScope_NotByTheNearestNameAbove is the pin. */
-                    if (paren == 0 && bracket == 0 && angle == 0 && last is not null)
-                    {
-                        return (last, DeclarationKind.Member);
-                    }
-
-                    paren++;
-                    break;
-
-                case ')':
-                    paren--;
-                    break;
-
-                case '[':
-                    bracket++;
-                    break;
-
-                case ']':
-                    bracket--;
-                    break;
-
-                /* Type arguments, tracked so a ( or a ; inside one cannot end the name — Func<(int, int)>
-                   is the shape, and TheResolver_AttributesByScope_NotByTheNearestNameAbove reds without
-                   this on the plainer Dictionary<,> form. Only opened directly after an identifier, so a
-                   comparison operator in an initialiser cannot open one; a stray > cannot drive the depth
-                   negative and strand every check below it. */
-                case '<':
-                    if (paren == 0 && bracket == 0 && angle == 0 && last is not null)
-                    {
-                        angle++;
-                    }
-
-                    break;
-
-                case '>':
-                    if (angle > 0)
-                    {
-                        angle--;
-                    }
-
-                    break;
-
-                case '=':
-                case '{':
-                case ';':
-                    if (paren == 0 && bracket == 0 && angle == 0)
-                    {
-                        return (last ?? Unknown, DeclarationKind.Member);
-                    }
-
-                    break;
-
-                default:
-                    break;
-            }
-        }
-
-        return (last ?? Unknown, DeclarationKind.Member);
-    }
-
-    /// <summary>
-    /// One past the declaration's last character: the <c>;</c> that ends a field or an expression-bodied
-    /// member, or the <c>}</c> that closes a braced body. <c>-1</c> when a body opened and never closed.
-    ///
-    /// <para>Deliberately UNBOUNDED — it reads to the end of the file rather than stopping at the next
-    /// declaration, so <see cref="DeclaredRange.NextStart"/> stays an independent bound that a runaway
-    /// count can be caught by. Clamping here would make the two agree by construction.</para>
-    ///
-    /// <para><b>A braced group does not always end the declaration.</b> An accessor list can be followed
-    /// by <c>= initialiser;</c>, and on an auto-property that initialiser is where a literal lives. This
-    /// is the one truncation <see cref="ShapeOf"/> is structurally unable to report — a range that stops
-    /// short of its own member is still closed and still well under
-    /// <see cref="DeclaredRange.NextStart"/>, so it reads as
-    /// <see cref="RangeShape.WholeMember"/> — which is why it is handled here rather than described as a
-    /// bound. <c>Auto</c> in <see cref="TheResolver_AttributesByScope_NotByTheNearestNameAbove"/> is the
-    /// pin; found in review of #3097, where it resolved to <see cref="Unknown"/> in silence.</para>
-    /// </summary>
-    private static int DeclarationEnd(string code, int from)
-    {
-        var paren = 0;
-        var bracket = 0;
-
-        for (var i = from; i < code.Length; i++)
-        {
-            var c = code[i];
-
-            if (c == '(')
-            {
-                paren++;
-            }
-            else if (c == ')')
-            {
-                paren--;
-            }
-            else if (c == '[')
-            {
-                bracket++;
-            }
-            else if (c == ']')
-            {
-                bracket--;
-            }
-            else if (paren != 0 || bracket != 0)
-            {
-                continue;
-            }
-            else if (c == ';')
-            {
-                return i + 1;
-            }
-            else if (c == '{')
-            {
-                var close = BraceGroupEnd(code, i);
-
-                if (close < 0)
-                {
-                    return -1;
-                }
-
-                /* An accessor list can be followed by "= initialiser;", and on an auto-property that
-                   initialiser is exactly where a literal lives:
-
-                       public string QueryText { get; set; } = "SELECT …";
-
-                   Returning at the accessor list's closing brace ends the range BEFORE the literal, so
-                   the literal is contained by nothing and labelled <unknown> — and neither arm of
-                   ShapeOf can see it, because a range that stops short of its own member is still well
-                   under NextStart and still closed. That is a truncation with no detector, which is the
-                   one shape this scan must not produce.
-
-                   An '=' is the only thing that can legally follow the brace inside the same
-                   declaration; anything else there belongs to the next one, so the brace ends this
-                   range. */
-                var after = close;
-
-                while (after < code.Length && char.IsWhiteSpace(code[after]))
-                {
-                    after++;
-                }
-
-                if (after < code.Length && code[after] == '=')
-                {
-                    i = after;
-                    continue;
-                }
-
-                return close;
-            }
-        }
-
-        return -1;
-    }
-
-    /// <summary>One past the <c>}</c> that closes the brace group opening at <paramref name="open"/>, or
-    /// <c>-1</c> if it never closes.</summary>
-    private static int BraceGroupEnd(string code, int open)
-    {
-        var depth = 0;
-
-        for (var j = open; j < code.Length; j++)
-        {
-            if (code[j] == '{')
-            {
-                depth++;
-            }
-            else if (code[j] == '}' && --depth == 0)
-            {
-                return j + 1;
-            }
-        }
-
-        return -1;
-    }
-
-    /// <summary>
-    /// The member a literal belongs to: the innermost member declaration whose range CONTAINS the offset.
-    ///
-    /// <para><b>Containment is not what fixed the measured sites, and saying so precisely matters.</b> The
-    /// predecessor had no containment test at all — whatever matched last before the offset won, inside the
-    /// literal's member or not — but what actually produced the 48 wrong labels was the pattern it matched
-    /// WITH, and <see cref="DeclarationHead"/> is where that is fixed. Measured over the corpus: asking for
-    /// the innermost CONTAINING member and asking for the nearest member declaration ABOVE the offset give
-    /// the same answer at all 160 T-SQL sites. So containment is hardening, for the one direction the
-    /// declaration regex cannot cover — a literal that is inside no member at all (an attribute argument,
-    /// or anything below a body the brace walk lost) resolves to <see cref="Unknown"/> here instead of
-    /// borrowing the name of whichever member happens to sit above it. It is pinned by
-    /// <see cref="TheMemberScan_ReadsABodyWhoseLiteralHoldsABrace_AndARawCountDoesNot"/>, which is an
-    /// arranged case rather than a site on the tree, and that is the honest status of it.</para>
-    /// </summary>
-    private static string EnclosingMember(MemberMap map, int offset)
-    {
-        var name = Unknown;
-        var innermost = -1;
-
-        foreach (var declaration in map.Declarations)
-        {
-            if (declaration.Kind != DeclarationKind.Member
-                || declaration.End < 0
-                || offset < declaration.Start
-                || offset >= declaration.End
-                || declaration.Start <= innermost)
-            {
-                continue;
-            }
-
-            name = declaration.Name;
-            innermost = declaration.Start;
-        }
-
-        return name;
-    }
-
-    /// <summary>What the brace walk actually returned for one declaration.</summary>
-    private enum RangeShape
-    {
-        /// <summary>One whole declaration, ending inside its own bounds.</summary>
-        WholeMember,
-
-        /// <summary>A body opened and never closed, so every literal below it is attributed to nothing.</summary>
-        Unterminated,
-
-        /// <summary>The walk ran past the next declaration, so that member's literals are attributed
-        /// here.</summary>
-        OverExtended,
-    }
-
-    /// <summary>
-    /// Which of three shapes a declaration's range is.
-    ///
-    /// <para><b>The two failing shapes are complementary, not redundant.</b>
-    /// <see cref="RangeShape.OverExtended"/> compares the brace walk against a regex offset, so it can
-    /// disagree with the walk — but it is structurally blind at the END of the file, where the last
-    /// declaration has no successor to run past. That tail is what
-    /// <see cref="RangeShape.Unterminated"/> still covers, because a runaway there simply never closes.
-    /// #3089 measured the same pair on the same kind of scan and both arms are pinned here.</para>
-    /// </summary>
-    private static RangeShape ShapeOf(DeclaredRange declaration) =>
-        declaration.End < 0 ? RangeShape.Unterminated
-        : declaration.End > declaration.NextStart ? RangeShape.OverExtended
-        : RangeShape.WholeMember;
-
-    /// <summary>
-    /// The 1-based line <paramref name="offset"/> falls on. Sound over both the file and the walked text:
-    /// <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> preserves every newline and every character
-    /// position.
-    /// </summary>
-    private static int LineOf(string text, int offset) =>
-        text.AsSpan(0, Math.Clamp(offset, 0, text.Length)).Count('\n') + 1;
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {
