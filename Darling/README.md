@@ -517,7 +517,7 @@ The embedded MCP server, over Streamable HTTP bound to `localhost` by default (s
 
   The Dashboard's per-class latch `severity` / `description` / `recommendation`, spinlock `description`, plan-cache `bloat_level`, and CPU-scheduler `pressure_level` / `recommendation` are the Dashboard / reporting-view CASE derivations (not collected columns), reproduced service-side so the full result shape is served. Darling's delta collectors store no `sample_interval_seconds`, so per-second latch/spinlock rates are derived from the collection interval, and the Dashboard's `get_resource_semaphore` `sample_interval_seconds` is not emitted for the same reason (`max_target_memory_mb`, the workspace-memory ceiling, is added since the store carries it).
 
-- **Twelve PostgreSQL data-read tools** — the read surface for a PostgreSQL target's collectors, each a stored read (see [PostgreSQL targets](#postgresql-targets)):
+- **PostgreSQL data-read tools** — the read surface for a PostgreSQL target's collectors, each a stored read. The `get_pg_*` family is larger than the reads called out here (see [PostgreSQL targets](#postgresql-targets)):
   - *Waits and queries* — `get_pg_wait_stats` (top wait events in the window, decoded to type + event name), `get_pg_top_queries` (query shapes by total execution time, carrying Aurora's storage-vs-cache I/O split and per-statement peak memory).
   - *Outage predictors* — `get_pg_wraparound_risk` (XID and MultiXact freeze headroom per database), `get_pg_xmin_horizon` (why vacuum is reclaiming nothing, attributed to the specific holder), `get_pg_replication_slots` (slot health, including whether retained WAL is still growing).
   - *Maintenance* — `get_pg_autovacuum_health` (tables behind on vacuum or analyze, ranked by how far past each table's OWN trigger threshold it is — the ratio, not the dead-tuple count, because the same count is routine on a large table and urgent on a small one).
@@ -925,7 +925,7 @@ Each per-server tab has these inner tabs (**Session Stats**, **Configuration Cha
 | **Daily Summary** | A one-row roll-up of the selected day (default today, UTC, with a date picker) — total wait time, the top wait type, distinct query count, deadlock / blocking-event / high-CPU-sample counts, collector errors, and an overall health band |
 | **Collection Health** | Sub-tabs — **Health Summary** (a 7-day per-collector roll-up: run / success / error counts, failure rate, average duration, last success / run / error, and a health band of HEALTHY / WARNING / STALE / FAILING / NEVER_RUN / NO_PERMISSIONS — double-click a collector to open its full run history), **Collection Log** (the recent run log with per-run SQL and store-write timings and row counts), and **Duration Trends** (a per-collector success-duration scatter) |
 
-The aggregate tabs — **Overview** and **Alerts** span every server; **Recommendations** and **FinOps** are server-scoped, each with its own server selector independent of the sidebar. **Job History** and **FinOps** are not described below:
+The aggregate tabs — **Overview** and **Alerts** span every server; **Recommendations** has its own server selector, independent of the sidebar. **Job History** and **FinOps** are not described below:
 
 | Tab | Contents |
 |---|---|
