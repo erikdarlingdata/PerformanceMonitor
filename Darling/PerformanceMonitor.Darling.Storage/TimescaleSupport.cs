@@ -1773,15 +1773,62 @@ WITH NO DATA";
     public const string HeaviestHourlyRefreshView = QueryStoreStatsIntervalHourlyView;
 
     /// <summary>
-    /// The longest run recorded for <see cref="HeaviestHourlyRefreshView"/> under the narrowed
-    /// <see cref="HourlyRefreshStartOffset"/> window, and the number the compression grid is sized against.
+    /// The runtime the compression grid is sized against for <see cref="HeaviestHourlyRefreshView"/>. ONE
+    /// recorded run, and NOT a measured maximum of the narrowed <see cref="HourlyRefreshStartOffset"/>
+    /// regime — the difference is the whole of #3069, and the paragraphs below state it rather than leaving
+    /// the number to imply a provenance it does not have.
     ///
-    /// <para><b>The measured range, so a later reader can tell whether they are still inside it.</b> Before
-    /// the narrowing this job ran 3,301-6,330 s against a 1-hour cadence. Under the 1-day window the highest
-    /// figure recorded is the 864 s here; the drift chart's most recent readings for the same job are
-    /// <b>194 s, 225 s and 335 s</b>, climbing with volume rather than settling. The grid is sized against the
-    /// 864 s ceiling and not against the 194 s low, because a slot chosen against the low would be correct
-    /// only at the load it was chosen at.</para>
+    /// <para><b>WHERE IT CAME FROM.</b> One run of this job's refresh policy — <c>13:30:00</c> to
+    /// <c>13:44:24</c> on the boundary day, on the one store that carries this workload — read from that
+    /// store's per-run job history with an explicit <c>succeeded</c> column that said <c>t</c>. The narrowed
+    /// <see cref="HourlyRefreshStartOffset"/> reached that store's refresh policies at <c>13:44:23</c>, one
+    /// second BEFORE this run ended. So it is either the TRANSITION run — in flight while
+    /// <c>start_offset</c> was narrowed underneath it, therefore neither cleanly pre- nor post-treatment —
+    /// or the boundary timestamp was itself derived from this run's completion, in which case the boundary
+    /// and this constant are the SAME OBSERVATION and cannot corroborate each other. Separating those two
+    /// needs clock times nobody has read.</para>
+    ///
+    /// <para><b>Which is why "conservative" is the wrong word for it, safe though it is.</b> Conservative
+    /// reads as measured-then-rounded-up, and nothing measured this as a ceiling. It is a reading whose
+    /// REGIME MEMBERSHIP IS UNDETERMINED, which happens to exceed every cleanly post-boundary run observed:
+    /// a partly-narrowed window simply costs more than a fully-narrowed one. So the value bounds the grid
+    /// safely WITHOUT HAVING BEEN ESTABLISHED AS A BOUND. The safety is incidental; the provenance is still
+    /// owed, and the read that would settle it is named at the end of this comment.</para>
+    ///
+    /// <para><b>THE POST-BOUNDARY DISTRIBUTION, recorded here because a constant with one sample behind it
+    /// reads exactly like a constant with a distribution behind it.</b> 10 consecutive runs of this job's
+    /// refresh policy, each read with an explicit <c>succeeded</c> column and every one of them <c>t</c>, in
+    /// start order across the ten hours after the boundary:
+    /// <c>864, 194, 222, 225, 335, 594, 465, 359, 293, 355</c> seconds. Set the first aside for the reason
+    /// above and the remaining 9 run from <b>194 s to 594 s</b>, mean <b>338 s</b>, middle reading
+    /// <b>335 s</b> — every one of them below <see cref="RefreshSlotWarningSeconds"/>. The largest of the 9
+    /// clears the slot by <b>306 s</b>, where this constant clears it by 36 s. (#3069 records the median of
+    /// the same window as ~<b>347 s</b>; the rows published there do not produce that — 347 is the midpoint
+    /// of 335 and 359, so a median over 8 of the 10 rather than the 9 clean ones — which is why the figure
+    /// held here is the one the listed series yields.)</para>
+    ///
+    /// <para><b>The hole, and two readings that are corroboration only.</b> The run starting near
+    /// <c>00:35:05</c> was never observed: by the next look the catalog's last-run figure had already
+    /// advanced past it. Two further readings of <b>342 s</b> and <b>348 s</b> come from the hourly
+    /// self-metrics snapshot (<see cref="StoreSelfMetrics.BackgroundJobInsertSql"/>,
+    /// <c>object_kind = 'background_job'</c>), which records <c>last_run_duration</c> with NO STATUS COLUMN
+    /// AT ALL — while <see cref="HeaviestRefreshRuntimeSql"/> and #2136's <see cref="JobCadenceReadSql"/>
+    /// both filter <c>last_run_status = 'Success'</c>. An unfiltered series can carry an aborted run's
+    /// duration, so those two say the series stayed flat and are NOT ADMISSIBLE in setting this constant.
+    /// They are kept out of the ten above for that reason rather than for tidiness.</para>
+    ///
+    /// <para><b>Why the value is unchanged in BOTH directions, which is #3069's whole resolution.</b> Upward
+    /// is asserted as a failure by design (#3055) — see the slot paragraph below. Downward is the subtler
+    /// trap: correcting toward the observed 594 s would leave 306 s of margin in place of 36 s, and the
+    /// reason the heaviest slot is excluded WHOLE rather than guarded
+    /// (<see cref="CompressionPhaseMinutes"/>) rests on that 36 s being real. A downward edit therefore
+    /// reopens #3035's exclude-vs-guard decision rather than merely re-provenancing a number. What settles
+    /// either direction is one read that has not been taken: the status-filtered per-bucket split of the
+    /// full per-run series (<c>collect.store_metrics</c>, <c>object_kind = 'background_job'</c>) on the
+    /// boundary timestamp, giving count, median and maximum each side of it. The grid is sized against the
+    /// high figure and not against the 194 s low for the original reason — a slot chosen against the low
+    /// would be correct only at the load it was chosen at — and before the narrowing this job ran
+    /// 3,301-6,330 s against a 1-hour cadence, which is what invalidation looks like.</para>
     ///
     /// <para><b>THE OPERATING ENVELOPE, stated because it is a condition and not a property.</b> #3012's
     /// convoy needed a refresh and a compression policy to want the same relation at the same time. Two things
