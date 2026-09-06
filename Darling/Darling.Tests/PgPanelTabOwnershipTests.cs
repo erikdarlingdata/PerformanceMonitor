@@ -36,16 +36,15 @@ namespace Darling.Tests;
 public sealed class PgPanelTabOwnershipTests
 {
     /// <summary>
-    /// Panels whose load path is not their own tab's, each with the issue that tracks it. Deliberately
-    /// carrying the pair rather than muting the whole tab: any OTHER panel on those tabs is still checked.
+    /// Panels whose load path is not their own tab's, each with the issue that tracks it. EMPTY, and the
+    /// rule below is enforced with no exemption anywhere in the PostgreSQL tree.
+    ///
+    /// <para>An entry belongs here only alongside an open issue that says which way the pair will be
+    /// resolved, and it is carried per PANEL rather than per tab so every other panel on that tab stays
+    /// checked. The stale-exemption assertion at the end of the rule is what stops one outliving its
+    /// fix.</para>
     /// </summary>
-    private static readonly Dictionary<string, string> KnownOffTab = new(StringComparer.Ordinal)
-    {
-        ["PgWaitSamplingGrid"] = "#3050",
-        ["PgWaitSamplingNote"] = "#3050",
-        ["PgPredicateStatsGrid"] = "#3050",
-        ["PgPredicateStatsNote"] = "#3050",
-    };
+    private static readonly Dictionary<string, string> KnownOffTab = new(StringComparer.Ordinal);
 
     private static readonly Regex ControlAssignment = new(
         @"\b(?<name>Pg[A-Za-z]+(?:Grid|Note|Expander))\s*(?:\.\w+)?\s*=", RegexOptions.Compiled);
