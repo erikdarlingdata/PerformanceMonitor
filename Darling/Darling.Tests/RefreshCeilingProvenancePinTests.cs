@@ -151,7 +151,7 @@ public sealed class RefreshCeilingProvenancePinTests
         yield return (
             "the inadmissible snapshot readings",
             CeilingDeclaration,
-            @"\(([0-9]+ s(?:, [0-9]+ s)*)\) say the series stayed flat",
+            @"\(([0-9]+ s(?:, [0-9]+ s)*)\) says the series stayed flat",
             false);
 
         yield return (
@@ -468,14 +468,24 @@ public sealed class RefreshCeilingProvenancePinTests
             $"an unfiltered snapshot reading appears in the status-verified series {Join(series)}, so the two "
             + "populations have been run together");
 
-        /* THE SCOPE MARKER, which is what stops that list reading as a complete enumeration. The series it
-           quotes gains a reading every hour, so a list without an as-at is a frozen enumeration wearing a
-           complete one's clothes - #3072's defect exactly. Checked for PRESENCE and not for value: the
-           timestamp is evidence, and pinning it to a derived quantity would be inventing a bound. */
-        Require(Regex.IsMatch(ceilingProse, @"Snapshot readings as at <c>[0-9][0-9]:[0-9][0-9]Z</c> \("),
-            "the snapshot readings are no longer scoped by an as-at stamp, so the list now reads as a "
-            + "complete enumeration of a series that gains a reading every hour this job runs. Restore the "
-            + "scope, or drop the enumeration and keep only the rule - the rule is the timeless part");
+        /* THE CLOSING SCOPE, which is what stops that list reading as a complete enumeration of an open
+           set. The series it quotes gains a reading every hour, so an unscoped list is a frozen enumeration
+           wearing a complete one's clothes - #3072's defect exactly.
+
+           And the scope has to CLOSE the population rather than merely date it. "up to <hh:mmZ>" names a
+           window that has ended; "the readings so far" carries a scope and rots anyway, because a doc
+           comment has no timestamp of its own for a relative phrase to be read against. So the pattern
+           demands the closing preposition and an absolute stamp, not just any stamp.
+
+           Checked for PRESENCE and not for value: the timestamp is evidence, and pinning it to a derived
+           quantity would be inventing a bound this constant does not have. */
+        Require(
+            Regex.IsMatch(ceilingProse, @"complete set of snapshot readings up to <c>[0-9][0-9]:[0-9][0-9]Z</c> \("),
+            "the snapshot readings are no longer bounded by a CLOSED window, so the list reads as a complete "
+            + "enumeration of a series that gains a reading every hour this job runs. Restore a scope that "
+            + "has ended (\"up to <hh:mmZ>\"), not one relative to whenever it is read - or drop the "
+            + "enumeration and keep only the rule, which is the timeless part and the paragraph's real "
+            + "subject");
 
         /* CompressionPhaseMinutes' exclude-whole reasoning, in minutes. */
         Require(Ceiling * 10 % 60 == 0,

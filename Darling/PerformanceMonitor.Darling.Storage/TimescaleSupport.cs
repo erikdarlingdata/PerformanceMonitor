@@ -1819,9 +1819,12 @@ WITH NO DATA";
     /// <c>last_run_status = 'Success'</c>. An unfiltered series can carry an aborted run's duration, so NO
     /// reading from it may set this constant — a statement about the SOURCE, deliberately not about any
     /// particular reading, because that series gains one every hour this job runs and an enumeration of it
-    /// would be stale within the hour. Snapshot readings as at <c>04:20Z</c> (342 s, 348 s, 286 s) say the
-    /// series stayed flat, which is corroboration and nothing more. They are kept out of the ten above for
-    /// the rule's sake rather than for tidiness.</para>
+    /// would be stale within the hour. The complete set of snapshot readings up to <c>04:20Z</c>
+    /// (342 s, 348 s, 286 s) says the series stayed flat, which is corroboration and nothing more. Note the
+    /// scope has to CLOSE the population, not merely date it: "up to 04:20Z" is a window that has ended and
+    /// will still be true next year, where "the readings so far" carries a scope and rots anyway, because a
+    /// doc comment has no timestamp of its own to be read relative to. They are kept out of the ten above
+    /// for the rule's sake rather than for tidiness.</para>
     ///
     /// <para><b>Why the value is unchanged in BOTH directions, which is #3069's whole resolution.</b> Upward
     /// is asserted as a failure by design (#3055) — see the slot paragraph below. Downward is the subtler
