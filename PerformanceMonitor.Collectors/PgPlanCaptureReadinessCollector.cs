@@ -148,7 +148,17 @@ WITH settings AS (
            PGC_SUPERUSER by context - a superuser can SET it - but it carries no GUC_SUPERUSER_ONLY flag, so
            any role may read it. The decisive evidence is next door rather than in the docs: this collector
            already reads shared_preload_libraries this way and #2564/#2605 measured that against a live
-           Aurora target, and shared_preload_libraries is the more restricted of the two. */
+           Aurora target, and shared_preload_libraries is the more restricted of the two.
+
+           WHAT THIS CANNOT SEE, and the facet says so on the row rather than leaving it implied: a log
+           entry is written by the backend that raised it, in THAT backend's lc_messages, and the setting
+           is overridable per role and per database. This read resolves on the monitoring connection, so
+           it is the server's value only when nothing overrode it - which is the ordinary case, since the
+           setting normally comes from postgresql.conf or from nowhere. The direction that matters is a
+           global de_DE with an override putting the MONITORING role at C: the facet would then read
+           satisfied about a server whose backends translate. Distinguishing it means reading
+           pg_settings.source rather than the resolved value, which is a refinement and not this change;
+           naming the limit is what stops the row being over-read in the meantime. */
         current_setting('lc_messages', true)                                     AS message_locale
 ),
 probe AS (
@@ -340,7 +350,12 @@ SELECT
         WHEN p.english_messages
             THEN 'PostgreSQL writes its messages untranslated under this locale, so the log reads that match '
                  || 'English message text can find their anchor. That is a precondition being met, not a '
-                 || 'claim that anything was read.'
+                 || 'claim that anything was read. One limit on how far to trust this row: lc_messages is '
+                 || 'overridable per role and per database, and a log entry is written in the language of '
+                 || 'the backend that raised it, while this value is the one the monitoring connection '
+                 || 'resolved. They are the same wherever the setting comes from postgresql.conf or from '
+                 || 'nowhere, which is the ordinary case - but an override aimed at the monitoring role '
+                 || 'alone would make this row agree with itself and not with the server.'
         ELSE 'PostgreSQL TRANSLATES its own messages under this locale, the severity label included - a '
              || 'German catalogue writes FEHLER: where an English one writes ERROR:. Every log read this '
              || 'product performs matches English message text, so on this target they find nothing. THE '
