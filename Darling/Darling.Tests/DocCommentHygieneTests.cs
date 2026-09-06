@@ -685,20 +685,20 @@ public sealed class DocCommentHygieneTests
     /// stopped being true, and #3079 found three such cases were not even reachable where they were first
     /// written.</para>
     /// </summary>
-    private static readonly (string Target, string Limit)[] CrefShapesTheResolverAccepts =
+    private static readonly (string Target, bool Resolves, string Limit)[] CrefShapesTheResolverAccepts =
     {
-        ("CollectorCatalog.AppliesTo(NoSuchTypeAnywhere)",
+        ("CollectorCatalog.AppliesTo(NoSuchTypeAnywhere)", true,
             "PARAMETER LISTS are discarded at the first '(', so overload identity is never checked and a "
             + "parameter type that does not exist cannot be seen."),
 
-        ("ICollectorDefinition{NoSuchTypeAnywhere}",
+        ("ICollectorDefinition{NoSuchTypeAnywhere}", true,
             "GENERIC ARGUMENTS are discarded with the braces, so neither arity nor the arguments themselves "
             + "are checked."),
 
-        ("CollectorCatalog.NoSuchMemberButAppliesTo",
-            "NOTHING is checked about a name's position: this segment is not a member of CollectorCatalog "
-            + "and does not resolve — included as the negative control for the entry below, so the two "
-            + "cannot be read as the same claim."),
+        ("CollectorCatalog.NoSuchMemberButAppliesTo", false,
+            "THE NEGATIVE CONTROL, and it is a row rather than a comment so that a resolver which said yes "
+            + "to everything could not satisfy the two rows above. Nothing here checks a name's POSITION "
+            + "either, but this segment is spelled nowhere, so it does not resolve."),
     };
 
     /// <summary>
@@ -860,6 +860,7 @@ public sealed class DocCommentHygieneTests
         var onDisk = Directory.EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories)
             .Select(p => Path.GetRelativePath(root, p).Replace('\\', '/'))
             .Where(p => !HasBuildOutputSegment(p))
+            .Where(p => p.Contains('/', StringComparison.Ordinal))
             .Select(p => p[..p.LastIndexOf('/')])
             .Distinct(StringComparer.Ordinal)
             .ToHashSet(StringComparer.Ordinal);
@@ -1385,8 +1386,9 @@ public sealed class DocCommentHygieneTests
                 $"the bound for '{target}' opens with no recognised kind: "
                 + $"\"{bound[..Math.Min(60, bound.Length)]}…\". Every entry has to name its kind, because "
                 + "two of the three are defects awaiting repair and the third is this resolver's own "
-                + "boundary, and nothing else distinguishes them. Add the kind to CrefBoundKinds if it is "
-                + "genuinely new.");
+                + "boundary, and nothing else distinguishes them. The kinds are:\n"
+                + string.Join("\n", CrefBoundKinds.Select(k => $"  {k.Label} — {k.Meaning}"))
+                + "\n\nAdd a kind to CrefBoundKinds if this one is genuinely new.");
 
             Assert.True(
                 string.Equals(label, "MARKER", StringComparison.Ordinal)
@@ -1396,6 +1398,7 @@ public sealed class DocCommentHygieneTests
                 + "label is decidable from the target, so a hand label that disagrees with it is wrong.");
         }
 
+        Assert.All(CrefCarryingElements.Values, bound => Assert.NotEmpty(bound));
         Assert.All(SolutionProjectsWithoutCrefs.Values, bound => Assert.NotEmpty(bound));
         Assert.All(ProjectDirectoriesOutsideTheSolution.Values, bound => Assert.NotEmpty(bound));
     }
@@ -1417,10 +1420,8 @@ public sealed class DocCommentHygieneTests
 
         /* The accepted shapes. The third row is a negative control, so "everything resolves" cannot pass
            this. */
-        foreach (var (target, limit) in CrefShapesTheResolverAccepts)
+        foreach (var (target, expected, limit) in CrefShapesTheResolverAccepts)
         {
-            var expected = !limit.StartsWith("NOTHING", StringComparison.Ordinal);
-
             Assert.True(
                 CrefResolves(target, census.CodeIdentifiers) == expected,
                 $"'{target}' should{(expected ? " " : " NOT ")}resolve; its recorded limit says "
