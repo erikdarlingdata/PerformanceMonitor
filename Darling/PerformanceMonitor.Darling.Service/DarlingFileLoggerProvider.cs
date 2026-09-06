@@ -18,8 +18,8 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// The service's rolling file log — an <see cref="ILoggerProvider"/> so every existing
-/// <c>ILogger</c> call site (collector run lines, connect edges, reload notices, errors) lands in a
-/// greppable file with zero changes at the call sites. This is the service's PRIMARY diagnostic
+/// <c>ILogger</c> call site (connect edges, reload notices, warnings, errors) lands in a greppable
+/// file with zero changes at the call sites. This is the service's PRIMARY diagnostic
 /// surface: the Windows Event Log provider is also wired, but its event source can only be created
 /// by an elevated principal — the recommended <c>NT SERVICE</c> virtual account cannot, so on a
 /// by-the-book install the Event Log silently receives nothing until the installer pre-creates the
@@ -36,6 +36,16 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para>Directory: <c>%ProgramData%\PerformanceMonitorDarling\logs</c> — the machine-level Darling
 /// folder the managed store already lives under (<c>...\pg</c>), created by the service account on
 /// first use exactly like the data directory. File: <c>darling-service_yyyyMMdd.log</c>.</para>
+///
+/// <para><b>This provider is not the level gate, and reading it as one inverts the conclusion.</b>
+/// <c>FileLogger.IsEnabled</c> accepts every level except <see cref="LogLevel.None"/>, which reads like a
+/// provider that writes <c>Debug</c> unconditionally and therefore like a call site's level being
+/// decorative. The gate is upstream: <c>AddLogging</c> registers a default
+/// <c>LoggerFilterOptions.MinLevel</c> of <see cref="LogLevel.Information"/>, so a <c>Debug</c> call is
+/// dropped by the factory and never reaches any provider — the permissive test here is what makes
+/// <c>Debug</c> land in the FILE once configuration raises that minimum, rather than only on the console.
+/// Both halves are asserted in <c>PerCycleTimingLogLevelTests</c>; #3102 is the level decision that
+/// depends on them.</para>
 /// </summary>
 public sealed class DarlingFileLoggerProvider : ILoggerProvider
 {

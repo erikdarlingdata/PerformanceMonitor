@@ -6248,7 +6248,20 @@ LIMIT 1";
         try
         {
             var result = await run(runner, runtime, cancellationToken);
-            _logger.LogInformation("  [{Server}] {Collector} => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
+
+            /* #3102: Debug, which is BELOW the default filter's Information, for the same reason the
+               per-database fault split takes its arm's level — see LogPerDatabaseFaultSplit's remarks. A
+               timing on the default log with no reason beside it is the shape to avoid, and a run that
+               SUCCEEDED has no reason beside it at all. The level is the whole of the choice: the message,
+               its gates and its numbers are untouched, so the parsers outside this repo see the identical
+               text the moment the level is turned up.
+
+               Not deleted and not aggregated, because the sample IS the artifact here: attributing one
+               server's one cycle needs that cycle's own numbers, and a periodic distribution cannot answer
+               "what did this collector do at 04:12". Reachable per-namespace rather than all-or-nothing, so
+               measuring the store-write path does not also turn on every other Debug line in the process
+               (Darling/README.md, "Logs"). */
+            _logger.LogDebug("  [{Server}] {Collector} => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
                 server.Config.DisplayName, collectorName, result.Rows, result.SqlMs, result.StorageMs);
 
             /* #2851: the server-scoped phase split rides its OWN line, for the same reason #2811's fetch
@@ -6263,7 +6276,7 @@ LIMIT 1";
                read #2796 clocked at 50s cold is free. */
             if (result.ServerPhasesMeasured)
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "  [{Server}] {Collector} sql:{SqlMs}ms = open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms (wm:{WatermarkMs}ms store-side, outside sql)",
                     server.Config.DisplayName, collectorName, result.SqlMs,
                     result.ServerOpenMs, result.ServerDrainMs, result.ServerOtherMs, result.ServerWatermarkMs);

@@ -1417,10 +1417,15 @@ public sealed class DarlingCollectorRunner
                        collection_log's sql_duration_ms. Neither of the two options it named was taken. Only
                        the DECLARATION moved above the try; the START stayed exactly where it was, so the
                        interval is unchanged, dbSqlMs is the same number, and no second stopwatch measures a
-                       second interval that a reader would then have to reconcile with this one. */
+                       second interval that a reader would then have to reconcile with this one.
+
+                       #3102: Debug, matching the enumerated branch's block below and the generic fault
+                       arm's own level. A database that SUCCEEDED has no error for its split to sit beside,
+                       which is exactly LogPerDatabaseFaultSplit's rule about a phase line being louder
+                       than the thing it decomposes. */
                     if (context.PerDatabasePhasesFrom(dbSqlMs) is { } dbPhases)
                     {
-                        _logger?.LogInformation(
+                        _logger?.LogDebug(
                             "  [{Server}] {Collector} [{Database}] sql:{SqlMs}ms = connect:{ConnectMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms ({Rows} rows, pg:{PgMs}ms)",
                             server.Config.DisplayName, definition.Name, databaseName, dbSqlMs,
                             dbPhases.ConnectMs, dbPhases.OpenMs, dbPhases.DrainMs, dbPhases.OtherMs,
@@ -1946,7 +1951,14 @@ public sealed class DarlingCollectorRunner
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, which hid a single busy database's 50s burst
                            behind four quiet siblings. Quiet databases (0 rows — the 2-of-3 cycles between
-                           Query Store's 900s flushes) stay silent. */
+                           Query Store's 900s flushes) stay silent.
+
+                           #3102: every line in this block is Debug, below the default filter. This is the
+                           branch that multiplies — one line per DATABASE per cycle, and two or three of
+                           them for a collector that fetches plans or text — so it is where the level
+                           decision is worth the most and where a per-cycle timing on the default log
+                           displaces the errors the log is opened for. Suppressed, not removed: the whole
+                           block returns at Debug (Darling/README.md, "Logs"). */
                         if (batchCount > 0)
                         {
                             /* #2164: open vs drain, because they have different fixes. A pass that is nearly
@@ -1966,7 +1978,7 @@ public sealed class DarlingCollectorRunner
                                    so every other collector's line is byte-identical to before. */
                                 if (context.PerItemPlanFetchMs > 0 || context.PerItemTextFetchMs > 0)
                                 {
-                                    _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + plan_fetch:{PlanFetchMs}ms + text_fetch:{TextFetchMs}ms, pg:{PgMs}ms)",
+                                    _logger?.LogDebug("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + plan_fetch:{PlanFetchMs}ms + text_fetch:{TextFetchMs}ms, pg:{PgMs}ms)",
                                         server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
                                         context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
                                         context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs);
@@ -1978,7 +1990,7 @@ public sealed class DarlingCollectorRunner
                                        line and a fetchless collector prints none. */
                                     if (context.PerItemPlanFetchMs > 0)
                                     {
-                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
                                             server.Config.DisplayName, definition.Name, item, context.PerItemPlanFetchMs,
                                             context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
                                             context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted,
@@ -1987,7 +1999,7 @@ public sealed class DarlingCollectorRunner
 
                                     if (context.PerItemTextFetchMs > 0)
                                     {
-                                        _logger?.LogInformation("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
                                             server.Config.DisplayName, definition.Name, item, context.PerItemTextFetchMs,
                                             context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
                                             context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted,
@@ -1996,14 +2008,14 @@ public sealed class DarlingCollectorRunner
                                 }
                                 else
                                 {
-                                    _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms, pg:{PgMs}ms)",
+                                    _logger?.LogDebug("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms, pg:{PgMs}ms)",
                                         server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
                                         context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs), itemStorageMs);
                                 }
                             }
                             else
                             {
-                                _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
+                                _logger?.LogDebug("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
                                     server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs, itemStorageMs);
                             }
                         }
