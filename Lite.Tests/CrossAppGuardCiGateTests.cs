@@ -457,6 +457,20 @@ public class CrossAppGuardCiGateTests
             var items = doc.RootElement.GetProperty("Items");
             Assert.Equal(1, items.GetProperty("Compile").GetArrayLength());
             Assert.Equal(0, items.GetProperty("NoSuchItemTypeAtAll").GetArrayLength());
+
+            /* The fourth way a child process returns nothing: it never exits. Driven with a deadline no
+               real invocation can beat rather than by waiting out the shipped one - the same probe
+               project answers in about a third of a second above, so a millisecond cannot be a flake in
+               the passing direction. A hung child has to FAIL rather than hang the suite, which for a
+               guard is the same as being deleted. */
+            var (hungExit, hungOut, hungError) = RunDotnet(
+                scratch,
+                new[] { "msbuild", probe, "-getItem:Compile" },
+                TimeSpan.FromMilliseconds(1));
+
+            Assert.NotEqual(0, hungExit);
+            Assert.Contains("did not exit within", hungError, StringComparison.Ordinal);
+            Assert.Equal(string.Empty, hungOut);
         }
         finally
         {
@@ -1358,8 +1372,13 @@ public class CrossAppGuardCiGateTests
     /// on PATH surfaces as a non-zero exit with the exception text, so it fails loudly rather than as an
     /// empty answer.</para></summary>
     private static (int ExitCode, string StdOut, string StdErr) RunDotnet(
-        string workingDirectory, IEnumerable<string> arguments)
+        string workingDirectory, IEnumerable<string> arguments, TimeSpan? deadline = null)
     {
+        /* A parameter with the shipped value as its default, so the timeout branch can be exercised at
+           all: the real deadline cannot be waited out in a test, and what the pin is about is what
+           happens WHEN it expires rather than how long it is. */
+        var timeout = deadline ?? EvaluationTimeout;
+
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = workingDirectory,
@@ -1390,18 +1409,29 @@ public class CrossAppGuardCiGateTests
             var stdout = process.StandardOutput.ReadToEndAsync();
             var stderr = process.StandardError.ReadToEndAsync();
 
-            if (!process.WaitForExit((int)EvaluationTimeout.TotalMilliseconds))
+            if (!process.WaitForExit((int)timeout.TotalMilliseconds))
             {
                 try
                 {
                     process.Kill(entireProcessTree: true);
                 }
-                catch (InvalidOperationException)
+                catch (Exception error) when (error is InvalidOperationException
+                    or NotSupportedException
+                    or System.ComponentModel.Win32Exception
+                    or AggregateException)
                 {
-                    /* Exited between the deadline and the kill; the exit code below is still read. */
+                    /* The kill is best-effort and its failure is not the finding: the deadline already
+                       is, and it is returned below either way. All four are races or refusals rather
+                       than defects here - the process exited between the deadline and the kill, it is
+                       remote, the OS refused to terminate it, or (the one Kill(entireProcessTree)
+                       documents for itself) some descendant could not be killed. Letting any of them
+                       out would replace "dotnet did not exit within 2 minutes" with a kill-failure
+                       stack trace, on the path that is hardest to diagnose from a CI log. */
                 }
 
-                return (-1, string.Empty, $"dotnet did not exit within {EvaluationTimeout}");
+                /* No output, and the message says so rather than leaving an empty stdout to be read as
+                   an answer: the reader tasks are abandoned with the process. */
+                return (-1, string.Empty, $"dotnet did not exit within {timeout}, so no output was collected");
             }
 
             return (process.ExitCode, stdout.GetAwaiter().GetResult(), stderr.GetAwaiter().GetResult());
