@@ -133,8 +133,9 @@ public sealed class TimescaleContinuousAggregateTests
     /// retention re-materialized roughly three quarters of the hypertable every hour. Measured on the
     /// production store: the heaviest hourly refresh ran 3,301-6,330 s against its own 1-hour cadence — 118-175%
     /// of it, so each run started into the tail of the last — while rows arriving per hour FELL ~3x. On the
-    /// narrowed window the same refresh runs 864 s, 24% of cadence, which is what makes the overlap
-    /// structurally impossible rather than merely absent.</para>
+    /// narrowed window the same refresh finishes well inside one phase slot, which is what makes the overlap
+    /// structurally impossible rather than merely absent. The figure and its derivation live on
+    /// TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds rather than being restated here.</para>
     ///
     /// <para>Asserted for EVERY hourly view rather than the heavy one alone: the defect was a shared default,
     /// so a fix that reached only the aggregate named in the incident would leave twelve behind.</para>
@@ -167,9 +168,9 @@ public sealed class TimescaleContinuousAggregateTests
     /// <summary>
     /// TREATMENT TWO of #3012, pinned ALONE so that reverting it is red here even if the narrowing survives.
     ///
-    /// <para>The heaviest hourly refresh is still ~33x its lightest sibling on the narrowed window, so 864 s
-    /// has to be invisible to everything else rather than merely short. Two things do that, and the second is
-    /// the less obvious one:</para>
+    /// <para>The heaviest hourly refresh is still more than 4x the recorded ceiling for any other one on the
+    /// narrowed window, so what it does take has to be invisible to everything else rather than merely
+    /// short. Two things do that, and the second is the less obvious one:</para>
     ///
     /// <para><b>Distinct minutes of the hour.</b> A refresh holds <c>AccessShareLock</c> on what it reads; a
     /// compression policy on that same hypertable queues an <c>AccessExclusiveLock</c> request behind it; and a
