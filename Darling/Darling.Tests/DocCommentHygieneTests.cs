@@ -735,11 +735,13 @@ public sealed class DocCommentHygieneTests
     ///
     /// <para>Measured on this branch's base with <c>GenerateDocumentationFile</c> switched on from the
     /// command line — no project file was changed, and none is changed by this PR: the flag remains the
-    /// parked decision from #3025. That run reports 71 <c>CS1574</c> occurrences on 70 lines. This resolver
-    /// sees 7 of those lines. The rows below are the reasons for the other 63, and together they
-    /// are why this guard is complementary to that flag rather than a substitute for it — while the 12
-    /// <c>MARKER</c> targets above are the traffic in the other direction, which the flag would never
-    /// report.</para>
+    /// parked decision from #3025. That run reports 71 <c>CS1574</c> occurrences on 70 lines, and this
+    /// resolver's unresolved set meets that set on 8 of them — 7 for the same reason, plus
+    /// <c>JsonEncodedText.Encode(string)</c>, where the two mechanisms happen to reject the same line for
+    /// unrelated reasons and which is labelled accordingly. The rows below are the reasons for the other
+    /// 62, and together they are why this guard is complementary to that flag rather than a substitute for
+    /// it — while the 12 <c>MARKER</c> targets above are the traffic in the other direction, which the flag
+    /// would never report.</para>
     /// </summary>
     private static readonly (string Project, string Target, string Reason)[]
         LiveSitesOutsideTheResolversReach =
@@ -797,7 +799,7 @@ public sealed class DocCommentHygieneTests
     /// declarations misses the ones this codebase actually writes — a tuple-returning static, a property
     /// whose type is a nested generic — and every miss is a spurious offender in a set compared for
     /// equality. Measured before choosing: a declaration index reported 385 unresolvable targets against
-    /// this one's 31, and the extra 354 were dominated by real members it had failed to parse. An index that
+    /// this one's 31, and the difference was dominated by real members it had failed to parse. An index that
     /// is too WIDE loses recall, which the recorded limits above state; one that is too NARROW manufactures
     /// offenders, and a guard that cries wolf gets its allow-list widened until it says nothing.</para>
     /// </summary>
@@ -1197,6 +1199,20 @@ public sealed class DocCommentHygieneTests
             new[] { "RealReference" },
             BuildCrefCensus(new[] { ("AppOne/File.cs", fixture) }, new[] { "AppOne" })
                 .Sites.Select(s => s.Target).ToArray());
+
+        /* And on real input, because a blanking step that has nothing to blank is a step nobody would
+           notice the loss of. Derived rather than stated as a count: what matters is that the tree holds
+           at least one such line, not how many. */
+        var blanked = RepoSources(RepositoryScan.Value.Root).Sum(s =>
+            s.Text.Split('\n').Count(l => l.TrimStart().StartsWith("///", StringComparison.Ordinal))
+            - WithStringLiteralsBlanked(s.Text).Split('\n')
+                .Count(l => l.TrimStart().StartsWith("///", StringComparison.Ordinal)));
+
+        Assert.True(blanked > 0,
+            "no /// line anywhere in the repository sits inside a string literal, so the blanking step is "
+            + "inert on real input and only the fixture above says it works. The fixtures in this very "
+            + "file were the only such lines when this landed, so a red here most likely means one of them "
+            + "was reformatted.");
     }
 
     /// <summary>
@@ -1640,11 +1656,11 @@ public sealed class DocCommentHygieneTests
     /// version of the cref rule duly read the crefs out of its own test data and reported them as
     /// offenders in the tree.</para>
     ///
-    /// <para><b>Where it is exercised, measured rather than assumed.</b> Nine <c>///</c> lines in the
-    /// whole repository sit inside a string literal and every one of them is in THIS file — the fixtures
-    /// below are the only live instance, and there were none before them. So the blanking is exercised
-    /// where the guard can see it rather than somewhere it might be, which is the direction #3079 asked
-    /// for; the arithmetic is a count the sweep produces, not a number written down here.</para>
+    /// <para><b>Where it is exercised.</b> Every <c>///</c> line in this repository that sits inside a
+    /// string literal is in THIS file: the fixtures below are the only live instance, and there were none
+    /// before them. That the tree holds at least one is asserted rather than stated, in
+    /// <see cref="ADocCommentInsideAStringLiteralIsNotPartOfThePopulation"/>, which is the difference
+    /// #3079 asked for between a limitation recorded and a limitation exercised.</para>
     /// </summary>
     private static string WithStringLiteralsBlanked(string text)
     {
