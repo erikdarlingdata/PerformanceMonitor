@@ -1451,7 +1451,7 @@ public sealed class DarlingManagedPostgres
         {
             File.AppendAllText(confPath, BuildMessageLocaleConfAppend());
             _logger.LogInformation(
-                "Appended v10 message locale to postgresql.conf (lc_messages = 'C'): PostgreSQL translates its severity labels under the host locale, and the store's own log parser matches them as English tokens.");
+                "Appended v10 message locale to postgresql.conf (lc_messages = 'C'): PostgreSQL translates its severity labels under lc_messages, and the store's own log parser matches them as English tokens.");
         }
     }
 
