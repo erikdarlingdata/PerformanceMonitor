@@ -977,9 +977,8 @@ public class CrossAppGuardCiGateTests
     /// followed by a SEPARATOR, so a tree merely PREFIXED by a root's name (<c>Lite.TestsExtra/</c>) is
     /// no more a read of that SKU than it was before.</para>
     ///
-    /// <para>Shared by the walk and by the pin that reads it back, for the same reason
-    /// <see cref="MsBuildPaths"/> is: a retyped copy in a test is free to agree with itself while the
-    /// matcher that ships does something else.</para></summary>
+    /// <para>Shared by the walk and by the pin that reads it back, so a retyped copy in a test cannot
+    /// agree with itself while the matcher that ships does something else.</para></summary>
     private static IEnumerable<string> CSharpPaths(string text, SkuTrees other)
     {
         var anyRoot = "(?:" + string.Join("|", other.Roots.Select(Regex.Escape)) + ")";
