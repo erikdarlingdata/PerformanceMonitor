@@ -327,15 +327,16 @@ public class CrossAppGuardCiGateTests
 
             /* The per-type floor. Every requested type present AND non-empty - key presence alone proves
                nothing, which the pin below measures. */
+            var counts = string.Join(
+                ", ", evaluation.ItemCounts.Select(kv => kv.Key + "=" + kv.Value));
+
             foreach (var type in EvaluatedItemTypes)
             {
                 Assert.True(
                     evaluation.ItemCounts.TryGetValue(type, out var count) && count > 0,
-                    $"the fixture declares one {type} item and the evaluated read returned " +
-                    $"{(evaluation.ItemCounts.TryGetValue(type, out var c) ? c.ToString(System.Globalization.CultureInfo.InvariantCulture) : "no such key")}. " +
-                    $"An unrecognised item type answers with an EMPTY array and exit 0, so this is what a " +
-                    $"typo in {nameof(EvaluatedItemTypes)} looks like. Counts: " +
-                    $"[{string.Join(", ", evaluation.ItemCounts.Select(kv => kv.Key + "=" + kv.Value))}]");
+                    $"the fixture declares one {type} item and the evaluated read returned none. An " +
+                    "unrecognised item type answers with an EMPTY array and exit 0, so this is what a " +
+                    $"typo in {nameof(EvaluatedItemTypes)} looks like. Counts: [{counts}]");
             }
 
             var found = CrossAppItems(fixture, evaluation, DarlingTrees)
@@ -1236,43 +1237,7 @@ public class CrossAppGuardCiGateTests
                 return "the invocation's output carries no Items object";
             }
 
-            var collected = new List<EvaluatedItem>();
-            foreach (var type in itemsElement.EnumerateObject())
-            {
-                if (type.Value.ValueKind != JsonValueKind.Array)
-                {
-                    return $"the Items entry for {type.Name} is not an array";
-                }
-
-                foreach (var element in type.Value.EnumerateArray())
-                {
-                    var identity = Metadata(element, "Identity");
-
-                    /* FullPath is MSBuild's own rooted, normalised answer for the item's identity. */
-                    var fullPath = Metadata(element, "FullPath");
-                    if (fullPath.Length > 0)
-                    {
-                        collected.Add(new EvaluatedItem(type.Name, "FullPath", identity, fullPath, Metadata(element, "DefiningProjectFullPath")));
-                    }
-
-                    /* HintPath is the path a Reference actually names, and MSBuild hands it back AS
-                       WRITTEN rather than rooted - unlike FullPath, whose value for a Reference is the
-                       assembly NAME resolved under the project directory and means nothing. Resolved
-                       against the project directory, which is where MSBuild resolves it. */
-                    var hintPath = Metadata(element, "HintPath");
-                    if (hintPath.Length > 0)
-                    {
-                        var projectDirectory = Path.GetDirectoryName(
-                            Metadata(element, "DefiningProjectFullPath")) ?? string.Empty;
-                        var resolved = Absolute(projectDirectory, hintPath);
-                        if (resolved is not null)
-                        {
-                            collected.Add(new EvaluatedItem(type.Name, "HintPath", identity, resolved, Metadata(element, "DefiningProjectFullPath")));
-                        }
-                    }
-                }
-            }
-
+            /* Properties first, because the item pass needs one of them. */
             var readProperties = new SortedDictionary<string, string>(StringComparer.Ordinal);
             if (document.RootElement.TryGetProperty("Properties", out var propertiesElement) &&
                 propertiesElement.ValueKind == JsonValueKind.Object)
@@ -1288,6 +1253,54 @@ public class CrossAppGuardCiGateTests
                 if (!readProperties.ContainsKey(expected))
                 {
                     return $"the invocation's output carries no {expected} property";
+                }
+            }
+
+            /* MEASURED, and the two candidates diverge: MSBuild resolves a relative HintPath against the
+               CONSUMING PROJECT's directory, not against the directory of the file that declared the
+               Reference. A Reference declared in a Directory.Build.props one level up, whose HintPath
+               names a file beside THAT props file, does not resolve; the same HintPath naming a file
+               beside the consuming project does. Getting this backwards is a silent miss - the path
+               resolves somewhere real-looking, fails the cross-app anchor and vanishes. */
+            var projectDirectory =
+                Path.GetDirectoryName(readProperties["MSBuildProjectFullPath"]) ?? string.Empty;
+
+            var collected = new List<EvaluatedItem>();
+            foreach (var type in itemsElement.EnumerateObject())
+            {
+                if (type.Value.ValueKind != JsonValueKind.Array)
+                {
+                    return $"the Items entry for {type.Name} is not an array";
+                }
+
+                foreach (var element in type.Value.EnumerateArray())
+                {
+                    var identity = Metadata(element, "Identity");
+                    var declaredIn = Metadata(element, "DefiningProjectFullPath");
+
+                    /* FullPath is MSBuild's own rooted, normalised answer for the item's identity. */
+                    var fullPath = Metadata(element, "FullPath");
+                    if (fullPath.Length > 0)
+                    {
+                        collected.Add(
+                            new EvaluatedItem(type.Name, "FullPath", identity, fullPath, declaredIn));
+                    }
+
+                    /* HintPath is the path a Reference actually names, and MSBuild hands it back AS
+                       WRITTEN rather than rooted - unlike FullPath, whose value for a Reference is the
+                       assembly NAME resolved under the project directory and means nothing. */
+                    var hintPath = Metadata(element, "HintPath");
+                    if (hintPath.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    var resolved = Absolute(projectDirectory, hintPath);
+                    if (resolved is not null)
+                    {
+                        collected.Add(
+                            new EvaluatedItem(type.Name, "HintPath", identity, resolved, declaredIn));
+                    }
                 }
             }
 
@@ -1599,11 +1612,15 @@ public class CrossAppGuardCiGateTests
             "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>"
             + "<TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n");
 
-        /* The item this one defines is the case no scan of the consuming project alone can see, and its
-           relative Include is resolved by MSBuild against the CONSUMING project's directory rather than
-           against this file's. */
+        /* ABOVE the consuming project, which is what makes the resolution base load-bearing. Both the
+           relative Include here and the Reference's relative HintPath are resolved by MSBuild against
+           the CONSUMING project's directory rather than against this file's, and written from this
+           directory they resolve OUT of the fixture tree under the other rule - so an implementation
+           that took the declaring file's directory finds neither and the pin reds. Sitting beside the
+           project, as a Directory.Build.props usually does not, the two bases coincide and the pin
+           could not fail for this reason at all. */
         File.WriteAllText(
-            Path.Combine(consumer, "Imported.props"),
+            Path.Combine(root, "Imported.props"),
             """
             <Project>
               <PropertyGroup>
@@ -1613,6 +1630,9 @@ public class CrossAppGuardCiGateTests
               <ItemGroup>
                 <Compile Include="$(OtherTests)\FromImport.cs" Link="FromImport.cs" />
                 <TransformSeed Include="Transformed.cs" />
+                <Reference Include="SomeCrossAppLib">
+                  <HintPath>..\Darling\PerformanceMonitor.Darling.Service\Hinted.dll</HintPath>
+                </Reference>
               </ItemGroup>
             </Project>
 
@@ -1627,15 +1647,12 @@ public class CrossAppGuardCiGateTests
                 <TargetFramework>net10.0</TargetFramework>
                 <EnableDefaultItems>false</EnableDefaultItems>
               </PropertyGroup>
-              <Import Project="Imported.props" />
+              <Import Project="..\Imported.props" />
               <ItemGroup>
                 <Compile Include="$(OtherTests)\FromProperty.cs" />
                 <None Include="..\Darling\Fixtures\*.xml" />
                 <Content Include="$(OtherTests)\ChosenWhen.cs" Link="Content.cs" />
                 <EmbeddedResource Include="$(OtherTests)\ConditionTrue.cs" />
-                <Reference Include="SomeCrossAppLib">
-                  <HintPath>..\Darling\PerformanceMonitor.Darling.Service\Hinted.dll</HintPath>
-                </Reference>
                 <ProjectReference Include="$(OtherTests)\Darling.Tests.csproj" />
                 <Compile Include="..\DarlingExtra\Nope.cs" />
               </ItemGroup>
