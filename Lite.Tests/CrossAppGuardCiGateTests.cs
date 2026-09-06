@@ -35,6 +35,13 @@ namespace Lite.Tests;
 /// <para>Only references that RESOLVE on disk are required, which drops message strings and the filter
 /// patterns other guards assert on (those carry glob characters and are excluded outright). The glob matcher
 /// is self-validated against known answers below, so a matcher bug fails loudly instead of green-washing.</para>
+///
+/// <para><b>Two populations, because a cross-app read is not always C#.</b> A linked compile —
+/// <c>&lt;Compile Include="..\Darling\Darling.Tests\X.cs" /&gt;</c> — is a read of exactly the kind this
+/// guard exists to require be filter-reachable, and #3063 was filed because a <c>*.cs</c>-only scan could not
+/// see one: the file was never opened. So the scan reads project XML as well, and the MSBuild path
+/// normaliser is self-validated against known answers alongside the glob matcher, for the same reason —
+/// a relative <c>Include=</c> resolving to the WRONG repo-rooted path finds nothing and passes.</para>
 /// </summary>
 public class CrossAppGuardCiGateTests
 {
@@ -64,6 +71,97 @@ public class CrossAppGuardCiGateTests
 
         Assert.True(Matches("README.md", "README.md"));
         Assert.False(Matches("README.md", "Lite/README.md"));
+    }
+
+    /// <summary>
+    /// The MSBuild half of the self-validation above, and for the same reason: a relative
+    /// <c>Include=</c> that normalised to the WRONG repo-rooted path would match no filter pattern and
+    /// find no file on disk, so <see cref="Resolve"/> would drop it and every coverage check would pass
+    /// having seen nothing. The first case is #3059's linked compile — the reference #3063 exists for.
+    /// </summary>
+    [Fact]
+    public void TheMsBuildPathNormaliser_AgreesWithKnownAnswers()
+    {
+        var repo = RepoRoot();
+        var liteTests = Path.Combine(repo, LiteTestsDir);
+        var darlingTests = Path.Combine(repo, DarlingTestsDir.Replace('/', Path.DirectorySeparatorChar));
+
+        Assert.Equal(
+            "Darling/Darling.Tests/CSharpSourceWalker.cs",
+            RepoRooted(repo, liteTests, @"..\Darling\Darling.Tests\CSharpSourceWalker.cs", "Darling"));
+
+        /* Forward slashes are legal in MSBuild too, and so is a redundant segment. */
+        Assert.Equal(
+            "Darling/Darling.Tests/CSharpSourceWalker.cs",
+            RepoRooted(repo, liteTests, "../Darling/./Darling.Tests/CSharpSourceWalker.cs", "Darling"));
+
+        /* The other direction is two levels up, out of Darling/Darling.Tests. */
+        Assert.Equal(
+            "Lite/Services/DataImportService.cs",
+            RepoRooted(repo, darlingTests, @"..\..\Lite\Services\DataImportService.cs", "Lite"));
+
+        /* Same app, so not this guard's business — and the discrimination a relative path cannot make
+           until it is resolved, since both spellings open with the same "..\". */
+        Assert.Null(RepoRooted(repo, liteTests, @"..\Lite\Mcp\McpHostService.cs", "Darling"));
+        Assert.Null(RepoRooted(repo, liteTests, @"Fixtures\SystemHealth\*.xml", "Darling"));
+
+        /* A wildcard over the other app IS a read, so it becomes the directory it enumerates. Spelled
+           against a directory that does not exist, deliberately: an expected value written as a real
+           "Darling/..." literal is itself matched by the C# stage above, and would put a path nothing
+           actually reads into the found set. The normaliser never touches the disk, so a fictional
+           directory tests it exactly as well. */
+        Assert.Equal(
+            "Darling/NoSuchArea/Fixtures",
+            RepoRooted(repo, liteTests, @"..\Darling\NoSuchArea\Fixtures\*.xml", "Darling"));
+
+        /* Out of the tree entirely, and not a path at all. */
+        Assert.Null(RepoRooted(repo, liteTests, @"..\..\Darling\X.cs", "Darling"));
+        Assert.Null(RepoRooted(repo, liteTests, "xunit.v3", "Darling"));
+    }
+
+    /// <summary>
+    /// The population is what failed in #3063, so it is pinned directly rather than left implied.
+    ///
+    /// <para>The collector enumerated <c>*.cs</c> only, so a cross-app read expressed as
+    /// <c>&lt;Compile Include="..\Darling\Darling.Tests\X.cs" /&gt;</c> was invisible — the file holding it
+    /// was never opened. A widened collector that reaches no project files passes exactly as the narrow one
+    /// did, which would be the same defect committed by its own fix. So the file that WOULD carry such a
+    /// reference is required to be in the population, by name, rather than merely counted.</para>
+    ///
+    /// <para><see cref="ImportedBuildFiles"/> is reported and not floored: there is no
+    /// <c>Directory.Build.props</c> or <c>Directory.Build.targets</c> in this repository today, and asserting
+    /// one exists would be asserting a fiction. It is in the population so the first one is read.</para>
+    /// </summary>
+    [Fact]
+    public void ThePopulationReachesTheProjectFiles_AndNotOnlyTheCSharp()
+    {
+        var repo = RepoRoot();
+
+        var expectations = new[]
+        {
+            (Project: LiteTestsDir, OtherApp: "Darling", Manifest: $"{LiteTestsDir}/Lite.Tests.csproj"),
+            (Project: DarlingTestsDir, OtherApp: "Lite", Manifest: $"{DarlingTestsDir}/Darling.Tests.csproj"),
+        };
+
+        foreach (var (project, otherApp, manifest) in expectations)
+        {
+            var scan = Scan(repo, project, otherApp);
+
+            Assert.True(scan.CSharpFiles > 0, $"the C# stage opened no files under {project}");
+
+            Assert.True(
+                scan.ProjectFiles.Contains(manifest, StringComparer.Ordinal),
+                $"the MSBuild stage did not open {manifest}, so an Include= naming {otherApp} there would " +
+                $"be invisible. Opened: [{string.Join(", ", scan.ProjectFiles)}]");
+
+            /* Build output holds a copy of the project file on any machine that has built the suite; a
+               scan that read it would assert on an artifact, and on this repo's own CI that copy is the
+               one a stale build left behind. */
+            Assert.DoesNotContain(
+                scan.ProjectFiles,
+                p => p.Contains("/bin/", StringComparison.Ordinal) ||
+                     p.Contains("/obj/", StringComparison.Ordinal));
+        }
     }
 
     [Fact]
@@ -162,44 +260,76 @@ public class CrossAppGuardCiGateTests
             yaml[step..Math.Min(step + 400, yaml.Length)],
             StringComparison.Ordinal);
 
-        foreach (var reference in CrossAppReferences(repo, scannedProject, otherApp))
+        var scan = Scan(repo, scannedProject, otherApp);
+
+        /* #3063: a widened population that reaches no project files passes exactly as the *.cs-only one
+           did, which is the defect committed by its own fix. Each stage is floored by name, because
+           "found no references" and "opened no files" are otherwise the same green. */
+        Assert.True(scan.CSharpFiles > 0, $"the C# stage opened no files under {scannedProject}");
+        Assert.True(
+            scan.ProjectFiles.Count > 0,
+            $"the MSBuild stage opened no project files under {scannedProject}, so a cross-app reference " +
+            "written as an Include= attribute is invisible again");
+
+        /* This guard's failure direction is not noticing, so a path it CANNOT read has to be loud rather
+           than absent from the found set. */
+        Assert.True(
+            scan.UnevaluablePaths.Count == 0,
+            "MSBuild path attributes this scan cannot evaluate, so it cannot say whether they cross apps — " +
+            "spell the path literally, or teach RepoRooted the property:\n  " +
+            string.Join("\n  ", scan.UnevaluablePaths));
+
+        foreach (var reference in scan.References)
         {
             if (!patterns.Any(p => Matches(p, reference.Probe)))
             {
                 failures.Add(
-                    $"{scannedProject} reads {reference.Raw} but the '{filterName}' filter does not reach it " +
-                    $"(probe path: {reference.Probe})");
+                    $"{scannedProject} reads {reference.Raw} (named in {reference.Origin}) but the " +
+                    $"'{filterName}' filter does not reach it (probe path: {reference.Probe})");
             }
         }
     }
 
+    /// <summary>What one scan found, carried together with what it opened to find it. One value rather
+    /// than a bare reference list, because a found set is not interpretable without the population that
+    /// produced it — an empty population and an empty answer are the same green.</summary>
+    private readonly record struct CrossAppScan(
+        int CSharpFiles,
+        IReadOnlyList<string> ProjectFiles,
+        IReadOnlyList<string> ImportedBuildFiles,
+        IReadOnlyList<string> UnevaluablePaths,
+        IReadOnlyList<(string Raw, string Probe, string Origin)> References);
+
+    /* The MSBuild attributes that can carry a path to another app's file. Remove= is deliberately
+       absent: dropping an item from a glob is not a read of it. */
+    private static readonly Regex MsBuildPathAttribute = new(
+        "\\b(?:Include|Update|Project|HintPath)\\s*=\\s*(?:\"(?<dq>[^\"]*)\"|'(?<sq>[^']*)')",
+        RegexOptions.Compiled);
+
     /// <summary>Repo-relative paths naming <paramref name="otherApp"/> that a test in
     /// <paramref name="project"/> reads, paired with a concrete file path to test coverage against.</summary>
-    private static IEnumerable<(string Raw, string Probe)> CrossAppReferences(
-        string repo, string project, string otherApp)
+    private static CrossAppScan Scan(string repo, string project, string otherApp)
     {
-        var seen = new SortedSet<string>(StringComparer.Ordinal);
+        /* Keyed by the reference, valued by every file that named it, so a failure says where to go. */
+        var seen = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+        var unevaluable = new List<string>();
         var projectRoot = Path.Combine(repo, project.Replace('/', Path.DirectorySeparatorChar));
         if (!Directory.Exists(projectRoot))
         {
             throw new DirectoryNotFoundException($"test project not found: {project}");
         }
 
-        foreach (var file in Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
+        var csharpFiles = 0;
+        foreach (var file in TrackedFiles(projectRoot, "*.cs"))
         {
-            /* Build output carries copies of product source; scanning it would assert on artifacts. */
-            if (file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ||
-                file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
+            csharpFiles++;
             var text = File.ReadAllText(file);
+            var origin = Rooted(repo, file);
 
             /* "Darling/Some/Path.cs" and the backslash spelling some Windows-facing pins use. */
             foreach (Match m in Regex.Matches(text, "\"(" + Regex.Escape(otherApp) + "[/\\\\][^\"]+)\""))
             {
-                seen.Add(m.Groups[1].Value.Replace('\\', '/'));
+                Note(seen, m.Groups[1].Value.Replace('\\', '/'), origin);
             }
 
             /* Path.Combine("Darling", "Darling.Tests", "X.cs") */
@@ -211,15 +341,211 @@ public class CrossAppGuardCiGateTests
                     .ToArray();
                 if (segments.Length > 0)
                 {
-                    seen.Add(otherApp + "/" + string.Join("/", segments));
+                    Note(seen, otherApp + "/" + string.Join("/", segments), origin);
                 }
             }
         }
 
-        foreach (var raw in seen)
+        /* The second population, and the one #3063 was filed for. Neither matcher above can see a linked
+           compile: the path is relative and backslashed, so their otherApp anchor never fires — but that
+           is downstream of the real reason, which is that project XML is not a *.cs file and was never
+           opened. The project's own files first, then the build files MSBuild imports into it unnamed. */
+        var projectFiles = TrackedFiles(projectRoot, "*.csproj")
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .ToList();
+        var importedBuildFiles = ImportedBuildFiles(repo, projectRoot).ToList();
+
+        foreach (var file in projectFiles)
         {
+            ReadMsBuildPaths(repo, file, Path.GetDirectoryName(file)!, otherApp, seen, unevaluable);
+        }
+
+        foreach (var file in importedBuildFiles)
+        {
+            /* MSBuild resolves a relative item path in an IMPORTED file against the consuming project's
+               directory, not the imported file's own — which is why these resolve against projectRoot
+               even for a Directory.Build.props sitting at the repo root. */
+            ReadMsBuildPaths(repo, file, projectRoot, otherApp, seen, unevaluable);
+        }
+
+        return new CrossAppScan(
+            csharpFiles,
+            projectFiles.Select(f => Rooted(repo, f)).ToList(),
+            importedBuildFiles.Select(f => Rooted(repo, f)).ToList(),
+            unevaluable,
+            Resolve(repo, seen).ToList());
+    }
+
+    /// <summary>Every file that names a reference is recorded, not just the first. The two populations
+    /// can name the same path — a linked compile and a pin that reads the linked file both do — and a
+    /// failure that reported only one of them would say the reference came from the C# and leave the
+    /// project entry looking unread.</summary>
+    private static void Note(SortedDictionary<string, SortedSet<string>> seen, string raw, string origin)
+    {
+        if (!seen.TryGetValue(raw, out var origins))
+        {
+            origins = new SortedSet<string>(StringComparer.Ordinal);
+            seen[raw] = origins;
+        }
+
+        origins.Add(origin);
+    }
+
+    /// <summary>Files of one pattern under <paramref name="root"/>, minus build output — that carries
+    /// copies of product source, and scanning it would assert on artifacts.</summary>
+    private static IEnumerable<string> TrackedFiles(string root, string pattern) =>
+        Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories)
+            .Where(f =>
+                !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
+                !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
+
+    /// <summary>The build files MSBuild imports into a project without being named: any
+    /// <c>Directory.Build.props</c> / <c>Directory.Build.targets</c> from the project directory up to and
+    /// including the repo root.
+    ///
+    /// <para>There are none in this repository today, and nothing here asserts there are. They are in the
+    /// population because an <c>ItemGroup</c> in one can legally carry a cross-app <c>Compile Include</c> —
+    /// for a file OUTSIDE the project cone there is no duplicate-item conflict with the SDK's later default
+    /// glob, so it works — which is the same invisible shape as a <c>.csproj</c> entry in a file no
+    /// <c>.csproj</c> scan would open. The point is that the first one is read rather than this test needing
+    /// to be edited first.</para></summary>
+    private static IEnumerable<string> ImportedBuildFiles(string repo, string projectRoot)
+    {
+        var root = Path.GetFullPath(repo).TrimEnd(Path.DirectorySeparatorChar);
+
+        for (var dir = new DirectoryInfo(Path.GetFullPath(projectRoot)); dir is not null; dir = dir.Parent)
+        {
+            foreach (var name in new[] { "Directory.Build.props", "Directory.Build.targets" })
+            {
+                var candidate = Path.Combine(dir.FullName, name);
+                if (File.Exists(candidate))
+                {
+                    yield return candidate;
+                }
+            }
+
+            if (string.Equals(
+                    dir.FullName.TrimEnd(Path.DirectorySeparatorChar), root, StringComparison.Ordinal))
+            {
+                break;
+            }
+        }
+    }
+
+    /// <summary>The <paramref name="otherApp"/> paths one MSBuild file names, repo-rooted into
+    /// <paramref name="seen"/>.</summary>
+    private static void ReadMsBuildPaths(
+        string repo,
+        string file,
+        string projectDir,
+        string otherApp,
+        SortedDictionary<string, SortedSet<string>> seen,
+        List<string> unevaluable)
+    {
+        var text = File.ReadAllText(file);
+        var origin = Rooted(repo, file);
+        var thisFileDir = Path.GetDirectoryName(file)! + Path.DirectorySeparatorChar;
+
+        foreach (Match m in MsBuildPathAttribute.Matches(text))
+        {
+            var raw = m.Groups["dq"].Success ? m.Groups["dq"].Value : m.Groups["sq"].Value;
+
+            /* The two properties a hand-written cross-app include actually uses. */
+            var expanded = raw
+                .Replace("$(MSBuildThisFileDirectory)", thisFileDir, StringComparison.Ordinal)
+                .Replace("$(MSBuildProjectDirectory)", projectDir, StringComparison.Ordinal);
+
+            if (expanded.Contains("$(", StringComparison.Ordinal) ||
+                expanded.Contains("%(", StringComparison.Ordinal))
+            {
+                /* Only MSBuild can evaluate what is left. Recorded rather than dropped, so the caller
+                   can be loud about a path this guard cannot read. */
+                unevaluable.Add($"{origin}: {raw}");
+                continue;
+            }
+
+            var rooted = RepoRooted(repo, projectDir, expanded, otherApp);
+            if (rooted is not null)
+            {
+                Note(seen, rooted, origin);
+            }
+        }
+    }
+
+    /// <summary>One MSBuild path attribute, expressed the way the rest of this class reasons about paths:
+    /// repo-rooted, forward slashes.
+    ///
+    /// <para>This is the whole difficulty of #3063's fix. An <c>Include=</c> is RELATIVE to the project
+    /// directory and spelled with backslashes (<c>..\Darling\Darling.Tests\X.cs</c>), so it names no app at
+    /// all until it is resolved — the <paramref name="otherApp"/> anchor the C# matchers open with cannot
+    /// fire on it, and applying that anchor AFTER normalisation is what leaves every coverage decision
+    /// downstream of here unchanged.</para>
+    ///
+    /// <para>Null when the path names something other than <paramref name="otherApp"/>, resolves outside the
+    /// repository, or is not a path at all (a <c>PackageReference</c>'s Include is a package id).</para></summary>
+    private static string? RepoRooted(string repo, string projectDir, string raw, string otherApp)
+    {
+        if (raw.Length == 0)
+        {
+            return null;
+        }
+
+        var native = raw.Replace('\\', Path.DirectorySeparatorChar)
+                        .Replace('/', Path.DirectorySeparatorChar);
+
+        string full;
+        try
+        {
+            full = Path.GetFullPath(Path.Combine(projectDir, native));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+
+        var prefix = Path.GetFullPath(repo).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!full.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            /* Outside the tree, so no path filter could name it. */
+            return null;
+        }
+
+        var rooted = full[prefix.Length..].Replace(Path.DirectorySeparatorChar, '/');
+
+        /* An MSBuild wildcard is a real file set. In C# source a glob is the opposite — there the pattern
+           IS the assertion, which is why Resolve excludes those outright — so reduce it to the directory
+           it enumerates and let the directory arm probe it, rather than dropping a genuine read. */
+        var wildcard = rooted.IndexOfAny(new[] { '*', '?' });
+        if (wildcard >= 0)
+        {
+            var cut = rooted.LastIndexOf('/', wildcard);
+            if (cut <= 0)
+            {
+                return null;
+            }
+
+            rooted = rooted[..cut];
+        }
+
+        return rooted.Equals(otherApp, StringComparison.Ordinal)
+            || rooted.StartsWith(otherApp + "/", StringComparison.Ordinal)
+                ? rooted
+                : null;
+    }
+
+    /// <summary>Each collected reference paired with a concrete file path to test coverage against.</summary>
+    private static IEnumerable<(string Raw, string Probe, string Origin)> Resolve(
+        string repo, SortedDictionary<string, SortedSet<string>> seen)
+    {
+        foreach (var (raw, named) in seen)
+        {
+            /* Every file that named it, so a failure points at all of them. */
+            var origin = string.Join(", ", named);
+
             /* A reference carrying glob syntax is an assertion ABOUT the filter (WatermarkPolicyTests does
-               this), not a file read. Excluded rather than matched, or the guard would assert on itself. */
+               this), not a file read. Excluded rather than matched, or the guard would assert on itself.
+               MSBuild wildcards never arrive here — RepoRooted reduces those to a directory, because in
+               project XML a wildcard IS a read. */
             if (raw.IndexOfAny(new[] { '*', '!', '(', ')', '{', '}' }) >= 0)
             {
                 continue;
@@ -229,16 +555,25 @@ public class CrossAppGuardCiGateTests
 
             if (File.Exists(onDisk))
             {
-                yield return (raw, raw);
+                yield return (raw, raw, origin);
             }
             else if (Directory.Exists(onDisk))
             {
                 /* Directory reads are EnumerateCsFiles-shaped, so coverage of *.cs inside it is the ask. */
-                yield return (raw + " (directory)", raw.TrimEnd('/') + "/CoverageProbe.cs");
+                yield return (raw + " (directory)", raw.TrimEnd('/') + "/CoverageProbe.cs", origin);
             }
 
             /* Anything that resolves to neither is a message string or a moved file — not this test's business. */
         }
+    }
+
+    /// <summary>A repo-relative, forward-slash spelling of an absolute path, for messages.</summary>
+    private static string Rooted(string repo, string absolute)
+    {
+        var prefix = Path.GetFullPath(repo).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return absolute.StartsWith(prefix, StringComparison.Ordinal)
+            ? absolute[prefix.Length..].Replace(Path.DirectorySeparatorChar, '/')
+            : absolute;
     }
 
     /// <summary>The quoted pattern entries of one dorny/paths-filter area block.</summary>
