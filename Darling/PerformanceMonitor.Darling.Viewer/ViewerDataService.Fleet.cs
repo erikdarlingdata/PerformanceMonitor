@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -596,7 +596,7 @@ public sealed class FleetRollup
     /// Collapses a card's health to one fleet band — REUSING #1426's banding, mirroring
     /// <see cref="ServerSummaryItem.CardBorderBrush"/>: offline collection → Offline; else the card's
     /// worst metric band (<see cref="ServerSummaryItem.OverallMetricSeverity"/>) maps Critical → Critical,
-    /// Warning → Warning, and a stale collection (<see cref="ServerSummaryItem.HasCollectorErrors"/>) is
+    /// Warning → Warning, and a stale collection (<see cref="ServerSummaryItem.CollectionStale"/>) is
     /// Warning too; otherwise Healthy. No new thresholds are introduced here.
     /// </summary>
     public static FleetHealthBand ClassifyBand(ServerSummaryItem s) =>
@@ -606,7 +606,7 @@ public sealed class FleetRollup
                whatever IsOnline says, so an online card carrying a stray marker banded Warning while the card
                said "Online" and had nothing to report — a third reading of the same pair. See ServerCollectionStatus. */
             s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection,
-            s.HasCollectorErrors,
+            s.CollectionStale,
             s.OverallMetricSeverity);
 
     /// <summary>
@@ -666,7 +666,7 @@ public sealed class FleetRollup
         {
             parts.Add($"{s.FailedCollectorCount} collector{(s.FailedCollectorCount == 1 ? "" : "s")} failing");
         }
-        if (s.HasCollectorErrors)
+        if (s.CollectionStale)
         {
             parts.Add("collection stale");
         }

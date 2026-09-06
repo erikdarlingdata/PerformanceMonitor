@@ -135,27 +135,27 @@ public sealed class ServerHealthClassifierTests
     [Fact]
     public void ClassifyBand_Offline_WhenNotOnline() =>
         Assert.Equal(FleetHealthBand.Offline,
-            ServerHealthClassifier.ClassifyBand(isOnline: false, awaitingFirstCollection: false, hasCollectorErrors: false, HealthSeverity.Healthy));
+            ServerHealthClassifier.ClassifyBand(isOnline: false, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Healthy));
 
     [Fact]
     public void ClassifyBand_AwaitingFirstCollection_IsWarning_NotOffline() =>
         Assert.Equal(FleetHealthBand.Warning,
-            ServerHealthClassifier.ClassifyBand(isOnline: null, awaitingFirstCollection: true, hasCollectorErrors: false, HealthSeverity.Healthy));
+            ServerHealthClassifier.ClassifyBand(isOnline: null, awaitingFirstCollection: true, collectionStale: false, HealthSeverity.Healthy));
 
     [Fact]
     public void ClassifyBand_CriticalMetric_IsCritical() =>
         Assert.Equal(FleetHealthBand.Critical,
-            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, hasCollectorErrors: false, HealthSeverity.Critical));
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Critical));
 
     [Fact]
     public void ClassifyBand_StaleCollectionCalmMetrics_IsWarning() =>
         Assert.Equal(FleetHealthBand.Warning,
-            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, hasCollectorErrors: true, HealthSeverity.Healthy));
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: true, HealthSeverity.Healthy));
 
     [Fact]
     public void ClassifyBand_OnlineCalm_IsHealthy() =>
         Assert.Equal(FleetHealthBand.Healthy,
-            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, hasCollectorErrors: false, HealthSeverity.Healthy));
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Healthy));
 
     /* ── worst-first score ── */
 

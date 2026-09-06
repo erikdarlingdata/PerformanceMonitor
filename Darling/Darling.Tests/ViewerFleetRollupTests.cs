@@ -139,7 +139,7 @@ public sealed class ViewerFleetRollupBuilderTests
         new() { DisplayName = name, ServerId = id, IsOnline = true, FailedCollectorCount = failed };
 
     private static ServerSummaryItem Stale(string name, int id) =>
-        new() { DisplayName = name, ServerId = id, IsOnline = true, HasCollectorErrors = true };
+        new() { DisplayName = name, ServerId = id, IsOnline = true, CollectionStale = true };
 
     private static ServerSummaryItem Offline(string name, int id) =>
         new() { DisplayName = name, ServerId = id, IsOnline = false };
@@ -186,7 +186,7 @@ public sealed class ViewerFleetRollupBuilderTests
     [Fact]
     public void ClassifyBand_StaleCollection_IsWarning()
     {
-        // Online but collection has gone stale (HasCollectorErrors) → the card's amber → fleet Warning,
+        // Online but collection has gone stale (CollectionStale) → the card's amber → fleet Warning,
         // even with every metric calm.
         Assert.Equal(FleetHealthBand.Warning, FleetRollup.ClassifyBand(Stale("s", 1)));
     }

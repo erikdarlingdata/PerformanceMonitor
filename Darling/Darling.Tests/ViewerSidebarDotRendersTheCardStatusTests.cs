@@ -94,7 +94,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
                overlay read them directly, so two surfaces agreeing on the word while disagreeing on
                IsOnline would still paint differently. */
             Assert.Equal(card.IsOnline, dot.IsOnline);
-            Assert.Equal(card.HasCollectorErrors, dot.HasCollectorErrors);
+            Assert.Equal(card.CollectionStale, dot.CollectionStale);
             Assert.Equal(card.AwaitingFirstCollection, dot.AwaitingFirstCollection);
 
             Assert.True(seen.Add(dot.CardStatus), $"two inputs produced the same state; {where}");
@@ -260,7 +260,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
 
         var rules = ReadRepoFileLf(Path.Combine("PerformanceMonitor.Common", "ServerHealthBands.cs"));
         Assert.Contains(
-            "public static ServerCollectionStatus Classify(bool? isOnline, bool hasCollectorErrors, bool awaitingFirstCollection) =>",
+            "public static ServerCollectionStatus Classify(bool? isOnline, bool collectionStale, bool awaitingFirstCollection) =>",
             rules, StringComparison.Ordinal);
 
         /* The dot tells the reader which axis it is on, rather than leaving them to infer it from a colour —
@@ -407,7 +407,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
         foreach (var band in Enum.GetValues<ServerFreshness>())
         {
             var flags = ServerCollectionStatusRules.FlagsFor(band);
-            var viaFlags = ServerCollectionStatusRules.Classify(flags.IsOnline, flags.HasCollectorErrors, flags.AwaitingFirstCollection);
+            var viaFlags = ServerCollectionStatusRules.Classify(flags.IsOnline, flags.CollectionStale, flags.AwaitingFirstCollection);
 
             Assert.Equal(expected[band], ServerCollectionStatusRules.FromFreshness(band));
             Assert.Equal(expected[band], viaFlags);
@@ -462,7 +462,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
             ServerName = "SQL2022",
             ServerId = 1,
             IsOnline = flags.IsOnline,
-            HasCollectorErrors = flags.HasCollectorErrors,
+            CollectionStale = flags.CollectionStale,
             AwaitingFirstCollection = flags.AwaitingFirstCollection,
         };
 
