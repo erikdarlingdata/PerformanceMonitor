@@ -144,7 +144,8 @@ public sealed class DarlingMcpPgPlanTools
                 "This server cannot capture execution plans yet, so an empty result here says nothing about "
                 + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
                 + string.Join(" | ", unmet)
-                + " — get_pg_plan_capture_readiness has the full detail and the remedy for each.");
+                + " — the pg_plan_capture_readiness collector stores the full detail and the remedy "
+                + "beside each observation.");
         }
 
         var subject = wantedQueryId is null ? "any statement" : "this statement";
