@@ -689,7 +689,9 @@ public sealed class TsqlConventionGuardTests
                firing rather than a second rule covering for it. */
             ("SELECT c = CONVERT(int, w.waiting_tasks_count) FROM sys.dm_os_wait_stats AS w OPTION(RECOMPILE);", UnabbreviatedTypes),
             ("DECLARE @on_pos int; SELECT @on_pos = CHARINDEX(N' on ', @@VERSION);", UnabbreviatedTypes),
-            /* A DDL type position, which is where nine of the corpus's own spellings sat. */
+            /* A DDL type position rather than an expression one: a temp table's and a table variable's
+               column types were both among the corpus's own spellings, and a check anchored only on
+               CONVERT( would have missed every one of them. */
             ("SET NOCOUNT ON; CREATE TABLE #file_space (database_id int NOT NULL); SELECT 1 FROM sys.databases AS d;", UnabbreviatedTypes),
             /* An sp_executesql PARAMETER DECLARATION, which is where the corpus's remaining doubt sat: it
                is a type position like any other, `integer` is accepted in it, and the engine binds the two
