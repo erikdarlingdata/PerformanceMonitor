@@ -18,9 +18,10 @@ namespace Lite.Tests;
 
 /// <summary>
 /// PIN B (parity board §05 D3, round 2): the MCP tool-INVENTORY pin. Nothing pins Lite's and Darling's MCP
-/// tool sets together — <c>McpSchemaCompatTests</c> guards the Gemini schema SHAPE, not the tool set — so the
-/// 55-vs-73 drift is invisible to CI. This enumerates every <c>[McpServerTool(Name="…")]</c> in both apps' MCP
-/// servers and asserts Darling's set is a SUPERSET of Lite's, with two allow-lists:
+/// tool sets together — <c>McpSchemaCompatTests</c> guards the Gemini schema SHAPE, not the tool set — so a
+/// tool present in one app and absent from the other is invisible to CI. This enumerates every
+/// <c>[McpServerTool(Name="…")]</c> in both apps' MCP servers and asserts Darling's set is a SUPERSET of
+/// Lite's, with two allow-lists:
 /// <list type="bullet">
 /// <item><see cref="KnownLiteMissingMcpTools"/> — a RATCHET of the Darling-only tools Lite hasn't ported yet;
 /// it only ever shrinks, and a NEW Darling tool with no Lite twin must be either ported or added here;</item>
