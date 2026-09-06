@@ -88,11 +88,15 @@ public class StoreWriteReattemptTests
     /// A failure on BOTH attempts still reports the error rather than silently succeeding. A retry that
     /// swallowed a persistent fault would trade one lost sample for a store nobody can tell is refusing
     /// writes.
+    ///
+    /// <para>There is deliberately no "and stored nothing" assertion here. Both delegates throw before
+    /// touching anything, so a sink would be empty however <see cref="StoreWriteReattempt.RunAsync"/>
+    /// behaved — an assertion that cannot fail, which is worse than none because it reads as coverage. The
+    /// claim that survives is that no value is returned at all, which is what the throw is.</para>
     /// </summary>
     [Fact]
-    public async Task AFailureOnBothAttempts_ReportsTheError_AndStoresNothing()
+    public async Task AFailureOnBothAttempts_ReportsTheError()
     {
-        var stored = new List<string>();
         var attempts = 0;
         Exception? loggedFirstAttempt = null;
 
@@ -112,7 +116,6 @@ public class StoreWriteReattemptTests
                 CancellationToken.None));
 
         Assert.Equal(2, attempts);
-        Assert.Empty(stored);
         Assert.Equal("second", thrown.InnerException?.Message);
 
         /* The first attempt is not chained onto the thrown exception, so the ONLY thing that keeps it from
