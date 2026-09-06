@@ -157,10 +157,12 @@ public sealed class PgPanelTabOwnershipTests
     /// Asked from this direction the loss has nowhere to hide: a grid nothing fills is named, whether the
     /// assignment was dropped by a bad read or deleted from the source.</para>
     ///
-    /// <para>Grids only. Four notes — <c>PgActivityNote</c>, <c>PgOverviewNote</c>, <c>PgStorageNote</c>,
-    /// <c>PgVacuumNote</c> — are static tab-level prose set in the markup and assigned by no loader, so
-    /// requiring a load path for every named control would need an exemption table. A grid is the case with
-    /// no legitimate exception: it exists to hold collected rows, and rows arrive on a load path.</para>
+    /// <para>Grids only, and the four exceptions are why. <c>PgOverviewNote</c>, <c>PgActivityNote</c>,
+    /// <c>PgVacuumNote</c> and <c>PgStorageNote</c> are tab-level framing prose assigned once in
+    /// <c>ApplyEngineTabSet</c> — tab setup, not a load path — so requiring a load path for every named
+    /// control would need an exemption table, and an exemption table is what this rule exists without. A
+    /// grid is the case with no legitimate exception: it holds collected rows, and rows arrive on a load
+    /// path.</para>
     /// </summary>
     [Fact]
     public void EveryPgGridOnAPgTab_IsFilledBySomePgTabsLoadPath()
