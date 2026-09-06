@@ -75,10 +75,12 @@ namespace Darling.Tests;
 ///
 /// <para><b>What holds that reachability, stated precisely rather than gestured at.</b>
 /// <c>CrossAppGuardCiGateTests</c> requires every cross-app source read to be reachable by the filter that
-/// gates its suite — but its C# matcher records "a collection declared in one member and projected in
-/// another" among the spellings it cannot see, and the bare <c>"Lite"</c> in <see cref="ScannedTrees"/> is
-/// that shape. So the ANCHOR paths carry the claim: each is a separator-bearing path literal, which is that
-/// matcher's first arm, so <c>Lite/Services/LocalDataService.FinOps.Recommendations.cs</c> is in its found
+/// gates its suite, and <c>CONTRIBUTING.md</c>'s "Writing a Test That Reads the Other SKU's Source" names
+/// the three spellings it can see. A bare root iterated out of a <c>string[]</c> field is not one of them —
+/// it is the "segment array declared in another member" case that section calls out as silent by
+/// construction — and the bare <c>"Lite"</c> in <see cref="ScannedTrees"/> is exactly that. So the ANCHOR
+/// paths carry the claim: each is a repo-rooted path literal at the site that reads it, which is the first
+/// of the three, so <c>Lite/Services/LocalDataService.FinOps.Recommendations.cs</c> is in that guard's found
 /// set and has to stay filter-reachable. Measured: with the anchors in place, pointing the Lite one at a
 /// <c>Lite.Tests</c> path reds that guard by name; before they existed the same injection changed nothing,
 /// which is how the gap was found rather than assumed. The injected path has to EXIST — that guard drops
@@ -1380,10 +1382,11 @@ public sealed class TsqlConventionGuardTests
     ///
     /// <para>Each group names an ANCHOR file whose T-SQL must stay visible, which is a per-site requirement
     /// that a per-tree total cannot give — and it is also what makes this file's cross-app read of Lite
-    /// legible to <c>CrossAppGuardCiGateTests</c>. That guard's C# matcher records "a collection declared in
-    /// one member and projected in another" among the spellings it cannot see, and the bare <c>"Lite"</c>
-    /// below is exactly that shape; a path literal carrying a separator is its FIRST arm, so the anchor is
-    /// what puts this read into that guard's found set instead of leaving it to arrive from another pin. The
+    /// legible to <c>CrossAppGuardCiGateTests</c>. A bare root iterated out of a field is not one of the
+    /// three spellings that guard can see — <c>CONTRIBUTING.md</c> names them, and calls this one silent by
+    /// construction — and the bare <c>"Lite"</c> below is exactly it. A repo-rooted path literal at the site
+    /// that reads it is the first of the three, so the anchor is what puts this read into that guard's found
+    /// set instead of leaving it to arrive from another pin. The
     /// three anchors are the file #3078's violation landed in and the two non-shared files this change
     /// fixed.</para>
     /// </summary>
