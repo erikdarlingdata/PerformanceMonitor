@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
@@ -333,6 +334,13 @@ public class StoreWriteReattemptTests
     /// <para>Pinned against the source because <c>WriteBatchAsync</c> is private and needs a constructed
     /// runner plus a live store to call. Every assertion here is a call site rather than logic: the policy
     /// tests above would all stay green if the write simply stopped using it.</para>
+    ///
+    /// <para><b>Scoped by counting rather than by slicing between two declarations.</b> The earlier form
+    /// took the text between <c>WriteBatchAsync</c> and <c>CopyBatchOnceAsync</c> and asserted the helper
+    /// call appeared in it — and stayed green against a variant where the write called something else,
+    /// because the slice swallowed anything declared in the gap. Counting every call to the COPY and
+    /// requiring each one to sit inside the re-attempt's own argument list cannot be satisfied that
+    /// way.</para>
     /// </summary>
     [Fact]
     public void TheShippedStoreWriteRoutesThroughTheReattemptOnAFreshConnection()
@@ -340,32 +348,49 @@ public class StoreWriteReattemptTests
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")));
 
-        var write = source.IndexOf("private async Task<int> WriteBatchAsync<TRow>(", StringComparison.Ordinal);
-        Assert.True(write >= 0, "expected DarlingCollectorRunner.WriteBatchAsync");
-
-        var copyOnce = source.IndexOf("private async Task<int> CopyBatchOnceAsync<TRow>(", StringComparison.Ordinal);
-        Assert.True(
-            copyOnce > write,
-            "the COPY must live in its own method, so the failed attempt's importer and transaction are " +
-            "disposed before the re-attempt runs — a retry entered with an aborted transaction still on " +
-            "the connection fails on 25P02 rather than on anything to do with the store.");
-
-        /* Scope every assertion below to WriteBatchAsync's own body. */
-        var body = source[write..copyOnce];
-
-        Assert.Contains("StoreWriteReattempt.RunAsync(", body, StringComparison.Ordinal);
-
         Assert.Contains(
-            "await _postgres.OpenConnectionAsync(token)", body, StringComparison.Ordinal);
+            "private async Task<int> CopyBatchOnceAsync<TRow>(", source, StringComparison.Ordinal);
 
-        var rewrite = body.IndexOf("rewrite:", StringComparison.Ordinal);
-        var freshConnection = body.IndexOf("_postgres.OpenConnectionAsync(token)", StringComparison.Ordinal);
+        /* The COPY must live in its own method so the failed attempt's importer and transaction are
+           disposed before the re-attempt runs — a retry entered with an aborted transaction still on the
+           connection fails on 25P02 rather than on anything to do with the store. */
+        /* The generic declaration is `CopyBatchOnceAsync<TRow>(`, so it does not match this needle: these
+           are the CALL sites, and there must be exactly the two attempt delegates. */
+        var copyCalls = Offsets(source, "CopyBatchOnceAsync(").ToArray();
+        Assert.Equal(2, copyCalls.Length);
+
+        var runAsync = source.IndexOf("StoreWriteReattempt.RunAsync(", StringComparison.Ordinal);
+        var afterRunAsync = source.IndexOf("if (outcome.Reattempted)", StringComparison.Ordinal);
         Assert.True(
-            rewrite >= 0 && freshConnection > rewrite,
-            "the re-attempt must open its OWN store connection. The first attempt's connector is dead, so " +
-            "a second COPY on the caller's handle fails on the protocol and the sample is lost anyway.");
+            runAsync >= 0 && afterRunAsync > runAsync,
+            "the shipped store write must route through StoreWriteReattempt.RunAsync and read the outcome " +
+            "it returns.");
 
-        Assert.Contains("context.StoreWriteReattempts++", body, StringComparison.Ordinal);
+        /* Both COPY call sites must be the re-attempt's OWN arguments. A write that bypassed the helper — or
+           a helper reached through an indirection — would put a call outside this span. */
+        foreach (var call in copyCalls)
+        {
+            Assert.True(
+                call > runAsync && call < afterRunAsync,
+                "every call to the COPY must sit inside StoreWriteReattempt.RunAsync's argument list; a " +
+                $"call at offset {call} does not.");
+        }
+
+        var argumentList = source[runAsync..afterRunAsync];
+
+        var rewrite = argumentList.IndexOf("rewrite:", StringComparison.Ordinal);
+        var onReattempt = argumentList.IndexOf("onReattempt:", StringComparison.Ordinal);
+        Assert.True(rewrite >= 0 && onReattempt > rewrite, "expected the rewrite and onReattempt arguments");
+
+        var rewriteDelegate = argumentList[rewrite..onReattempt];
+
+        /* The re-attempt must open its OWN store connection and must not mention the caller's. The first
+           attempt's connector is dead, so a second COPY on the caller's handle fails on the protocol and
+           the sample is lost anyway — which is the whole fix, silently undone. */
+        Assert.Contains("_postgres.OpenConnectionAsync(token)", rewriteDelegate, StringComparison.Ordinal);
+        Assert.DoesNotContain("pgConnection", rewriteDelegate, StringComparison.Ordinal);
+
+        Assert.Contains("context.StoreWriteReattempts++", source[afterRunAsync..], StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -424,6 +449,20 @@ public class StoreWriteReattemptTests
     }
 
     /* ── helpers ── */
+
+    /// <summary>
+    /// Every offset at which <paramref name="needle"/> occurs. Enumerated rather than counted so a pin can
+    /// say WHERE a call sits, which is the assertion that survives a method being inserted nearby.
+    /// </summary>
+    private static IEnumerable<int> Offsets(string haystack, string needle)
+    {
+        for (var at = haystack.IndexOf(needle, StringComparison.Ordinal);
+             at >= 0;
+             at = haystack.IndexOf(needle, at + 1, StringComparison.Ordinal))
+        {
+            yield return at;
+        }
+    }
 
     private static string FindRepoFile(string relativePath)
     {
