@@ -354,14 +354,6 @@ public class StoreWriteReattemptTests
         Assert.Contains(
             "private async Task<int> CopyBatchOnceAsync<TRow>(", source, StringComparison.Ordinal);
 
-        /* The COPY must live in its own method so the failed attempt's importer and transaction are
-           disposed before the re-attempt runs — a retry entered with an aborted transaction still on the
-           connection fails on 25P02 rather than on anything to do with the store. */
-        /* The generic declaration is `CopyBatchOnceAsync<TRow>(`, so it does not match this needle: these
-           are the CALL sites, and there must be exactly the two attempt delegates. */
-        var copyCalls = Offsets(source, "CopyBatchOnceAsync(").ToArray();
-        Assert.Equal(2, copyCalls.Length);
-
         var runAsync = source.IndexOf("StoreWriteReattempt.RunAsync(", StringComparison.Ordinal);
         var afterRunAsync = source.IndexOf("if (outcome.Reattempted)", StringComparison.Ordinal);
         Assert.True(
@@ -369,29 +361,57 @@ public class StoreWriteReattemptTests
             "the shipped store write must route through StoreWriteReattempt.RunAsync and read the outcome " +
             "it returns.");
 
-        /* Both COPY call sites must be the re-attempt's OWN arguments. A write that bypassed the helper — or
-           a helper reached through an indirection — would put a call outside this span. */
-        foreach (var call in copyCalls)
+        /* The generic declarations are `...<TRow>(`, so they do not match these needles: these are the CALL
+           sites. Every one of them must be an argument of the re-attempt — a write that bypassed the
+           helper, or reached it through an indirection, would put a call outside this span. */
+        var freshCalls = Offsets(source, "CopyOnAFreshConnectionAsync(").ToArray();
+        Assert.Equal(2, freshCalls.Length); /* the first-attempt fallback, and the re-attempt */
+
+        var sharedConnectionCopy = Offsets(source, "CopyBatchOnceAsync(").ToArray();
+        Assert.Equal(2, sharedConnectionCopy.Length); /* the shared-connection attempt, and the fresh one */
+
+        foreach (var call in freshCalls)
         {
             Assert.True(
                 call > runAsync && call < afterRunAsync,
-                "every call to the COPY must sit inside StoreWriteReattempt.RunAsync's argument list; a " +
-                $"call at offset {call} does not.");
+                "every fresh-connection attempt must be an argument of StoreWriteReattempt.RunAsync; a " +
+                $"call at offset {call} is not.");
         }
 
         var argumentList = source[runAsync..afterRunAsync];
 
+        /* The re-attempt is the fresh-connection path, and it must not reach for the caller's handle: the
+           first attempt's connector is dead, so a second COPY on it fails on the protocol and the sample
+           is lost anyway — the whole fix, silently undone. */
         var rewrite = argumentList.IndexOf("rewrite:", StringComparison.Ordinal);
         var onReattempt = argumentList.IndexOf("onReattempt:", StringComparison.Ordinal);
         Assert.True(rewrite >= 0 && onReattempt > rewrite, "expected the rewrite and onReattempt arguments");
 
         var rewriteDelegate = argumentList[rewrite..onReattempt];
-
-        /* The re-attempt must open its OWN store connection and must not mention the caller's. The first
-           attempt's connector is dead, so a second COPY on the caller's handle fails on the protocol and
-           the sample is lost anyway — which is the whole fix, silently undone. */
-        Assert.Contains("_postgres.OpenConnectionAsync(token)", rewriteDelegate, StringComparison.Ordinal);
+        Assert.Contains("CopyOnAFreshConnectionAsync(", rewriteDelegate, StringComparison.Ordinal);
         Assert.DoesNotContain("pgConnection", rewriteDelegate, StringComparison.Ordinal);
+
+        /* And "fresh" has to mean fresh: the one method both paths route through opens its own connection
+           from the data source and never touches the caller's. */
+        var freshMethod = source.IndexOf(
+            "private async Task<int> CopyOnAFreshConnectionAsync<TRow>(", StringComparison.Ordinal);
+        Assert.True(freshMethod >= 0, "expected DarlingCollectorRunner.CopyOnAFreshConnectionAsync");
+
+        /* Bounded by the NEXT member declaration, found generically, rather than by the name of whichever
+           method happens to follow — the bound then moves with a reordering instead of silently taking in
+           a neighbour's body. */
+        var nextDeclaration = Offsets(source, "    private ").First(at => at > freshMethod);
+        var freshBody = source[freshMethod..nextDeclaration];
+        Assert.Contains("_postgres.OpenConnectionAsync(", freshBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("pgConnection", freshBody, StringComparison.Ordinal);
+
+        /* A first attempt whose shared connection is already broken must go to a fresh one too, decided on
+           the connection's STATE. On a fan-out every batch after the first faulting one inherits a broken
+           connection, and what that throws need not be a transport fault this arm would recognise —
+           plan_correction enumerates on every non-Azure target and declares no WatermarkColumn, so it both
+           fans out and cannot re-read a sample it loses that way. */
+        Assert.Contains(
+            "pgConnection.State == ConnectionState.Open", argumentList, StringComparison.Ordinal);
 
         Assert.Contains("context.StoreWriteReattempts++", source[afterRunAsync..], StringComparison.Ordinal);
     }

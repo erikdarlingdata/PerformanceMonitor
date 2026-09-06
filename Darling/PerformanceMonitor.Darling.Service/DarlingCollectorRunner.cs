@@ -2461,18 +2461,24 @@ public sealed class DarlingCollectorRunner
            pause short enough to be safe is noise against that window: no delay is purchasable here. The
            accepted cost is that a write's worst case is two command deadlines rather than one.
 
-           The caller's connection stays broken, so on a fan-out each remaining batch faults once and
-           re-attempts on its own fresh connection. Wasteful and bounded — and strictly better than ending
-           the cycle at the first fault, where the later items are never even read. */
+           The FIRST attempt also goes to a fresh connection when the caller's is no longer open, and that
+           is not tidiness. The caller's connection is shared across a fan-out's batches (#2819 has the
+           Query Store plan and text fetches borrowing the same one), and a transport fault breaks it — so
+           every batch after the first faulting one inherits a connection that cannot be used, and what it
+           throws then need not be a transport fault this arm would recognise. Deciding on the connection's
+           own STATE rather than on the shape of a later exception keeps those batches out of that
+           classification entirely. plan_correction is the collector that makes it matter: it enumerates on
+           every non-Azure target and declares no WatermarkColumn, so it both fans out and cannot re-read a
+           sample it lost. The cost is that a faulted cycle's remaining batches hold two store connections
+           at a time on that server rather than one, for the rest of the cycle. */
         var outcome = await StoreWriteReattempt.RunAsync(
-            write: token => CopyBatchOnceAsync(
-                pgConnection, definition, rows, server, collectionTime, context, token),
-            rewrite: async token =>
-            {
-                await using var freshConnection = await _postgres.OpenConnectionAsync(token);
-                return await CopyBatchOnceAsync(
-                    freshConnection, definition, rows, server, collectionTime, context, token);
-            },
+            write: async token => pgConnection.State == ConnectionState.Open
+                ? await CopyBatchOnceAsync(
+                    pgConnection, definition, rows, server, collectionTime, context, token)
+                : await CopyOnAFreshConnectionAsync(
+                    definition, rows, server, collectionTime, context, token),
+            rewrite: token => CopyOnAFreshConnectionAsync(
+                definition, rows, server, collectionTime, context, token),
             onReattempt: firstAttempt => _logger?.LogWarning(
                 firstAttempt,
                 StoreWriteReattemptLogTemplate,
@@ -2534,6 +2540,25 @@ public sealed class DarlingCollectorRunner
         reattempts <= 0
             ? null
             : string.Format(CultureInfo.InvariantCulture, s_storeWriteReattemptNote, reattempts);
+
+    /// <summary>
+    /// One attempt at the batch on a store connection of its own, borrowed for the attempt and returned
+    /// when it ends (#3099). Both the re-attempt and a first attempt whose shared connection is already
+    /// broken route through here, so "a fresh connection" is one named method with one body rather than two
+    /// copies that could drift.
+    /// </summary>
+    private async Task<int> CopyOnAFreshConnectionAsync<TRow>(
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        ServerRuntime server,
+        DateTime collectionTime,
+        CollectorContext context,
+        CancellationToken cancellationToken)
+    {
+        await using var freshConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+        return await CopyBatchOnceAsync(
+            freshConnection, definition, rows, server, collectionTime, context, cancellationToken);
+    }
 
     /// <summary>
     /// ONE attempt at the batch: the binary COPY, and for the diverting collectors the transaction that
