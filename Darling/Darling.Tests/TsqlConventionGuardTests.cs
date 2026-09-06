@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -104,9 +103,9 @@ public sealed class TsqlConventionGuardTests
     private const string BlockComments = "block-comments-not-double-dash";
     private const string NoTabs = "spaces-not-tabs";
     private const string LowercaseTypes = "data-types-lowercase";
+    private const string UnabbreviatedTypes = "data-types-unabbreviated";
 
     private const string UppercaseKeywords = "keywords-UPPERCASE";
-    private const string UnabbreviatedTypes = "data-types-unabbreviated";
     private const string SysnameForIdentifiers = "sysname-for-identifiers";
     private const string FourSpaceIndent = "indent-four-spaces";
     private const string AliasWithAs = "table-aliases-use-AS";
@@ -119,12 +118,11 @@ public sealed class TsqlConventionGuardTests
     /// not, and <c>Phrases</c> is the wording the checks were derived FROM — asserted still present, so an
     /// edit to the rule cannot leave a check enforcing something the document no longer says.
     ///
-    /// <para><b><c>Data types</c> and <c>Indentation</c> are split</b> rather than all-or-nothing, and
-    /// saying so is the point of the shape. <c>Data types</c> states two independent properties and only
-    /// one of them is checked here. <c>Indentation</c> bans tabs and prescribes a depth; the ban is a
-    /// token, the depth is a shape. That pair is NAMED rather than counted, and
+    /// <para><b><c>Indentation</c> is the one split bullet</b> rather than all-or-nothing, and saying so
+    /// is the point of the shape: it bans tabs and prescribes a depth, the ban is a token, the depth is a
+    /// shape, and only the token is checked here. It is NAMED rather than counted, and
     /// <see cref="TheDispositionMap_PartitionsTheBulletsContributingStates"/> holds the naming, so a
-    /// third split bullet cannot leave this prose quietly incomplete.
+    /// second split bullet cannot leave this prose quietly incomplete.
     /// A bullet with entries on both sides is honest about covering half of itself; a bullet listed as covered
     /// when it is not is the shape this issue was filed about.</para>
     /// </summary>
@@ -140,22 +138,18 @@ public sealed class TsqlConventionGuardTests
                     + "same words to a regex, and this codebase's SQL comments are long and discuss SQL."),
 
             ["Data types"] = new(
-                Covered: new[] { LowercaseTypes },
-                Uncovered: new[] { UnabbreviatedTypes },
+                Covered: new[] { LowercaseTypes, UnabbreviatedTypes },
+                Uncovered: Array.Empty<string>(),
                 Phrases: new[] { "lowercase", "never abbreviated", "`integer`", "`nvarchar(max)`", "`nvarchar(MAX)`" },
-                Note: "The CASE half is checked. The ABBREVIATION half is not, and the reason is remediation "
-                    + "cost rather than detectability: `int` where `integer` is meant stands at 33 sites in 7 "
-                    + "files, all of them inside T-SQL that runs against monitored production servers, some "
-                    + "in sp_executesql parameter declarations "
-                    + "(`N'@h varbinary(64), @stmt_start int, @stmt_end int'`) that nothing in this repository "
-                    + "executes. Rewriting live query strings belongs in a change whose subject is that "
-                    + "rewrite. That figure is DERIVED and pinned by "
-                    + "TheAbbreviationScopeNote_CountsTheSitesItClaims rather than written down once, so it "
-                    + "cannot quietly stop describing the tree — and when it reaches zero that pin says to "
-                    + "move this rule to the Covered side. A waiver list was considered and rejected: its key "
-                    + "would have to collapse repeated spellings within one member, so a 34th "
-                    + "`CONVERT(int, NULL)` beside the ones already there would satisfy it — a guard claiming "
-                    + "the rule while under-covering it, which is the shape #3081 was filed about."),
+                Note: "Both halves are tokens with a single correct replacement, which is what makes them "
+                    + "worth a guard. The CASE half reads the type vocabulary plus the `max` length spec, "
+                    + "which no vocabulary match can see on its own. The ABBREVIATION half is `int` where "
+                    + "`integer` is meant, and it is anchored on BOTH sides: without the trailing lookahead "
+                    + "`integer` itself contains the token under test, and without the leading lookbehind so "
+                    + "do `bigint`, `smallint` and `tinyint` — three type names this corpus writes and the "
+                    + "bullet does not object to. `dec` for `decimal` and `double precision` for `float` are "
+                    + "the other abbreviations T-SQL accepts and neither is in the detector: a stated bound "
+                    + "on the CHECK rather than on the rule."),
 
             ["Object names"] = new(
                 Covered: Array.Empty<string>(),
@@ -244,11 +238,11 @@ public sealed class TsqlConventionGuardTests
     /// <see cref="EverySqlServerCollectorDefinitionsFile_ContributesATsqlStatement"/> is the stronger version
     /// of the same idea: a per-SITE requirement derived from the catalog, which a total can never give.</para>
     ///
-    /// <para><b>There is deliberately no waiver list.</b> The nine pre-existing violations of the covered
-    /// subset — three <c>COUNT(*)</c>, one <c>--</c> comment, three type names spelled in capitals and two
-    /// <c>(MAX)</c> length specs — were fixed in the change that added this file, so the covered subset
-    /// measures zero on the tree with no exceptions carried. A waiver mechanism nobody needs is a mechanism
-    /// the next exception takes for granted.</para>
+    /// <para><b>There is deliberately no waiver list.</b> The covered subset measures zero on the tree
+    /// with no exceptions carried, and every rule in it got there by having the tree's existing violations
+    /// REWRITTEN rather than waived — the abbreviation rule's <c>int</c> spellings included. A rule whose
+    /// cost is paid by a waiver is a rule this guard only appears to hold, and a waiver mechanism nobody
+    /// needs is a mechanism the next exception takes for granted.</para>
     /// </summary>
     [Fact]
     public void NoTsqlStatementViolatesACoveredConvention()
@@ -566,55 +560,30 @@ public sealed class TsqlConventionGuardTests
 
         Assert.Empty(CoveredRules.Intersect(UncoveredRules, StringComparer.Ordinal));
 
-        /* The split bullets, NAMED in RuleBullets' own summary rather than counted there. A third one
+        /* The abbreviation ratchet, at the BULLET rather than through the flattened lists. Both
+           equalities above are over a UNION of every bullet's arrays, so neither can see which bullet a
+           rule sits under: moving UnabbreviatedTypes to the Functions bullet's Covered array satisfies
+           all of them, and the map then claims this guard enforces a sentence CONTRIBUTING.md does not
+           have it enforcing. This is the direction nothing else holds.
+
+           The OTHER direction — the rule drifting back to Uncovered while Findings still emits it — is
+           already held, and stating where is what keeps a decorative assertion from being added here
+           later. Putting it back on the Uncovered side makes the flattened Uncovered union disagree with
+           UncoveredRules two assertions up; adding it to UncoveredRules as well instead trips the
+           disjointness one line up, because Covered still holds it. A DoesNotContain here could
+           therefore never be the assertion that reds, and an assertion that cannot fail is the shape
+           #3081 was filed about. */
+        Assert.Contains(UnabbreviatedTypes, RuleBullets["Data types"].Covered);
+
+        /* The split bullets, NAMED in RuleBullets' own summary rather than counted there. A second one
            would leave that prose incomplete without contradicting it, which is the quiet direction. */
         Assert.Equal(
-            new[] { "Data types", "Indentation" },
+            new[] { "Indentation" },
             RuleBullets
                 .Where(b => b.Value.Covered.Length > 0 && b.Value.Uncovered.Length > 0)
                 .Select(b => b.Key)
                 .OrderBy(k => k, StringComparer.Ordinal)
                 .ToArray());
-    }
-
-    /// <summary>
-    /// The abbreviation rule is out of scope on a COST, and a cost stated once is a claim that goes stale by
-    /// exactly the mechanism this guard exists to stop. So the figure in
-    /// <see cref="RuleBullets"/>'s <c>Data types</c> note is derived from the same population the enforced
-    /// checks read, and compared to what the note says.
-    ///
-    /// <para><b>The direction that matters is DOWNWARD.</b> If those sites get fixed, the reason for
-    /// leaving the rule out disappears and this pin says so — a rule left uncovered because remediation was
-    /// expensive, after the remediation, is just an unguarded rule. The detector for it lives here and runs;
-    /// it is <see cref="Findings"/> that deliberately does not emit it.</para>
-    ///
-    /// <para>Non-vacuous in both halves: a scan that found nothing reds on the floor rather than agreeing
-    /// with a note that had also drifted to zero, and a note whose figures stopped being parseable reds
-    /// rather than comparing nothing.</para>
-    /// </summary>
-    [Fact]
-    public void TheAbbreviationScopeNote_CountsTheSitesItClaims()
-    {
-        var (sites, files) = AbbreviatedTypeSites();
-
-        Assert.True(
-            sites > 0,
-            "no abbreviated data type is left in the corpus. That is the good outcome and it makes the "
-            + "scope note wrong: move UnabbreviatedTypes from the Data types bullet's Uncovered side to its "
-            + "Covered side, emit it from Findings, and give it a hazard fixture. If instead the count is "
-            + "zero because the scan broke, NoTsqlStatementViolatesACoveredConvention's floors will say so.");
-
-        var note = RuleBullets["Data types"].Note;
-        var claim = Regex.Match(note, @"(?<sites>\d+) sites in (?<files>\d+) files");
-
-        Assert.True(
-            claim.Success,
-            "the Data types note no longer states its cost as \"<n> sites in <n> files\", so nothing holds "
-            + "the figure it rests on. Keep the phrasing parseable, or drop the number from the note and "
-            + "delete this pin with it. Note text: " + note);
-
-        Assert.Equal(sites, int.Parse(claim.Groups["sites"].Value, CultureInfo.InvariantCulture));
-        Assert.Equal(files, int.Parse(claim.Groups["files"].Value, CultureInfo.InvariantCulture));
     }
 
     /// <summary>
@@ -715,6 +684,20 @@ public sealed class TsqlConventionGuardTests
             ("DECLARE @sql nvarchar(MAX); SELECT @sql = N'x' FROM sys.databases AS d;", LowercaseTypes),
             /* Mixed case is not lowercase either. */
             ("DECLARE @db SysName; SELECT @db = d.name FROM sys.databases AS d;", LowercaseTypes),
+            /* The ABBREVIATION half of the same bullet, and every fixture for it is spelled LOWERCASE on
+               purpose: the case half then stays silent, so what these record is the abbreviation check
+               firing rather than a second rule covering for it. */
+            ("SELECT c = CONVERT(int, w.waiting_tasks_count) FROM sys.dm_os_wait_stats AS w OPTION(RECOMPILE);", UnabbreviatedTypes),
+            ("DECLARE @on_pos int; SELECT @on_pos = CHARINDEX(N' on ', @@VERSION);", UnabbreviatedTypes),
+            /* A DDL type position rather than an expression one: a temp table's and a table variable's
+               column types were both among the corpus's own spellings, and a check anchored only on
+               CONVERT( would have missed every one of them. */
+            ("SET NOCOUNT ON; CREATE TABLE #file_space (database_id int NOT NULL); SELECT 1 FROM sys.databases AS d;", UnabbreviatedTypes),
+            /* An sp_executesql PARAMETER DECLARATION, which is where the corpus's remaining doubt sat: it
+               is a type position like any other, `integer` is accepted in it, and the engine binds the two
+               spellings to the same type. Verified against a live SQL Server rather than reasoned about,
+               because nothing in this repository executes that path. */
+            ("EXEC sys.sp_executesql N'SELECT probe = @a;', N'@a int', @a = 1;", UnabbreviatedTypes),
         };
 
         var flagged = new List<string>();
@@ -808,6 +791,20 @@ public sealed class TsqlConventionGuardTests
             "SELECT largest = MAX(MAX) FROM dbo.metrics AS mt OPTION(RECOMPILE);",
             /* @@ROWCOUNT spelled inside a comment, which is where this codebase discusses it. */
             "SELECT d.name FROM sys.databases AS d /* ROWCOUNT_BIG(), never @@ROWCOUNT */ OPTION(RECOMPILE);",
+            /* The abbreviation check's near misses. Every token here CONTAINS `int` and none of them is
+               the violation, so this is where an unanchored or greedy match reds. `integer` is the
+               CORRECT spelling — a detector matching it would report every rewritten site as the
+               violation the rewrite removed, which is every site in the corpus. `bigint`,
+               `smallint` and `tinyint` are type names this corpus writes; the leading lookbehind is the
+               only thing holding them. */
+            "DECLARE @a integer, @b bigint, @c smallint, @d tinyint; SELECT @a = d.database_id FROM sys.databases AS d;",
+            /* An identifier merely CONTAINING the token, at each end: `int_col` is held by the trailing
+               lookahead's `_` and `sysint` by the lookbehind. Synthetic — ordinary SQL, absent from this
+               corpus — and the two directions are separate cases because one anchor cannot hold both. */
+            "SELECT int_col = d.database_id, sysint = d.source_database_id FROM sys.databases AS d OPTION(RECOMPILE);",
+            /* A VARIABLE named @int, which is what the `@` in the lookbehind is for: after a sigil the
+               token is a name, and this codebase's dynamic SQL is full of parameter names. */
+            "DECLARE @int integer; SELECT @int = COUNT_BIG(*) FROM sys.databases AS d;",
         };
 
         foreach (var sql in benign)
@@ -910,11 +907,6 @@ public sealed class TsqlConventionGuardTests
             (UppercaseKeywords,
                 "select w.wait_type from sys.dm_os_wait_stats as w where w.wait_time_ms > 0 option(recompile);"),
 
-            /* Data types, abbreviation half: `int` where the bullet says `integer`. Lowercase, so the half
-               that IS covered stays silent — which is precisely the split being recorded. */
-            (UnabbreviatedTypes,
-                "SELECT c = CONVERT(int, w.waiting_tasks_count) FROM sys.dm_os_wait_stats AS w OPTION(RECOMPILE);"),
-
             /* Object names: an identifier column typed nvarchar(128) rather than sysname. */
             (SysnameForIdentifiers,
                 "SELECT database_name = CONVERT(nvarchar(128), d.name) FROM sys.databases AS d OPTION(RECOMPILE);"),
@@ -972,11 +964,14 @@ public sealed class TsqlConventionGuardTests
 
     /* ───────────────────────── the checks ───────────────────────── */
 
-    private static readonly string[] CoveredRules = { CountBig, RowcountBig, BlockComments, NoTabs, LowercaseTypes };
+    private static readonly string[] CoveredRules =
+    {
+        CountBig, RowcountBig, BlockComments, NoTabs, LowercaseTypes, UnabbreviatedTypes,
+    };
 
     private static readonly string[] UncoveredRules =
     {
-        UppercaseKeywords, UnabbreviatedTypes, SysnameForIdentifiers, FourSpaceIndent,
+        UppercaseKeywords, SysnameForIdentifiers, FourSpaceIndent,
         AliasWithAs, ColumnAliasForm, TrailingCommas,
     };
 
@@ -1127,58 +1122,34 @@ public sealed class TsqlConventionGuardTests
             }
         }
 
+        /* The abbreviation half of the same bullet, off the SAME view as the case check above — so a type
+           name inside a blanked `FOR XML` or `AT TIME ZONE` cannot supply one either. */
+        foreach (Match match in AbbreviatedTypeUse.Matches(forTypes))
+        {
+            findings.Add(new(UnabbreviatedTypes, Where(sql, match.Index, $"the data type `{match.Value}` — data types are never abbreviated, so `integer`")));
+        }
+
         return findings;
     }
 
     /// <summary>
-    /// <c>int</c> where <c>CONTRIBUTING.md</c> says <c>integer</c> — the one rule whose detector lives here
-    /// and whose findings <see cref="Findings"/> deliberately does not emit. Kept so the out-of-scope
-    /// decision rests on a measurement that is re-taken on every run rather than on a number somebody wrote
-    /// down once, and so switching the rule on later is a one-line change instead of a rediscovery.
+    /// <c>int</c> where <c>CONTRIBUTING.md</c> says <c>integer</c>.
     ///
-    /// <para><c>int</c> is the only abbreviation the bullet's own examples name and the only one this corpus
-    /// contains; <c>dec</c> for <c>decimal</c> and <c>double precision</c> for <c>float</c> are the others
-    /// T-SQL accepts, and neither appears. That is a stated bound on the FIGURE, not on the rule.</para>
+    /// <para><b>Both anchors are load-bearing, and each is held by a benign fixture.</b> The trailing
+    /// lookahead is what stops <c>integer</c> — the correct spelling — matching on its own first three
+    /// characters, which would make every fix report itself as the violation it fixed. The leading
+    /// lookbehind is what stops <c>bigint</c>, <c>smallint</c> and <c>tinyint</c>, three type names this
+    /// corpus writes and the bullet does not object to, and it carries <c>.</c> so a column reference
+    /// <c>t.int</c> is not one either. No capture group, deliberately: a group around the token is how a
+    /// greedy match absorbs the thing under test.</para>
+    ///
+    /// <para><c>int</c> is the only abbreviation the bullet's own examples name; <c>dec</c> for
+    /// <c>decimal</c> and <c>double precision</c> for <c>float</c> are the others T-SQL accepts and neither
+    /// is checked here. That is a stated bound on the CHECK, not on the rule.</para>
     /// </summary>
     private static readonly Regex AbbreviatedTypeUse = new(
         @"(?<![A-Za-z0-9_@#$.])int(?![A-Za-z0-9_])",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    /// <summary>How many abbreviated data types the corpus holds, and in how many files. Reads the SAME
-    /// population and the SAME code view as the enforced checks, so the cost recorded for leaving the rule
-    /// out is the cost the rule would actually find.</summary>
-    private static (int Sites, int Files) AbbreviatedTypeSites()
-    {
-        var sites = 0;
-        var files = new HashSet<string>(StringComparer.Ordinal);
-
-        foreach (var (_, roots, _) in ScannedTrees)
-        {
-            foreach (var path in SourceFiles(roots))
-            {
-                foreach (var (_, body) in CSharpSourceWalker.StringLiteralBodies(File.ReadAllText(path)))
-                {
-                    if (!IsTsqlStatement(body))
-                    {
-                        continue;
-                    }
-
-                    var view = Blank(
-                        CodeAndDynamicSql(body, SpanKinds(body)),
-                        TypeNameClauseCollisions);
-                    var found = AbbreviatedTypeUse.Matches(view).Count;
-
-                    if (found > 0)
-                    {
-                        sites += found;
-                        files.Add(path);
-                    }
-                }
-            }
-        }
-
-        return (sites, files.Count);
-    }
 
     private static bool IsLowercase(string token) =>
         token.All(c => !char.IsLetter(c) || char.IsLower(c));

@@ -32,7 +32,7 @@ public sealed class MemoryStatsCollectorDefinitionTests
 
         /* Azure: committed-target approximation + NULL workers (#857 elastic-pool grant wall). */
         Assert.Contains("committed_target_kb", azure, StringComparison.Ordinal);
-        Assert.Contains("current_workers_count = CONVERT(int, NULL)", azure, StringComparison.Ordinal);
+        Assert.Contains("current_workers_count = CONVERT(integer, NULL)", azure, StringComparison.Ordinal);
         Assert.DoesNotContain("sys.dm_os_schedulers", azure, StringComparison.Ordinal);
 
         /* On-prem/MI: real memory DMV + live worker count. */

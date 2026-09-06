@@ -71,8 +71,8 @@ SET NOCOUNT ON;
 
 CREATE TABLE #file_space
 (
-    database_id int NOT NULL,
-    file_id int NOT NULL,
+    database_id integer NOT NULL,
+    file_id integer NOT NULL,
     used_size_mb decimal(19,2) NULL,
     /* #2169: the file's CURRENT size, read in-database alongside SpaceUsed. sys.master_files.size is the
        size recorded at configuration time and does NOT track autogrowth for tempdb, so a grown tempdb
@@ -168,7 +168,7 @@ SELECT
     recovery_model_desc =
         d.recovery_model_desc,
     compatibility_level =
-        CONVERT(int, d.compatibility_level),
+        CONVERT(integer, d.compatibility_level),
     state_desc =
         d.state_desc,
     volume_mount_point =
@@ -233,8 +233,8 @@ DECLARE
     @database_sizes TABLE
 (
     database_name nvarchar(128) NULL,
-    database_id int NULL,
-    file_id int NULL,
+    database_id integer NULL,
+    file_id integer NULL,
     file_type_desc nvarchar(60) NULL,
     file_name nvarchar(128) NULL,
     physical_name nvarchar(260) NULL,
@@ -243,14 +243,14 @@ DECLARE
     auto_growth_mb decimal(19,2) NULL,
     max_size_mb decimal(19,2) NULL,
     recovery_model_desc nvarchar(12) NULL,
-    compatibility_level int NULL,
+    compatibility_level integer NULL,
     state_desc nvarchar(60) NULL,
     volume_mount_point nvarchar(256) NULL,
     volume_total_mb decimal(19,2) NULL,
     volume_free_mb decimal(19,2) NULL,
     is_percent_growth bit NULL,
-    growth_pct int NULL,
-    vlf_count int NULL
+    growth_pct integer NULL,
+    vlf_count integer NULL
 );
 
 INSERT
@@ -283,7 +283,7 @@ SELECT
     recovery_model_desc =
         CONVERT(nvarchar(12), DATABASEPROPERTYEX(DB_NAME(), N'Recovery')),
     compatibility_level =
-        CONVERT(int, NULL),
+        CONVERT(integer, NULL),
     state_desc =
         N'ONLINE',
     volume_mount_point =

@@ -184,7 +184,7 @@ OPTION(RECOMPILE);";
             var query = $@"
 EXECUTE {quotedDbName}.sys.sp_executesql
     N'{SqlHandlePlanInnerSql}',
-    N'@h varbinary(64), @stmt_start int, @stmt_end int',
+    N'@h varbinary(64), @stmt_start integer, @stmt_end integer',
     @h, @stmt_start, @stmt_end;";
 
             await using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };
