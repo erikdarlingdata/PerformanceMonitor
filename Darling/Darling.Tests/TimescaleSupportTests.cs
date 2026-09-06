@@ -2560,6 +2560,21 @@ LIMIT 1", connection))
 
         /* Not keyed on a job id, which is per-deployment. */
         Assert.DoesNotContain("job_id =", sql, StringComparison.Ordinal);
+
+        /* The live test corroborates the join by re-running this statement with ONLY its status filter
+           spliced out. That splice is string work on a verbatim literal in a CRLF file, so it is pinned HERE
+           rather than discovered against a live store: a splice that silently matched nothing would leave the
+           live test running the unmodified statement and passing for the wrong reason — the "test that agrees
+           with any derivation" failure, one layer down. */
+        var relaxed = sql
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\nAND   js.last_run_status = 'Success'", "", StringComparison.Ordinal);
+
+        Assert.DoesNotContain("last_run_status", relaxed, StringComparison.Ordinal);
+        Assert.Contains("ca.view_schema = 'collect'", relaxed, StringComparison.Ordinal);
+        Assert.Equal(
+            sql.Replace("\r\n", "\n", StringComparison.Ordinal).Length - "\nAND   js.last_run_status = 'Success'".Length,
+            relaxed.Length);
     }
 
     /// <summary>
@@ -2606,6 +2621,124 @@ LIMIT 1", connection))
         Assert.True(
             TimescaleSupport.RefreshSlotWarningSeconds < hourlyCadenceSeconds * ShippedWarnPercent / 100,
             "the slot watch no longer fires before #2136's default cadence warning, so it adds no lead time");
+    }
+
+    /// <summary>
+    /// The #3044 read against a LIVE TimescaleDB catalog: it resolves, its join finds the heaviest refresh's
+    /// own policy, and with no completed run yet it returns an HONEST EMPTY rather than a swallowed error.
+    ///
+    /// <para><b>Why this is the shape rather than an end-to-end duration reading.</b> Driving a real
+    /// <c>last_run_duration</c> needs the actual scheduler — foreground <c>run_job</c> does NOT update that
+    /// accounting, which CI proved on <c>StoreSelfMetricsTests</c>' first version — so a duration assertion
+    /// here would mean arming, polling and parking a refresh policy for the sake of a column whose behaviour
+    /// that test already pins. What is unproven without a live store is everything else: that the three-way
+    /// join resolves, that <c>USING (job_id)</c> is unambiguous across it, that the column names and the
+    /// <c>EXTRACT ... ::double precision</c> cast exist on this runtime, and that the OR-join actually finds a
+    /// view — the exact defect that shipped once, when the materialization-only form read back nothing.</para>
+    ///
+    /// <para><b>The load-bearing assertion is that the logger stayed silent.</b>
+    /// <see cref="TimescaleSupport.ReadHeaviestRefreshRuntimeAsync"/> is failure-isolated to null, so a wrong
+    /// column, a broken join or a bad cast all return null too — indistinguishable from "no successful run
+    /// yet" by the return value alone. The Debug line it emits on failure is what separates them, so a silent
+    /// null is the proof and a null on its own would be worth nothing.</para>
+    ///
+    /// <para>And the join is corroborated INDEPENDENTLY, the way
+    /// <see cref="RefreshPolicyCountAsync"/> corroborates its sibling: the shipped statement is re-run with
+    /// only its <c>last_run_status</c> filter spliced out — the shipped text, not a retyped copy — and must
+    /// then find exactly the policy a proc_name-only count says exists. That is what tells "no Success run
+    /// yet" apart from "the read cannot find the job".</para>
+    /// </summary>
+    [Fact]
+    public async Task HeaviestRefreshRuntimeRead_ResolvesAndFindsThePolicy_AndIsHonestlyEmptyBeforeAnyRun_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live refresh-slot read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        const string Heaviest = TimescaleSupport.HeaviestHourlyRefreshView;
+
+        /* Creating the aggregates changes compose's tier routing, so snapshot and restore. */
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var createLog = new CapturingTestLogger();
+            Assert.True(await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct) > 0,
+                $"the fixture did not build the aggregates; {createLog.Joined}");
+
+            /* (1) The shipped statement RESOLVES on this runtime. Executed for its side effect of not
+                   throwing — the columns, the three-way join and the cast are all only checkable here. */
+            long rows;
+            using (var shipped = new NpgsqlCommand(TimescaleSupport.HeaviestRefreshRuntimeSql, connection))
+            {
+                rows = 0;
+                using var reader = await shipped.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    rows++;
+                }
+            }
+
+            Assert.True(rows <= 1, $"the read returned {rows} rows for one view; it must identify at most one policy");
+
+            /* (2) The independent corroboration: the policy EXISTS, counted on nothing this read joins on. */
+            Assert.True(await RefreshPolicyCountAsync(connection, ct) > 0,
+                "no continuous-aggregate refresh job exists at all — the fixture did not build the aggregates");
+
+            /* (3) The join finds THAT policy. The shipped text with only its status filter spliced out, so
+                   this cannot pass against a statement the product does not ship. */
+            var relaxed = TimescaleSupport.HeaviestRefreshRuntimeSql
+                .Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace("\nAND   js.last_run_status = 'Success'", "", StringComparison.Ordinal);
+            Assert.DoesNotContain("last_run_status", relaxed, StringComparison.Ordinal);
+
+            using (var probe = new NpgsqlCommand(relaxed, connection))
+            {
+                using var reader = await probe.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct),
+                    $"the OR-join found no refresh policy for {Heaviest} even though the store has refresh jobs — "
+                    + "this is the materialization-only-join defect, which reads back nothing");
+                Assert.Equal(Heaviest, reader.GetString(0));
+            }
+
+            /* (4) THE ASSERTION THIS TEST EXISTS FOR. No run has completed, so the reading is null — and the
+                   logger must be SILENT, because a swallowed failure returns null too. */
+            var readLog = new CapturingTestLogger();
+            var reading = await TimescaleSupport.ReadHeaviestRefreshRuntimeAsync(connection, readLog, ct);
+
+            Assert.Equal("(no log lines captured)", readLog.Joined);
+
+            /* Either state is legitimate on a shared fixture — what must never happen is a reading that
+               came back through the catch. If a Success run HAS happened, hold it to the real contract. */
+            if (reading is not null)
+            {
+                Assert.Equal(Heaviest, reading.View);
+                Assert.True(reading.LastRunSeconds >= 0, $"a duration of {reading.LastRunSeconds}s is not a duration");
+                Assert.Equal(TimescaleSupport.ClassifyRefreshSlotHeadroom(reading.LastRunSeconds), reading.Headroom);
+            }
+            else
+            {
+                Assert.Equal(0, rows);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropContinuousAggregatesAsync(
+                    (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt));
+        }
     }
 
     /// <summary>
