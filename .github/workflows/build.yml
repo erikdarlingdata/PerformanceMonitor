@@ -161,14 +161,6 @@ jobs:
               - 'upgrades/**/!(*.md)'
             darling:
               - 'Darling/**/!(*.md)'
-              # Darling/README.md is markdown, so the extglob above excludes it — but
-              # Darling.Tests PARSES it: the #3072 pin reads its collector-inventory,
-              # V1-table, hypertable and worker-sizing figures back against
-              # CollectorCatalog.All and TimescaleSupport.HypertableCount. Without this, a
-              # README-only edit could reword a pinned sentence out from under the regex
-              # while never running the guard — the same silently-stops-guarding mode as
-              # the nightly.yml entry, on a file the markdown carve-out would otherwise hide.
-              - 'Darling/README.md'
               # nightly.yml is not a build input, but Darling.Tests PARSES it: the #1888
               # guard reads both workflows' throwaway-cluster settings and compares them
               # against the product's worker-sizing formula. Without this, a nightly-only
@@ -680,14 +672,6 @@ jobs:
           filters: |
             darling:
               - 'Darling/**/!(*.md)'
-              # Darling/README.md is markdown, so the extglob above excludes it — but
-              # Darling.Tests PARSES it: the #3072 pin reads its collector-inventory,
-              # V1-table, hypertable and worker-sizing figures back against
-              # CollectorCatalog.All and TimescaleSupport.HypertableCount. Without this, a
-              # README-only edit could reword a pinned sentence out from under the regex
-              # while never running the guard — the same silently-stops-guarding mode as
-              # the nightly.yml entry, on a file the markdown carve-out would otherwise hide.
-              - 'Darling/README.md'
               - '.github/workflows/build.yml'
               # Same reason as the build job's darling filter: the #1888 cluster-sizing
               # guard parses nightly.yml, so an edit to it has to reach the suite.
@@ -869,14 +853,6 @@ jobs:
           filters: |
             darling:
               - 'Darling/**/!(*.md)'
-              # Darling/README.md is markdown, so the extglob above excludes it — but
-              # Darling.Tests PARSES it: the #3072 pin reads its collector-inventory,
-              # V1-table, hypertable and worker-sizing figures back against
-              # CollectorCatalog.All and TimescaleSupport.HypertableCount. Without this, a
-              # README-only edit could reword a pinned sentence out from under the regex
-              # while never running the guard — the same silently-stops-guarding mode as
-              # the nightly.yml entry, on a file the markdown carve-out would otherwise hide.
-              - 'Darling/README.md'
               - 'PerformanceMonitor.Common/**'
               - 'PerformanceMonitor.Collectors/**'
               - 'PerformanceMonitor.Analysis/**'
