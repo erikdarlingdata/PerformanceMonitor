@@ -179,6 +179,11 @@ public sealed class DarlingSelfAlertTests
         /// frozen default and hide exactly the drift #3060's pins exist to catch.</summary>
         public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
 
+        /// <summary>#3060: set false to build the evaluator with the knob seam UNSUPPLIED, so the
+        /// constructor's own fallback is what judges. Otherwise that fallback is a product default no test
+        /// ever reaches — the shape a stale literal survives in.</summary>
+        public bool WireCadenceKnob { get; set; } = true;
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -196,7 +201,7 @@ public sealed class DarlingSelfAlertTests
             agLagAlertSeconds: () => AgLagAlertSeconds,
             agRedoQueueAlertKb: () => AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes,
-            storeJobCadenceWarnPercent: () => StoreJobCadenceWarnPercent);
+            storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -2548,6 +2553,11 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
        every boundary case below moves with RefreshPhaseStepMinutes instead of agreeing with it by accident. */
     private const long RefreshSlotMs = HourlyCadenceMs / TimescaleSupport.RefreshPhaseSlots;
 
+    /* One second under whatever the shipped knob resolves to — derived from the THRESHOLD, not from the
+       slot, because the two coincide only while the grid step divides 100. */
+    private const long JustUnderTheKnobMs =
+        HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100 - 1_000;
+
     private static StoreJobCadenceReading CadenceJob(
         long id = 1028, long? durMs = RefreshSlotMs, long schedMs = HourlyCadenceMs,
         string name = "policy_compression query_store_stats") =>
@@ -2627,6 +2637,30 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Contains(
             $"store_job_cadence_warn_percent integer NOT NULL DEFAULT {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}",
             v57.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3060: the constructor's fallback for an unsupplied knob seam is the same derived slot, exercised
+    /// through the fallback rather than asserted about it. It is the copy of this number that no wired test
+    /// reaches, so it is the one a stale literal would have survived in.
+    /// </summary>
+    [Fact]
+    public async Task JobOverCadence_WithTheKnobSeamUnsupplied_StillJudgesAtOneRefreshSlot()
+    {
+        var h = new Harness { WireCadenceKnob = false };
+        var e = h.Build();
+
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal($"{TimescaleSupport.RefreshSlotPercentOfHourlyCadence}%", fired.ThresholdValue);
+
+        /* And a second under that same fallback's threshold stays silent, so the assertion above is a
+           threshold and not merely "it fires on anything". Derived from the threshold rather than from the
+           slot: the two coincide only while the step divides 100. */
+        var quiet = new Harness { WireCadenceKnob = false };
+        var e2 = quiet.Build();
+        await e2.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: JustUnderTheKnobMs) }, Ct);
+        Assert.Empty(quiet.Deliverer.Outcomes);
     }
 
     [Fact]

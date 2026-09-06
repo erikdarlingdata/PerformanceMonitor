@@ -377,9 +377,12 @@ internal sealed class DarlingSelfAlertEvaluator
         _agLagAlertSeconds = agLagAlertSeconds ?? (() => 300);
         _agRedoQueueAlertKb = agRedoQueueAlertKb ?? (() => 0);
         _agDisconnectRefireMinutes = agDisconnectRefireMinutes ?? (() => 0);
-        /* Unsupplied falls back to the V57 DDL default, so an evaluator built without the seam behaves
-           like a store at its shipped defaults (the AG-seam discipline). */
-        _storeJobCadenceWarnPercent = storeJobCadenceWarnPercent ?? (() => 25);
+        /* Unsupplied falls back to the shipped default, so an evaluator built without the seam behaves
+           like a store at its shipped defaults (the AG-seam discipline). Taken from the constant rather
+           than restated (#3060): a literal here is a third copy of the same number that a moved refresh
+           grid would leave behind, and this one would fire past the slot silently. */
+        _storeJobCadenceWarnPercent =
+            storeJobCadenceWarnPercent ?? (() => TimescaleSupport.RefreshSlotPercentOfHourlyCadence);
         _readFailures = readFailures;
     }
 
