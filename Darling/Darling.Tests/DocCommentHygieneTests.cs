@@ -487,9 +487,11 @@ public sealed class DocCommentHygieneTests
         @"[A-Za-z_][A-Za-z0-9_]*",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /// <summary>A doc-XML generic argument list — <c>{TRow}</c>, <c>{T, TResult}</c>. Balanced-free
-    /// (<c>[^{}]*</c>) on purpose: an UNCLOSED brace is then not removed, so the segment keeps it and fails
-    /// <see cref="WholeIdentifier"/> instead of being quietly repaired into something that resolves.</summary>
+    /// <summary>The INNERMOST doc-XML generic argument lists — <c>{TRow}</c>, <c>{T, TResult}</c>.
+    /// Balanced-free (<c>[^{}]*</c>) on purpose: an UNCLOSED brace is then not removed, so the segment
+    /// keeps it and fails <see cref="WholeIdentifier"/> instead of being quietly repaired into something
+    /// that resolves. Applied a level at a time by <see cref="StripGenericArguments"/>, because one pass
+    /// cannot match across a nested brace.</summary>
     private static readonly Regex GenericArgumentList = new(
         @"\{[^{}]*\}",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -721,6 +723,11 @@ public sealed class DocCommentHygieneTests
         ("ICollectorDefinition{NoSuchTypeAnywhere}", true,
             "GENERIC ARGUMENTS are discarded with the braces, so neither arity nor the arguments themselves "
             + "are checked."),
+
+        ("ICollectorDefinition{NoSuchTypeAnywhere, ICollectorDefinition{AlsoNoSuchType}}", true,
+            "NESTED GENERIC ARGUMENTS come off a level at a time, so the outer name is reached rather than "
+            + "left carrying a half-stripped brace. No such cref exists in the tree today; this row is "
+            + "what drives the loop, and without it the nesting would be an untested branch."),
 
         ("CollectorCatalog.NoSuchMemberButAppliesTo", false,
             "THE NEGATIVE CONTROL, and it is a row rather than a comment so that a resolver which said yes "
@@ -1307,6 +1314,10 @@ public sealed class DocCommentHygieneTests
        illegal. A balanced-anything pattern would have deleted it and resolved this. */
     [InlineData(false, "CollectorCatalog{TRow")]
     [InlineData(true, "CollectorCatalog{TRow}")]
+    /* Nested lists come off a level at a time; an unbalanced brace survives every level. */
+    [InlineData(true, "CollectorCatalog{TRow, CollectorCatalog{TRow}}")]
+    [InlineData(false, "CollectorCatalog{{TRow}")]
+    [InlineData(false, "CollectorCatalog{TRow}}")]
     /* Nullable annotations and stray punctuation are not identifiers and are not stripped. */
     [InlineData(false, "CollectorCatalog?")]
     [InlineData(false, "CollectorCatalog!")]
@@ -1713,11 +1724,45 @@ public sealed class DocCommentHygieneTests
     }
 
     /// <summary>
+    /// <paramref name="text"/> with every generic argument list removed, innermost first, until no more
+    /// come off.
+    ///
+    /// <para><b>Why a loop and not one pass.</b> <see cref="GenericArgumentList"/> cannot match across a
+    /// nested brace, so a single pass over <c>Dictionary{TKey,List{TValue}}</c> takes only the inner list
+    /// and leaves <c>Dictionary{TKey,List}</c> — a segment that then fails
+    /// <see cref="WholeIdentifier"/> and is reported unresolved although <c>Dictionary</c> is spelled all
+    /// over the tree. Loud rather than silent, but wrong, and the review on #3086 found it before any such
+    /// cref existed.</para>
+    ///
+    /// <para><b>What the loop still does NOT repair, which is the point.</b> Each pass removes only
+    /// BALANCED lists, so an unmatched brace survives every pass and the segment stays malformed:
+    /// <c>Foo{T</c> comes out unchanged, and <c>Foo{{T}</c> comes out as <c>Foo{</c>. Termination is by
+    /// construction — a pass that changes nothing ends it, and any pass that changes something has
+    /// removed at least two characters. Both directions are driven in
+    /// <see cref="TheResolverCannotLaunderAMalformedTarget"/>.</para>
+    /// </summary>
+    private static string StripGenericArguments(string text)
+    {
+        while (true)
+        {
+            var stripped = GenericArgumentList.Replace(text, string.Empty);
+
+            if (string.Equals(stripped, text, StringComparison.Ordinal))
+            {
+                return text;
+            }
+
+            text = stripped;
+        }
+    }
+
+    /// <summary>
     /// A cref target reduced to the dot-separated names it asserts exist. Every reduction is here, in one
     /// place, so <see cref="TheResolverCannotLaunderAMalformedTarget"/> can drive all of them at once.
     ///
     /// <para>Reductions, in order: one documented kind prefix from <see cref="DocIdKindPrefixes"/>; the
-    /// parameter list from the first <c>(</c> onward; each balanced generic argument list; and whitespace at
+    /// parameter list from the first <c>(</c> onward; every balanced generic argument list, innermost
+    /// first, via <see cref="StripGenericArguments"/>; and whitespace at
     /// each segment's edges, which is what XML leaves behind when a cref wraps across two lines. Nothing
     /// else is touched — no punctuation is deleted, no brace is repaired, no interior whitespace is
     /// collapsed — because each of those would turn a malformed target into a resolvable one, and this
@@ -1742,7 +1787,7 @@ public sealed class DocCommentHygieneTests
             text = text[..parameters];
         }
 
-        text = GenericArgumentList.Replace(text, string.Empty);
+        text = StripGenericArguments(text);
 
         return text.Split('.').Select(s => s.Trim()).ToArray();
     }
