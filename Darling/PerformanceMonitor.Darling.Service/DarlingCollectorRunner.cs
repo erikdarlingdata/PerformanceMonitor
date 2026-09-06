@@ -2566,6 +2566,29 @@ public sealed class DarlingCollectorRunner
     /// the transaction are both disposed before the re-attempt runs — a retry that fired while the failed
     /// attempt's transaction was still in scope would re-enter with an aborted transaction on the
     /// connection and fail on 25P02 rather than on anything to do with the store.
+    ///
+    /// <para><b>The re-attempt this feeds is at-least-once, not exactly-once, and the window is here.</b>
+    /// A transport fault raised BEFORE the commit acknowledgment is awaited leaves the store untouched, and
+    /// that is the ordinary case. A fault raised WHILE awaiting it — <c>CompleteAsync</c>'s CommandComplete,
+    /// or <c>CommitAsync</c>'s on the diverting path — can leave the server committed while the client sees
+    /// a retryable exception, and the re-attempt then lands the batch a second time. The copies are not
+    /// identical rows and nothing downstream can collapse them:
+    /// <see cref="ICollectorSchemaInfo.IncludesCollectionId"/> is true for every collector but running_jobs,
+    /// so <c>CollectionIdGenerator.Next()</c> stamps each row of each attempt with its own id.</para>
+    ///
+    /// <para><b>The cost is a doubled hour, and it is accepted.</b> <c>collection_id</c> is in no continuous
+    /// aggregate's <c>GROUP BY</c> — it does not appear in TimescaleSupport at all — so both copies land in
+    /// the same bucket and 18 <c>sum()</c> views double it. The bucket is materialised and raw retention is
+    /// four days, so the wrong figure outlives the rows that explain it, and each daily rollup reads its
+    /// hourly view rather than raw, so it inherits the doubling. The trade is a one-round-trip window
+    /// against a sample lost on EVERY failed write, and the loss is the certainty.</para>
+    ///
+    /// <para><b>It has a signature.</b> A doubled batch doubles the bucket's <c>sample_count</c>, so an hour
+    /// at twice its neighbours' count is the tell — and it reads off the aggregate itself, with no raw rows
+    /// needed. That column exists on five of the eighteen: query_stats_hourly, procedure_stats_hourly,
+    /// query_stats_db_hourly, query_store_stats_hourly and query_store_stats_interval_hourly. It covers the
+    /// two null-watermark collectors the re-attempt is chiefly for; it is absent from every daily view, so
+    /// the anomaly is findable one tier above where it propagates.</para>
     /// </summary>
     private async Task<int> CopyBatchOnceAsync<TRow>(
         NpgsqlConnection pgConnection,
