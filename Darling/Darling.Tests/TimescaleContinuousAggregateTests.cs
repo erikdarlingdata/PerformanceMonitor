@@ -133,8 +133,8 @@ public sealed class TimescaleContinuousAggregateTests
     /// retention re-materialized roughly three quarters of the hypertable every hour. Measured on the
     /// production store: the heaviest hourly refresh ran 3,301-6,330 s against its own 1-hour cadence — 118-175%
     /// of it, so each run started into the tail of the last — while rows arriving per hour FELL ~3x. On the
-    /// narrowed window the same refresh runs 864 s, 24% of cadence, which is what makes the overlap
-    /// structurally impossible rather than merely absent.</para>
+    /// narrowed window the same refresh's largest clean run is 594 s, 16.5% of cadence, which is what makes
+    /// the overlap structurally impossible rather than merely absent.</para>
     ///
     /// <para>Asserted for EVERY hourly view rather than the heavy one alone: the defect was a shared default,
     /// so a fix that reached only the aggregate named in the incident would leave twelve behind.</para>
@@ -167,9 +167,9 @@ public sealed class TimescaleContinuousAggregateTests
     /// <summary>
     /// TREATMENT TWO of #3012, pinned ALONE so that reverting it is red here even if the narrowing survives.
     ///
-    /// <para>The heaviest hourly refresh is still ~33x its lightest sibling on the narrowed window, so 864 s
-    /// has to be invisible to everything else rather than merely short. Two things do that, and the second is
-    /// the less obvious one:</para>
+    /// <para>The heaviest hourly refresh is still more than 4x the recorded ceiling for any other one on the
+    /// narrowed window, so its 594 s has to be invisible to everything else rather than merely short. Two
+    /// things do that, and the second is the less obvious one:</para>
     ///
     /// <para><b>Distinct minutes of the hour.</b> A refresh holds <c>AccessShareLock</c> on what it reads; a
     /// compression policy on that same hypertable queues an <c>AccessExclusiveLock</c> request behind it; and a

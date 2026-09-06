@@ -1573,7 +1573,8 @@ WITH NO DATA";
     /// hypertable rather than with ingest. Measured on the production store: the heaviest hourly refresh
     /// (<see cref="QueryStoreStatsIntervalHourlyView"/>) ran 3,301-6,330 s against a 1-hour cadence —
     /// <b>118-175% of its own schedule interval</b> — while rows arriving per hour FELL ~3x over the same
-    /// period. Narrowed to 1 day the same refresh runs <b>864 s, 24% of cadence</b>. The direction of that
+    /// period. Narrowed to 1 day the same refresh's largest clean run is <b>594 s, 16.5% of cadence</b> (the
+    /// derivation is on <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>). The direction of that
     /// measurement is the whole argument: duration tracking window size while ingest moves the other way is
     /// what rules out "more rows to materialize" and rules in "too much window".</para>
     ///
@@ -1585,7 +1586,8 @@ WITH NO DATA";
     /// next run started into the tail of the previous one, and the convoy sustained itself. Below cadence it
     /// cannot form, which is why this number and <see cref="RefreshPhaseStepMinutes"/> are complements rather
     /// than alternatives: narrowing is what makes the heavy refresh finish, phasing is what keeps its
-    /// remaining 864 s out of everyone else's way.</para>
+    /// remaining <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> seconds out of everyone else's
+    /// way.</para>
     ///
     /// <para><b>What still has to fit inside it, now stated as a relationship rather than left to a
     /// constant.</b> Two things need the window to reach back far enough. Live collectors only ever append
@@ -1640,15 +1642,20 @@ WITH NO DATA";
     /// phased across the hour instead of all starting together.
     ///
     /// <para><b>Phasing alone is not the fix and neither is narrowing alone.</b>
-    /// <see cref="HourlyRefreshStartOffset"/> is what brought the heavy refresh from 6,330 s to 864 s; this is
-    /// what keeps those 864 s from being visible to anything else, because the refresh that is running is not
-    /// the one a compression policy or a sibling refresh is about to want. The heaviest hourly refresh is
-    /// still ~33x its lightest sibling on the narrowed window, so the two treatments address different halves
-    /// and dropping either one reopens the door.</para>
+    /// <see cref="HourlyRefreshStartOffset"/> is what brought the heavy refresh from 6,330 s to a clean
+    /// maximum of <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> s; this is what keeps those
+    /// seconds from being visible to anything else, because the refresh that is running is not the one a
+    /// compression policy or a sibling refresh is about to want. The heaviest hourly refresh is still more
+    /// than 4x the recorded ceiling for any other one
+    /// (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), so the two treatments address different
+    /// halves and dropping either one reopens the door.</para>
     ///
     /// <para><b>15 minutes over four slots is the configuration that was measured</b>, not a round number: the
     /// production store's <c>query_store_stats</c> job family was moved to :00/:15/:30/:45 and the first full
-    /// staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on every sample since.
+    /// staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on every sample since —
+    /// a cycle that STRADDLES the narrowing boundary
+    /// (<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>), so its four figures record what the
+    /// stagger did to lock waits and are not samples of the narrowed regime's cost.
     /// Spreading all thirteen hourly policies across thirteen distinct minutes would contend less still, and
     /// is the obvious next refinement — but it is not what the numbers above were taken on.</para>
     /// </summary>
@@ -1766,51 +1773,81 @@ WITH NO DATA";
     /// <para>On the narrowed <see cref="HourlyRefreshStartOffset"/> window it is still by far the largest job
     /// on the grid — see <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> for the number the grid is
     /// sized against and for the operating envelope that number defines. Every other hourly refresh is an
-    /// order of magnitude smaller (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), and that asymmetry
-    /// is what the grid below is shaped by: one slot treated as FULL, the rest as occupied only at their
+    /// under a quarter of it (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), and that asymmetry is
+    /// what the grid below is shaped by: one slot excluded WHOLE, the rest treated as occupied only at their
     /// start.</para>
     /// </summary>
     public const string HeaviestHourlyRefreshView = QueryStoreStatsIntervalHourlyView;
 
     /// <summary>
-    /// The runtime the compression grid is sized against for <see cref="HeaviestHourlyRefreshView"/>. ONE
-    /// recorded run, and NOT a measured maximum of the narrowed <see cref="HourlyRefreshStartOffset"/>
-    /// regime — the difference is the whole of #3069, and the paragraphs below state it rather than leaving
-    /// the number to imply a provenance it does not have.
+    /// The runtime the compression grid is sized against for <see cref="HeaviestHourlyRefreshView"/>: the
+    /// LARGEST run in the clean narrowed-window population, on the one store that carries this workload.
     ///
-    /// <para><b>WHERE IT CAME FROM.</b> One run of this job's refresh policy — <c>13:30:00</c> to
-    /// <c>13:44:24</c> on the boundary day, on the one store that carries this workload — read from that
-    /// store's per-run job history with an explicit <c>succeeded</c> column that said <c>t</c>. The narrowed
-    /// <see cref="HourlyRefreshStartOffset"/> reached that store's refresh policies at <c>13:44:23</c>, one
-    /// second BEFORE this run ended. So it is either the TRANSITION run — in flight while
-    /// <c>start_offset</c> was narrowed underneath it, therefore neither cleanly pre- nor post-treatment —
-    /// or the boundary timestamp was itself derived from this run's completion, in which case the boundary
-    /// and this constant are the SAME OBSERVATION and cannot corroborate each other. Separating those two
-    /// needs clock times nobody has read.</para>
+    /// <para><b>THE DERIVATION, recorded as a method and not only as a value, because a value cannot be
+    /// re-derived by the next reader and a method can (#3101).</b> POPULATION: runs of this job's refresh
+    /// policy under the narrowed <see cref="HourlyRefreshStartOffset"/> window, each read from that store's
+    /// per-run job history with an explicit <c>succeeded</c> column that said <c>t</c>. EXCLUSION RULE:
+    /// every run that started at or before the narrowing boundary of <c>13:44:23</c> is out, whatever its
+    /// duration — membership is decided by position against the boundary, never by whether a reading looks
+    /// like it belongs. SPAN: the boundary day's remaining hours, plus the days after it. ESTIMATOR: the
+    /// maximum. RefreshCeilingProvenancePinTests holds this constant equal to the maximum of the population
+    /// published below and TimescaleSupportTests holds the grid clear of it, so the value and the method
+    /// cannot drift apart without a red test.</para>
     ///
-    /// <para><b>Which is why "conservative" is the wrong word for it, safe though it is.</b> Conservative
-    /// reads as measured-then-rounded-up, and nothing measured this as a ceiling. It is a reading whose
-    /// REGIME MEMBERSHIP IS UNDETERMINED, which happens to exceed every cleanly post-boundary run observed:
-    /// a partly-narrowed window simply costs more than a fully-narrowed one. So the value bounds the grid
-    /// safely WITHOUT HAVING BEEN ESTABLISHED AS A BOUND. The safety is incidental; the provenance is still
-    /// owed, and the read that would settle it is named at the end of this comment.</para>
+    /// <para><b>THE POPULATION ITSELF, published so the estimator can be recomputed rather than taken on
+    /// trust.</b> The boundary day's tail, every run that day after the boundary: <c>194, 222, 225, 335,
+    /// 594, 465, 359, 293, 355</c> seconds. The days after it: <c>219, 225, 299, 376, 418, 546, 515</c>
+    /// seconds. Together <b>16 runs</b> spanning <b>194 s to 594 s</b>, mean <b>352.5 s</b>, median
+    /// <b>345 s</b> — every one of them below <see cref="RefreshSlotWarningSeconds"/>.</para>
     ///
-    /// <para><b>THE POST-BOUNDARY DISTRIBUTION, recorded here because a constant with one sample behind it
-    /// reads exactly like a constant with a distribution behind it.</b> 10 consecutive runs of this job's
-    /// refresh policy, each read with an explicit <c>succeeded</c> column and every one of them <c>t</c>, in
-    /// start order across the ten hours after the boundary:
-    /// <c>864, 194, 222, 225, 335, 594, 465, 359, 293, 355</c> seconds. Set the first aside for the reason
-    /// above and the remaining 9 run from <b>194 s to 594 s</b>, mean <b>338 s</b>, middle reading
-    /// <b>335 s</b> — every one of them below <see cref="RefreshSlotWarningSeconds"/>. The largest of the 9
-    /// clears the slot by <b>306 s</b>, where this constant clears it by 36 s. (#3069 quotes ~347 s as the
-    /// median of the same window. The rows published there do not reproduce it, so the figure held here is
-    /// the one the listed series yields — which is what the middle reading above is pinned to. The quoted
-    /// figure is left as a quotation rather than re-derived here, because an arithmetic aside about a
-    /// superseded external number is coupling with nothing behind it.)</para>
+    /// <para><b>MAXIMUM, NOT A PERCENTILE PLUS MARGIN — decided rather than defaulted, and the trade stated
+    /// because the two answers diverge as the population grows.</b> What this constant sizes is a SCHEDULING
+    /// exclusion, and the cost of undersizing it is one lock convoy (#3012's measured harm) that no later
+    /// run amortises. A percentile is a statement about an ACCEPTED RATE OF EXCEEDANCE, and the rate this
+    /// bound may accept over the record it is derived from is zero — so the estimator is the maximum. The
+    /// sample size says the same thing from the other end: by nearest rank over <b>16 readings</b> the 95th
+    /// percentile IS the largest of them, and the 90th is <b>546 s</b>, only <b>48 s</b> below it, so a
+    /// percentile buys no headroom here and only discards the readings the bound exists for. No margin is
+    /// added on top either: the clearance is <see cref="RefreshPhaseSlotSeconds"/> minus this value, stated
+    /// where it is used, so a reader sees a bound and its margin as two numbers instead of one padded
+    /// one.</para>
     ///
-    /// <para><b>The hole.</b> The run starting near <c>00:35:05</c> was never observed: by the next look
-    /// the catalog's last-run figure had already advanced past it. That is a gap in the ten above, not a
-    /// reading that was dropped.</para>
+    /// <para><b>What would change that answer, written down so it is not re-reasoned from scratch.</b> A
+    /// population large enough for a high percentile to sit meaningfully below the maximum — which this one
+    /// is not, and the pin on the 95th goes red when it becomes so — or this maximum ceasing to be a lower
+    /// bound on the truth. The second is the live limitation, and it is a property of the READ rather than
+    /// of the estimator: the boundary day's runs are a census of that day after the boundary, while the days
+    /// after it are a SAMPLE, because the sweep that reads this and the refresh that produces it tick on
+    /// independent anchors (see <see cref="HeaviestRefreshRuntimeSql"/>). So the figure bounds the runs that
+    /// were OBSERVED. The census read that would drop that qualifier exists and is named rather than left
+    /// implied: <c>timescaledb_information.job_history</c>, whose <c>succeeded</c> column this store has
+    /// because <c>DarlingManagedPostgres.BuildConfAppend</c> turns
+    /// <c>timescaledb.enable_job_execution_logging</c> on (#1681) — read as every run since the boundary
+    /// rather than sampled, giving count, median and maximum each side of it.</para>
+    ///
+    /// <para><b>THE RUN THE EXCLUSION RULE REMOVES, recorded because a figure that looks like a ceiling and
+    /// is not one is how the wrong number gets cited.</b> One run, <c>13:30:00</c> to <c>13:44:24</c> on the
+    /// boundary day, 864 s, excluded for starting before the boundary — and disqualified independently of
+    /// any timestamp, by the durations alone: it is <b>3.8x</b> faster than the fastest run the 3-day window
+    /// ever produced (3,301 s, of a 3,301-6,330 s band) and <b>1.45x</b> slower than the largest reading in
+    /// the population above. Too fast for one regime and too slow for the other, so it is a sample of
+    /// neither and can bound neither. Why it is that fast is NOT established — the plausible candidate is
+    /// that the 6,330 s run before it had already cleared most of the backlog — and it is recorded as
+    /// unexplained precisely so the low figure is not read as evidence that the narrowing had partly taken
+    /// effect.</para>
+    ///
+    /// <para><b>ONE READING IS LEFT OPEN, and the derivation above does not rest on it: whether the boundary
+    /// timestamp is independent of the excluded run's completion.</b> No independent record of the narrowing
+    /// has been found — the boundary day's service log carries no <c>alter_job</c>, no <c>start_offset</c>,
+    /// no <c>StartOffset</c>, no <c>refresh policy</c> and no <c>HourlyRefreshStartOffset</c> line, on a
+    /// filter proved live by a positive control against the same file, so that is a real negative rather
+    /// than a dead filter. The boundary therefore cannot have come from a service-log ALTER, which leaves
+    /// the circular possibility live: it may have been read off the job history, plausibly off the excluded
+    /// run's own completion a fraction of a second later, in which case the boundary and that run's
+    /// exclusion are ONE OBSERVATION and cannot corroborate each other. That is NOT asserted as settled in
+    /// either direction. What would settle it is a record of the ALTER independent of the job history, and
+    /// none has been found — and nothing above needs one, because the exclusion rule is positional and the
+    /// excluded run is disqualified by its duration alone.</para>
     ///
     /// <para><b>And the rule that keeps a whole SERIES out of this constant, stated as a rule because the
     /// series keeps growing.</b> The hourly self-metrics snapshot
@@ -1824,20 +1861,11 @@ WITH NO DATA";
     /// (342 s, 348 s, 286 s) says the series stayed flat, which is corroboration and nothing more. Note the
     /// scope has to CLOSE the population, not merely date it: "up to 04:20Z" is a window that has ended and
     /// will still be true next year, where "the readings so far" carries a scope and rots anyway, because a
-    /// doc comment has no timestamp of its own to be read relative to. They are kept out of the ten above
-    /// for the rule's sake rather than for tidiness.</para>
+    /// doc comment has no timestamp of its own to be read relative to. They are kept out of the population
+    /// above for the rule's sake rather than for tidiness.</para>
     ///
-    /// <para><b>Why the value is unchanged in BOTH directions, which is #3069's whole resolution.</b> Upward
-    /// is asserted as a failure by design (#3055) — see the slot paragraph below. Downward is the subtler
-    /// trap: correcting toward the observed 594 s would leave 306 s of margin in place of 36 s, and the
-    /// reason the heaviest slot is excluded WHOLE rather than guarded
-    /// (<see cref="CompressionPhaseMinutes"/>) rests on that 36 s being real. A downward edit therefore
-    /// reopens #3035's exclude-vs-guard decision rather than merely re-provenancing a number. What settles
-    /// either direction is one read that has not been taken: the status-filtered per-bucket split of the
-    /// full per-run series (<c>collect.store_metrics</c>, <c>object_kind = 'background_job'</c>) on the
-    /// boundary timestamp, giving count, median and maximum each side of it. The grid is sized against the
-    /// high figure and not against the 194 s low for the original reason — a slot chosen against the low
-    /// would be correct only at the load it was chosen at — and before the narrowing this job ran
+    /// <para><b>Why the grid is sized against the high figure and not the low.</b> A slot chosen against the
+    /// 194 s low would be correct only at the load it was chosen at, and before the narrowing this job ran
     /// 3,301-6,330 s against a 1-hour cadence, which is what invalidation looks like.</para>
     ///
     /// <para><b>THE OPERATING ENVELOPE, stated because it is a condition and not a property.</b> #3012's
@@ -1854,13 +1882,14 @@ WITH NO DATA";
     /// overlap at all.</para>
     ///
     /// <para><b>So: the small-residual reading holds while this job completes well inside its slot, and what
-    /// invalidates it is this number approaching <see cref="RefreshPhaseStepMinutes"/> x 60.</b> At 864 s
-    /// against a 900-second slot the margin is already only 36 seconds, which is why the heaviest slot is
-    /// excluded WHOLE rather than guarded, and why a value at or past the slot width is asserted as a failure
-    /// rather than accommodated: past that point the refresh runs into its neighbour and the grid needs
-    /// redesigning, not renumbering.</para>
+    /// invalidates it is this number approaching <see cref="RefreshPhaseStepMinutes"/> x 60.</b> At 594 s
+    /// against a 900-second slot the margin is 306 seconds, better than a third of the slot; the heaviest
+    /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
+    /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
+    /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
+    /// into its neighbour and the grid needs redesigning, not renumbering.</para>
     /// </summary>
-    public const int HeaviestHourlyRefreshObservedCeilingSeconds = 864;
+    public const int HeaviestHourlyRefreshObservedCeilingSeconds = 594;
 
     /// <summary>
     /// The slot width in seconds — the bound
@@ -1897,12 +1926,13 @@ WITH NO DATA";
     /// <see cref="CompressionPhaseGuardMinutes"/> band, 480 s — was rejected on those same readings: it would
     /// have fired on three of the five.</para>
     ///
-    /// <para><b>This line sits BELOW <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>, deliberately,
-    /// and that is not a contradiction.</b> 750 &lt; 864 means the recorded ceiling itself classifies as a
-    /// warning — which is exactly the state #3044 was filed on: the constant the grid is sized against is
-    /// already 96.0% of the slot, 36 seconds clear. So a live reading in this band is not news about the
-    /// ceiling; it is the signal that the store is back at the top of its own measured range, where the next
-    /// move is the one that invalidates the grid. Pinned as that relationship rather than as two numbers.</para>
+    /// <para><b>This line sits ABOVE <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>, and that is
+    /// what makes a crossing mean something.</b> 750 s is <b>26% above</b> the largest run the narrowed
+    /// regime has been observed to produce, so a reading in this band is not "approaching a known ceiling" —
+    /// it is this job doing something its own record has no instance of, which is a different signal calling
+    /// for a different response. The relationship is what is pinned, not the two numbers: a ceiling that rose
+    /// past this line would put the grid's own sizing figure inside the warning band, and the pin says so
+    /// rather than leaving a reader to notice.</para>
     /// </summary>
     public const int RefreshSlotWarningSeconds = RefreshPhaseSlotSeconds * 5 / 6;
 
@@ -1955,9 +1985,27 @@ WITH NO DATA";
     }
 
     /// <summary>
-    /// The longest run recorded for any hourly refresh OTHER than
-    /// <see cref="HeaviestHourlyRefreshView"/> — the number <see cref="CompressionPhaseGuardMinutes"/> is
-    /// derived from. The first full staggered cycle came back 26 s / 2 s / 864 s / 140 s, so this is the 140.
+    /// The longest run recorded for any hourly refresh OTHER than <see cref="HeaviestHourlyRefreshView"/> —
+    /// the number the <see cref="CompressionPhaseGuardMinutes"/> margin is CHARACTERISED against. The first
+    /// full staggered cycle came back 26 s / 2 s / 864 s / 140 s, so this is the 140.
+    ///
+    /// <para><b>It carries the same regime-membership problem as the 864 in that list, and the difference is
+    /// what it is used FOR.</b> That cycle straddles the narrowing boundary
+    /// (<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>), and the narrowed
+    /// <see cref="HourlyRefreshStartOffset"/> reached every hourly policy rather than only the heaviest one,
+    /// so this reading's membership is undetermined in exactly the way the excluded run's is. What stops that
+    /// being the same defect is that NOTHING IS SIZED FROM IT:
+    /// <see cref="CompressionPhaseGuardMinutes"/> is derived from <see cref="RefreshPhaseStepMinutes"/>, and
+    /// this figure only says how much margin that derivation happens to leave — 3x, asserted by
+    /// TimescaleSupportTests, which is a check on the CHARACTERISATION rather than a bound the grid rests
+    /// on.</para>
+    ///
+    /// <para><b>Which is also why it is not re-derived here.</b> Re-deriving it needs a clean post-boundary
+    /// per-run series for the light refreshes, and no such series has been read — the census read named on
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> would supply it for these policies too. The
+    /// direction of the risk is stated rather than left to be discovered: a true light-refresh ceiling ABOVE
+    /// 140 s would make the 3x characterisation false, and the assertion is written to fail in that
+    /// direction.</para>
     /// </summary>
     public const int OtherHourlyRefreshObservedCeilingSeconds = 140;
 
@@ -1998,10 +2046,17 @@ WITH NO DATA";
     /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.</para>
     ///
     /// <para><b>Why the heaviest slot is excluded whole rather than guarded.</b>
-    /// <see cref="HeaviestHourlyRefreshView"/> occupies 14.4 of the 15 minutes in its slot, so there is no
-    /// minute of that slot a <see cref="CompressionPhaseGuardMinutes"/> band could recover. Excluding it is
-    /// also what keeps the remaining minutes far from the only refresh that can reach forward: the nearest is
-    /// a full slot past the heaviest one, and the furthest is 59 minutes past it.</para>
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 9.9 of the 15 minutes in its slot and the
+    /// <see cref="CompressionPhaseGuardMinutes"/> band is 7, so applying the ordinary band to this slot would
+    /// admit 3 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
+    /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
+    /// 5 minutes of the slot are past the refresh and are left on the table deliberately: recovering them
+    /// means sizing a band for one slot against a bound whose population is 16 readings and still moving
+    /// (194 s to 594 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen
+    /// and not a renumbering.
+    /// Excluding the slot is also what keeps the remaining minutes far from the only refresh that can reach
+    /// forward: the nearest is a full slot past the heaviest one, and the furthest is 59 minutes past
+    /// it.</para>
     ///
     /// <para>Derived from the refresh grid, so a change to <see cref="RefreshPhaseStepMinutes"/> or to where
     /// the heaviest refresh sits moves these minutes with it rather than leaving behind a literal that used to
@@ -4219,10 +4274,10 @@ AND   js.last_run_status = 'Success'";
     /// <para><b>That the two lines coincide is a coincidence of two independent decisions, and the clearest
     /// evidence is that #2136 does not know this job's size.</b> Its clamp is justified in
     /// <c>DarlingAlertSettings</c> on the grounds that "the production worst runs ~7% of cadence" — 252 s —
-    /// while <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> here records 864 s, which is <b>24.0%
-    /// of the same 3,600 s cadence</b>, one point under the 25% default. So the job this envelope is about is
-    /// already sitting just below a warning line calibrated as though it ran a third of its actual length,
-    /// and nothing connects the two numbers. #2136's own remedy text — "extend the job's schedule_interval" —
+    /// while <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> here records 594 s, which is <b>16.5%
+    /// of the same 3,600 s cadence</b> — so the line #2136 lands on is calibrated as though this job ran
+    /// under half its actual length, and nothing connects the two numbers. #2136's own remedy text —
+    /// "extend the job's schedule_interval" —
     /// is actively wrong for this one, because <see cref="HourlyRefreshScheduleInterval"/> is also the
     /// <c>end_offset</c> and widening it changes what the aggregate materializes without touching the slot.
     /// A line derived from the slot, keyed on the view, naming the actual remedy, is the form that stays
@@ -4587,8 +4642,9 @@ public sealed record HeaviestRefreshSlotReading(string View, double LastRunSecon
     /// clamping would report every breach as a dead heat.</summary>
     public double ClearOfSlotSeconds => TimescaleSupport.RefreshPhaseSlotSeconds - LastRunSeconds;
 
-    /// <summary>This reading as a percentage of the slot — 96.0% for the 864 s recorded ceiling, which is the
-    /// margin #3044 was filed on.</summary>
+    /// <summary>This reading as a percentage of the slot — 66.0% for the recorded ceiling
+    /// (<see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>), which is the margin the
+    /// #3044 watch is stated against.</summary>
     public double PercentOfSlot => 100.0 * LastRunSeconds / TimescaleSupport.RefreshPhaseSlotSeconds;
 }
 
