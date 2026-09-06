@@ -105,7 +105,10 @@ public sealed class CommentFilterAdoptionTests
 
         ["Darling.Tests/DocCommentHygieneTests.cs"] =
             "COLLECTS a doc run. DocRuns groups contiguous /// lines into the run that documents one member, "
-            + "which is the subject of the whole class rather than an approximation of it.",
+            + "and DocCommentBlocks groups the strictly contiguous ones into the one XML fragment a cref is "
+            + "parsed out of (#3083). Both are the subject of that class rather than an approximation of "
+            + "comment-stripping - and its cref rule DOES ask for the walker, for the identifier universe it "
+            + "resolves targets against.",
 
         ["Darling.Tests/RefreshCeilingProvenancePinTests.cs"] =
             "COLLECTS a doc run. DocProseFor walks the contiguous /// run above a named declaration and "
