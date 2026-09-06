@@ -40,6 +40,34 @@ namespace PerformanceMonitor.Collectors;
 /// captured, and neither is the same as us being able to READ them — auto_explain writes to the server log,
 /// which is a separate problem (#2566/#2567). This records readiness only, and the column names say so.</para>
 ///
+/// <para><b>Why a message locale is a readiness facet (#3061).</b> Reading a captured plan is still
+/// #2566/#2567's and this claims nothing about it — but one PRECONDITION for reading is a configuration
+/// state on the target, which is exactly what this collector reports. Every log read this product performs
+/// matches PostgreSQL's ENGLISH message text, and <c>lc_messages</c> decides whether the target writes any.
+/// The <c>message_locale</c> facet reports that setting so an empty read becomes a NAMED unmet precondition
+/// rather than a silent zero.</para>
+///
+/// <para><b>Measured, not inferred</b> — PostgreSQL 17.11 with <c>lc_messages = 'de_DE.UTF-8'</c>, a real
+/// deadlock provoked and read back out of the server log. The line is
+/// <c>FEHLER:  Verklemmung (Deadlock) entdeckt</c>: the severity label AND the message body. <c>HINT:</c>
+/// becomes <c>TIPP:</c> and <c>CONTEXT:</c> becomes <c>ZUSAMMENHANG:</c>, while <c>DETAIL:</c> comes
+/// through UNCHANGED — so a translated catalogue does not mean every label differs, and nothing here should
+/// rest on that. It does not help the parser: the block pattern needs the <c>ERROR:</c> line and the
+/// <c>DETAIL:</c> line together, so the surviving half matches and the report is still lost whole. Against
+/// one log holding a German report and an English one, <c>PgDeadlockLogParser.Extract</c> returned ONE —
+/// the English — and a caller cannot tell a partial answer from a complete one. The mode also renders
+/// <c>ShareLock-Sperre</c>, whose hyphen the edge pattern's <c>[A-Za-z ]+</c> group excludes.</para>
+///
+/// <para><b>It is the deadlock read, not the plan read, that makes this urgent.</b> Zero rows is the healthy
+/// resting state for <c>pg_deadlocks</c>, so a locale-blinded parser and a server that simply did not
+/// deadlock produce identical output and nothing else distinguishes them — the #3030 failure shape from a
+/// new cause. Plan capture is worse-placed for a fallback but less dangerous for being noticed:
+/// <c>auto_explain</c> writes at LOG level with SQLSTATE <c>00000</c>, so there is no error code to key on
+/// even under <c>csvlog</c>, but nobody mistakes a missing plan for a healthy answer. Both the
+/// <c>get_pg_deadlocks</c> empty-result advice and the WPF deadlock panel already point HERE for whether
+/// the log can be read at all; before this facet, neither could see the one precondition that is
+/// invisible.</para>
+///
 /// <para>Core catalog surfaces only (<c>pg_settings</c>, <c>pg_available_extensions</c>), both readable by any
 /// role, so this runs on every PostgreSQL target including standbys — a replica's parameter group can differ
 /// from its writer's, and that difference is exactly the kind of thing nobody notices.</para>
@@ -95,6 +123,12 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
                                it every captured plan is an orphan that cannot be joined to the statement it
                                belongs to - and the failure looks like the feature working, which is why
                                this is a facet rather than a footnote.
+         message_locale      - lc_messages. Whether the target writes its messages in the language every
+                               log read here matches, which decides whether ANY of them can find an anchor.
+                               Judged rather than merely recorded: a facet that reported the value and drew
+                               no conclusion would leave the reader exactly where the empty result already
+                               left them. Its own comment carries which locales count as satisfied, and why
+                               an EMPTY value is a third state rather than a translated one.
 
        current_setting(..., true) throughout — the MISSING_OK form. Reading a GUC that does not exist because
        the library was never loaded is the NORMAL case here, and the two-argument form answers NULL instead of
@@ -119,7 +153,23 @@ WITH settings AS (
         current_setting('shared_preload_libraries', true)                        AS preload,
         current_setting('auto_explain.log_min_duration', true)                   AS threshold,
         current_setting('auto_explain.log_format', true)                         AS log_format,
-        current_setting('log_line_prefix', true)                                 AS line_prefix
+        current_setting('log_line_prefix', true)                                 AS line_prefix,
+        /* current_setting rather than a pg_settings subquery, matching the four above. lc_messages is
+           PGC_SUPERUSER by context - a superuser can SET it - but it carries no GUC_SUPERUSER_ONLY flag, so
+           any role may read it. The decisive evidence is next door rather than in the docs: this collector
+           already reads shared_preload_libraries this way and #2564/#2605 measured that against a live
+           Aurora target, and shared_preload_libraries is the more restricted of the two.
+
+           WHAT THIS CANNOT SEE, and the facet says so on the row rather than leaving it implied: a log
+           entry is written by the backend that raised it, in THAT backend's lc_messages, and the setting
+           is overridable per role and per database. This read resolves on the monitoring connection, so
+           it is the server's value only when nothing overrode it - which is the ordinary case, since the
+           setting normally comes from postgresql.conf or from nowhere. The direction that matters is a
+           global de_DE with an override putting the MONITORING role at C: the facet would then read
+           satisfied about a server whose backends translate. Distinguishing it means reading
+           pg_settings.source rather than the resolved value, which is a refinement and not this change;
+           naming the limit is what stops the row being over-read in the meantime. */
+        current_setting('lc_messages', true)                                     AS message_locale
 ),
 probe AS (
     SELECT
@@ -127,12 +177,41 @@ probe AS (
         s.threshold,
         s.log_format,
         s.line_prefix,
+        s.message_locale,
         /* BOUNDARY-AWARE, not a substring. shared_preload_libraries is a comma-separated list, and a plain
            substring test reports true for any library whose name merely CONTAINS this one (measured: both
            my_auto_explain_shim and auto_explain_extra false-positive that way). */
         coalesce(s.preload, '') ~ '(^|,)\s*auto_explain\s*(,|$)'                 AS loaded,
         EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain') AS catalogued,
-        (SELECT max(default_version) FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain') AS catalog_version
+        (SELECT max(default_version) FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain') AS catalog_version,
+        /* DERIVED ONCE, for the reason library_loaded is: the shipped #2605 bug was one fact derived in
+           five places where the fifth forgot, and this fact is consulted by both the is_satisfied column
+           and the detail arms of its facet. A second copy is how they come to disagree.
+
+           SATISFIED means a locale that PROVABLY leaves PostgreSQL's message catalogue untranslated, never
+           one that merely looks acceptable. Two families qualify: the C family (C, POSIX, and any
+           C.<codeset> such as C.UTF-8) has no catalogue to load at all, and the English locales are the
+           catalogue's own source language, so gettext hands back the msgid unchanged.
+
+           THE ANCHOR IS THE LOAD-BEARING HALF, and it is the ONLY one - a mutation removing it was the one
+           that got through a first draft of the test. Unanchored, '^C' passes Czech_Czech Republic.1250 and
+           Chinese (Simplified)_China.936, both real Windows locale names beginning with a literal C, and
+           reports a TRANSLATED catalogue as readable. Anchored, they are rejected however the comparison
+           treats case, which is why the test is case-INSENSITIVE: no language has the ISO code 'c', so a
+           name whose first character is C and whose second is a dot or nothing is the C locale under any
+           spelling convention, and matching case-insensitively tolerates the POSIX/posix variation at no
+           cost. Case sensitivity here would only produce false NEGATIVES.
+
+           'english' is matched beside 'en' because that is the form a Windows PostgreSQL reports
+           (English_United States.1252). The longer alternative is written first so the result does not
+           depend on the regex engine's alternation order. */
+        coalesce(s.message_locale, '') ~* '^(C|POSIX)(\.|$)'
+            OR coalesce(s.message_locale, '') ~* '^(english|en)(_|\.|@|$)'     AS english_messages,
+        /* Its own flag, not the negation of the one above. An EMPTY lc_messages means PostgreSQL takes the
+           message language from the server PROCESS's environment, which no SQL read can see - so it is
+           UNKNOWN rather than translated, and it gets its own detail arm because what a reader may conclude
+           from an empty deadlock result differs between the two. */
+        coalesce(s.message_locale, '') = ''                                      AS locale_unset
     FROM settings AS s
 )
 SELECT
@@ -249,6 +328,56 @@ SELECT
              || 'itself - the id appears ONLY in the log line prefix - so plans captured without it cannot '
              || 'be joined to the statement they belong to. Add %Q to log_line_prefix; it is a dynamic '
              || 'parameter and needs no restart.'
+    END
+FROM probe AS p
+
+UNION ALL
+
+SELECT
+    'message_locale'::text,
+    /* NOT gated on loaded, and for a stronger reason than plan_attribution's: lc_messages governs whether
+       ANY of this product's log reads can find their anchor, and the deadlock read depends on it with no
+       auto_explain in the picture at all. A locale that hides deadlocks is worth reporting on a server that
+       will never load auto_explain.
+
+       An unset locale reads as UNSATISFIED, which is the same direction the reader takes for a NULL: a
+       precondition this cannot prove must not be presented as met. The detail arm says it is unknown rather
+       than wrong, so the row does not overclaim in the other direction either - the extension_available
+       convention, where a negative is inconclusive and says so. */
+    p.english_messages,
+    CASE
+        WHEN p.locale_unset THEN '(empty - the server takes its message language from its own environment)'
+        ELSE p.message_locale
+    END,
+    CASE
+        WHEN p.locale_unset
+            THEN 'lc_messages is EMPTY, so PostgreSQL takes its message language from the server process''s '
+                 || 'environment - which no SQL read can see. That makes this UNKNOWN, not wrong: the '
+                 || 'messages may well be English. But every log read this product performs matches English '
+                 || 'message text, so an empty deadlock or plan result from this target is an empty result '
+                 || 'of unknown meaning rather than an answer. Set lc_messages = ''C'' to make it knowable; '
+                 || 'it is a dynamic parameter and needs a reload, not a restart.'
+        WHEN p.english_messages
+            THEN 'PostgreSQL writes its messages untranslated under this locale, so the log reads that match '
+                 || 'English message text can find their anchor. That is a precondition being met, not a '
+                 || 'claim that anything was read. One limit on how far to trust this row: lc_messages is '
+                 || 'overridable per role and per database, and a log entry is written in the language of '
+                 || 'the backend that raised it, while this value is the one the monitoring connection '
+                 || 'resolved. They are the same wherever the setting comes from postgresql.conf or from '
+                 || 'nowhere, which is the ordinary case - but an override aimed at the monitoring role '
+                 || 'alone would make this row agree with itself and not with the server.'
+        ELSE 'PostgreSQL TRANSLATES its own messages under this locale, the severity label included - a '
+             || 'German catalogue writes FEHLER: where an English one writes ERROR:. Every log read this '
+             || 'product performs matches English message text, so on this target they find nothing. THE '
+             || 'DEADLOCK READ IS THE DANGEROUS ONE: zero deadlocks is also the healthy answer, so a '
+             || 'blinded read and a server that did not deadlock are indistinguishable - use '
+             || 'pg_stat_database''s cumulative deadlock counter, which is a number rather than text, '
+             || 'before believing an empty deadlock result from here. Plan capture has no error code to '
+             || 'fall back on either: auto_explain writes at LOG level with SQLSTATE 00000, so there is no '
+             || 'severity-independent anchor even under csvlog. Set lc_messages = ''C''; it is a dynamic '
+             || 'parameter and needs a reload. One honest caveat: this reports what the product can '
+             || 'CONFIRM, not a verdict on your build - a PostgreSQL compiled without NLS support writes '
+             || 'English whatever this is set to, and SQL cannot see that.'
     END
 FROM probe AS p";
 

@@ -224,6 +224,53 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
+    /// #3060: the seam between the grid and #2136's Store Job Over Cadence knob, asserted in SECONDS —
+    /// the unit that alert actually compares — against <see cref="TimescaleSupport.RefreshPhaseSlotSeconds"/>.
+    ///
+    /// <para><b>Why in seconds as well as in percent.</b> The knob is a percent of a job's own schedule
+    /// interval and the grid is a number of minutes, and nothing made those two commensurable: the default
+    /// landing exactly on one slot was an accident of two independent decisions, so a grid moved to a
+    /// 10-minute step would have left the alert firing at 900 s against a 600 s slot — after the point it
+    /// exists to precede. The percent-side identity lives with the alert; this is the same claim restated in
+    /// the unit an operator reads off the alert text, so neither form can be satisfied alone.</para>
+    ///
+    /// <para><b>The tiling assertion is not a tautology.</b> Under integer division a step that does not
+    /// divide 60 leaves <c>RefreshPhaseSlotSeconds * RefreshPhaseSlots</c> SHORT of the cadence — a
+    /// 7-minute step gives 8 slots of 420 s, 3,360 s of a 3,600 s hour — and every "a slot is a quarter of
+    /// the cadence" statement in the product silently stops being true. Pinned against
+    /// <see cref="TimescaleSupport.HourlyRefreshScheduleSpan"/> rather than a literal hour so the cadence
+    /// enters as the product's own value.</para>
+    /// </summary>
+    [Fact]
+    public void TheRefreshGrid_TilesTheHourlyCadence_AndTheCadenceKnobFiresNoLaterThanOneSlot()
+    {
+        var cadenceSeconds = TimescaleSupport.RefreshPhaseSlotSeconds * TimescaleSupport.RefreshPhaseSlots;
+
+        Assert.Equal(TimescaleSupport.HourlyRefreshScheduleSpan, TimeSpan.FromSeconds(cadenceSeconds));
+
+        var knobFiresAtSeconds = cadenceSeconds * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100;
+
+        Assert.True(
+            knobFiresAtSeconds <= TimescaleSupport.RefreshPhaseSlotSeconds,
+            $"the shipped cadence knob fires at {knobFiresAtSeconds}s against a "
+            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s slot — past the width the compression phase grid "
+            + "assumes a refresh fits inside, so the alert would arrive after #3035's precondition is false");
+
+        /* And within one percentage point of the slot, so the derivation is the LATEST value that clears it
+           rather than an arbitrary early one. One point of cadence is the finest step the knob has. */
+        Assert.True(
+            knobFiresAtSeconds + cadenceSeconds / 100 > TimescaleSupport.RefreshPhaseSlotSeconds,
+            $"the shipped cadence knob fires at {knobFiresAtSeconds}s against a "
+            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s slot — earlier than it needs to be");
+
+        /* #3044's watch line sits inside the same slot, so the two signals are ordered rather than
+           competing: the grid's own watch speaks first, the cadence alert at the wall. */
+        Assert.True(
+            TimescaleSupport.RefreshSlotWarningSeconds <= TimescaleSupport.RefreshPhaseSlotSeconds,
+            "the refresh slot watch line must sit inside the slot it watches");
+    }
+
+    /// <summary>
     /// The grid's actual invariant, over EVERY contended relation rather than the one family the incident
     /// evidence named.
     ///

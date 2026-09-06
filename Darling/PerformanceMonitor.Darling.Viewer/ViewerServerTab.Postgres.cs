@@ -540,12 +540,15 @@ public partial class ViewerServerTab
     ///
     /// <para><b>An empty grid is the healthy answer AND the shape of a log that cannot be read or cannot be
     /// parsed</b>, which is why the note names the other checks rather than leaving them. Deadlock reports
-    /// need nothing ENABLED on the target, unlike plan capture, but they are not unsuppressable. Two things
-    /// have to hold: the log must be readable, which the Vacuum tab's plan-capture readiness panel
-    /// reports on because it reads the same file, AND it must carry DETAIL, which <c>log_error_verbosity = terse</c>
-    /// strips along with the whole graph. pg_stat_database's cumulative deadlock counter is the independent
-    /// test: if that moved and this is empty, the log is the problem — unreadable or too terse — rather
-    /// than the server (#3030).</para>
+    /// need nothing ENABLED on the target, unlike plan capture, but they are not unsuppressable. THREE
+    /// things have to hold: the log must be readable, which the Vacuum tab's plan-capture readiness panel
+    /// reports on because it reads the same file; it must carry DETAIL, which <c>log_error_verbosity = terse</c>
+    /// strips along with the whole graph; and it must be written in ENGLISH, because the parser matches
+    /// PostgreSQL's own message text and PostgreSQL translates it — severity label included — under any
+    /// other <c>lc_messages</c> (#3061, reported as the readiness panel's <c>message_locale</c> facet).
+    /// pg_stat_database's cumulative deadlock counter is the independent test for all three: if that moved
+    /// and this is empty, the log is the problem — unreadable, too terse, or not in a language this reads —
+    /// rather than the server (#3030).</para>
     /// </summary>
     private async Task LoadPgDeadlocksAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -562,8 +565,10 @@ public partial class ViewerServerTab
 
         PgDeadlocksNote.Text = PanelNote("pg_deadlocks", rows.Count,
             "No deadlock was reported in this window. That is the healthy answer, and it is also what an "
-            + "unreadable server log looks like — the Vacuum tab's plan-capture readiness panel reads the "
-            + "same file and says which it is.")
+            + "unreadable server log looks like — or one PostgreSQL wrote in another language, since this "
+            + "grid is filled by matching English message text. The Vacuum tab's plan-capture readiness "
+            + "panel reads the same file and reports both: whether it can be read, and whether "
+            + "lc_messages leaves the messages in English.")
             + (rows.Count == 0
                 ? string.Empty
                 : "  Sightings counts how often the collector saw the SAME report while it stayed inside "
@@ -665,10 +670,14 @@ public partial class ViewerServerTab
                     : "At least one precondition is unmet, so either no execution plans are being captured "
                       + "by auto_explain here or the ones that are cannot be attributed. Read the rows in "
                       + "order — extension_available, library_loaded, capture_threshold, plan_text_setting, "
-                      + "plan_attribution — each names the specific step and, on Aurora/RDS, whether it "
-                      + "needs a parameter-group change and a reboot rather than a SET. plan_attribution is "
-                      + "the one that is easy to miss: auto_explain puts no query id in the plan itself, so "
-                      + "without %Q in log_line_prefix every captured plan is an orphan.";
+                      + "plan_attribution, message_locale — each names the specific step and, on Aurora/RDS, "
+                      + "whether it needs a parameter-group change and a reboot rather than a SET. "
+                      + "plan_attribution is the one that is easy to miss: auto_explain puts no query id in "
+                      + "the plan itself, so without %Q in log_line_prefix every captured plan is an orphan. "
+                      + "message_locale is the one that reaches further than this panel: it reports whether "
+                      + "the target writes its log messages in English, which every log read here matches, "
+                      + "so an unmet one also means the Blocking sub-tab's deadlock grid cannot be trusted "
+                      + "to be empty for the healthy reason.";
     }
 
     /// <summary>
