@@ -141,8 +141,8 @@ public sealed class ServerIdentityFromStoreTests
            an explanatory note about the helper reads as a call to it. Line numbers still line up because the
            walk preserves every newline. */
         var offenders = CSharpSourceWalker
-            .StripCommentsAndStrings(File.ReadAllText(Path.Combine(root!, relativePath)))
-            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .StripCommentsAndStrings(
+                File.ReadAllText(Path.Combine(root!, relativePath)).Replace("\r\n", "\n", StringComparison.Ordinal))
             .Split('\n')
             .Select((line, index) => (Line: line, Number: index + 1))
             .Where(l => l.Line.Contains("GetDeterministicHashCode(", StringComparison.Ordinal))
