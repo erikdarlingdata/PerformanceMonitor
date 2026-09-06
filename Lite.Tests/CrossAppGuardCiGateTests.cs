@@ -122,6 +122,17 @@ public class CrossAppGuardCiGateTests
         /* Out of the tree entirely, and not a path at all. */
         Assert.Null(RepoRooted(repo, liteTests, @"..\..\Darling\X.cs", "Darling"));
         Assert.Null(RepoRooted(repo, liteTests, "xunit.v3", "Darling"));
+
+        /* The base directory is the whole answer for an Import inside an imported build file, and the
+           two rules disagree there. A repo-root Directory.Build.props writing
+           <Import Project="Darling\Shared.targets" /> means <repo>/Darling/Shared.targets, because
+           Import resolves against its own file. Resolved against the CONSUMING project it would be
+           Lite.Tests/Darling/Shared.targets, which fails the anchor and disappears - a silent miss, not
+           a wrong answer, which is why it is pinned from both bases. */
+        Assert.Equal(
+            "Darling/Shared.targets",
+            RepoRooted(repo, repo, @"Darling\Shared.targets", "Darling"));
+        Assert.Null(RepoRooted(repo, liteTests, @"Darling\Shared.targets", "Darling"));
     }
 
     /// <summary>
@@ -164,28 +175,75 @@ public class CrossAppGuardCiGateTests
         Assert.Equal(
             new[]
             {
-                @"..\Other\A.cs",
-                @"..\Other\B.xml",
-                "SomeLib",
-                "Other",
-                @"..\Other\C.dll",
-                "Gated",
-                "Angled",
-                @"..\Other\D.props",
+                /* Item paths resolve against the consuming project, so RelativeToItsOwnFile is false for
+                   every one of them. Import's Project is the single exception, and getting that wrong is
+                   a silent miss rather than a wrong answer: it would resolve one directory off, fail the
+                   otherApp anchor, and vanish. */
+                (@"..\Other\A.cs", false),
+                (@"..\Other\B.xml", false),
+                ("SomeLib", false),
+                ("Other", false),
+                (@"..\Other\C.dll", false),
+                ("Gated", false),
+                ("Angled", false),
+                (@"..\Other\D.props", true),
 
                 /* The element spellings are collected after the attributes, and are the cases the
                    attribute matcher alone cannot see at all. The last two carry their own attribute on
                    the open tag - Condition, for a platform-specific hint path - and the last one's
                    Condition holds a raw '>', which is legal in an attribute value and would end the tag
                    early for a matcher that scanned to the next angle bracket. */
-                @"..\Other\bin\SomeLib.dll",
-                @"..\Other\x64\Gated.dll",
-                @"..\Other\Angled.dll",
+                (@"..\Other\bin\SomeLib.dll", false),
+                (@"..\Other\x64\Gated.dll", false),
+                (@"..\Other\Angled.dll", false),
             },
             MsBuildPaths(Xml));
 
         /* Remove= is absent by design: dropping an item from a glob is not a read of it. */
-        Assert.DoesNotContain(@"..\Other\Removed.cs", MsBuildPaths(Xml));
+        Assert.DoesNotContain(
+            MsBuildPaths(Xml),
+            p => p.Raw.Equals(@"..\Other\Removed.cs", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The two base directories, exercised through the shipped read rather than through
+    /// <see cref="RepoRooted"/> alone.
+    ///
+    /// <para>An <c>Import</c>'s <c>Project</c> resolves against the file CONTAINING it; an item's path
+    /// resolves against the CONSUMING project. For a <c>.csproj</c> those are the same directory, so the
+    /// divergence only appears in an imported build file — and there is none in this repository, which
+    /// is why this is driven with synthetic XML rather than repo content.</para>
+    ///
+    /// <para>Both spellings below name a file under the other app, and <b>neither single base produces
+    /// both answers</b>: one base for everything drops the <c>Import</c> (it lands under the consuming
+    /// project) or drops the item (it climbs out of the repository). So the assertion is two-sided in
+    /// both directions at once. It matters because the wrong base is a SILENT miss — the reference fails
+    /// the anchor and vanishes, rather than resolving to something visibly wrong.</para>
+    /// </summary>
+    [Fact]
+    public void TheTwoResolutionBases_AreBothUsedWhereTheyDiverge()
+    {
+        var repo = RepoRoot();
+        var seen = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+        var unevaluable = new List<string>();
+
+        ReadMsBuildPaths(
+            repo,
+            "<Project>"
+                + "<Import Project=\"Darling\\NoSuchArea\\Imported.targets\" />"
+                + "<ItemGroup><None Include=\"..\\Darling\\NoSuchArea\\Item.cs\" /></ItemGroup>"
+                + "</Project>",
+            origin: "Directory.Build.props",
+            projectDir: Path.Combine(repo, LiteTestsDir),
+            ownDir: repo,
+            otherApp: "Darling",
+            seen,
+            unevaluable);
+
+        Assert.Empty(unevaluable);
+        Assert.Equal(
+            new[] { "Darling/NoSuchArea/Imported.targets", "Darling/NoSuchArea/Item.cs" },
+            seen.Keys);
     }
 
     /// <summary>
@@ -475,7 +533,7 @@ public class CrossAppGuardCiGateTests
     /* The MSBuild attributes that can carry a path to another app's file. Remove= is deliberately
        absent: dropping an item from a glob is not a read of it. */
     private static readonly Regex MsBuildPathAttribute = new(
-        "\\b(?:Include|Update|Project|HintPath)\\s*=\\s*(?:\"(?<dq>[^\"]*)\"|'(?<sq>[^']*)')",
+        "\\b(?<name>Include|Update|Project|HintPath)\\s*=\\s*(?:\"(?<dq>[^\"]*)\"|'(?<sq>[^']*)')",
         RegexOptions.Compiled);
 
     /* HintPath is item METADATA, and MSBuild lets metadata be written as an attribute OR as a child
@@ -543,15 +601,27 @@ public class CrossAppGuardCiGateTests
 
         foreach (var file in projectFiles)
         {
-            ReadMsBuildPaths(repo, file, Path.GetDirectoryName(file)!, otherApp, seen, unevaluable);
+            /* A .csproj is its own consumer, so both bases are its directory. */
+            var dir = Path.GetDirectoryName(file)!;
+            ReadMsBuildPaths(
+                repo, File.ReadAllText(file), Rooted(repo, file), dir, dir, otherApp, seen, unevaluable);
         }
 
         foreach (var file in importedBuildFiles)
         {
-            /* MSBuild resolves a relative item path in an IMPORTED file against the consuming project's
-               directory, not the imported file's own — which is why these resolve against projectRoot
-               even for a Directory.Build.props sitting at the repo root. */
-            ReadMsBuildPaths(repo, file, projectRoot, otherApp, seen, unevaluable);
+            /* The two bases diverge here, and both are needed. MSBuild resolves a relative ITEM path in
+               an imported file against the consuming project's directory — which is why these get
+               projectRoot even for a Directory.Build.props sitting at the repo root — while an Import's
+               own Project attribute resolves against the file that contains it. */
+            ReadMsBuildPaths(
+                repo,
+                File.ReadAllText(file),
+                Rooted(repo, file),
+                projectRoot,
+                Path.GetDirectoryName(file)!,
+                otherApp,
+                seen,
+                unevaluable);
         }
 
         return new CrossAppScan(
@@ -657,31 +727,46 @@ public class CrossAppGuardCiGateTests
     private static bool NeedsMsBuildToEvaluate(string path) =>
         MsBuildExpressionForms.Any(form => path.Contains(form, StringComparison.Ordinal));
 
-    /// <summary>Every path-bearing value one MSBuild file's XML names, in both spellings MSBuild
-    /// accepts. Shared by the walk and by the pin that reads it back, so the pin cannot drift from what
-    /// ships.</summary>
-    private static IEnumerable<string> MsBuildPaths(string xml) =>
+    /// <summary>Every path-bearing value one MSBuild file's XML names, in both spellings MSBuild accepts,
+    /// each paired with WHICH directory MSBuild resolves it against.
+    ///
+    /// <para>The two rules differ and the difference is load-bearing. An item's path
+    /// (<c>Include</c> / <c>Update</c> / <c>HintPath</c>) is relative to the CONSUMING project's
+    /// directory — that is why <c>$(MSBuildThisFileDirectory)</c> has to exist. <c>Import</c>'s
+    /// <c>Project</c> is relative to the directory of the file CONTAINING the import. They coincide for a
+    /// <c>.csproj</c>, which is its own consumer, and diverge for an imported build file — which is
+    /// precisely where a cross-app <c>Import</c> would live.</para>
+    ///
+    /// <para>Shared by the walk and by the pin that reads it back, so the pin cannot drift from what
+    /// ships.</para></summary>
+    private static IEnumerable<(string Raw, bool RelativeToItsOwnFile)> MsBuildPaths(string xml) =>
         MsBuildPathAttribute.Matches(xml)
-            .Select(m => m.Groups["dq"].Success ? m.Groups["dq"].Value : m.Groups["sq"].Value)
-            .Concat(MsBuildPathElement.Matches(xml).Select(m => m.Groups[1].Value.Trim()));
+            .Select(m => (
+                Raw: m.Groups["dq"].Success ? m.Groups["dq"].Value : m.Groups["sq"].Value,
+                RelativeToItsOwnFile: m.Groups["name"].Value.Equals("Project", StringComparison.Ordinal)))
+            .Concat(MsBuildPathElement.Matches(xml)
+                .Select(m => (Raw: m.Groups[1].Value.Trim(), RelativeToItsOwnFile: false)));
 
     /// <summary>The <paramref name="otherApp"/> paths one MSBuild file names, repo-rooted into
     /// <paramref name="seen"/>.</summary>
     private static void ReadMsBuildPaths(
         string repo,
-        string file,
+        string xml,
+        string origin,
         string projectDir,
+        string ownDir,
         string otherApp,
         SortedDictionary<string, SortedSet<string>> seen,
         List<string> unevaluable)
     {
-        var text = File.ReadAllText(file);
-        var origin = Rooted(repo, file);
-        var thisFileDir = Path.GetDirectoryName(file)! + Path.DirectorySeparatorChar;
+        /* $(MSBuildThisFileDirectory) carries a trailing separator by MSBuild's own convention, and a
+           path is written expecting it. */
+        var thisFileDir = ownDir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
 
-        foreach (var raw in MsBuildPaths(text))
+        foreach (var (raw, relativeToItsOwnFile) in MsBuildPaths(xml))
         {
-            /* The two properties a hand-written cross-app include actually uses. */
+            /* The two properties a hand-written cross-app include actually uses. Both mean what they say
+               regardless of which base the value itself resolves against. */
             var expanded = raw
                 .Replace("$(MSBuildThisFileDirectory)", thisFileDir, StringComparison.Ordinal)
                 .Replace("$(MSBuildProjectDirectory)", projectDir, StringComparison.Ordinal);
@@ -696,7 +781,12 @@ public class CrossAppGuardCiGateTests
                 continue;
             }
 
-            var rooted = RepoRooted(repo, projectDir, expanded, otherApp);
+            var rooted = RepoRooted(
+                repo,
+                relativeToItsOwnFile ? thisFileDir : projectDir,
+                expanded,
+                otherApp);
+
             if (rooted is not null)
             {
                 Note(seen, rooted, origin);
