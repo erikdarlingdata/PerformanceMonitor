@@ -2073,10 +2073,16 @@ public sealed class DarlingCollectorRunner
                    every non-SQL-Server target; see StallProbeArm.Start.
 
                    The counting reader is read from the arm's thread without synchronisation, deliberately.
-                   Its counters are plain longs written by the drain's read loop, so a torn or stale read
-                   mis-states a diagnostic figure by at most one row — and putting a lock in the hot read
-                   loop of 66 collectors to serve a once-per-stall sample would be the wrong trade by a wide
-                   margin. */
+                   The hazard here is STALENESS, not tearing: a 64-bit read is atomic on every architecture
+                   this ships to, so the arm cannot observe half of a counter — it can only observe an
+                   earlier value of one, which mis-states a diagnostic figure by at most the rows read since
+                   the cache line was last seen. Putting a lock, or a volatile write, in the hot read loop of
+                   66 collectors to serve a once-per-stall sample would be the wrong trade by a wide margin.
+
+                   Both stale readings fail in the CONSERVATIVE direction, which is what makes the trade safe
+                   rather than merely cheap: a lagging byte count reads the stream as SLOWER than it is, and a
+                   not-yet-visible reader reference reads as -1, which Decide treats as "still executing".
+                   Neither can talk the probe out of firing on a target that has earned one. */
                 var readWatch = Stopwatch.StartNew();
                 DrainCountingDataReader? countingForProbe = null;
                 using var stallProbeArm = StallProbeArm.Start(

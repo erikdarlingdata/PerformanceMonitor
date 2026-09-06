@@ -371,15 +371,29 @@ public class StallWaitProbePolicyTests
     {
         var delays = 0;
         var fires = 0;
+        var observations = 0;
+        StallProbeObservation? probed = null;
         var fired = new TaskCompletionSource();
         var elapsed = (long)(AbandoningBudget.TotalMilliseconds * StallWaitProbePolicy.TriggerFractionOfBudget);
+
+        /* Each reading is DISTINGUISHABLE — the row count rises on every call, all of them firing. A
+           constant observation would make a second reading invisible, which is how the claim that the
+           stored row carries the observation the DECISION was made on went unpinned: the arm read the
+           counters twice at one point, the two readings disagreed by whatever arrived in between, and no
+           test could see it. `probed` is what the probe would have stored. */
+        StallProbeObservation Observe()
+        {
+            var n = Interlocked.Increment(ref observations);
+            return new StallProbeObservation(elapsed, 149 + n, BytesFor(AbandonedSlowestMbPerSecond, elapsed), elapsed);
+        }
 
         using (var arm = StallProbeArm.Start(
             CollectorTargetEngine.SqlServer,
             AbandoningBudget,
-            observe: () => new StallProbeObservation(elapsed, 149, BytesFor(AbandonedSlowestMbPerSecond, elapsed), elapsed),
-            fire: _ =>
+            observe: Observe,
+            fire: observation =>
             {
+                probed = observation;
                 Interlocked.Increment(ref fires);
                 fired.TrySetResult();
                 return Task.CompletedTask;
@@ -400,11 +414,84 @@ public class StallWaitProbePolicyTests
             Assert.Equal(1, arm.Fires);
             Assert.Equal(1, Volatile.Read(ref delays));
             Assert.Equal(1, Volatile.Read(ref fires));
+
+            /* One reading, and the probe got THAT reading. Two calls would leave the stored row describing a
+               moment the decision was never made on, which both the arm's doc comment and V112's rung
+               comment claim cannot happen. */
+            Assert.Equal(1, Volatile.Read(ref observations));
+            Assert.Equal(150, probed!.Value.RowsRead);
         }
 
         /* Disposal does not fire a parting shot either. */
         await Task.Delay(50);
         Assert.Equal(1, Volatile.Read(ref fires));
+        Assert.Equal(1, Volatile.Read(ref observations));
+    }
+
+    /// <summary>
+    /// <b>The shape this design deliberately does NOT sample</b>: a read that looks healthy at the trigger
+    /// and degrades afterwards. Pinned as an absence, so the bound is discoverable by someone reading the
+    /// guard rather than only by someone reading a report.
+    ///
+    /// <para><c>observe</c> hands back a HEALTHY observation first and a catastrophically degraded one on
+    /// every later call. The arm takes the first and is finished: no probe, and — the load-bearing half —
+    /// <c>observe</c> is called exactly once, so the later degradation is not merely ignored, it is never
+    /// LOOKED AT. That is what makes this a statement about the design instead of about a threshold.</para>
+    ///
+    /// <para>Accepted on evidence, not convenience. The measured failure is uniformly slow rather than
+    /// fast-then-stalled — 0.21-0.24 MB/s against 11.3-14.0 MB/s on identical payload, with 0-3 ms of
+    /// terminal silence on 8 of 8, so the run was still delivering when the budget fired — and the condition
+    /// PRECEDES the run: <c>open_ms</c> on the four cheapest collectors was already degraded 3x to 152x in
+    /// the sweep body BEFORE each abandoned run, 9 of 9 across both affected servers. Re-evaluating would
+    /// cover a shape nothing has observed, at the price of the one thing #2880's first constraint forbids.
+    /// If a late-onset stall is ever measured, THIS is the test that has to change, and it says so.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheArm_HealthyAtTheTrigger_IsNeverReconsidered_ByDesign()
+    {
+        var observations = 0;
+        var fires = 0;
+        var elapsed = (long)(AbandoningBudget.TotalMilliseconds * StallWaitProbePolicy.TriggerFractionOfBudget);
+
+        var healthy = new StallProbeObservation(
+            elapsed, 12_557, BytesFor(SuccessfulSlowestMedianMbPerSecond, elapsed), elapsed);
+
+        /* Well under the floor, and past the trigger — the signature that fires whenever anything fires. So
+           if the arm ever asked a second time, it would get an answer that DOES fire, and the fire count
+           below would move. */
+        var degraded = new StallProbeObservation(
+            elapsed * 4, 149, BytesFor(AbandonedSlowestMbPerSecond, elapsed), elapsed * 4);
+
+        using (var arm = StallProbeArm.Start(
+            CollectorTargetEngine.SqlServer,
+            AbandoningBudget,
+            observe: () => Interlocked.Increment(ref observations) == 1 ? healthy : degraded,
+            fire: _ =>
+            {
+                Interlocked.Increment(ref fires);
+                return Task.CompletedTask;
+            },
+            delay: (_, _) => Task.CompletedTask))
+        {
+            /* Room for a second lap, so "never reconsidered" is an observation rather than an artefact of
+               disposing before one could happen. */
+            await Task.Delay(100);
+
+            Assert.Equal(1, arm.Delays);
+            Assert.Equal(1, Volatile.Read(ref observations));
+            Assert.Equal(0, arm.Fires);
+            Assert.Equal(0, Volatile.Read(ref fires));
+        }
+
+        await Task.Delay(50);
+        Assert.Equal(1, Volatile.Read(ref observations));
+        Assert.Equal(0, Volatile.Read(ref fires));
+
+        /* The positive control the absence needs: the degraded observation the arm never asked for WOULD
+           have fired. Without this, the zero above would pass just as well against an observation that was
+           healthy all along, and the test would be pinning nothing. */
+        Assert.True(StallWaitProbePolicy.Decide(CollectorTargetEngine.SqlServer, AbandoningBudget, degraded).Fire);
+        Assert.False(StallWaitProbePolicy.Decide(CollectorTargetEngine.SqlServer, AbandoningBudget, healthy).Fire);
     }
 
     /// <summary>

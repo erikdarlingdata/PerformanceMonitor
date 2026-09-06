@@ -297,6 +297,22 @@ public static class StallWaitProbePolicy
     /// not exist yet, i.e. the read is still inside <c>ExecuteReaderAsync</c> — the phase the cheap-collector
     /// <c>open_ms</c> degradation showed up in — and a read still executing 30 s into a 120 s budget is
     /// exactly what is worth a sample.</para>
+    ///
+    /// <para><b>THE SHAPE THIS DOES NOT SAMPLE, and it is a design bound rather than an oversight.</b> This
+    /// is asked ONCE, at the trigger, because <see cref="StallProbeArm"/> is one-shot — so a read that looks
+    /// HEALTHY at the trigger and degrades afterwards is never sampled, however badly it then stalls. Nobody
+    /// reading this guard should infer coverage of that shape; the case is pinned as a deliberate absence in
+    /// <c>StallWaitProbePolicyTests.TheArm_HealthyAtTheTrigger_IsNeverReconsidered_ByDesign</c>.</para>
+    ///
+    /// <para>The bound is accepted on evidence rather than on convenience. The measured failure is uniformly
+    /// slow rather than fast-then-stalled: abandoned runs deliver 0.21-0.24 MB/s against 11.3-14.0 MB/s on
+    /// identical payload, and terminal silence is 0-3 ms on 8 of 8, so the run was STILL DELIVERING when the
+    /// budget fired. And the condition PRECEDES the run it would sample — the four cheapest collectors'
+    /// <c>open_ms</c> was already degraded 3x to 152x in the sweep body BEFORE each abandoned run, 9 of 9
+    /// across both affected servers. A run past a quarter of its budget under the floor is therefore already
+    /// in the measured population, and re-evaluating would buy coverage of a shape nothing has observed at
+    /// the price of the one thing #2880's first constraint forbids: a watchdog that keeps looking at a
+    /// struggling target.</para>
     /// </summary>
     /// <param name="engine">
     /// The target's engine. PostgreSQL never fires: <see cref="QueryText"/> is T-SQL and reads
