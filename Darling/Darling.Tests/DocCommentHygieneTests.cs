@@ -709,7 +709,7 @@ public sealed class DocCommentHygieneTests
     /// <para>Measured on this branch's base with <c>GenerateDocumentationFile</c> switched on from the
     /// command line — no project file was changed, and none is changed by this PR: the flag remains the
     /// parked decision from #3025. That run reports 71 <c>CS1574</c> occurrences on 70 lines. This resolver
-    /// sees 7 of those lines. The three rows below are the three reasons for the other 63, and together they
+    /// sees 7 of those lines. The rows below are the reasons for the other 63, and together they
     /// are why this guard is complementary to that flag rather than a substitute for it — while the 12
     /// <c>MARKER</c> targets above are the traffic in the other direction, which the flag would never
     /// report.</para>
@@ -727,6 +727,15 @@ public sealed class DocCommentHygieneTests
             "USINGS. Namespace imports are ignored here. PgMigrations.cs carries no using for the "
             + "collectors' namespace, so this name is out of scope for the compiler even though the "
             + "project references the assembly that declares it."),
+
+        ("Darling/PerformanceMonitor.Darling.Viewer",
+            "PerformanceMonitorLite.Analysis.Recommendations.LiteRecommendationItem",
+            "ASSEMBLIES. Resolution is repository-wide and knows nothing about assembly boundaries. This "
+            + "target is a Lite type, cref'd from the Darling viewer, which does not reference the Lite "
+            + "assembly — its own doc comment says so in the next sentence. The compiler cannot resolve it "
+            + "and never will; this resolver does, because a name spelled in Lite's tree is a name spelled "
+            + "in the repository. That is the same property that lets one guard cover both SKUs, so it is "
+            + "the boundary and the design at once rather than a defect to be repaired."),
 
         ("Darling/Darling.Tests", "Write(char)",
             "OVERLOADS. The parameter list is discarded, and the name alone is spelled all over the tree. "
