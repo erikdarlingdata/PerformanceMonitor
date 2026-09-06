@@ -94,6 +94,7 @@ public sealed class ServerPageTabsTests
         ["get_pg_replication_stats"] = "pg_replication_stats",
             ["get_pg_top_queries"] = "pg_statement_stats",
             ["get_pg_plans"] = "pg_plan_capture",
+            ["get_pg_plan_capture_readiness"] = "pg_plan_capture_readiness",
             ["get_pg_blocking"] = "pg_blocking",
             ["get_pg_io_stats"] = "pg_io_stats",
             ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
@@ -150,9 +151,18 @@ public sealed class ServerPageTabsTests
     /// list, because listing the nine would need editing every time one is closed and the edit is where a
     /// tenth quietly joins.</para>
     ///
-    /// <para>It is deliberately not "every collector must have a read". Some genuinely should not: a
-    /// collector whose whole output is one row of configuration state is a panel, not a question anyone asks
-    /// an agent. The ratchet lets that stand while making a NEW one impossible.</para>
+    /// <para>It is deliberately not "every collector must have a read", and it still is not, even though the
+    /// count has reached zero. The shape it tolerates is a collector that genuinely answers no question an
+    /// agent would ask; the shape it refuses is that claim being made by omission. So an exemption is
+    /// possible and is a deliberate act — raise the constant, and write down beside it which collector and
+    /// why — while a collector that quietly acquires no read cannot happen.</para>
+    ///
+    /// <para><b>The one exemption that was taken did not survive examination</b> (#3070), which is the
+    /// evidence worth carrying forward. <c>pg_plan_capture_readiness</c> was exempted as "a single row of
+    /// configuration state"; it emits one row per FACET, each with its own remedy in its own column, that
+    /// column had no reader outside the Windows Viewer, and two separate remedy strings elsewhere in the
+    /// service already pointed at a <c>get_pg_plan_capture_readiness</c> tool that did not exist. Treat a
+    /// future exemption request with that in mind rather than as a formality.</para>
     /// </summary>
     [Fact]
     public void ThePostgresCollectorsWithNoServedRead_OnlyEverShrink()
@@ -176,11 +186,20 @@ public sealed class ServerPageTabsTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-        /* Eleven, then nine, now ONE. The one left is pg_plan_capture_readiness, which is the legitimate
-           case this ratchet was built to tolerate: its output is a single row of configuration state, a
-           panel rather than a question anyone asks an agent. Every other PostgreSQL collector is now
-           served. It must never be raised. */
-        const int KnownUnreadable = 1;
+        /* Eleven, then nine, then one, now NONE. Every PostgreSQL collector has a served read.
+
+           The last exemption was pg_plan_capture_readiness, and it is worth recording why it went rather
+           than only that it did (#3070). It was held to be the case this ratchet was built to tolerate — a
+           single row of configuration state, a panel rather than a question anyone asks an agent — and none
+           of that survived contact. It is not one row but one per FACET, each carrying a different remedy in
+           its own detail column; that detail is the most useful thing the collector produces and had no
+           reader outside the Windows Viewer at all; and the prose reached for a get_pg_plan_capture_readiness
+           tool twice, in two different remedy strings, while no such tool existed.
+
+           So the exemption clause above is now unused, and that is the state to keep it in. A collector
+           whose whole output is genuinely a panel is still allowed to exist — raise the constant and say why
+           here — but nothing currently claims to be one, and the last thing that did was wrong about it. */
+        const int KnownUnreadable = 0;
 
         Assert.True(
             unreadable.Length <= KnownUnreadable,
@@ -189,6 +208,10 @@ public sealed class ServerPageTabsTests
             "agent. Add the read, or if this one genuinely answers no question worth asking, say so here and " +
             "raise the constant deliberately: " + string.Join(", ", unreadable));
 
+        /* At zero this says nothing the assertion above does not, and it is kept rather than deleted: the
+           two halves are what make this a ratchet rather than a cap, and the moment somebody raises the
+           constant for a new exemption they must also lower it again when the read lands. Deleting the
+           lower-it half at the bottom of the ratchet is how the ground stops being held. */
         Assert.True(
             unreadable.Length == KnownUnreadable,
             $"Only {unreadable.Length} PostgreSQL collectors now lack a served read, down from {KnownUnreadable}. " +

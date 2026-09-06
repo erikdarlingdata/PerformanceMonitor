@@ -88,6 +88,18 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_pg_replication_stats",
         "get_pg_top_queries",
         "get_pg_plans",
+
+        /* get_pg_plan_capture_readiness (#3070) - whether a PostgreSQL target can capture plans at all,
+           facet by facet, with the remedy for each step that is not in place. Same architectural reason as
+           every entry around it rather than a porting backlog: Lite has no PostgreSQL target and cannot
+           acquire one, DuckDbSchemaGenerator.StoredCollectors filters pg_plan_capture_readiness out, and
+           Lite passes engineKind: null explicitly - so there is no Lite twin for this to be missing FROM.
+
+           No near-twin to warn about either, and that is worth saying: the facets are auto_explain
+           preconditions and a log-message locale, none of which has a SQL Server counterpart. Query Store
+           is the closest thing conceptually and it is not close - it is a database-scoped feature with its
+           own health read (get_query_store_health) rather than a set of preload-only server GUCs. */
+        "get_pg_plan_capture_readiness",
         "get_pg_wraparound_risk",
         "get_pg_xmin_horizon",
         "get_pg_replication_slots",
