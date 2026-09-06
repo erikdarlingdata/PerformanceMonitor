@@ -49,6 +49,11 @@ public class CrossAppGuardCiGateTests
     private const string LiteTestsDir = "Lite.Tests";
     private const string DarlingTestsDir = "Darling/Darling.Tests";
 
+    /* The build files MSBuild imports into a project without being named, in the order it probes
+       them. Shared by the walk and by the pin that floors where the walk looked. */
+    private static readonly string[] BuildFileNames =
+        { "Directory.Build.props", "Directory.Build.targets" };
+
     [Fact]
     public void TheGlobMatcher_AgreesWithKnownAnswers()
     {
@@ -191,6 +196,43 @@ public class CrossAppGuardCiGateTests
                 scan.ProjectFiles,
                 p => p.Contains("/bin/", StringComparison.Ordinal) ||
                      p.Contains("/obj/", StringComparison.Ordinal));
+
+            /* The imported-build-file half needs the same protection as ProjectFiles above and cannot
+               have it in the same shape: nothing in this repository imports a Directory.Build.props, so
+               flooring the found COUNT would red on a clean tree. What is floored instead is that the
+               collector reached the locations MSBuild itself would probe — the two names in every
+               directory from the project up to and including the repo root — so "we looked and there
+               were none" is distinguishable from "we never looked". The chain is re-derived here from
+               the project path rather than read back off the walk. */
+            var directories = new List<string>();
+            for (var d = project; ; )
+            {
+                directories.Add(d);
+                var cut = d.LastIndexOf('/');
+                if (cut < 0)
+                {
+                    break;
+                }
+
+                d = d[..cut];
+            }
+
+            directories.Add(string.Empty);
+
+            Assert.Equal(
+                directories.SelectMany(d => BuildFileNames.Select(n => d.Length == 0 ? n : $"{d}/{n}")),
+                scan.ImportedBuildProbes);
+
+            /* And what it opened is exactly the NEAREST existing probe of each name, which is MSBuild's
+               own rule. Holds at zero, so a clean tree passes honestly rather than by not being asked. */
+            Assert.Equal(
+                BuildFileNames
+                    .Select(n => scan.ImportedBuildProbes.FirstOrDefault(
+                        p => p.EndsWith(n, StringComparison.Ordinal) &&
+                             File.Exists(Path.Combine(repo, p.Replace('/', Path.DirectorySeparatorChar)))))
+                    .Where(p => p is not null)
+                    .OrderBy(p => p, StringComparer.Ordinal),
+                scan.ImportedBuildFiles.OrderBy(p => p, StringComparer.Ordinal));
         }
     }
 
@@ -301,6 +343,16 @@ public class CrossAppGuardCiGateTests
             $"the MSBuild stage opened no project files under {scannedProject}, so a cross-app reference " +
             "written as an Include= attribute is invisible again");
 
+        /* The imported-build-file stage is floored on where it LOOKED, not on what it found: there is no
+           Directory.Build.props anywhere in this repository, so a count floor would red on a clean tree
+           while still not distinguishing "probed nowhere" from "probed and found none". */
+        Assert.True(
+            scan.ImportedBuildProbes.Count > 0,
+            $"the imported-build-file stage probed nowhere for {scannedProject}, so an item group in a " +
+            "Directory.Build.props or .targets is invisible. Probed: " +
+            $"[{string.Join(", ", scan.ImportedBuildProbes)}], opened: " +
+            $"[{string.Join(", ", scan.ImportedBuildFiles)}]");
+
         /* This guard's failure direction is not noticing, so a path it CANNOT read has to be loud rather
            than absent from the found set. */
         Assert.True(
@@ -326,6 +378,7 @@ public class CrossAppGuardCiGateTests
     private readonly record struct CrossAppScan(
         int CSharpFiles,
         IReadOnlyList<string> ProjectFiles,
+        IReadOnlyList<string> ImportedBuildProbes,
         IReadOnlyList<string> ImportedBuildFiles,
         IReadOnlyList<string> UnevaluablePaths,
         IReadOnlyList<(string Raw, string Probe, string Origin)> References);
@@ -383,7 +436,7 @@ public class CrossAppGuardCiGateTests
         var projectFiles = TrackedFiles(projectRoot, "*.csproj")
             .OrderBy(f => f, StringComparer.Ordinal)
             .ToList();
-        var importedBuildFiles = ImportedBuildFiles(repo, projectRoot).ToList();
+        var (importedProbes, importedBuildFiles) = ImportedBuildFiles(repo, projectRoot);
 
         foreach (var file in projectFiles)
         {
@@ -401,6 +454,7 @@ public class CrossAppGuardCiGateTests
         return new CrossAppScan(
             csharpFiles,
             projectFiles.Select(f => Rooted(repo, f)).ToList(),
+            importedProbes.Select(f => Rooted(repo, f)).ToList(),
             importedBuildFiles.Select(f => Rooted(repo, f)).ToList(),
             unevaluable,
             Resolve(repo, seen).ToList());
@@ -448,23 +502,33 @@ public class CrossAppGuardCiGateTests
     /// path is a property function, and <see cref="ReadMsBuildPaths"/> reports an unevaluable path as a
     /// failure rather than ignoring it — so the chain is loud, not silently uncollected. That is the right
     /// direction for a guard whose whole defect class is not noticing.</para></summary>
-    private static IEnumerable<string> ImportedBuildFiles(string repo, string projectRoot)
+    /// <para>Every location looked at is returned alongside what was there. A stage that probed nowhere
+    /// and a stage that probed everywhere and found nothing both leave an empty found list, and on a tree
+    /// with no such file anywhere — this one — a count floor cannot tell them apart without redding on a
+    /// clean checkout. The probe list can, so it is what gets floored.</para>
+    private static (List<string> Probed, List<string> Found) ImportedBuildFiles(
+        string repo, string projectRoot)
     {
         var root = Path.GetFullPath(repo).TrimEnd(Path.DirectorySeparatorChar);
-        var names = new[] { "Directory.Build.props", "Directory.Build.targets" };
-        var found = new HashSet<string>(StringComparer.Ordinal);
+        var probed = new List<string>();
+        var found = new List<string>();
+        var claimed = new HashSet<string>(StringComparer.Ordinal);
 
-        for (var dir = new DirectoryInfo(Path.GetFullPath(projectRoot));
-             dir is not null && found.Count < names.Length;
-             dir = dir.Parent)
+        for (var dir = new DirectoryInfo(Path.GetFullPath(projectRoot)); dir is not null; dir = dir.Parent)
         {
-            foreach (var name in names)
+            foreach (var name in BuildFileNames)
             {
                 var candidate = Path.Combine(dir.FullName, name);
-                if (!found.Contains(name) && File.Exists(candidate))
+
+                /* Probing continues to the root even once a name is claimed. The walk costs two
+                   File.Exists calls per directory, and a probe list that stopped early could not be
+                   floored against the locations MSBuild would consider. */
+                probed.Add(candidate);
+
+                if (!claimed.Contains(name) && File.Exists(candidate))
                 {
-                    found.Add(name);
-                    yield return candidate;
+                    claimed.Add(name);
+                    found.Add(candidate);
                 }
             }
 
@@ -474,6 +538,8 @@ public class CrossAppGuardCiGateTests
                 break;
             }
         }
+
+        return (probed, found);
     }
 
     /// <summary>The <paramref name="otherApp"/> paths one MSBuild file names, repo-rooted into
