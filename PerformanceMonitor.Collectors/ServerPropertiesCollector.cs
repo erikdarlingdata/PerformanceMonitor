@@ -75,12 +75,12 @@ IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
 IF @host_os IS NULL
 BEGIN
     DECLARE @ver nvarchar(4000) = @@VERSION;
-    DECLARE @on_pos int = CHARINDEX(N' on ', @ver);
+    DECLARE @on_pos integer = CHARINDEX(N' on ', @ver);
     IF @on_pos > 0
         SET @host_os = LTRIM(SUBSTRING(@ver, @on_pos + 4, LEN(@ver)));
 END;
 
-IF CONVERT(int, ISNULL(SERVERPROPERTY(N'IsHadrEnabled'), 0)) = 1
+IF CONVERT(integer, ISNULL(SERVERPROPERTY(N'IsHadrEnabled'), 0)) = 1
    AND OBJECT_ID(N'sys.dm_hadr_availability_replica_states') IS NOT NULL
 BEGIN
     DECLARE @ag_detected nvarchar(20);
@@ -129,7 +129,7 @@ SELECT
         /* Azure SQL DB reports the legacy 'SQL Azure' for SERVERPROPERTY('Edition');
            store the actual product name + service tier instead. */
         CASE
-            WHEN CONVERT(int, SERVERPROPERTY(N'EngineEdition')) = 5
+            WHEN CONVERT(integer, SERVERPROPERTY(N'EngineEdition')) = 5
             THEN N'Azure SQL Database'
                  + ISNULL(N' (' +
                      CASE CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), N'Edition'))
@@ -146,7 +146,7 @@ SELECT
     product_update_level =
         CONVERT(nvarchar(128), SERVERPROPERTY(N'ProductUpdateLevel')),
     engine_edition =
-        CONVERT(int, SERVERPROPERTY(N'EngineEdition')),
+        CONVERT(integer, SERVERPROPERTY(N'EngineEdition')),
     cpu_count =
         @cpu_count,
     hyperthread_ratio =
@@ -163,7 +163,7 @@ SELECT
         CONVERT(bit, SERVERPROPERTY(N'IsClustered')),
     service_objective =
         CASE
-            WHEN CONVERT(int, SERVERPROPERTY(N'EngineEdition')) = 5
+            WHEN CONVERT(integer, SERVERPROPERTY(N'EngineEdition')) = 5
             THEN CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), N'ServiceObjective'))
             ELSE NULL
         END,

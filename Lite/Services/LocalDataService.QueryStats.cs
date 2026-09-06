@@ -788,7 +788,7 @@ AND   tqp.query_plan IS NOT NULL
 ORDER BY
     qs.last_execution_time DESC
 OPTION(RECOMPILE);',
-    N'@h varbinary(64), @stmt_start int, @stmt_end int',
+    N'@h varbinary(64), @stmt_start integer, @stmt_end integer',
     @h, @stmt_start, @stmt_end;";
 
         using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };

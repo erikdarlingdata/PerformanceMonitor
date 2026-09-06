@@ -58,7 +58,7 @@ SELECT
     buffer_pool_mb = CONVERT(decimal(18,2), pc_buffer.cntr_value / 1024.0),
     plan_cache_mb = CONVERT(decimal(18,2), pc_plan.cntr_value * 8.0 / 1024.0),
     max_workers_count = osi.max_workers_count,
-    current_workers_count = CONVERT(int, NULL)
+    current_workers_count = CONVERT(integer, NULL)
 FROM sys.dm_os_sys_info AS osi
 CROSS JOIN
 (
