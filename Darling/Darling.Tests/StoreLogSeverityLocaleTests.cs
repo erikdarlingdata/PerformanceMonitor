@@ -23,13 +23,14 @@ namespace Darling.Tests;
 /// The seam between the managed store's <c>postgresql.conf</c> and the store-log parser's severity
 /// vocabulary (#3053).
 ///
-/// <para><b>What was wrong.</b> initdb takes <c>lc_messages</c> from the host OS, and PostgreSQL translates
-/// the SEVERITY LABEL along with the message body — a German host writes <c>FEHLER:</c> where an English one
-/// writes <c>ERROR:</c>. <see cref="StoreLogClassifier"/> anchors on that field, and its residue class is
-/// gated on <see cref="StoreLogClassifier.IsAtLeastWarning"/>: a token the gate does not recognise cannot
-/// reach <c>unclassified</c>-retained and falls to the <c>routine</c> arm, counted with its text dropped. So
-/// under a localised label the classifier's load-bearing property — a rule the table forgot costs a heading,
-/// never a row — inverted and cost the row.</para>
+/// <para><b>What was wrong.</b> PostgreSQL translates the SEVERITY LABEL along with the message body — a
+/// store running a German catalogue writes <c>FEHLER:</c> where an English one writes <c>ERROR:</c>.
+/// <see cref="StoreLogClassifier"/> anchors on that field, and its residue class is gated on
+/// <see cref="StoreLogClassifier.IsAtLeastWarning"/>: a token the gate does not recognise cannot reach
+/// <c>unclassified</c>-retained and falls to the <c>routine</c> arm, counted with its text dropped. So under
+/// a localised label the classifier's load-bearing property — a rule the table forgot costs a heading, never
+/// a row — inverted and cost the row. The managed bootstrap's <c>--locale=C</c> already kept a cluster it
+/// initialized off that path; nothing named the dependency, so nothing stopped the argument moving.</para>
 ///
 /// <para><b>Why the pins are shaped this way.</b> A test that merely asserted the parser knows four English
 /// tokens would pass on a German store, and a test that merely asserted the conf carries a line would pass

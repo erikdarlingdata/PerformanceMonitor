@@ -226,14 +226,31 @@ public sealed class DarlingManagedPostgres
     /// the same reason v9 is separate from v3: an existing cluster gains it by the marker being absent on its
     /// next service-owned start, which is what carries the pin to the stores already in the field.
     ///
-    /// <para><b>The severity label is the part that bites.</b> initdb takes <c>lc_messages</c> from the host
-    /// OS, and PostgreSQL translates the label as well as the body — a German host writes <c>FEHLER:</c>
-    /// where an English one writes <c>ERROR:</c>. <see cref="StoreLogClassifier"/> anchors on that field and
-    /// its residue class is gated on <see cref="StoreLogClassifier.IsAtLeastWarning"/>, so a token it does
-    /// not recognise cannot reach <c>unclassified</c>-retained and lands in <c>routine</c>, counted with its
-    /// text dropped. The design's property is that a rule the table forgot costs a heading and never a row;
-    /// under a translated label it costs the row. The store is product-managed, so making the English
-    /// assumption true belongs here rather than in each parser.</para>
+    /// <para><b>The severity label is the part that bites.</b> PostgreSQL translates the label as well as the
+    /// body — a store running a German catalogue writes <c>FEHLER:</c> where an English one writes
+    /// <c>ERROR:</c>. <see cref="StoreLogClassifier"/> anchors on that field and its residue class is gated on
+    /// <see cref="StoreLogClassifier.IsAtLeastWarning"/>, so a token it does not recognise cannot reach
+    /// <c>unclassified</c>-retained and lands in <c>routine</c>, counted with its text dropped. The design's
+    /// property is that a rule the table forgot costs a heading and never a row; under a translated label it
+    /// costs the row.</para>
+    ///
+    /// <para><b>What this block adds over the initdb line, stated precisely, because it is less than it
+    /// looks.</b> <see cref="InitializeClusterAsync"/> already passes <c>--locale=C</c>, and initdb templates
+    /// the resolved <c>lc_*</c> values into the conf it generates — so a cluster this build initialized was
+    /// never running a translated catalogue, and the plain default-initdb exposure does not apply to it. This
+    /// block buys three things that argument does not. It makes the parser's dependency EXPLICIT and testable,
+    /// so changing <c>--locale</c> for the collation reason it exists for cannot silently re-localise messages
+    /// as a side effect. It reaches data directories this build's initdb did not create — built before that
+    /// argument landed, restored, adopted, or hand-initialized — which is the population the marker-absent
+    /// heal exists for. And it wins over the generated line by last-occurrence, so an edited value is
+    /// corrected rather than inherited.</para>
+    ///
+    /// <para><b>What it does not reach.</b> <c>postgresql.auto.conf</c> is read after <c>postgresql.conf</c>,
+    /// so an <c>ALTER SYSTEM SET lc_messages</c> still wins; this is diagnostic fidelity, not a security
+    /// boundary, so it is not forced through the <c>-o</c> runtime override the way <c>listen_addresses</c>
+    /// is. And it reaches MANAGED stores only, while the classifier does not: <c>StoreLogSweep</c> runs on
+    /// every store shape, so a bring-your-own store's log is classified under whatever locale its owner gave
+    /// it.</para>
     ///
     /// <para><c>C</c> rather than <c>en_US.UTF-8</c>: <c>C</c> is guaranteed present with no locale
     /// installed on the host, and it is the locale under which PostgreSQL emits its untranslated message
@@ -1423,11 +1440,13 @@ public sealed class DarlingManagedPostgres
                 "Appended v9 session time zone to postgresql.conf (timezone = 'UTC'): the store's timestamp columns hold naive UTC, so a host-derived session zone would shift any comparison against now() and render timestamptz output on a different clock than the collected data.");
         }
 
-        /* Checked independently of v1-v9: an existing cluster heals by GAINING the message-locale block
-           (#3053). initdb takes lc_messages from the host OS and PostgreSQL translates the SEVERITY LABEL as
-           well as the body, so a non-English host writes a token StoreLogClassifier does not recognise —
-           which then cannot reach its unclassified-retained residue class and is counted as routine with its
-           text dropped. SIGHUP-context and appended before pg_ctl start, so effective on this very start. */
+        /* Checked independently of v1-v9: a data directory this build's initdb did not create heals by
+           GAINING the message-locale block (#3053). PostgreSQL translates the SEVERITY LABEL as well as the
+           body, so a translated catalogue writes a token StoreLogClassifier does not recognise — which then
+           cannot reach its unclassified-retained residue class and is counted as routine with its text
+           dropped. The initdb call already passes --locale=C, so this states the parser's dependency rather
+           than repairing a fresh install; see ConfMarkerV10 for what that distinction does and does not buy.
+           SIGHUP-context and appended before pg_ctl start, so effective on this very start. */
         if (!conf.Contains(ConfMarkerV10, StringComparison.Ordinal))
         {
             File.AppendAllText(confPath, BuildMessageLocaleConfAppend());
