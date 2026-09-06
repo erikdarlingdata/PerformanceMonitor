@@ -1573,9 +1573,10 @@ WITH NO DATA";
     /// hypertable rather than with ingest. Measured on the production store: the heaviest hourly refresh
     /// (<see cref="QueryStoreStatsIntervalHourlyView"/>) ran 3,301-6,330 s against a 1-hour cadence —
     /// <b>118-175% of its own schedule interval</b> — while rows arriving per hour FELL ~3x over the same
-    /// period. Narrowed to 1 day the same refresh's largest clean run is <b>594 s, 16.5% of cadence</b> (the
-    /// derivation is on <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>). The direction of that
-    /// measurement is the whole argument: duration tracking window size while ingest moves the other way is
+    /// period. Narrowed to 1 day the same refresh finishes <b>well inside one phase slot</b>, and the figure
+    /// with its derivation is on <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> rather than
+    /// restated here — a percentage of cadence written twice goes stale in one of the two places. The
+    /// direction of that measurement is the whole argument: duration tracking window size while ingest moves the other way is
     /// what rules out "more rows to materialize" and rules in "too much window".</para>
     ///
     /// <para><b>Why a job that outran its cadence could not recover.</b> A refresh holds
@@ -1585,9 +1586,8 @@ WITH NO DATA";
     /// merely QUEUED, not held, even though their own locks are mutually compatible. At >100% of cadence the
     /// next run started into the tail of the previous one, and the convoy sustained itself. Below cadence it
     /// cannot form, which is why this number and <see cref="RefreshPhaseStepMinutes"/> are complements rather
-    /// than alternatives: narrowing is what makes the heavy refresh finish, phasing is what keeps its
-    /// remaining <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> seconds out of everyone else's
-    /// way.</para>
+    /// than alternatives: narrowing is what makes the heavy refresh finish, phasing is what keeps what
+    /// remains of it out of everyone else's way.</para>
     ///
     /// <para><b>What still has to fit inside it, now stated as a relationship rather than left to a
     /// constant.</b> Two things need the window to reach back far enough. Live collectors only ever append
@@ -1642,13 +1642,12 @@ WITH NO DATA";
     /// phased across the hour instead of all starting together.
     ///
     /// <para><b>Phasing alone is not the fix and neither is narrowing alone.</b>
-    /// <see cref="HourlyRefreshStartOffset"/> is what brought the heavy refresh from 6,330 s to a clean
-    /// maximum of <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> s; this is what keeps those
-    /// seconds from being visible to anything else, because the refresh that is running is not the one a
-    /// compression policy or a sibling refresh is about to want. The heaviest hourly refresh is still more
-    /// than 4x the recorded ceiling for any other one
-    /// (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), so the two treatments address different
-    /// halves and dropping either one reopens the door.</para>
+    /// <see cref="HourlyRefreshStartOffset"/> is what brought the heavy refresh down from 6,330 s to
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>; this is what keeps what remains of it from
+    /// being visible to anything else, because the refresh that is running is not the one a compression
+    /// policy or a sibling refresh is about to want. The heaviest hourly refresh is still more than 4x the
+    /// recorded ceiling for any other one (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), so the
+    /// two treatments address different halves and dropping either one reopens the door.</para>
     ///
     /// <para><b>15 minutes over four slots is the configuration that was measured</b>, not a round number: the
     /// production store's <c>query_store_stats</c> job family was moved to :00/:15/:30/:45 and the first full
@@ -1772,8 +1771,9 @@ WITH NO DATA";
     ///
     /// <para>On the narrowed <see cref="HourlyRefreshStartOffset"/> window it is still by far the largest job
     /// on the grid — see <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> for the number the grid is
-    /// sized against and for the operating envelope that number defines. Every other hourly refresh is an
-    /// under a quarter of it (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), and that asymmetry is
+    /// sized against and for the operating envelope that number defines. Every other hourly refresh's own
+    /// ceiling is under a quarter of it (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), and that
+    /// asymmetry is
     /// what the grid below is shaped by: one slot excluded WHOLE, the rest treated as occupied only at their
     /// start.</para>
     /// </summary>

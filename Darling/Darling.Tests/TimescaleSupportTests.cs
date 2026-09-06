@@ -2312,6 +2312,17 @@ LIMIT 1", connection))
             $"the {TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard band is no longer 3x the "
             + $"{TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s recorded ceiling for a non-heaviest hourly refresh");
 
+        /* And the ASYMMETRY between the two recorded ceilings, which is what HeaviestHourlyRefreshView's
+           "under a quarter of it" and RefreshPhaseStepMinutes' "more than 4x" both rest on. Those are the
+           only two places the asymmetry is stated in prose, and neither is derivable from the grid, so
+           without this they can go stale in either direction while every other pin stays green. */
+        Assert.True(
+            TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds * 4 < TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
+            $"the heaviest hourly refresh's {TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds}s "
+            + $"recorded ceiling is no longer more than 4x the {TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s "
+            + "recorded for any other one, so the asymmetry the grid's shape is justified by has narrowed — "
+            + "re-read HeaviestHourlyRefreshView and RefreshPhaseStepMinutes rather than editing this");
+
         var refreshSlots = TimescaleSupport.HourlyRefreshPhaseOrder
             .Select(TimescaleSupport.RefreshPhaseMinutesFor)
             .Distinct()
@@ -2402,12 +2413,15 @@ LIMIT 1", connection))
         Assert.DoesNotContain(lastMinuteInsideTheRefresh, TimescaleSupport.CompressionPhaseMinutes);
 
         /* And the ceiling is strictly below the watch line, which is what makes a live reading in the warning
-           band news rather than a restatement of the grid's own sizing figure. */
+           band news rather than a restatement of the grid's own sizing figure. The GAP is pinned too, since
+           RefreshSlotWarningSeconds states it as a percentage and a percentage in prose cannot notice that
+           its own two terms have moved. */
         Assert.True(
             ceiling < TimescaleSupport.RefreshSlotWarningSeconds,
             $"the recorded ceiling is {ceiling}s against a {TimescaleSupport.RefreshSlotWarningSeconds}s watch "
             + "line, so the figure the grid is sized against classifies as a warning and the watch reports the "
             + "grid's own sizing rather than anything new");
+        Assert.Equal(26, (TimescaleSupport.RefreshSlotWarningSeconds - ceiling) * 100 / ceiling);
     }
 
     /* ─────────────────── #3044: the watch on the LIVE figure, not the constant ─────────────────── */
