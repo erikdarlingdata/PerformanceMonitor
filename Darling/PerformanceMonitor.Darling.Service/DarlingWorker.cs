@@ -4409,6 +4409,11 @@ LIMIT 1";
     /// row, and the series' own bounded retention DELETE. Failure-isolated at the worker level like the
     /// disk-pressure and compression checks: a store hiccup logs and skips this tick, never aborting the
     /// sweep loop, and the series simply gains a one-hour gap.
+    ///
+    /// <para>Two more self-telemetry passes ride the same tick, connection and budget: the #3021
+    /// <see cref="StoreLogSweep"/> read of the store's own server log, and the #2674 collector-cost flush.
+    /// The shared budget is what bounds the whole tick — three passes on one
+    /// <see cref="StoreSelfMetrics.SweepTimeoutSeconds"/> linked CTS, not one each.</para>
     /// </summary>
     private async Task SweepStoreSelfMetricsAsync(CancellationToken cancellationToken)
     {
@@ -4426,6 +4431,36 @@ LIMIT 1";
         {
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
             await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, budget.Token);
+
+            /* #3021: the store reading its OWN server log, on the same hourly tick and the same connection.
+               It rides this cadence rather than carrying its own for two reasons. The log grows slowly (a
+               production day is ~1,400 entries worth classifying), so an hourly bucket is the finest grain
+               the census can honestly report; and sharing the tick makes the two self-telemetry series -
+               what the store WEIGHS and what it COMPLAINED about - land on the same timestamp grid, which is
+               how they get read side by side.
+
+               ITS OWN catch, unlike the two passes either side of it, and that asymmetry is the point. This
+               is the only pass here whose PRIVILEGE is not guaranteed: reading the log needs
+               pg_read_server_files plus an explicit GRANT on pg_read_binary_file, which the managed store's
+               bootstrap superuser has and a bring-your-own store's owner may not have given. Sharing the
+               outer catch would let that one permanent condition cost the collector-cost flush below it
+               every hour forever - a new failure in a pass that was working. Warning rather than Error for
+               the same reason: on a store that cannot grant it this repeats hourly and would otherwise
+               pollute every "errors in the last hour" count with a condition nobody is going to change.
+               The durable record is on the read surface, where get_store_log reports zero captures as
+               not_collected and names the privilege. */
+            try
+            {
+                await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(
+                    "Store log capture failed, so this hour's store-log census is missing (get_store_log "
+                    + "reports the capture gap). Reading the store's own log needs pg_read_server_files and "
+                    + "EXECUTE on pg_read_binary_file; a bring-your-own store may not grant them: {Message}",
+                    ex.Message);
+            }
 
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)
                for the window, plus the accumulator's own bounded retention DELETE. */
