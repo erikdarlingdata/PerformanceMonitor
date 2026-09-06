@@ -10,11 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -188,7 +188,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
     [Fact]
     public void TheSidebarDot_IsBoundToItsTooltip()
     {
-        var xaml = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"));
+        var xaml = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"));
 
         var at = xaml.IndexOf("{Binding Server.DotStatus}", StringComparison.Ordinal);
         Assert.True(at > 0, "the sidebar status dot is gone — find where it moved before editing this test");
@@ -221,7 +221,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
             Assert.Equal("Double-click the row to open this server's tab", lines[^1]);
         }
 
-        var xaml = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"));
+        var xaml = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"));
         Assert.Contains("MouseDoubleClick=\"ServerList_MouseDoubleClick\"", xaml, StringComparison.Ordinal);
     }
 
@@ -258,7 +258,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
         /* The severity is not lost — it is reported on the axis it belongs to. */
         Assert.Equal(HealthSeverity.Critical, onFire.OverallMetricSeverity);
 
-        var rules = ReadRepoFile(Path.Combine("PerformanceMonitor.Common", "ServerHealthBands.cs"));
+        var rules = ReadRepoFileLf(Path.Combine("PerformanceMonitor.Common", "ServerHealthBands.cs"));
         Assert.Contains(
             "public static ServerCollectionStatus Classify(bool? isOnline, bool hasCollectorErrors, bool awaitingFirstCollection) =>",
             rules, StringComparison.Ordinal);
@@ -293,7 +293,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
     [Fact]
     public void TheStatusWords_AreWrittenInExactlyOnePlace()
     {
-        var rulesFile = Path.Combine(RepoRoot(), "PerformanceMonitor.Common", "ServerHealthBands.cs");
+        var rulesFile = Path.Combine(RepoFile.Root, "PerformanceMonitor.Common", "ServerHealthBands.cs");
         var forbidden = new[] { "\"Online\"", "\"Offline\"", "\"Unknown\"", "\"Awaiting first collection\"", "\"AwaitingFirstCollection\"" };
 
         /* Part A: the phrase only this ladder spells, anywhere in the three trees. A copy with all five
@@ -354,7 +354,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
             + string.Join("; ", offenders));
 
         /* And they are written in the one function every surface renders. */
-        var rules = ReadRepoFile(Path.Combine("PerformanceMonitor.Common", "ServerHealthBands.cs"));
+        var rules = ReadRepoFileLf(Path.Combine("PerformanceMonitor.Common", "ServerHealthBands.cs"));
         Assert.Contains("public static string Word(this ServerCollectionStatus status) => status switch", rules, StringComparison.Ordinal);
         Assert.Contains("public static string McpToken(this ServerCollectionStatus status) => status switch", rules, StringComparison.Ordinal);
         Assert.Contains("public static string Headline(this ServerCollectionStatus status) => status switch", rules, StringComparison.Ordinal);
@@ -382,7 +382,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
             .ToList();
         Assert.Equal(new[] { ServerCollectionStatus.AwaitingFirstCollection }, differing);
 
-        var tools = ReadRepoFile(Path.Combine(
+        var tools = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"));
         Assert.DoesNotContain("TimeSpan.FromMinutes(2)", tools, StringComparison.Ordinal);
         Assert.DoesNotContain("TimeSpan.FromMinutes(15)", tools, StringComparison.Ordinal);
@@ -428,7 +428,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
     [Fact]
     public void TheGuard_RunsOnEveryTreeItScans()
     {
-        var workflow = ReadRepoFile(Path.Combine(".github", "workflows", "build.yml"));
+        var workflow = ReadRepoFileLf(Path.Combine(".github", "workflows", "build.yml"));
 
         var step = workflow.IndexOf("- name: Run Darling tests", StringComparison.Ordinal);
         Assert.True(step > 0, "the step that runs Darling.Tests was renamed — re-point this assertion before editing it");
@@ -474,7 +474,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
     /// Ellipse that actually owns them rather than out of the whole file (MainWindow.xaml has other dots).</summary>
     private static Dictionary<string, string> SidebarDotTriggers()
     {
-        var xaml = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"));
+        var xaml = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"));
 
         var at = xaml.IndexOf("{Binding Server.DotStatus}", StringComparison.Ordinal);
         Assert.True(at > 0, "the sidebar status dot is gone — find where it moved before editing this test");
@@ -507,9 +507,9 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
     {
         var roots = new[]
         {
-            Path.Combine(RepoRoot(), "PerformanceMonitor.Common"),
-            Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer"),
-            Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service"),
+            Path.Combine(RepoFile.Root, "PerformanceMonitor.Common"),
+            Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Viewer"),
+            Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service"),
         };
 
         foreach (var root in roots)
@@ -633,20 +633,4 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
 
         return kept.ToString();
     }
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            if (Directory.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.Common")))
-            {
-                return dir.FullName;
-            }
-        }
-
-        throw new DirectoryNotFoundException($"Could not locate the repo root walking up from {thisFile}");
-    }
-
-    private static string ReadRepoFile(string relative) =>
-        File.ReadAllText(Path.Combine(RepoRoot(), relative)).Replace("\r\n", "\n", StringComparison.Ordinal);
 }

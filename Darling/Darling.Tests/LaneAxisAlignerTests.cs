@@ -9,10 +9,10 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using PerformanceMonitor.Ui;
 using ScottPlot;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -305,22 +305,5 @@ public sealed class LaneAxisAlignerTests
 
         Assert.True(end > open, $"{what}: SyncXAxes body is unbalanced");
         return source[open..(end + 1)];
-    }
-
-    /// <summary>
-    /// Walks up from this source file until the requested path resolves - the idiom the #1949 grid pins use.
-    /// Deliberately NOT a <c>.git</c> probe: in a git WORKTREE <c>.git</c> is a FILE, not a directory, so a
-    /// <c>Directory.Exists</c> check walks past the root and the pin fails everywhere feature work happens.
-    /// </summary>
-    private static string ReadRepoFile(string relativePath, [CallerFilePath] string callerPath = "")
-    {
-        var dir = Path.GetDirectoryName(callerPath);
-        while (dir is not null && !File.Exists(Path.Combine(dir, relativePath)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.True(dir is not null, $"{relativePath} not found walking up from the test source");
-        return File.ReadAllText(Path.Combine(dir!, relativePath));
     }
 }

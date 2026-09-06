@@ -11,13 +11,13 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -544,20 +544,6 @@ public sealed class PerDatabaseFaultPathSplitTests
         Assert.True(end > start, "The per-database branch's closing anchor moved.");
 
         return runner[start..end];
-    }
-
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
     }
 
     private sealed class Recorder : ILogger

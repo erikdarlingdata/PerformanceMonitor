@@ -7,8 +7,8 @@
  */
 
 using System.IO;
-using System.Runtime.CompilerServices;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -68,18 +68,5 @@ public sealed class PgDeadlockLogTimezoneTests
            server reported no deadlocks instead of reporting a zone this cannot store. */
         Assert.Contains("([^ \\n]+) \\[(\\d+)\\]", source, System.StringComparison.Ordinal);
         Assert.DoesNotContain("\\w+ \\[(\\d+)\\]", source, System.StringComparison.Ordinal);
-    }
-
-    /* Locate the repo from this file — the DarlingLockTimeoutYieldTests idiom; no build-output copying. */
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
     }
 }

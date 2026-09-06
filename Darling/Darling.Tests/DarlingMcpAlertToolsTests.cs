@@ -24,6 +24,7 @@ using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 using Reader = PerformanceMonitor.Darling.Service.Mcp.DarlingAlertReader;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -390,19 +391,6 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         StoreJobCadenceWarnPercent: 80,
         FileGrowthEnabled: true, FileGrowthRiseMb: 1024, FileGrowthVolumePercent: 10,
         FileGrowthLookbackMinutes: 60);
-
-    private static string ReadRepoFile(
-        string relative, [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new System.IO.DirectoryInfo(System.IO.Path.GetDirectoryName(thisFile)!);
-             dir is not null; dir = dir.Parent)
-        {
-            var candidate = System.IO.Path.Combine(dir.FullName, relative);
-            if (System.IO.File.Exists(candidate)) return System.IO.File.ReadAllText(candidate);
-        }
-
-        throw new System.IO.FileNotFoundException($"Could not locate {relative}");
-    }
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

@@ -11,10 +11,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -422,20 +422,6 @@ public sealed class ServerScopePhaseSplitTests
         CollectionTime = new DateTime(2026, 9, 4, 0, 0, 0, DateTimeKind.Utc),
         Deltas = new CollectorDeltaCalculator(),
     };
-
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
-    }
 
     [Fact]
     public void PhaseStamps_AreReachableFromExceptionHandlers_SoAThrowingPhaseStillReportsItsTime()

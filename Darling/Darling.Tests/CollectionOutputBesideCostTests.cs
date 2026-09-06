@@ -15,6 +15,7 @@ using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -215,7 +216,10 @@ public sealed class CollectionOutputBesideCostTests
            Derived from the note rather than listed beside it, so a name added to the note later is checked
            without this test being edited - and vocabulary spans BOTH tools plus the collector-cost tool the
            note disclaims, because one string serves both SKUs. */
-        var vocabulary = string.Concat(ToolSources.Select(ReadRepoFile))
+        /* A lambda rather than the `Select(ReadRepoFile)` method group: the shared reader takes `params
+           string[]`, which serves both the pre-combined and the segment-list spelling with one method, and a
+           params method group does not convert to Func<string, string>. */
+        var vocabulary = string.Concat(ToolSources.Select(s => ReadRepoFile(s)))
             + ReadRepoFile(Path.Combine(
                 "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCollectorCostTools.cs"));
 
@@ -526,19 +530,5 @@ public sealed class CollectionOutputBesideCostTests
         }
 
         return map;
-    }
-
-    private static string ReadRepoFile(string relative) =>
-        File.ReadAllText(Path.Combine(RepoRoot(), relative));
-
-    private static string RepoRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new InvalidOperationException("PerformanceMonitor.sln not found above the test output directory.");
     }
 }

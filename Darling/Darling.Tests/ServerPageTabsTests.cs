@@ -10,11 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -47,16 +47,16 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ServerPageTabsTests
 {
-    private static string ServerTabsJs => ReadRepoFile(Path.Combine(
+    private static string ServerTabsJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
-    private static string ServerJs => ReadRepoFile(Path.Combine(
+    private static string ServerJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js"));
 
-    private static string AppJs => ReadRepoFile(Path.Combine(
+    private static string AppJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "app.js"));
 
-    private static string EditorJs => ReadRepoFile(Path.Combine(
+    private static string EditorJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "editor.js"));
 
     /// <summary>
@@ -430,7 +430,7 @@ public sealed class ServerPageTabsTests
 
         /* And the registry in panels.js is that same vocabulary — the C# validator and the browser renderer
            agreeing is what lets a stored view and a built-in page share one seam. */
-        var panels = ReadRepoFile(Path.Combine(
+        var panels = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         foreach (var v in vocabulary)
         {
@@ -457,7 +457,7 @@ public sealed class ServerPageTabsTests
     public void WebDashboard_DegradesOverRangeGracefully_AndDropsTheTrayChannel()
     {
         /* One shared helper carries the over-range degrade. */
-        var util = ReadRepoFile(Path.Combine(
+        var util = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js"));
         Assert.Contains("export function readErrorStrip(message)", util, StringComparison.Ordinal);
         Assert.Contains("exceeds maximum of (\\d+) hours", util, StringComparison.Ordinal);
@@ -471,10 +471,10 @@ public sealed class ServerPageTabsTests
 
         /* Parity: both the loader and the composites route read errors through the helper — no read-error site
            left on the raw path, or the tab mixes friendly notices with raw API strings. */
-        var panels = ReadRepoFile(Path.Combine(
+        var panels = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         Assert.Contains("readErrorStrip(res.message)", panels, StringComparison.Ordinal);
-        var serverTabs = ReadRepoFile(Path.Combine(
+        var serverTabs = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
         Assert.Contains("readErrorStrip(res.message)", serverTabs, StringComparison.Ordinal);
         Assert.Contains("readErrorStrip(trend.message)", serverTabs, StringComparison.Ordinal);
@@ -482,10 +482,10 @@ public sealed class ServerPageTabsTests
         Assert.DoesNotContain("errorStrip(trend.message)", serverTabs, StringComparison.Ordinal);
 
         /* #2781 on BOTH surfaces that render the status cell. */
-        var alerts = ReadRepoFile(Path.Combine(
+        var alerts = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "alerts.js"));
         Assert.Contains("a.notification_type !== \"tray\"", alerts, StringComparison.Ordinal);
-        var triage = ReadRepoFile(Path.Combine(
+        var triage = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "triage.js"));
         Assert.Contains("a.notification_type !== \"tray\"", triage, StringComparison.Ordinal);
     }
@@ -695,7 +695,7 @@ public sealed class ServerPageTabsTests
            recognised token, and the RAW TOKEN for one this build has never heard of — because the describer's
            "an unrecognised engine" is a mid-sentence fragment and reads as the wrong part of speech beside
            "SQL Server". */
-        var reader = ReadRepoFile(Path.Combine(
+        var reader = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs"));
         Assert.Contains("string.IsNullOrWhiteSpace(EngineKind) ? null", reader, StringComparison.Ordinal);
         Assert.Contains(
@@ -818,7 +818,7 @@ public sealed class ServerPageTabsTests
         /* And renderPanel is what renders both, from the descriptor field the helpers set. The line guard fires
            at EXACTLY zero rows: at one row renderLineChart draws the lone bucket as a marker, and a descriptor
            that never had an emptyText (every stored view authored before this) still falls through unchanged. */
-        var panels = ReadRepoFile(Path.Combine(
+        var panels = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         Assert.Contains("desc.emptyText || \"No rows in this window.\"", panels, StringComparison.Ordinal);
         Assert.Contains("if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);", panels, StringComparison.Ordinal);
@@ -852,7 +852,7 @@ public sealed class ServerPageTabsTests
     [Fact]
     public void SingleBucketSeries_RendersAsAMarker_NotTheWarmingUpStrip()
     {
-        var charts = ReadRepoFile(Path.Combine(
+        var charts = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "charts.js"));
 
         /* The whole-chart gate is zero-only now; a single row is data and proceeds to the geometry below. */
@@ -1002,19 +1002,5 @@ public sealed class ServerPageTabsTests
                 .ToArray();
             yield return (m.Groups[1].Value, keys);
         }
-    }
-
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate).Replace("\r\n", "\n", StringComparison.Ordinal);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
     }
 }
