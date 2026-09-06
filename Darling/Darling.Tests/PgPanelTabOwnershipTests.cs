@@ -565,7 +565,12 @@ public sealed class PgPanelTabOwnershipTests
             var tab = $"Pg{arm.Groups["tab"].Value}Tab";
             var entry = $"LoadPg{arm.Groups["loader"].Value}Async";
 
-            Assert.Contains(entry, declarations);
+            /* Per-arm rather than a count: a floor on the declaration total cannot tell which entry point
+               went missing, and the tab whose loader is gone is exactly the tab that stops being checked. */
+            Assert.True(declarations.Contains(entry),
+                $"The dispatcher routes {tab} to {entry}, but no such declaration exists in "
+                + "ViewerServerTab.Postgres.cs. Every panel that tab renders would resolve to an empty load "
+                + "path, and an empty load path is what both rules below read as nothing to disagree about.");
 
             loadPaths[tab] = Transitive(entry, loaderCode, ranges, new HashSet<string>(StringComparer.Ordinal));
         }
