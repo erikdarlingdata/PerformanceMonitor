@@ -200,17 +200,6 @@ public sealed class PgRegistryPanelPlacementTests
     {
         var chain = Read();
 
-        Assert.True(chain.Registry.Count == 7,
-            $"Parsed {chain.Registry.Count} entries out of ViewerPostgresTabs.All; the registry has seven "
-            + "tabs and this file's parse no longer matches its shape.");
-        Assert.True(chain.Collectors.Count >= 25,
-            $"Parsed only {chain.Collectors.Count} collectors out of the registry, which is fewer than the "
-            + "PostgreSQL surface ships. The parse is losing entries and every rule here is running on the "
-            + "remainder.");
-        Assert.True(chain.NamedBy.Count >= 15,
-            $"Only {chain.NamedBy.Count} loader methods name a collector at all; ViewerServerTab.Postgres.cs "
-            + "is not being read the way this file assumes.");
-
         /* Resolved means it reached a PANEL, not merely a method: a collector named inside a method that
            assigns no control would otherwise leave both rules with nothing to compare while this list
            stayed empty — the same invisible skip, one step further along. */
@@ -590,6 +579,24 @@ public sealed class PgRegistryPanelPlacementTests
                 .Where(n => !string.Equals(n, method, StringComparison.Ordinal))
                 .ToHashSet(StringComparer.Ordinal);
         }
+
+        /* The POPULATION floors, here in the shared read rather than in each rule, because every rule
+           divides by this chain and a rule's own floor cannot save it: "compared >= Collectors.Count * 2"
+           is 0 >= 0 on an empty registry, and "one dispatcher arm per registry entry" is 0 == 0. A parse
+           that finds nothing has to fail here, once, loudly — that is the whole failure mode this file
+           exists to prevent, one level up. */
+        Assert.True(registry.Count == 7,
+            $"Parsed {registry.Count} entries out of ViewerPostgresTabs.All; the registry has seven tabs and "
+            + "this file's parse no longer matches its shape, so every rule here would run on the remainder.");
+
+        var declared = registry.SelectMany(t => t.Collectors).Distinct(StringComparer.Ordinal).Count();
+        Assert.True(declared >= 25,
+            $"Parsed only {declared} collectors out of the registry, which is fewer than the PostgreSQL "
+            + "surface ships. The collector arrays are not being read.");
+
+        Assert.True(namedBy.Count >= 15,
+            $"Only {namedBy.Count} loader methods name a collector at all; ViewerServerTab.Postgres.cs is "
+            + "not being read the way this file assumes.");
 
         var loadPathOf = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
         foreach (Match arm in DispatcherArm.Matches(shell))
