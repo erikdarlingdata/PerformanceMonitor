@@ -333,7 +333,7 @@ public class CrossAppGuardCiGateTests
             {
                 Assert.True(
                     evaluation.ItemCounts.TryGetValue(type, out var count) && count > 0,
-                    $"the fixture declares one {type} item and the evaluated read returned none. An " +
+                    $"the fixture declares one {type} item and MSBuild returned none of that type. An " +
                     "unrecognised item type answers with an EMPTY array and exit 0, so this is what a " +
                     $"typo in {nameof(EvaluatedItemTypes)} looks like. Counts: [{counts}]");
             }
@@ -430,9 +430,9 @@ public class CrossAppGuardCiGateTests
             /* Output that is not the expected JSON is a failure and not an empty answer. Driven through
                the shipped parser rather than through a process, because there is no invocation that
                produces this today - the point is that the reader does not treat it as zero items. */
-            Assert.NotEqual(string.Empty, ParseEvaluation("Build succeeded.", out _, out _));
-            Assert.NotEqual(string.Empty, ParseEvaluation(string.Empty, out _, out _));
-            Assert.NotEqual(string.Empty, ParseEvaluation("{\"Properties\":{}}", out _, out _));
+            Assert.NotEqual(string.Empty, ParseEvaluation("Build succeeded.", out _, out _, out _));
+            Assert.NotEqual(string.Empty, ParseEvaluation(string.Empty, out _, out _, out _));
+            Assert.NotEqual(string.Empty, ParseEvaluation("{\"Properties\":{}}", out _, out _, out _));
 
             /* And an item type MSBuild does not recognise: exit 0, the key present, the array empty. This
                is the shape of a typo in EvaluatedItemTypes, and the reason the fixture pin above floors
@@ -1174,23 +1174,7 @@ public class CrossAppGuardCiGateTests
                 new Dictionary<string, string>(StringComparer.Ordinal));
         }
 
-        var failure = ParseEvaluation(stdout, out var items, out var properties);
-        var counts = new SortedDictionary<string, int>(StringComparer.Ordinal);
-        foreach (var item in items)
-        {
-            counts.TryGetValue(item.ItemType, out var seen);
-            counts[item.ItemType] = seen + 1;
-        }
-
-        /* A requested type with no items still gets a count, so a per-type floor reads zero rather than
-           "no such key" - the two are the same defect and only one of them is legible. */
-        foreach (var type in EvaluatedItemTypes)
-        {
-            if (!counts.ContainsKey(type))
-            {
-                counts[type] = 0;
-            }
-        }
+        var failure = ParseEvaluation(stdout, out var items, out var counts, out var properties);
 
         return new Evaluation(
             projectPath, commandLine, exitCode, failure, diagnostics, counts, items, properties);
@@ -1208,9 +1192,11 @@ public class CrossAppGuardCiGateTests
     private static string ParseEvaluation(
         string stdout,
         out IReadOnlyList<EvaluatedItem> items,
+        out IReadOnlyDictionary<string, int> counts,
         out IReadOnlyDictionary<string, string> properties)
     {
         items = Array.Empty<EvaluatedItem>();
+        counts = new Dictionary<string, int>(StringComparer.Ordinal);
         properties = new Dictionary<string, string>(StringComparer.Ordinal);
 
         if (stdout.Length == 0)
@@ -1265,12 +1251,23 @@ public class CrossAppGuardCiGateTests
                 Path.GetDirectoryName(readProperties["MSBuildProjectFullPath"]) ?? string.Empty;
 
             var collected = new List<EvaluatedItem>();
+
+            /* Counted from MSBuild's own arrays rather than from the paths taken out of them, because
+               the two answer different questions and only the first is what a per-type floor is for: an
+               item type MSBuild does not recognise returns an EMPTY array, so the count is the evidence
+               the NAME is real. The extraction is asserted separately, by what lands in the found set -
+               and one item can yield two paths, a Reference with a HintPath being exactly that, so a
+               count derived from the extraction would read as two items where the project declared one. */
+            var readCounts = new SortedDictionary<string, int>(StringComparer.Ordinal);
+
             foreach (var type in itemsElement.EnumerateObject())
             {
                 if (type.Value.ValueKind != JsonValueKind.Array)
                 {
                     return $"the Items entry for {type.Name} is not an array";
                 }
+
+                readCounts[type.Name] = type.Value.GetArrayLength();
 
                 foreach (var element in type.Value.EnumerateArray())
                 {
@@ -1303,7 +1300,18 @@ public class CrossAppGuardCiGateTests
                 }
             }
 
+            /* A requested type absent from the answer entirely reads as zero rather than as a missing
+               key: the two are the same defect and only one of them is legible in a message. */
+            foreach (var type in EvaluatedItemTypes)
+            {
+                if (!readCounts.ContainsKey(type))
+                {
+                    readCounts[type] = 0;
+                }
+            }
+
             items = collected;
+            counts = readCounts;
             properties = readProperties;
             return string.Empty;
         }
