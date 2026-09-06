@@ -565,9 +565,13 @@ public sealed class TsqlConventionGuardTests
             /* The block-comment continuation line, which is the #3052 defect this check must not have: this
                codebase writes no asterisk on continuation lines, and six files carry a `--` inside one. */
             "SELECT d.name\n/* memory_pressure_events.sample_time is naive UTC -- Darling passes it to\n   the viewer unchanged, so the frame is the collector's. */\nFROM sys.databases AS d OPTION(RECOMPILE);",
-            /* A `--` inside a nested block comment, because T-SQL nests them and a non-nesting walk would
-               end the outer comment at the inner close and read the rest as code. */
-            "SELECT d.name\n/* outer /* inner -- not a comment */ still outer */\nFROM sys.databases AS d OPTION(RECOMPILE);",
+            /* A `--` AFTER a nested block comment closes but still inside the outer one. T-SQL nests block
+               comments; a non-nesting walk ends the outer comment at the inner `*​/` and reads everything
+               after it as code, so this `--` becomes a line comment. The `--` has to sit after the inner
+               close for the fixture to tell the two walks apart — with it BEFORE the close, both walks have
+               it inside a comment and the case records nothing. It survived a de-nesting mutation written
+               the first way. */
+            "SELECT d.name\n/* outer /* inner */ -- still inside the outer comment */\nFROM sys.databases AS d OPTION(RECOMPILE);",
             /* A `--` inside a string VALUE is data, not a comment. */
             "SELECT d.name FROM sys.databases AS d WHERE d.name <> N'a--b' OPTION(RECOMPILE);",
             /* The same thing AFTER a '' escape, which is what makes this fixture worth its line: a walk that
@@ -591,6 +595,13 @@ public sealed class TsqlConventionGuardTests
             "SELECT [INT] = d.database_id FROM sys.databases AS d OPTION(RECOMPILE);",
             /* MAX the aggregate, not MAX the length spec. */
             "SELECT m = MAX(osi.runnable_tasks_count) FROM sys.dm_os_schedulers AS osi OPTION(RECOMPILE);",
+            /* And the adversarial version, which is what makes the length spec's type ANCHOR load-bearing:
+               an identifier called with a single argument spelled `MAX`. `MAX` is not a reserved word in
+               T-SQL, so a column may be named it, and `MAX(MAX)` is then `IDENT ( max )` — textually the
+               same shape as `nvarchar(max)`. Synthetic rather than drawn from the corpus, deliberately: the
+               shape does not occur here, and without it dropping the anchor changed no answer at all, so the
+               anchor read as load-bearing while nothing held it. */
+            "SELECT largest = MAX(MAX) FROM dbo.metrics AS mt OPTION(RECOMPILE);",
             /* @@ROWCOUNT spelled inside a comment, which is where this codebase discusses it. */
             "SELECT d.name FROM sys.databases AS d /* ROWCOUNT_BIG(), never @@ROWCOUNT */ OPTION(RECOMPILE);",
         };
