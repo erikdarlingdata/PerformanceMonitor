@@ -75,7 +75,7 @@ public sealed class CommentFilterAdoptionTests
     /// <see cref="AnalysisPassTokenThreadingTests"/> gives: the way a wildcard grows is that nobody has to
     /// name a new entry.
     ///
-    /// <para>Four kinds live here and they are not the same kind. Two <b>collect</b> a doc-comment run,
+    /// <para>Four kinds live here and they are not the same kind. Four <b>collect</b> a doc-comment run,
     /// where the prefix is what defines the run. One reads a <b>stated, measured</b> bound off a named file.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
@@ -102,6 +102,17 @@ public sealed class CommentFilterAdoptionTests
         ["Darling.Tests/DocCommentHygieneTests.cs"] =
             "COLLECTS a doc run. DocRuns groups contiguous /// lines into the run that documents one member, "
             + "which is the subject of the whole class rather than an approximation of it.",
+
+        ["Darling.Tests/RefreshCeilingProvenancePinTests.cs"] =
+            "COLLECTS a doc run. DocProseFor walks the contiguous /// run above a named declaration and "
+            + "collapses it, so that a pattern can span the wrapping of the prose it reads figures out of. "
+            + "The prefix defines the run rather than approximating comment-stripping, and asking for the "
+            + "walker would leave nothing to read - the figures being pinned live only in comments. Stated "
+            + "bound: the walk STOPS at the first line that is not /// -prefixed, so a block comment between "
+            + "the doc run and its declaration would truncate it. That direction is loud rather than quiet, "
+            + "because the collected prose is then asserted to open at <summary> and close at </summary> "
+            + "before any figure is compared - a truncated walk fails there instead of silently pinning half "
+            + "a comment.",
 
         ["Lite.Tests/LiteSidebarDotRendersTheCardStatusTests.cs"] =
             "STATED BOUND, and asking for the walker would BREAK it. Its doc comment records the measurement: "
