@@ -12,7 +12,9 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -2325,6 +2327,14 @@ public sealed class DarlingCollectorRunner
            Kept ABOVE the return rather than inside the argument list: DarlingEmptyEnumerationNoteTests pins
            this call's arguments as one whitespace-collapsed run, so a comment between them breaks a pin
            whose actual job is to catch a DROPPED argument. */
+        /* #3099: merged rather than assigned, and read HERE — one place, after every write on all three
+           dispatch paths — because the count is a per-cycle total and the fan-out paths write once per
+           item. Merging keeps a re-attempt from displacing the probe-failure or partial-database note it
+           can legitimately co-occur with; MergeNotes composes null away, so an ordinary cycle carries
+           exactly the note it carried before. */
+        collectionNote = EnumeratedCollectorDriver.MergeNotes(
+            collectionNote, StoreWriteReattemptNote(context.StoreWriteReattempts));
+
         return new CollectorRunResult(
             rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result,
             ServerPhasesMeasured: serverPhasesMeasured,
@@ -2434,6 +2444,113 @@ public sealed class DarlingCollectorRunner
             return 0;
         }
 
+        /* #3099: ONE re-attempt on a transport fault, and it is lossless because `rows` is still the
+           parameter this method was handed — the batch is in memory, the store is byte-identical (a failed
+           COPY commits nothing, and the diverting collectors' explicit transaction rolls back with it), and
+           the watermark has not moved. Without it a transport fault costs the whole cycle: collectors with
+           a WatermarkColumn re-read the same range next cycle and lose nothing, but the base default in
+           CollectorDefinitionBase is `WatermarkColumn => null` — those are cumulative-counter snapshots
+           with no way to ask for that instant again, so the sample is simply gone.
+
+           The re-attempt takes a FRESH connection, and that is the mechanism rather than any wait: the first
+           attempt's connector is dead — the same reasoning DarlingManagedPostgres' post-start loop records —
+           so a second attempt on the caller's handle would fail on the protocol rather than on the store.
+           There is deliberately no delay between them. The sweep permit and the caller's borrowed store
+           connection are both held for the duration, so a pause long enough to outlast the store's own
+           hourly continuous-aggregate refresh (hundreds of seconds) would hold both for minutes, while any
+           pause short enough to be safe is noise against that window: no delay is purchasable here. The
+           accepted cost is that a write's worst case is two command deadlines rather than one.
+
+           The caller's connection stays broken, so on a fan-out each remaining batch faults once and
+           re-attempts on its own fresh connection. Wasteful and bounded — and strictly better than ending
+           the cycle at the first fault, where the later items are never even read. */
+        var outcome = await StoreWriteReattempt.RunAsync(
+            write: token => CopyBatchOnceAsync(
+                pgConnection, definition, rows, server, collectionTime, context, token),
+            rewrite: async token =>
+            {
+                await using var freshConnection = await _postgres.OpenConnectionAsync(token);
+                return await CopyBatchOnceAsync(
+                    freshConnection, definition, rows, server, collectionTime, context, token);
+            },
+            onReattempt: firstAttempt => _logger?.LogWarning(
+                firstAttempt,
+                StoreWriteReattemptLogTemplate,
+                definition.Name, server.Config.DisplayName, rows.Count, firstAttempt.Message),
+            cancellationToken);
+
+        if (outcome.Reattempted)
+        {
+            /* Incremented only once the rows are actually stored: a re-attempt that also fails throws out
+               of RunAsync into RunOneAsync's fault arms, which record ERROR and never read this. So the
+               count means "stored on the second attempt", never "tried twice". */
+            context.StoreWriteReattempts++;
+        }
+
+        return outcome.RowsWritten;
+    }
+
+    /// <summary>
+    /// The template for the re-attempt's log line (#3099). A named constant so a pin can assert the shipped
+    /// string, and Warning rather than Debug because a store that drops collector writes is a finding even
+    /// when the row is recovered — the level is what keeps it on the default filter, where the log-based
+    /// measurement that found this reads.
+    /// </summary>
+    internal const string StoreWriteReattemptLogTemplate =
+        "{Collector} on '{Server}': the store write of {Rows} row(s) failed on a transport fault " +
+        "({Message}) — re-attempting once on a fresh store connection (#3099). The batch is still in " +
+        "memory and nothing was committed, so a successful re-attempt costs no sample.";
+
+    /// <summary>
+    /// The collection_log note for a cycle that stored its rows only after a re-attempt (#3099). <c>{0}</c>
+    /// = how many of the cycle's writes needed one.
+    ///
+    /// <para><b>The status stays SUCCESS, and the note is what makes the re-attempt visible.</b> A new
+    /// status value would be read as a failure by every consumer of
+    /// <c>status IN ('SUCCESS', 'SKIPPED')</c> — eight readers across the service, the MCP, both viewers
+    /// and Lite — and would suppress <c>last_success</c> for a cycle that genuinely stored every row and
+    /// advanced its watermark. That is #2673's defect with the sign flipped, and the same reasoning that
+    /// put the whole-cycle-budget message in this channel rather than inventing a sixth status.</para>
+    ///
+    /// <para>Recording it at all is not decoration. Before the re-attempt a transport fault wrote a
+    /// collection_log ERROR row, and those rows are the measurement behind #3099's own in-window versus
+    /// out-window error-rate ratio. A silent retry would remove the sample loss AND the only instrument
+    /// that can check whether the association it was diagnosed from is real.</para>
+    /// </summary>
+    internal const string StoreWriteReattemptNoteFormat =
+        "{0} store write(s) this cycle stored their rows only on a re-attempt after a transport fault " +
+        "(#3099); no rows were lost";
+
+    /// <summary><see cref="StoreWriteReattemptNoteFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_storeWriteReattemptNote =
+        CompositeFormat.Parse(StoreWriteReattemptNoteFormat);
+
+    /// <summary>
+    /// The note for this cycle's store-write re-attempts, or null when none of them needed one — the shape
+    /// every other note producer here takes, so <see cref="EnumeratedCollectorDriver.MergeNotes"/> composes
+    /// it with the probe-failure and partial-failure channels without a special case.
+    /// </summary>
+    internal static string? StoreWriteReattemptNote(int reattempts) =>
+        reattempts <= 0
+            ? null
+            : string.Format(CultureInfo.InvariantCulture, s_storeWriteReattemptNote, reattempts);
+
+    /// <summary>
+    /// ONE attempt at the batch: the binary COPY, and for the diverting collectors the transaction that
+    /// wraps it and its dimension flush. Separate from <see cref="WriteBatchAsync"/> so the importer and
+    /// the transaction are both disposed before the re-attempt runs — a retry that fired while the failed
+    /// attempt's transaction was still in scope would re-enter with an aborted transaction on the
+    /// connection and fail on 25P02 rather than on anything to do with the store.
+    /// </summary>
+    private async Task<int> CopyBatchOnceAsync<TRow>(
+        NpgsqlConnection pgConnection,
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        ServerRuntime server,
+        DateTime collectionTime,
+        CollectorContext context,
+        CancellationToken cancellationToken)
+    {
         var rowsWritten = 0;
         var writer = new PgCollectorRowWriter();
 
