@@ -153,6 +153,16 @@ public class CrossAppGuardCiGateTests
 
         [$"{LiteTestsDir}/LiteSidebarDotRendersTheCardStatusTests.cs"] =
             "WHOLE-TREE READ. The second key of that same bounded set, same sweep, same reason.",
+
+        [$"{LiteTestsDir} (directory)"] =
+            "WHOLE-TREE READ, and the one #3076 made visible. ControlPlaneReloadDurabilityTests' "
+            + "NeitherFixHasALiteTwinToDriftFrom sweeps { \"Lite\", \"Lite.Tests\", "
+            + "\"PerformanceMonitor.Common\" } through Path.Combine and EnumerateFiles, so it reads "
+            + "every *.cs under Lite's test project as well as under Lite. Nothing narrower than "
+            + "Lite.Tests/** reaches a tree enumeration, and in the darling filter that entry would "
+            + "buy no guard execution — same measurement as the entries above. The companion "
+            + "reference from the same sweep, Lite (directory), needs no exemption: the darling "
+            + "filter's derived Lite/**/*.cs entry already reaches it.",
     };
 
     /// <summary>The exact command <c>darling-tree-guards</c> has to run for anything in
@@ -213,7 +223,10 @@ public class CrossAppGuardCiGateTests
             var combined = Path.Combine("Lite.Tests", "Fixtures", "SystemHealth");
             var prefixedRoot = "LiteTests/NotOurs.cs";
             var longerRoot = "Lite.TestsExtra/NotOurs.cs";
-            var bareDirectory = "Lite.Tests";
+            var sweep = new[] { "Lite", "Lite.Tests", "PerformanceMonitor.Common" }
+                .Select(d => Path.Combine(root, d))
+                .Where(Directory.Exists)
+                .SelectMany(d => Directory.EnumerateFiles(d, "*.cs", SearchOption.AllDirectories));
             """;
 
         Assert.Equal(
@@ -234,13 +247,194 @@ public class CrossAppGuardCiGateTests
                    this shape one directory over. Collected after the quoted paths, hence last. */
                 "Lite.Tests/Fixtures/SystemHealth",
 
-                /* Absent, and each for its own reason: LiteTests/ shares no boundary with either root;
-                   Lite.TestsExtra/ is prefixed BY the longer root and is still not it; and a bare
-                   directory name with no separator was never in this matcher's language, before or
-                   after the widening (ControlPlaneReloadDurabilityTests names one, and this pin
-                   records that the scan does not see it rather than implying it does). */
+                /* #3076, and the reason the `sweep` line above is spelled exactly as
+                   ControlPlaneReloadDurabilityTests spells it: both roots named bare, with no
+                   separator on either, in a text that composes a whole path per collection element.
+                   Both are found and they are found SEPARATELY — the test root is not folded into the
+                   app root, which is what a shorter-root absorption would produce and what would then
+                   drop Lite.Tests out of the set entirely. Longest root first, as Roots is ordered. */
+                "Lite.Tests",
+                "Lite",
+
+                /* Absent, and each for its own reason: LiteTests/ shares no boundary with either
+                   root, and Lite.TestsExtra/ is prefixed BY the longer root and is still not it. Both
+                   would introduce a value nothing else in this set carries, so a widening into a
+                   prefix match is visible here.
+
+                   The spellings that remain UNFOUND after #3076 are NOT recorded here, deliberately.
+                   This text carries a genuine sweep, so both roots are in the expected set already,
+                   and arm three yields a root at most once per collection — an extra accepting site
+                   could not change the set, and a case whose firing is invisible records nothing. They
+                   are in TheCSharpMatchers_StillCannotSeeTheseSpellings instead, one text each, where
+                   the expected answer is empty and any firing shows. */
             },
             CSharpPaths(Text, LiteTrees).ToArray());
+    }
+
+    /// <summary>
+    /// The cross-app reads this matcher STILL cannot see, each with live instances, each written down
+    /// rather than left to be rediscovered — which is what #3063, #3067 and #3076 each were.
+    ///
+    /// <para>One text per spelling, so the expected answer is EMPTY and a widening that starts firing
+    /// on one of them shows up as a value appearing where none belongs. Folded into the fixture above
+    /// they would record nothing: that text carries a genuine sweep, so both roots are already in its
+    /// expected set, and an extra accepting site could not change it.</para>
+    ///
+    /// <para><b>Every case carries a positive control through the same matcher.</b> An empty answer is
+    /// the success condition here, and the other thing that produces an empty answer is a matcher that
+    /// has stopped working — the failure this whole class exists to catch. So each text is also fed
+    /// with the same read spelled WITH a separator, and that has to be found. A dead
+    /// <see cref="CSharpPaths"/> fails the control while satisfying every emptiness assertion.</para>
+    ///
+    /// <para>None of these is unguarded in CI. All three name files under the Lite app tree, which the
+    /// <c>darling</c> filter's derived <c>*.cs</c> entry reaches, so the suites run; the gap is in what
+    /// this guard can SAY, and therefore in what an exemption could ever be written for.</para>
+    ///
+    /// <para>One SKU rather than both, unlike <see cref="TheBareDirectoryArm_IsLiveForBothSkus"/>: each
+    /// case names the live instances it stands for and all of them are Lite-side, so a text derived per
+    /// SKU would carry a claim that is false for the other one. What is symmetric here is the matcher,
+    /// and that is pinned for both SKUs there.</para>
+    /// </summary>
+    [Fact]
+    public void TheCSharpMatchers_StillCannotSeeTheseSpellings()
+    {
+        /* A collection whose elements are SEGMENTS of one path rather than whole paths, recomposed by
+           a helper. The real read is Lite/Controls. The bare arm deliberately does not fire: reporting
+           `Lite` for a read of Lite/Controls would replace a precise reference with a whole tree.
+           ScopedLoadOrderingTests carries two (s_finOps, s_liteWindows), ViewerScopedPaintGuardTests a
+           third. */
+        const string SegmentCollection = """
+            var segmentList = new[] { "Lite", "Controls" };
+            var viaHelper = SourceFile(segmentList, "FinOpsTab.xaml.cs");
+            """;
+
+        /* The collection declared in one member and projected in another, so the two are never
+           adjacent and the gate cannot see them together. XamlStaticResourceHygieneTests is exactly
+           this shape; its whole-tree read of Lite is reported anyway, because
+           ControlPlaneReloadDurabilityTests produces the same reference from its own sweep — which is
+           luck, not coverage, and is the reason this case is here. */
+        const string CrossMemberCollection = """
+            private static readonly string[] Scopes = { "Lite" };
+            var crossMember = Scopes.Select(d => Path.Combine(root, d));
+            """;
+
+        /* Path.Combine with the base in a VARIABLE. The second arm requires the root literal FIRST, so
+           the specific file is never resolved. QueryStoreStatePruneTests and CollectorStateContractTests
+           carry live instances. */
+        const string VariableBase = """
+            var variableBase = Path.Combine(root, "Lite", "Analysis", "NotSeen.cs");
+            """;
+
+        foreach (var text in new[] { SegmentCollection, CrossMemberCollection, VariableBase })
+        {
+            Assert.Empty(CSharpPaths(text, LiteTrees));
+
+            /* The control. Same text, same matcher, plus the read spelled the way this matcher DOES
+               see — so an empty answer above means "this spelling is unfound" rather than "nothing is
+               found any more". */
+            Assert.Equal(
+                new[] { "Lite/Analysis/NotSeen.cs" },
+                CSharpPaths(text + "\r\nvar spelled = \"Lite/Analysis/NotSeen.cs\";\r\n", LiteTrees));
+        }
+    }
+
+    /// <summary>
+    /// #3076's arm, for BOTH SKUs and in one code path, with the fixture text DERIVED from each SKU's
+    /// own tree names rather than written out per arm.
+    ///
+    /// <para>Two things need saying at once, and neither is provable from the live tree. The arm has to
+    /// be live on the Lite arm as well as the Darling one — measured, <c>Lite.Tests</c> has no bare
+    /// directory read of a Darling root today, so a floor taken over the live scan there would be
+    /// satisfied by an arm that had stopped working entirely. And it has to be live on the DARLING SKU,
+    /// whose test root contains a separator and is therefore already visible to the first arm, so an
+    /// implementation that quietly special-cased "roots without a separator" would look identical here
+    /// until the day Darling's test project moved out to a sibling.</para>
+    ///
+    /// <para>Both expectations are taken off <see cref="SkuTrees.AppDir"/> and
+    /// <see cref="SkuTrees.TestsDir"/> — the NAMED members — while the matcher anchors on
+    /// <see cref="SkuTrees.Roots"/>. A root dropped from <c>Roots</c> therefore reds here rather than
+    /// disappearing from both sides of a comparison that derived them from the same list, which is how
+    /// a fixture agrees with itself.</para>
+    ///
+    /// <para>The negative halves are the point as much as the positive one. Without the gate this arm
+    /// reports every quoted mention of a root, which measured over this repository is 37 sites in
+    /// <c>Darling.Tests</c> and 20 in <c>Lite.Tests</c>, and the Lite arm has no backstop to exempt the
+    /// reference that would produce.</para>
+    /// </summary>
+    [Fact]
+    public void TheBareDirectoryArm_IsLiveForBothSkus()
+    {
+        foreach (var other in new[] { LiteTrees, DarlingTrees })
+        {
+            /* The live shape: a collection of bare roots, projected one element to one whole path. */
+            var swept =
+                $"var sweep = new[] {{ \"{other.AppDir}\", \"{other.TestsDir}\", \"PerformanceMonitor.Common\" }}\n"
+                + "    .Select(d => Path.Combine(root, d))\n"
+                + "    .SelectMany(d => Directory.EnumerateFiles(d, \"*.cs\", SearchOption.AllDirectories));\n";
+
+            /* Both roots, once each. A root that already carries a separator is ALSO seen by the first
+               arm, so it arrives twice; the duplicate is asserted rather than normalised away, and the
+               claim being made is about the distinct set. */
+            Assert.Equal(
+                new[] { other.AppDir, other.TestsDir }.OrderBy(r => r, StringComparer.Ordinal),
+                CSharpPaths(swept, other).Distinct().OrderBy(r => r, StringComparer.Ordinal));
+
+            /* Anti-vacuity, stated separately because the equality above holds for an empty set the day
+               someone writes an empty expectation next to an empty answer. */
+            Assert.Contains(other.TestsDir, CSharpPaths(swept, other));
+            Assert.Contains(other.AppDir, CSharpPaths(swept, other));
+
+            /* The precision half: the SAME roots, bare, with no per-element composition anywhere in the
+               text. This is the shape of all 20 Lite-arm sites and 35 of the 37 Darling-arm ones —
+               tuple labels, assertion keys, and this class's own root constants — and the arm must see
+               none of them. Nothing else in the text carries a separator, so an empty answer here is
+               the whole answer rather than the residue of one. */
+            var prose =
+                $"private const string AppDir = \"{other.AppDir}\";\n"
+                + $"private const string TestsDir = \"{other.TestsDir}\";\n"
+                + $"var scopes = new[] {{ (\"{other.AppDir}\", 1) }};\n"
+                + $"Assert.Equal(0, perStore[\"{other.AppDir}\"]);\n";
+
+            Assert.Equal(
+                /* Except the one a root containing a separator hands to the FIRST arm, which is not
+                   gated and never was. Derived, so the Lite SKU expects nothing and the Darling SKU
+                   expects its test root, without either being written down as a special case. */
+                new[] { other.AppDir, other.TestsDir }
+                    .Where(r => r.Contains('/', StringComparison.Ordinal)),
+                CSharpPaths(prose, other));
+
+            /* The absorption red-proof, and the reason the gate insists the element be the LAST
+               argument. This text carries a lambda, a Path.Combine and the element — everything the
+               gate looks for except the element being the whole path — and the group before it must
+               not absorb `root, d, "Fixtures"` into a match. If it did, every segment composition in
+               the repository would turn its first segment into a whole-tree reference, which is the
+               noisy widening #3076 exists to reject. */
+            var segments =
+                $"var files = new[] {{ \"{other.AppDir}\", \"{other.TestsDir}\" }}\n"
+                + "    .Select(d => Path.Combine(root, d, \"Fixtures\"));\n";
+
+            Assert.Equal(
+                new[] { other.AppDir, other.TestsDir }
+                    .Where(r => r.Contains('/', StringComparison.Ordinal)),
+                CSharpPaths(segments, other));
+
+            /* A collection element merely PREFIXED by a root is not that root, and it is a DIFFERENT
+               tree. Elements are compared for equality rather than by prefix, so neither root can
+               claim these. Written as its own case because equality and a prefix test agree on every
+               element that IS a root — the two only diverge on an element like this one, so a fixture
+               without it leaves the choice between them unpinned. The separator-carrying spelling is
+               still reported by the FIRST arm, which anchors on a root followed by a separator and is
+               right to: Darling/Darling.TestsExtra opens with the Darling root and a separator, so it
+               IS a path under that root, unlike Lite.TestsExtra which is a sibling of one. */
+            var prefixed =
+                $"var files = new[] {{ \"{other.AppDir}Extra\", \"{other.TestsDir}Extra\" }}\n"
+                + "    .Select(d => Path.Combine(root, d));\n";
+
+            Assert.Equal(
+                new[] { other.AppDir + "Extra", other.TestsDir + "Extra" }
+                    .Where(r => r.Contains('/', StringComparison.Ordinal)),
+                CSharpPaths(prefixed, other));
+        }
     }
 
     /// <summary>
@@ -787,14 +981,86 @@ public class CrossAppGuardCiGateTests
         "<HintPath(?:\\s+[\\w:.-]+\\s*=\\s*(?:\"[^\"]*\"|'[^']*'))*\\s*>([^<]*)</HintPath\\s*>",
         RegexOptions.Compiled);
 
-    /// <summary>The paths one C# file's text names that belong to <paramref name="other"/>, in the two
-    /// spellings this repository's pins use, repo-rooted and forward-slashed.
+    /// <summary>A collection literal whose elements are each projected to a WHOLE path below a base,
+    /// rather than to one segment of one:
+    /// <c>new[] { "Lite", "Lite.Tests" }.Select(d =&gt; Path.Combine(root, d))</c>.
+    ///
+    /// <para><b>This is what makes a bare directory name a path, and it is the whole discrimination
+    /// #3076 turns on.</b> <c>"Lite"</c> and <c>"Darling"</c> are quoted bare all over both test
+    /// projects — as tuple labels, as assertion keys, as this class's own root constants — and the
+    /// majority of the ones that touch a path at all are the FIRST SEGMENT of a longer literal
+    /// composition, <c>Path.Combine("Lite", "Services", "X.cs")</c>, which
+    /// <see cref="CSharpPaths"/>' second arm already resolves to the specific file. Reporting
+    /// <c>Lite</c> for one of those would replace a precise reference with a whole tree, which is a
+    /// LOSS of information, not a gain. Here the element is the last argument, so there is no further
+    /// literal segment and the element is the entire path — a bare root in that position names the
+    /// tree.</para>
+    ///
+    /// <para><b>The collection is matched together with the projection, not looked for anywhere in the
+    /// same file.</b> A file-wide gate reads well and self-reports immediately: this class declares
+    /// <c>DarlingAppDir = "Darling"</c> and carries a fixture text containing the projection, so a
+    /// gate satisfied file-wide turned THIS file into a bare-directory read of <c>Darling</c> that the
+    /// <c>lite</c> filter cannot reach — on the arm that deliberately has no exemption list. The bare
+    /// root has to be an ELEMENT of the collection being projected, which is a local fact and cannot
+    /// be manufactured by a fixture one member over. The element is compared for EQUALITY against the
+    /// root rather than searched for as a quoted substring, so the shorter root cannot claim the
+    /// longer one's characters here by any amount of backtracking.</para>
+    ///
+    /// <para>Any method taking the lambda, not <c>.Select</c> specifically: <c>.SelectMany</c> carries
+    /// the same projection, and an enumerated list of LINQ operators is how the next spelling gets
+    /// missed. The base may itself be a call — <c>Path.Combine(RepoRoot(), d)</c> — so one level of
+    /// nesting is allowed inside it, matched as balanced pairs rather than "anything up to the next
+    /// <c>)</c>", which would end the argument list inside the nested call.</para>
+    ///
+    /// <para><b>The element must be the LAST argument.</b>
+    /// <c>Path.Combine(root, d, "Fixtures")</c> is a segment composition wearing a lambda, and the
+    /// group before the element cannot absorb its way into matching one: after consuming
+    /// <c>root, d, "Fixtures"</c> there is no <c>, d)</c> left to match, and every shorter split fails
+    /// the same way. Pinned in <see cref="TheBareDirectoryArm_IsLiveForBothSkus"/>, because a group
+    /// that DID absorb the token under test is exactly how a regex pin passes while blind.</para></summary>
+    private static readonly Regex WholePathPerElement = new(
+        @"(?:new\[\]\s*\{|\[)(?<elements>[^{}\[\]]*)[\}\]]\s*\.\w+\(\s*(?<id>\w+)\s*=>\s*"
+        + @"Path\.Combine\((?:[^()]|\([^()]*\))*,\s*\k<id>\s*\)",
+        RegexOptions.Compiled);
+
+    /// <summary>The paths one C# file's text names that belong to <paramref name="other"/>, in the
+    /// three spellings this repository's pins use, repo-rooted and forward-slashed.
     ///
     /// <para><b>The anchor is every root the SKU owns, which is #3067.</b> Anchored on the app directory
     /// alone, <c>Lite.Tests/X.cs</c> matched neither <c>Lite/</c> nor anything else and left the found
     /// set silently — the failure direction this whole class exists to close. A root still has to be
     /// followed by a SEPARATOR, so a tree merely PREFIXED by a root's name (<c>Lite.TestsExtra/</c>) is
     /// no more a read of that SKU than it was before.</para>
+    ///
+    /// <para><b>A directory named without a separator is still a path, which is #3076.</b>
+    /// <c>ControlPlaneReloadDurabilityTests</c> sweeps <c>new[] { "Lite", "Lite.Tests", … }</c> through
+    /// <c>Path.Combine(root, d)</c> and <c>Directory.EnumerateFiles</c>, so it reads Lite's whole tree
+    /// AND Lite's whole test tree, and neither string carries the separator the first two arms need.
+    /// Accepting a bare root on the strength of the STRING alone is what would make that fix worse than
+    /// the miss. Measured over this tree: the spelling occurs at 37 quoted sites in
+    /// <c>Darling.Tests</c> and 20 in <c>Lite.Tests</c>; all 57 survive an on-disk-existence filter,
+    /// because a root IS a real directory and that filter therefore discriminates nothing here; and 2
+    /// survive being required to be USED as a directory. On the Lite arm the surviving count is zero,
+    /// which is the correct answer — every one of its 20 is a label, an assertion key or one of this
+    /// class's own root constants — and a string-only anchor would instead have manufactured a
+    /// <c>Darling</c> reference that the <c>lite</c> filter cannot reach, on the one arm that
+    /// deliberately has no exemption list to record it in.</para>
+    ///
+    /// <para><b>What this still cannot see, recorded rather than implied.</b> A collection whose
+    /// elements are SEGMENTS of one path rather than whole paths — <c>["Lite", "Controls"]</c>
+    /// recomposed by a helper — names <c>Lite/Controls</c>, and no arm here reaches it;
+    /// <c>ScopedLoadOrderingTests</c> and <c>ViewerScopedPaintGuardTests</c> carry three live
+    /// instances. A collection declared in one member and projected in another is invisible for the
+    /// reason the paragraph above gives, and <c>XamlStaticResourceHygieneTests</c> is that shape — its
+    /// whole-tree read of Lite happens to be reported anyway, because the same reference arrives from
+    /// <c>ControlPlaneReloadDurabilityTests</c>. And <c>Path.Combine(root, "Lite", "Services", "X.cs")</c>,
+    /// with the base as a VARIABLE, is missed by the second arm, which requires the root literal
+    /// first; <c>QueryStoreStatePruneTests</c> and <c>CollectorStateContractTests</c> carry live
+    /// instances of that one. All of them name files under the Lite app tree, which the
+    /// <c>darling</c> filter's derived <c>*.cs</c> entry already reaches, so as with #3063 and #3067
+    /// the gap is in what this guard can SAY, not in what CI runs. Each has its own case, with its own
+    /// text and its own positive control, in
+    /// <see cref="TheCSharpMatchers_StillCannotSeeTheseSpellings"/>.</para>
     ///
     /// <para>Shared by the walk and by the pin that reads it back, for the same reason
     /// <see cref="MsBuildPaths"/> is: a retyped copy in a test is free to agree with itself while the
@@ -822,6 +1088,28 @@ public class CrossAppGuardCiGateTests
                 if (segments.Length > 0)
                 {
                     yield return root + "/" + string.Join("/", segments);
+                }
+            }
+        }
+
+        /* #3076: "Lite" on its own, as an element of a collection projected one element to one whole
+           path. Elements are compared for EQUALITY against each root, so the shorter root cannot claim
+           the longer one's characters — "Lite" is simply not the string "Lite.Tests". A root that
+           CONTAINS a separator (Darling/Darling.Tests) is found by the first arm as well and
+           unconditionally; the duplicate is expected rather than normalised away, so a later change
+           that starts collapsing yields reds and gets read. Note() keys by reference, so a duplicate
+           costs the scan nothing. */
+        foreach (Match m in WholePathPerElement.Matches(text))
+        {
+            var elements = Regex.Matches(m.Groups["elements"].Value, "\"([^\"]+)\"")
+                .Select(s => s.Groups[1].Value)
+                .ToArray();
+
+            foreach (var root in other.Roots)
+            {
+                if (elements.Contains(root, StringComparer.Ordinal))
+                {
+                    yield return root;
                 }
             }
         }
