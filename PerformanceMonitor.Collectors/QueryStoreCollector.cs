@@ -162,7 +162,7 @@ DECLARE
 
 DECLARE
     @db sysname,
-    @sql NVARCHAR(500),
+    @sql nvarchar(500),
     @exec_sp nvarchar(256);
 
 DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR

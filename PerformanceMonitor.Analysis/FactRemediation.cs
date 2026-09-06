@@ -1569,7 +1569,7 @@ public static class FactRemediation
         sb.Append(nl);
         sb.Append("-- STEP 2 (apply): free every currently-cached plan for those hashes. There is NO un-clear —").Append(nl);
         sb.Append("-- the prior plans are gone and the recompile is not guaranteed to be better.").Append(nl);
-        sb.Append("DECLARE @plan_handle VARBINARY(64);").Append(nl);
+        sb.Append("DECLARE @plan_handle varbinary(64);").Append(nl);
         sb.Append("DECLARE plan_cursor CURSOR LOCAL FAST_FORWARD FOR").Append(nl);
         sb.Append("    SELECT DISTINCT qs.plan_handle").Append(nl);
         sb.Append("    FROM sys.dm_exec_query_stats AS qs").Append(nl);

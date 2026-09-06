@@ -31,7 +31,7 @@ public partial class LocalDataService
     /// </summary>
     internal const string InventoryQueryText = @"
 DECLARE
-    @storage_sql nvarchar(MAX) =
+    @storage_sql nvarchar(max) =
         CASE
             WHEN CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
             THEN N'SELECT @gb = SUM(CAST(size AS bigint)) * 8.0 / 1024.0 / 1024.0 FROM sys.database_files'
