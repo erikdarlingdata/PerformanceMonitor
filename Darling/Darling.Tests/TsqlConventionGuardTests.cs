@@ -66,9 +66,19 @@ namespace Darling.Tests;
 /// <see cref="NoTsqlStatementViolatesACoveredConvention"/>, spelled identically, because an arm written as a
 /// special case is how the next tree inherits the sibling bug #3067 was filed for. Duplicating the class into
 /// <c>Lite.Tests</c> would buy nothing and drift: the <c>darling</c> path filter reaches
-/// <c>Lite/**/*.cs</c> and the <c>core</c> filter reaches every shared library, so this suite runs on a change
-/// to any tree it reads — <c>CrossAppGuardCiGateTests</c> is what holds that, and
-/// <c>darling-tree-guards</c> runs the whole suite on the arm where the filter did not fire.</para>
+/// <c>Lite/**/*.cs</c> and the <c>core</c> filter reaches every shared library, so the "Run Darling tests"
+/// step fires on a change to any tree this reads, and <c>darling-tree-guards</c> runs the whole suite on the
+/// arm where it did not.</para>
+///
+/// <para><b>What holds that reachability, stated precisely rather than gestured at.</b>
+/// <c>CrossAppGuardCiGateTests</c> requires every cross-app source read to be reachable by the filter that
+/// gates its suite — but its C# matcher records "a collection declared in one member and projected in
+/// another" among the spellings it cannot see, and the bare <c>"Lite"</c> in <see cref="ScannedTrees"/> is
+/// that shape. So the ANCHOR paths carry the claim: each is a separator-bearing path literal, which is that
+/// matcher's first arm, so <c>Lite/Services/LocalDataService.FinOps.Recommendations.cs</c> is in its found
+/// set and has to stay filter-reachable. Measured: with the anchors in place, pointing one at a
+/// <c>Lite.Tests</c> path reds that guard; before they existed the same injection changed nothing, which is
+/// how the gap was found rather than assumed.</para>
 /// </summary>
 public sealed class TsqlConventionGuardTests
 {
@@ -228,16 +238,22 @@ public sealed class TsqlConventionGuardTests
         var statementsScanned = 0;
         var offenders = new List<string>();
 
-        foreach (var (tree, roots) in ScannedTrees)
+        var repo = RepoRoot();
+
+        foreach (var (tree, roots, anchor) in ScannedTrees)
         {
             treesScanned++;
             var statementsInTree = 0;
+            var anchorStatements = 0;
+            var anchorPath = Path.GetFullPath(
+                Path.Combine(repo, anchor.Replace('/', Path.DirectorySeparatorChar)));
 
             foreach (var path in SourceFiles(roots))
             {
                 filesScanned++;
                 var text = File.ReadAllText(path);
                 var name = Path.GetFileName(path);
+                var isAnchor = string.Equals(path, anchorPath, StringComparison.Ordinal);
 
                 foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
                 {
@@ -250,6 +266,11 @@ public sealed class TsqlConventionGuardTests
 
                     statementsScanned++;
                     statementsInTree++;
+
+                    if (isAnchor)
+                    {
+                        anchorStatements++;
+                    }
 
                     foreach (var (rule, detail) in Findings(body))
                     {
@@ -264,6 +285,15 @@ public sealed class TsqlConventionGuardTests
                 statementsInTree > 0,
                 $"the {tree} tree contributed no T-SQL statement at all, so every check below is vacuous "
                 + $"there. Roots read: {string.Join(", ", roots)}.");
+
+            /* And the same requirement on a NAMED file, which a per-tree total cannot give: the tree still
+               contributes when the glob reaches only part of it, or when the marker set goes blind on the
+               one shape that file uses. */
+            Assert.True(
+                anchorStatements > 0,
+                $"the {tree} tree's anchor file {anchor} contributed no T-SQL statement, so the tree total "
+                + "above is being satisfied by other files. Either the sweep no longer reaches that path or "
+                + "the discriminator no longer recognises the SQL in it.");
         }
 
         Assert.Equal(ScannedTrees.Length, treesScanned);
@@ -1224,8 +1254,17 @@ public sealed class TsqlConventionGuardTests
     /// T-SQL is COPIES: the <c>*CollectorDefinitionTests</c> parity constants are asserted equal to
     /// <c>BuildQuery(context).Text</c>, so a violation cannot exist in the copy without existing in the
     /// shipped query — and this file's own fixtures deliberately carry every banned shape.</para>
+    ///
+    /// <para>Each group names an ANCHOR file whose T-SQL must stay visible, which is a per-site requirement
+    /// that a per-tree total cannot give — and it is also what makes this file's cross-app read of Lite
+    /// legible to <c>CrossAppGuardCiGateTests</c>. That guard's C# matcher records "a collection declared in
+    /// one member and projected in another" among the spellings it cannot see, and the bare <c>"Lite"</c>
+    /// below is exactly that shape; a path literal carrying a separator is its FIRST arm, so the anchor is
+    /// what puts this read into that guard's found set instead of leaving it to arrive from another pin. The
+    /// three anchors are the file #3078's violation landed in and the two non-shared files this change
+    /// fixed.</para>
     /// </summary>
-    private static readonly (string Tree, string[] Roots)[] ScannedTrees =
+    private static readonly (string Tree, string[] Roots, string Anchor)[] ScannedTrees =
     {
         ("shared libraries", new[]
         {
@@ -1236,9 +1275,11 @@ public sealed class TsqlConventionGuardTests
             "PerformanceMonitor.Notifications",
             "PerformanceMonitor.PlanAnalysis",
             "PerformanceMonitor.Ui",
-        }),
-        ("Darling", new[] { "Darling" }),
-        ("Lite", new[] { "Lite" }),
+        }, "PerformanceMonitor.Collectors/StallWaitProbe.cs"),
+        ("Darling", new[] { "Darling" },
+            "Darling/PerformanceMonitor.Darling.Service/DarlingServerConnector.cs"),
+        ("Lite", new[] { "Lite" },
+            "Lite/Services/LocalDataService.FinOps.Recommendations.cs"),
     };
 
     private static IEnumerable<string> SourceFiles(string[] roots, [CallerFilePath] string thisFile = "")
