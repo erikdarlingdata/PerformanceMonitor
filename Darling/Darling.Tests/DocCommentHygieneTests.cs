@@ -1080,6 +1080,14 @@ public sealed class DocCommentHygieneTests
                 .SelectMany(b => CrefReference.Matches(string.Join("\n", b.Select(l => l.Text))))
                 .Select(m => m.Groups["target"].Value)
                 .ToArray());
+
+        /* And through the census, which is the part that ships. A blanking helper the sweep does not call
+           is the shape DocCommentHygieneTests already warns about one rule up: a predicate nothing calls
+           leaves the rule reading everything, and this pin would pass either way. */
+        Assert.Equal(
+            new[] { "RealReference" },
+            BuildCrefCensus(new[] { ("AppOne/File.cs", fixture) }, new[] { "AppOne" })
+                .Sites.Select(s => s.Target).ToArray());
     }
 
     /// <summary>
