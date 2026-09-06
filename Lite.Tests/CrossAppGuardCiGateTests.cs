@@ -364,7 +364,15 @@ public class CrossAppGuardCiGateTests
     [Fact]
     public void TheBareDirectoryArm_IsLiveForBothSkus()
     {
-        foreach (var other in new[] { LiteTrees, DarlingTrees })
+        var skus = new[] { LiteTrees, DarlingTrees };
+
+        /* Every assertion below lives inside a loop, and a loop over nothing satisfies all of them.
+           Floored at the number of SKUs this class gates a suite for, so a third one reds here and
+           gets a case rather than inheriting whichever arm's behaviour it happens to land on — which
+           is the shape of #3067, and the reason both arms are spelled identically to begin with. */
+        Assert.Equal(2, skus.Length);
+
+        foreach (var other in skus)
         {
             /* The live shape: a collection of bare roots, projected one element to one whole path. */
             var swept =
