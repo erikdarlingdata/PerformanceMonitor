@@ -20,22 +20,31 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Drift guard between <see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>'s recorded
-/// provenance and the arithmetic that provenance rests on (#3069).
+/// DERIVATION and the arithmetic that derivation consists of (#3069, #3101).
 ///
-/// <para><b>Why this exists.</b> The constant's doc comment used to present 864 s as the highest figure
-/// recorded under the narrowed window, alongside three companions "climbing with volume rather than
-/// settling". A ten-run status-verified series then rose to 594 s and settled back, and the 864 s run turned
-/// out to end one second AFTER the boundary the whole issue splits on — so its regime membership is
-/// undetermined. The comment records the distribution now. A distribution written in prose has no way to
-/// notice that its own summary no longer follows from it, which is how the superseded characterisation
-/// survived, so every summary figure is derived here and the prose is required to agree.</para>
+/// <para><b>Why this exists.</b> The constant is the maximum of a published population, and the doc comment
+/// states the population, the exclusion rule that produced it, and the summary figures that follow from it.
+/// Every one of those relationships is checkable and none of them is checked by the compiler: a population
+/// written in prose has no way to notice that its own summary no longer follows from it, and a summary is
+/// exactly what a later reader will cite. So the estimator is re-computed here from the series the comment
+/// publishes and the constant is required to equal it, which is the difference between a value someone can
+/// re-derive and a value someone has to trust.</para>
 ///
-/// <para><b>Derive, don't restate.</b> Nothing below hardcodes 864, 900, 36, 306 or 338. Every expected value
-/// comes either from the constants (<see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>,
+/// <para><b>Derive, don't restate.</b> Nothing below hardcodes the ceiling, the slot, the margin or any
+/// summary figure. Every expected value comes either from the constants
+/// (<see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>,
 /// <see cref="TimescaleSupport.RefreshPhaseSlotSeconds"/>,
 /// <see cref="TimescaleSupport.RefreshPhaseStepMinutes"/>,
-/// <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/>) or from the SERIES THE COMMENT ITSELF PUBLISHES.
-/// A pin that restated the summary would go stale by precisely the mechanism it exists to stop.</para>
+/// <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/>) or from the POPULATION THE COMMENT ITSELF
+/// PUBLISHES. A pin that restated the summary would go stale by precisely the mechanism it exists to
+/// stop.</para>
+///
+/// <para><b>One pin is written to expire, deliberately.</b> The comment's reason for taking the maximum
+/// rather than a percentile is partly that at this sample size the 95th percentile IS the maximum by nearest
+/// rank. <see cref="Verify"/> checks that, so the pin goes red once the population grows past the point where
+/// it holds — which is the moment the maximum-versus-percentile decision genuinely has to be re-taken rather
+/// than inherited. A check that simply kept passing would let the stated reason quietly stop being the real
+/// one.</para>
 ///
 /// <para><b>Which numeral KIND these are, because the repo handles two differently and neither #3072 nor
 /// #3073 says so out loud.</b> A numeral that restates an adjacent list gets DELETION offered in its
@@ -43,16 +52,19 @@ namespace Darling.Tests;
 /// numeral that is program output gets "fix the pattern rather than the count", because a transcript has
 /// to keep showing what the tool really prints. <c>ReadmeDerivedCountPinTests</c> implements both halves
 /// and states neither, so the rule has to be inferred from the disagreement between two of its own
-/// failure texts. All thirteen patterns here are the first kind — derived arithmetic restated in prose —
-/// which is why deletion is offered throughout; and this paragraph is NARRATION of an existing rule, not
-/// a counted claim, so nothing checks it and nothing should.</para>
+/// failure texts. Every pattern here is the first kind — derived arithmetic restated in prose — which is
+/// why deletion is offered throughout; and this paragraph is NARRATION of an existing rule, not a counted
+/// claim, so nothing checks it and nothing should. It states no count of patterns either, for the same
+/// reason: a numeral over a list that grows is the defect this file is about, one level up.</para>
 ///
-/// <para><b>What is deliberately NOT pinned, said plainly rather than left looking covered.</b> The two
+/// <para><b>What is deliberately NOT pinned, said plainly rather than left looking covered.</b> The
 /// snapshot readings are quoted evidence, not derived quantities — nothing in the code can know them — so
 /// they are held only by the DISJOINTNESS the paragraph is about (see
 /// <see cref="TheInadmissibleReadings_CannotBeFoldedIntoTheStatusVerifiedSeries"/>), which is the failure
 /// mode that matters: an unfiltered reading migrating into the population a constant may be set from. The
-/// clock time of the unobserved run and the pre-narrowing band are likewise evidence and carry no pin.</para>
+/// pre-narrowing band and the 3.8x ratio drawn against it are likewise evidence — that band is #3012's
+/// measurement and no constant here spells it — so they carry no pin. The excluded run's 1.45x ratio to the
+/// population maximum IS pinned, because both of its terms are stated here.</para>
 ///
 /// <para><b>The guard is itself guarded, three ways.</b> Every extraction asserts its pattern MATCHED before
 /// a value is compared. <see cref="EveryNumericPin_ReportsAnInjectedDrift"/> bumps each captured number ONE
@@ -96,49 +108,69 @@ public sealed class RefreshCeilingProvenancePinTests
     ///
     /// <para><b>ASCII-only patterns on purpose, and the reason is <see cref="DocProseFor"/> rather than
     /// anything in the patterns themselves.</b> It normalises <c>—</c> and <c>–</c> to <c>-</c>
-    /// before any pattern runs, so not one of the thirteen has to match a dash variant — and not one does.
+    /// before any pattern runs, so not one of them has to match a dash variant — and not one does.
     /// Matching a dash through a source-encoding round trip is a way for a pattern to stop matching for a
     /// reason that has nothing to do with what it guards, and normalising at the extractor removes that at
     /// the source instead of working around it thirteen times. The single literal hyphen below, in
     /// <c>([0-9]+)-second slot</c>, is a plain ASCII hyphen in the prose rather than a normalised
     /// dash.</para>
+    ///
+    /// <para><b>Every group is <c>[0-9]+</c> and never <c>[0-9]</c>, including the ones that read a single
+    /// decimal place.</b> <see cref="EveryNumericPin_ReportsAnInjectedDrift"/> bumps a captured number
+    /// WIDTH-PRESERVING, so a group holding a 9 comes back as two digits — and a one-digit group then stops
+    /// matching, which that sweep reports as a broken pattern rather than as a caught drift. Widening costs
+    /// no strictness, because <see cref="Verify"/> compares each captured value against the derived one
+    /// either way: prose stating a tenth as two digits is caught by the comparison instead of by the
+    /// regex.</para>
     /// </summary>
     private static IEnumerable<(string Name, string Declaration, string Pattern, bool DriftSwept)> Pins()
     {
         yield return (
-            "the transition run's clock arithmetic",
+            "the boundary timestamp",
+            CeilingDeclaration,
+            @"narrowing boundary of <c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c>",
+            true);
+
+        yield return (
+            "the excluded run's clock arithmetic",
             CeilingDeclaration,
             @"<c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c> to <c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c>",
             true);
 
         yield return (
-            "the boundary timestamp",
+            "the excluded run's duration",
             CeilingDeclaration,
-            @"<c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c>, one second BEFORE",
+            @"boundary day, ([0-9]+) s, excluded for starting before the boundary",
             true);
 
         yield return (
-            "the run count",
+            "the excluded run's ratio to the population maximum",
             CeilingDeclaration,
-            @"([0-9]+) consecutive runs",
+            @"([0-9]+)\.([0-9]+)x slower than the largest reading",
             true);
 
         yield return (
-            "the published series",
+            "the boundary day's tail",
             CeilingDeclaration,
-            @"<c>([0-9]+(?:, [0-9]+)+)</c> seconds",
+            @"every run that day after the boundary: <c>([0-9]+(?:, [0-9]+)+)</c> seconds",
             true);
 
         yield return (
-            "the clean-series summary",
+            "the days after the boundary",
             CeilingDeclaration,
-            @"remaining ([0-9]+) run from ([0-9]+) s to ([0-9]+) s, mean ([0-9]+) s, middle reading ([0-9]+) s",
+            @"The days after it: <c>([0-9]+(?:, [0-9]+)+)</c> seconds",
             true);
 
         yield return (
-            "the slot-clearance contrast",
+            "the population summary",
             CeilingDeclaration,
-            @"clears the slot by ([0-9]+) s, where this constant clears it by ([0-9]+) s",
+            @"Together ([0-9]+) runs spanning ([0-9]+) s to ([0-9]+) s, mean ([0-9]+)\.([0-9]+) s, median ([0-9]+) s",
+            true);
+
+        yield return (
+            "the percentile decision",
+            CeilingDeclaration,
+            @"by nearest rank over ([0-9]+) readings the 95th percentile IS the largest of them, and the 90th is ([0-9]+) s, only ([0-9]+) s below it",
             true);
 
         /* ARITY-FREE, and that is the point rather than a convenience. This list gains a reading every hour
@@ -158,32 +190,44 @@ public sealed class RefreshCeilingProvenancePinTests
             false);
 
         yield return (
-            "the downward-edit consequence",
-            CeilingDeclaration,
-            @"toward the observed ([0-9]+) s would leave ([0-9]+) s of margin in place of ([0-9]+) s",
-            true);
-
-        yield return (
             "the low the grid is deliberately not sized against",
             CeilingDeclaration,
-            @"not against the ([0-9]+) s low",
+            @"against the ([0-9]+) s low",
             true);
 
         yield return (
             "the margin sentence",
             CeilingDeclaration,
-            @"At ([0-9]+) s against a ([0-9]+)-second slot the margin is already only ([0-9]+) seconds",
+            @"At ([0-9]+) s against a ([0-9]+)-second slot the margin is ([0-9]+) seconds",
             true);
 
         yield return (
             "the exclude-whole occupancy sentence",
             CompressionMinutesDeclaration,
-            @"occupies ([0-9]+)\.([0-9]) of the ([0-9]+) minutes",
+            @"occupies ([0-9]+)\.([0-9]+) of the ([0-9]+) minutes",
+            true);
+
+        yield return (
+            "the guard-band arithmetic the exclusion rests on",
+            CompressionMinutesDeclaration,
+            @"band is ([0-9]+), so applying the ordinary band to this slot would admit ([0-9]+) minutes that sit INSIDE the refresh",
+            true);
+
+        yield return (
+            "the minutes left on the table",
+            CompressionMinutesDeclaration,
+            @"The other ([0-9]+) minutes of the slot are past the refresh",
+            true);
+
+        yield return (
+            "the population size and range the exclusion defers to",
+            CompressionMinutesDeclaration,
+            @"population is ([0-9]+) readings and still moving \(([0-9]+) s to ([0-9]+) s within the clean regime\)",
             true);
     }
 
     [Fact]
-    public void EveryProvenanceClaim_FollowsFromTheConstantsAndThePublishedSeries()
+    public void EveryDerivationClaim_FollowsFromTheConstantsAndThePublishedPopulation()
     {
         Verify(ReadTimescaleSupportSource());
     }
@@ -203,7 +247,7 @@ public sealed class RefreshCeilingProvenancePinTests
         var source = ReadTimescaleSupportSource();
         var prose = DocProseFor(source, CeilingDeclaration);
 
-        var series = Numbers(prose, "the published series");
+        var series = CleanPopulation(prose);
         var snapshot = Numbers(prose, "the inadmissible snapshot readings");
 
         Assert.NotEmpty(series);
@@ -280,9 +324,9 @@ public sealed class RefreshCeilingProvenancePinTests
     /// pattern STILL MATCHES, then require verification to fail with something other than a parse miss.
     ///
     /// <para>One number at a time rather than all at once is the point of the shape. It is what makes each
-    /// individual reading in the published series load-bearing — a bump to a middle-ranked reading changes
-    /// neither the range nor the middle, and is caught only because the mean is stated too. Bumping every
-    /// group together would have hidden that.</para>
+    /// individual reading in the published population load-bearing — a bump to a middle-ranked reading
+    /// changes neither the range, the maximum nor the median, and is caught only because the mean is stated
+    /// too. Bumping every group together would have hidden that.</para>
     /// </summary>
     [Fact]
     public void EveryNumericPin_ReportsAnInjectedDrift()
@@ -368,34 +412,42 @@ public sealed class RefreshCeilingProvenancePinTests
     /// figures the prose states to one decimal are held to being exactly stateable to one decimal.
     /// </summary>
     [Fact]
-    public void TheDerivedFiguresAreExactlyStateable_AndTheCleanSeriesSitsWhereTheProseSaysItDoes()
+    public void TheDerivedFiguresAreExactlyStateable_AndTheConstantIsThePopulationMaximum()
     {
         /* CompressionPhaseMinutes quotes the ceiling in minutes to one decimal, which is only faithful while
-           the ceiling is an exact tenth of a minute: 14.4 for a 14.41666 value is a rounded claim wearing an
+           the ceiling is an exact tenth of a minute: 9.9 for a 9.91666 value is a rounded claim wearing an
            exact one's clothes. */
         Assert.Equal(0, Ceiling * 10 % 60);
 
-        var clean = CleanSeries(DocProseFor(ReadTimescaleSupportSource(), CeilingDeclaration));
-        Assert.NotEmpty(clean);
+        var population = CleanPopulation(DocProseFor(ReadTimescaleSupportSource(), CeilingDeclaration));
+        Assert.NotEmpty(population);
 
-        /* The mean is stated as a whole number of seconds. */
-        Assert.Equal(0, clean.Sum() % clean.Length);
+        /* THE DERIVATION, as one assertion: this constant IS the maximum of the published population. Not
+           "above it" - equal to it, because the comment says the estimator is the maximum and a value merely
+           above the maximum is the unestablished-bound shape the derivation replaces. */
+        Assert.Equal(population.Max(), Ceiling);
 
-        /* The relationship the whole resolution turns on, as an assertion over the WHOLE inventory rather
-           than one true clause standing in for it: every cleanly post-boundary run came in under the value
-           the grid is sized against, which is what makes that value safe without making it measured. */
-        Assert.All(clean, reading => Assert.True(reading < Ceiling,
-            $"a cleanly post-boundary reading of {reading} s is at or past the {Ceiling} s the compression "
-            + "grid is sized against, so the ceiling is no longer above the observed range and #3069's "
-            + "resolution — record the provenance, leave the value — no longer holds."));
-        Assert.All(clean, reading => Assert.True(reading < WatchLine,
-            $"a cleanly post-boundary reading of {reading} s is at or past the {WatchLine} s watch line, so "
-            + "the doc comment's claim that every clean reading is below it is false."));
+        /* The mean is stated to one decimal and the median as a whole number, so both have to be exactly
+           stateable in those shapes. */
+        Assert.Equal(0, population.Sum() * 10 % population.Length);
+        var sorted = population.OrderBy(v => v).ToArray();
+        Assert.Equal(0, (sorted[(sorted.Length - 1) / 2] + sorted[sorted.Length / 2]) % 2);
 
-        /* The contrast the prose draws: the undetermined run is in the warning band, the clean ones are not. */
-        Assert.True(Ceiling >= WatchLine,
-            "the ceiling no longer classifies as a warning, so the doc comment's contrast between it and the "
-            + "clean series is stale.");
+        /* The relationship the grid depends on, over the WHOLE population rather than one true clause
+           standing in for it: every clean run fits inside the slot, and inside the routine band. */
+        Assert.All(population, reading => Assert.True(reading < Slot,
+            $"a clean post-boundary reading of {reading} s is at or past the {Slot} s refresh slot, so the "
+            + "compression grid's stated precondition is false and #3035 has to be re-derived rather than "
+            + "renumbered"));
+        Assert.All(population, reading => Assert.True(reading < WatchLine,
+            $"a clean post-boundary reading of {reading} s is at or past the {WatchLine} s watch line, so "
+            + "the doc comment's claim that every reading in the population is below it is false"));
+
+        /* And the contrast the prose draws: the watch line sits ABOVE the derived ceiling, which is what
+           makes a crossing news rather than a restatement of the grid's own sizing figure. */
+        Assert.True(Ceiling < WatchLine,
+            "the ceiling now classifies as a warning, so the doc comment's claim that the watch line sits "
+            + "above the observed range is stale.");
     }
 
     /* ─────────────────────────────── verification ─────────────────────────────── */
@@ -418,47 +470,56 @@ public sealed class RefreshCeilingProvenancePinTests
             return Numbers(DocProseFor(source, DeclarationFor(name)), name);
         }
 
-        var series = Read("the published series");
-        Require(series.Length > 0, "the published series parsed to nothing");
+        var tail = Read("the boundary day's tail");
+        var after = Read("the days after the boundary");
+        Require(tail.Length > 0, "the boundary day's tail parsed to nothing");
+        Require(after.Length > 0, "the days after the boundary parsed to nothing");
 
-        /* THE LINK TO THE CONSTANT. The comment's first reading IS this constant — that is what makes the
-           transition-run paragraph about this number rather than about some other run. */
-        Require(series.Count(v => v == Ceiling) == 1,
-            $"the published series {Join(series)} does not contain {Ceiling} exactly once, so the comment's "
-            + "transition-run paragraph is no longer about the value of this constant");
-
-        var clean = CleanSeries(ceilingProse);
-        Require(clean.Length == series.Length - 1, "setting the transition run aside did not leave one fewer reading");
-        Require(clean.Length > 0, "the clean series is empty, so every summary figure below would be vacuous");
-        Require(clean.Sum() % clean.Length == 0,
-            "the clean series' mean is no longer a whole number of seconds, so the prose cannot state it as "
-            + "one — restate it rather than removing this check");
-
-        var sorted = clean.OrderBy(v => v).ToArray();
+        var population = tail.Concat(after).ToArray();
+        var sorted = population.OrderBy(v => v).ToArray();
         var min = sorted[0];
         var max = sorted[^1];
-        var middle = sorted[sorted.Length / 2];
-        var mean = clean.Sum() / clean.Length;
+        var mean10 = population.Sum() * 10 / population.Length;
+        var median = (sorted[(sorted.Length - 1) / 2] + sorted[sorted.Length / 2]) / 2;
 
-        var runCount = Read("the run count");
-        Require(runCount[0] == series.Length,
-            $"the comment says {runCount[0]} consecutive runs and then lists {series.Length}");
+        /* THE DERIVATION, and the one relationship everything else here is decoration on: the constant is
+           the maximum of the population the comment publishes. */
+        Require(max == Ceiling,
+            $"the published population {Join(sorted)} has maximum {max} s, but this constant holds "
+            + $"{Ceiling} s — the comment says the estimator is the maximum, so one of the two is wrong");
 
-        var summary = Read("the clean-series summary");
-        Require(summary[0] == clean.Length, $"stated clean count {summary[0]} against {clean.Length} listed");
+        Require(population.Sum() * 10 % population.Length == 0,
+            "the population's mean is no longer an exact tenth of a second, so the prose cannot state it to "
+            + "one decimal — restate it rather than removing this check");
+        Require((sorted[(sorted.Length - 1) / 2] + sorted[sorted.Length / 2]) % 2 == 0,
+            "the population's median is no longer a whole number of seconds, so the prose cannot state it as "
+            + "one — restate it rather than removing this check");
+
+        var summary = Read("the population summary");
+        Require(summary[0] == population.Length,
+            $"stated count {summary[0]} against {population.Length} listed");
         Require(summary[1] == min, $"stated low {summary[1]} s against {min} s listed");
         Require(summary[2] == max, $"stated high {summary[2]} s against {max} s listed");
-        Require(summary[3] == mean, $"stated mean {summary[3]} s against {mean} s computed");
-        Require(summary[4] == middle, $"stated middle {summary[4]} s against {middle} s computed");
+        Require(summary[3] * 10 + summary[4] == mean10,
+            $"stated mean {summary[3]}.{summary[4]} s against {mean10 / 10}.{mean10 % 10} s computed");
+        Require(summary[5] == median, $"stated median {summary[5]} s against {median} s computed");
 
-        var clearance = Read("the slot-clearance contrast");
-        Require(clearance[0] == Slot - max, $"stated clearance {clearance[0]} s against {Slot - max} s derived");
-        Require(clearance[1] == Slot - Ceiling, $"stated margin {clearance[1]} s against {Slot - Ceiling} s derived");
-
-        var downward = Read("the downward-edit consequence");
-        Require(downward[0] == max, $"stated observed maximum {downward[0]} s against {max} s listed");
-        Require(downward[1] == Slot - max, $"stated replacement margin {downward[1]} s against {Slot - max} s derived");
-        Require(downward[2] == Slot - Ceiling, $"stated current margin {downward[2]} s against {Slot - Ceiling} s derived");
+        /* THE ESTIMATOR CHOICE, checked rather than asserted in prose — and written to EXPIRE. The comment
+           takes the maximum partly because at this sample size the 95th percentile is the maximum by nearest
+           rank; when the population grows past that, this goes red and the decision gets re-taken instead of
+           inherited. */
+        var percentile = Read("the percentile decision");
+        Require(percentile[0] == population.Length,
+            $"stated sample size {percentile[0]} against {population.Length} listed");
+        Require(NearestRank(sorted, 95) == max,
+            $"the 95th percentile of {Join(sorted)} is {NearestRank(sorted, 95)} s and no longer the "
+            + $"{max} s maximum, so the comment's stated reason for taking the maximum rather than a "
+            + "percentile has expired. RE-TAKE the decision (issue #3101 records the trade) rather than "
+            + "editing this assertion — that is what this pin is for");
+        Require(percentile[1] == NearestRank(sorted, 90),
+            $"stated 90th percentile {percentile[1]} s against {NearestRank(sorted, 90)} s computed");
+        Require(percentile[2] == max - NearestRank(sorted, 90),
+            $"stated gap {percentile[2]} s against {max - NearestRank(sorted, 90)} s derived");
 
         var low = Read("the low the grid is deliberately not sized against");
         Require(low[0] == min, $"stated low {low[0]} s against {min} s listed");
@@ -468,25 +529,35 @@ public sealed class RefreshCeilingProvenancePinTests
         Require(margin[1] == Slot, $"stated slot {margin[1]} s against {Slot} s");
         Require(margin[2] == Slot - Ceiling, $"stated margin {margin[2]} s against {Slot - Ceiling} s derived");
 
-        /* Clock arithmetic. The transition-run finding IS this subtraction: the run ends one second after the
-           boundary, which is why its regime membership cannot be settled from the data in hand. */
-        var run = Read("the transition run's clock arithmetic");
+        /* The EXCLUDED run. Its clock arithmetic has to reproduce its own stated duration, it has to end one
+           second after the stated boundary, and its ratio to the population maximum has to be the ratio the
+           prose draws — which is what keeps that paragraph about this population rather than free-floating. */
+        var run = Read("the excluded run's clock arithmetic");
         var started = Seconds(run[0], run[1], run[2]);
         var ended = Seconds(run[3], run[4], run[5]);
-        Require(ended - started == Ceiling,
-            $"the quoted run spans {ended - started} s, not the {Ceiling} s this constant holds");
+        var excluded = Read("the excluded run's duration");
+        Require(ended - started == excluded[0],
+            $"the quoted run spans {ended - started} s, not the {excluded[0]} s stated for it");
+        Require(excluded[0] > Ceiling,
+            $"the excluded run's {excluded[0]} s is no longer above the {Ceiling} s population maximum, so "
+            + "the prose's \"slower than the largest reading\" is false");
 
         var boundary = Read("the boundary timestamp");
         Require(ended - Seconds(boundary[0], boundary[1], boundary[2]) == 1,
-            "the quoted run no longer ends exactly one second after the quoted boundary, so the "
-            + "transition-run reading the whole provenance paragraph rests on is not what the numbers say");
+            "the quoted run no longer ends exactly one second after the quoted boundary, so the circularity "
+            + "the open-question paragraph is about is not what the numbers say");
+
+        var ratio = Read("the excluded run's ratio to the population maximum");
+        Require(ratio[0] * 100 + ratio[1] == excluded[0] * 100 / Ceiling,
+            $"stated ratio {ratio[0]}.{ratio[1]}x against {excluded[0] * 100 / Ceiling / 100}."
+            + $"{excluded[0] * 100 / Ceiling % 100}x derived from {excluded[0]} s over {Ceiling} s");
 
         /* The snapshot readings stay out of the admissible population, HOWEVER MANY of them there are. */
         var snapshot = Read("the inadmissible snapshot readings");
         Require(snapshot.Length > 0, "the inadmissible snapshot readings parsed to nothing");
-        Require(!snapshot.Intersect(series).Any(),
-            $"an unfiltered snapshot reading appears in the status-verified series {Join(series)}, so the two "
-            + "populations have been run together");
+        Require(!snapshot.Intersect(population).Any(),
+            $"an unfiltered snapshot reading appears in the status-verified population {Join(sorted)}, so "
+            + "the two populations have been run together");
 
         /* THE CLOSING SCOPE, which is what stops that list reading as a complete enumeration of an open
            set. The series it quotes gains a reading every hour, so an unscoped list is a frozen enumeration
@@ -507,7 +578,8 @@ public sealed class RefreshCeilingProvenancePinTests
             + "enumeration and keep only the rule, which is the timeless part and the paragraph's real "
             + "subject");
 
-        /* CompressionPhaseMinutes' exclude-whole reasoning, in minutes. */
+        /* CompressionPhaseMinutes' exclude-whole reasoning: the ceiling in minutes, the guard band against
+           it, and the minutes the exclusion declines to recover. */
         Require(Ceiling * 10 % 60 == 0,
             "the ceiling is no longer an exact tenth of a minute, so the occupancy figure cannot be stated to "
             + "one decimal");
@@ -517,12 +589,45 @@ public sealed class RefreshCeilingProvenancePinTests
             $"stated tenth of a minute {occupancy[1]} against {Ceiling * 10 / 60 % 10}");
         Require(occupancy[2] == SlotMinutes, $"stated slot {occupancy[2]} minutes against {SlotMinutes}");
 
+        var minutesInsideTheRefresh = (Ceiling + 59) / 60;
+        var band = Read("the guard-band arithmetic the exclusion rests on");
+        Require(band[0] == TimescaleSupport.CompressionPhaseGuardMinutes,
+            $"stated guard band {band[0]} minutes against {TimescaleSupport.CompressionPhaseGuardMinutes}");
+        Require(band[1] == minutesInsideTheRefresh - TimescaleSupport.CompressionPhaseGuardMinutes,
+            $"stated {band[1]} band minutes inside the refresh against "
+            + $"{minutesInsideTheRefresh - TimescaleSupport.CompressionPhaseGuardMinutes} derived — if this "
+            + "reached zero the band would clear the refresh and the exclude-whole reasoning would no longer "
+            + "hold, so re-read #3035 rather than restating the figure");
+
+        var onTheTable = Read("the minutes left on the table");
+        Require(onTheTable[0] == SlotMinutes - minutesInsideTheRefresh,
+            $"stated {onTheTable[0]} minutes past the refresh against "
+            + $"{SlotMinutes - minutesInsideTheRefresh} derived");
+
+        var deferred = Read("the population size and range the exclusion defers to");
+        Require(deferred[0] == population.Length,
+            $"stated population size {deferred[0]} against {population.Length} listed");
+        Require(deferred[1] == min, $"stated low {deferred[1]} s against {min} s listed");
+        Require(deferred[2] == max, $"stated high {deferred[2]} s against {max} s listed");
+
         /* And nothing in the pin list went unused: a pattern that is never asserted against reads, from the
            list, exactly like one that is. */
         var unused = Pins().Select(p => p.Name).Where(n => !consumed.Contains(n)).ToArray();
         Require(unused.Length == 0,
             "these pinned sentences are declared but never verified, so they guard nothing: "
             + string.Join(", ", unused));
+    }
+
+    /// <summary>
+    /// The nearest-rank percentile of an ASCENDING population — <c>ceil(p/100 * n)</c>, 1-based, which is
+    /// the definition the doc comment's percentile argument is stated in. Integer arithmetic throughout, so
+    /// no rounding mode can move the rank.
+    /// </summary>
+    private static int NearestRank(int[] sortedAscending, int percentile)
+    {
+        Require(sortedAscending.Length > 0, "no population, so no percentile");
+        var rank = (percentile * sortedAscending.Length + 99) / 100;
+        return sortedAscending[Math.Clamp(rank, 1, sortedAscending.Length) - 1];
     }
 
     /// <summary>
@@ -538,27 +643,15 @@ public sealed class RefreshCeilingProvenancePinTests
         Regex.IsMatch(sql, @"last_run_status\s*=\s*'Success'");
 
     /// <summary>
-    /// The published series with the ONE undetermined-regime reading set aside — matched against this
-    /// constant rather than taken by position, so a reordered list cannot silently set a different run aside.
+    /// The clean post-boundary population: both published lists, concatenated. Read from the two patterns
+    /// rather than from one, because the comment publishes them separately — the boundary day's tail is a
+    /// census of that day and the days after it are a sample, and collapsing the two into a single list in
+    /// the prose would erase a distinction the estimator's stated limitation rests on.
     /// </summary>
-    private static int[] CleanSeries(string prose)
-    {
-        var removed = false;
-        var clean = new List<int>();
-        foreach (var reading in Numbers(prose, "the published series"))
-        {
-            if (!removed && reading == Ceiling)
-            {
-                removed = true;
-                continue;
-            }
-
-            clean.Add(reading);
-        }
-
-        Require(removed, $"the published series does not contain {Ceiling}, so nothing was set aside");
-        return clean.ToArray();
-    }
+    private static int[] CleanPopulation(string prose) =>
+        Numbers(prose, "the boundary day's tail")
+            .Concat(Numbers(prose, "the days after the boundary"))
+            .ToArray();
 
     private static int Seconds(int hours, int minutes, int seconds) => (hours * 60 + minutes) * 60 + seconds;
 
@@ -745,10 +838,10 @@ public sealed class RefreshCeilingProvenancePinTests
     /// explicit value is used by the population-merge mutation. Either way the bump preserves WIDTH, so a
     /// zero-padded clock component cannot break the pattern it is being tested against.</para>
     ///
-    /// <para>Addressed by ORDINAL rather than by value, because a bare string replace of "36" would rewrite
-    /// every 36 in the file and prove something other than what it was aimed at — and because repeated
-    /// values (36 appears four times in this doc run, 306 twice, 9 three times) have to stay individually
-    /// addressable.</para>
+    /// <para>Addressed by ORDINAL rather than by value, because a bare string replace of a figure would
+    /// rewrite every copy of it in the file and prove something other than what it was aimed at — and
+    /// because a doc run that states the same value in several places (a reading that is also the maximum,
+    /// a population size quoted twice) has to keep each copy individually addressable.</para>
     /// </summary>
     private static string? RewriteNumberInDocRun(
         string source, string declaration, string pattern, int ordinal, string? replacement)
