@@ -195,6 +195,15 @@ public static class CollectorEngineCapability
             ["pg_session_states"] = "the pg_stat_activity session states behind a pinned xmin horizon - "
                                   + "who is idle in transaction, for how long, and whether they hold an "
                                   + "xid or a snapshot",
+            /* Named for the SETTINGS rather than for "plan capture readiness" (#3070). The gap here is
+               not that plans are missing - that is pg_plan_capture above - it is that nothing has told
+               this reader whether the target COULD capture one, so the noun phrase has to describe the
+               facets themselves or the message says a readiness read did not run and leaves the reader
+               exactly where they started. */
+            ["pg_plan_capture_readiness"] = "the auto_explain preload, threshold, format and log-prefix "
+                                          + "settings that decide whether plans can be captured and "
+                                          + "attributed at all, and the lc_messages locale that decides "
+                                          + "whether this product can read the log they land in",
         };
 
     /// <summary>

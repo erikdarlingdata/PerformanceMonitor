@@ -1563,6 +1563,20 @@ export const POSTGRES_TABS = [
         ctx.label + ", grouped by plan shape - plans are redacted at collection",
         "No captured plans. Usually auto_explain is not loaded, or the monitoring login cannot read the server log; on Aurora and RDS there is no log file to read at all."
       ),
+      /* #3070: directly under the plans, because it is the answer to the grid above being empty and to the
+         deadlock grid further down being empty. The Windows Viewer puts this panel on its Vacuum tab, which
+         is a different registry with a different shape; here it belongs beside the two reads whose absence
+         it explains, and its own empty text is what stops that explanation being circular. Every facet is
+         shown, satisfied ones included — a list of only the failures cannot show that capture is working. */
+      table(
+        "Plan Capture Readiness",
+        "get_pg_plan_capture_readiness",
+        { server, hours: ctx.hours, limit: 25 },
+        "facets",
+        PG_PLAN_CAPTURE_READINESS_COLUMNS,
+        ctx.label + ", the newest reading of each facet in it; in CAUSAL order rather than alphabetically - fix them top to bottom; the remedy is per facet, and on Aurora/RDS it says which changes need a parameter group and a reboot",
+        "No readiness state collected. Unlike the grids around it an empty panel here is never the healthy answer - the collector writes one row per facet on every run whatever it finds - so this means it has not run for this server, or the window is shorter than its hourly cadence."
+      ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
          time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
          only evidence of that we collect — the statement stats themselves cannot see it. The deadlock and
@@ -1646,7 +1660,7 @@ export const POSTGRES_TABS = [
         "deadlocks",
         PG_DEADLOCK_COLUMNS,
         ctx.label + ", newest first; Sightings counts re-reads of the same report, not repeats",
-        "No deadlock was reported in this window. That is the healthy answer - but it is the same shape as a server whose log cannot be read, which the plan-capture readiness panel reports on because it reads the same file. pg_stat_database's deadlock counter is the independent check."
+        "No deadlock was reported in this window. That is the healthy answer - but it is the same shape as a server whose log cannot be read, which the Plan Capture Readiness panel above reports on because it reads the same file. pg_stat_database's deadlock counter is the independent check."
       ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
          The statement grid above ranks by total time across the window, which hides a step change - a query
@@ -3312,6 +3326,18 @@ const PG_PLAN_COLUMNS = [
      statement actually ran, and this label has to keep the two apart. */
   { key: "captures", label: "Captures", format: "int" },
   { key: "plan_hash", label: "Plan Hash", mono: true },
+];
+
+/* Remedy last and deliberately widest. Facet, state and observed value are what the eye scans down; the
+   remedy is the sentence somebody reads once they have found the row that is wrong, and it is the column
+   this panel exists for — every other reader of these rows outside the Windows Viewer sees the facet name
+   and its observed value and nothing about what to do. */
+const PG_PLAN_CAPTURE_READINESS_COLUMNS = [
+  { key: "facet", label: "Facet" },
+  { key: "is_satisfied", label: "Satisfied", format: "bool" },
+  { key: "observed", label: "Observed", mono: true },
+  { key: "detail", label: "Consequence and Remedy" },
+  { key: "last_observed", label: "Last Seen", format: "time", small: true },
 ];
 
 const PG_TOP_QUERY_COLUMNS = [

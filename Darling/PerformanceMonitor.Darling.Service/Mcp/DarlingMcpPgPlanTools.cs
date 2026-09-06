@@ -21,7 +21,7 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// Captured PostgreSQL execution plans (#2567).
+/// Captured PostgreSQL execution plans (#2567), and whether the target can capture them at all (#3070).
 ///
 /// <para><b>It returns the plan, not a pointer to one.</b> #2538 is explicit about this and it is the whole
 /// point of the tool: an agent consuming the MCP has no viewer to follow a reference into, so a read that
@@ -36,6 +36,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// remedies, and collapsing them into one sentence is how a missing grant reads as a healthy query. They are
 /// separated here using facts the store already holds rather than prose that guesses between them, which is
 /// what #2557 replaced on the Query Store side.</para>
+///
+/// <para><b>Readiness is a first-class read, not a footnote on the empty answer</b> (#3070). The facets carry
+/// a per-facet <c>detail</c> — the operator-facing remedy for that specific step — and until #3070 its only
+/// reader was the WPF tab, so on a Linux host and to every agent the remedy did not exist.
+/// <c>UnsatisfiedFacetsAsync</c> below cannot substitute for it: by construction it shows only the facets
+/// that are UNSATISFIED and only their observed values, so it can never answer "what is the state of this
+/// server's plan capture", which is the question somebody has when the plans are missing.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpPgPlanTools
@@ -108,6 +115,141 @@ public sealed class DarlingMcpPgPlanTools
         }
     }
 
+    [McpServerTool(Name = "get_pg_plan_capture_readiness"), Description("Gets whether a PostgreSQL target can capture execution plans at all, facet by facet, with the specific remedy for every step that is not in place. Read this FIRST when get_pg_plans is empty, and read it before concluding anything from an empty target-side log read: the facets are the preconditions, not a summary of them, and each one carries the operator-facing consequence and fix for its own state rather than a shared 'plans unavailable'. Every facet is reported whether or not it is satisfied, because the state somebody needs is the whole picture and a list of only the failures cannot show that capture is configured and working. The facets are returned in CAUSAL order - could this server run auto_explain, is it loaded, is it capturing, in what format, and can what it captures be attributed to a statement - so they read as the sequence they have to be fixed in rather than alphabetically. Two states are the ones people misread and each is its own facet with its own remedy: auto_explain loaded with log_min_duration = -1 is loaded and capturing NOTHING, which is indistinguishable from not loaded from the outside; and a log_line_prefix with no %Q means auto_explain captured the plan but nothing can join it to the statement it came from, because auto_explain puts no query id in the plan itself. On Aurora and RDS the remedy text says which changes need a custom cluster parameter group and a writer reboot rather than a SET, which is the misconception worth heading off. One facet reaches beyond plan capture: message_locale reports whether the target writes its log messages in English, which every target-side log read matches - including get_pg_deadlocks, where zero rows is the healthy state, so an unmet locale facet is the difference between a quiet server and a read that cannot see anything. This is PostgreSQL-only. It reports readiness and never claims a plan was captured; get_pg_plans is the read for the plans themselves.")]
+    public static async Task<string> GetPgPlanCaptureReadiness(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history to search for each facet's most recent reading. Default 24 - this collector runs hourly, so a window under an hour can legitimately find nothing.")] int hours_back = 24,
+        [Description("Maximum facet rows to return. Default 25 - the collector emits one row per facet, so the default is well clear of the whole set.")] int limit = 25,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        if (validation != null) return validation;
+        validation = McpHelpers.ValidateTop(limit);
+        if (validation != null) return validation;
+
+        try
+        {
+            /* The reader shared with the WPF tab (#2530), which is the whole shape of this tool: the SQL,
+               the latest-per-facet reduction and the causal ordering already exist and are already proven
+               against a live store. A second copy of that query here is how the two surfaces start
+               disagreeing about what a server's readiness is. */
+            var rows = await DarlingPgPlanCaptureReadinessReader.GetPgPlanCaptureReadinessAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+
+            if (rows.Count == 0)
+            {
+                return await NoReadinessStatusAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back);
+            }
+
+            return BuildReadinessJson(resolved.ServerName, hours_back, rows, limit);
+        }
+        catch (Exception ex)
+        {
+            var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+                postgres, resolved.ServerId, resolved.ServerName, "pg_plan_capture_readiness");
+            if (gated != null)
+            {
+                return gated;
+            }
+
+            return McpHelpers.Status("error", $"Reading PostgreSQL plan-capture readiness failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Why there is no readiness state, which is a different question from why there are no plans.
+    ///
+    /// <para>The facets are configuration, so an empty answer here is never "the server was healthy and had
+    /// nothing to report" — this collector stores a row per facet on every run regardless of what it finds.
+    /// It is the engine gate, a run that could not complete, or a window shorter than the hourly cadence, in
+    /// that order.</para>
+    /// </summary>
+    private static async Task<string> NoReadinessStatusAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack)
+    {
+        var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
+            postgres, serverId, serverName, "pg_plan_capture_readiness");
+        if (gated != null)
+        {
+            return gated;
+        }
+
+        var precondition = await DarlingRuntimePrecondition.StatusAsync(
+            postgres, serverId, serverName, "pg_plan_capture_readiness");
+        if (precondition != null)
+        {
+            return precondition;
+        }
+
+        return McpHelpers.Status(
+            "empty",
+            $"No plan-capture readiness state for {serverName} in the last {hoursBack} hour(s). This is NOT "
+            + "the healthy case for this read: the collector writes one row per facet on every run whatever "
+            + "it finds, so an absence means nothing was collected rather than that nothing was wrong. It "
+            + "runs HOURLY, so widen hours_back before concluding anything — a window shorter than the "
+            + "cadence is legitimately empty on a server that is collecting normally.");
+    }
+
+    /// <summary>
+    /// The response body, split out so the WIRE SHAPE can be asserted without a live store — the same reason
+    /// <see cref="BuildPlansJson"/> is separate.
+    /// </summary>
+    internal static string BuildReadinessJson(
+        string serverName,
+        int hoursBack,
+        IReadOnlyList<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow> rows,
+        int limit)
+    {
+        /* #2629's lesson, applied to a read whose row count is small enough to make it look unnecessary: a
+           summary taken over a CAPPED result describes the page and reads as a fact about the server. The
+           collector emits a handful of facets and the default limit clears them all, but limit is a caller's
+           parameter — so the unsatisfied summary is WITHHELD rather than computed over whatever arrived. */
+        var truncated = rows.Count >= limit;
+
+        var unsatisfied = rows.Where(r => !r.IsSatisfied).Select(r => r.Facet).ToArray();
+
+        var facets = rows.Select(r => new
+        {
+            facet = r.Facet,
+            is_satisfied = r.IsSatisfied,
+            /* Verbatim, so a reader can see the value the server actually answered rather than trust this
+               tool's interpretation of it. */
+            observed = r.Observed,
+            /* The point of the tool. detail is the per-facet consequence and remedy, written against what
+               the collector saw, and until #3070 nothing outside the Windows Viewer could read it. */
+            detail = r.Detail,
+            last_observed = r.CaptureTime,
+        }).ToList();
+
+        return JsonSerializer.Serialize(new
+        {
+            server = serverName,
+            hours_back = hoursBack,
+            facet_count = rows.Count,
+            truncated,
+            /* Deliberately NOT a single ready/not-ready verdict. The facets do not reduce to one: an unmet
+               plan_attribution still captures plans and merely orphans them, and message_locale is about
+               every target-side log read rather than about capture. A boolean would have to pick one meaning
+               and would be wrong under the other, which is the exact collapse the collector splits its rows
+               to avoid. The unsatisfied facets are NAMED instead. */
+            unsatisfied_facets = truncated ? null : unsatisfied,
+            note = "Every facet is reported, satisfied or not, in CAUSAL order rather than alphabetically: "
+                 + "fix them in the order they are listed. detail carries the remedy for the state that "
+                 + "facet is actually in — including, on Aurora/RDS, whether the change needs a custom "
+                 + "cluster parameter group and a writer reboot rather than a SET. This is readiness only "
+                 + "and never a claim that a plan was captured; get_pg_plans is that read."
+                 + (truncated
+                     ? " TRUNCATED at the row limit, so unsatisfied_facets is WITHHELD: naming them from a "
+                       + "capped result would describe this page rather than the server. Raise the limit."
+                     : string.Empty),
+            facets,
+        }, McpHelpers.JsonOptions);
+    }
+
     /// <summary>
     /// Separates the three reasons there is no plan, using what the store already knows.
     ///
@@ -145,7 +287,8 @@ public sealed class DarlingMcpPgPlanTools
                 + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
                 + string.Join(" | ", unmet)
                 + " — the pg_plan_capture_readiness collector stores the full detail and the remedy "
-                + "beside each observation.");
+                + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
+                + "satisfied or not, in the order they have to be fixed in.");
         }
 
         var subject = wantedQueryId is null ? "any statement" : "this statement";
