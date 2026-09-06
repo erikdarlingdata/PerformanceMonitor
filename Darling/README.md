@@ -130,7 +130,7 @@ The same executable serves interactive debugging and service installation; the W
 Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonitor.Darling.Service.exe
 ```
 
-Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v44, ...)` — the number is whatever the current migration count is), the TimescaleDB detection result, per-server connects, and then per-collector run lines with row counts.
+Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v44, ...)` — the number is whatever the current migration count is), the TimescaleDB detection result, and per-server connects. Per-collector run lines with row counts are at `Debug` and so are not in that output by default — add `--Logging:LogLevel:PerformanceMonitor.Darling.Service=Debug` to the command above to watch a first sweep collector by collector, or read the outcomes back from `collection_log` and the Viewer's Collection Health tab, which record every run at any level. See [Logs](#logs).
 
 ### Run on Linux (Docker Compose or systemd) {#1804}
 
@@ -894,7 +894,17 @@ No raw tier is ever dropped before the aggregate that preserves it has caught up
 
 ### Logs
 
-The service's PRIMARY log is a **rolling file** under `%ProgramData%\PerformanceMonitorDarling\logs\darling-service_yyyyMMdd.log` — every collector run line, connect edge, reload notice, warning, and error lands there (buffered writes, one file per day, 14-day retention, and a logging failure can never crash the service). Console runs write the same file plus console output.
+The service's PRIMARY log is a **rolling file** under `%ProgramData%\PerformanceMonitorDarling\logs\darling-service_yyyyMMdd.log` — connect edges, reload notices, warnings, and errors land there (buffered writes, one file per day, 14-day retention, and a logging failure can never crash the service). Console runs write the same file plus console output.
+
+**Per-cycle collector timing is at `Debug`, which the default level does not write.** The run lines that decompose a collector's cost — `=> N rows (sql:Nms, pg:Nms)`, the `open:` / `drain:` / `other:` phase split, and the `plan_fetch:` / `text_fetch:` sub-splits — are emitted once per collector per server per cycle, and per *database* on the collectors that fan out. At fleet scale that is millions of lines a day, all of it shaped alike, and the errors and `PERMISSIONS` lines the log is actually opened for are dozens a day sitting inside it. Suppressing them by default is what keeps a grep of this file able to distinguish *not present* from *not found*.
+
+Turn them on when you are measuring, with any standard .NET logging configuration source — an environment variable on the service, a `--Logging:LogLevel:...` argument on a console run, or an `appsettings.json` beside the exe:
+
+```
+Logging__LogLevel__PerformanceMonitor.Darling.Service=Debug
+```
+
+Scope it to the namespace as above rather than setting `Logging__LogLevel__Default`, which also turns on every other component's `Debug` output. Nothing about the lines themselves changes when the level is turned up — same text, same numbers, same one-line-per-shape layout — so anything parsing them keeps working. The store carries the same timings independently of the log: `collection_log` records `duration_ms` and `sql_duration_ms` per collector run per server at every level, and the Collection Health tab and `get_collector_cost` read them, so the distribution is available without raising verbosity at all.
 
 Warnings and errors also go to the **Windows Application event log** (source `PerformanceMonitor Darling`) — but only if that event source exists. Registering an event source requires elevation, and the recommended `NT SERVICE` virtual account cannot do it, so run the `New-EventLog` line in the install steps above (or any elevated run of the exe) once; without it, Windows silently drops the events and the file log is your only surface. Collection outcomes are also queryable in the store itself — `collection_log` records every collector run per server with status and timings, and the viewer's Collection Health tab renders exactly that.
 
