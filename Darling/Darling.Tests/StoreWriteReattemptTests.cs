@@ -448,8 +448,9 @@ public class StoreWriteReattemptTests
     }
 
     /// <summary>
-    /// That the re-attempt does NOT introduce a new collection_log status. Eight readers across the
-    /// service, the MCP, both viewers and Lite treat <c>status IN ('SUCCESS', 'SKIPPED')</c> as success; a
+    /// That the re-attempt does NOT introduce a new collection_log status. Seven query clauses across five
+    /// files — Lite's collection-health read, the self-alert evaluator's two, both MCP readers and the
+    /// viewer's two — treat <c>status IN ('SUCCESS', 'SKIPPED')</c> as success; a
     /// sixth value would read as a failure in every one of them and suppress <c>last_success</c> for a
     /// cycle that stored every row and advanced its watermark. That is #2673's defect with the sign
     /// flipped.

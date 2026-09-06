@@ -2513,8 +2513,9 @@ public sealed class DarlingCollectorRunner
     ///
     /// <para><b>The status stays SUCCESS, and the note is what makes the re-attempt visible.</b> A new
     /// status value would be read as a failure by every consumer of
-    /// <c>status IN ('SUCCESS', 'SKIPPED')</c> — eight readers across the service, the MCP, both viewers
-    /// and Lite — and would suppress <c>last_success</c> for a cycle that genuinely stored every row and
+    /// <c>status IN ('SUCCESS', 'SKIPPED')</c> — seven query clauses across five files: Lite's
+    /// collection-health read, the self-alert evaluator's <c>last_success</c> and <c>recent_success</c>, both
+    /// MCP readers, and the viewer's two — and would suppress <c>last_success</c> for a cycle that stored every row and
     /// advanced its watermark. That is #2673's defect with the sign flipped, and the same reasoning that
     /// put the whole-cycle-budget message in this channel rather than inventing a sixth status.</para>
     ///
