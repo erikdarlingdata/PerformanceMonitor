@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -484,6 +485,33 @@ public sealed class ViewerControlCommandParityTests
         /* Without a target it fails — the viewer only ever sends it with a server id. */
         Assert.Equal(CommandKind.Fail,
             DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, ViewerDataService.CommandFetchPlan, null, args, "viewer")).Kind);
+    }
+}
+
+/// <summary>
+/// #3060: the viewer row's shipped default for the Store Job Over Cadence knob is the refresh slot, not a
+/// literal. Pinned here rather than beside the alert's own pins because this is the only surface that can
+/// reach <see cref="AlertSettingsRow"/>.
+///
+/// <para><b>Why this copy is load-bearing and not decoration.</b>
+/// <c>SettingsWindow.BuildAlertRowFromControls</c> assigns the textbox value only when it parses INSIDE the
+/// clamp, so out-of-range or unparseable input leaves whatever this initializer holds and persists it to the
+/// store. A frozen literal here would therefore survive a moved refresh grid and arm the alert past the slot
+/// it exists to precede — the same failure the evaluator's fallback, <c>AlertsConfig</c>'s initializer and
+/// the Restore-Defaults button were derived to avoid. Found by review, not by these tests.</para>
+/// </summary>
+public sealed class ViewerAlertRowCadenceDefaultTests
+{
+    [Fact]
+    public void TheViewerRowsCadenceDefault_IsOneRefreshSlot()
+    {
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotPercentOfHourlyCadence,
+            AlertSettingsRow.Defaults().StoreJobCadenceWarnPercent);
+
+        /* And it clears the clamp SettingsWindow validates against, so the initializer can never be the
+           value that gets rejected on its way back in. */
+        Assert.InRange(AlertSettingsRow.Defaults().StoreJobCadenceWarnPercent, 5, 100);
     }
 }
 
