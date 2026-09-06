@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -294,6 +295,43 @@ public sealed class CrossAppMcpToolInventoryPinTests
         Assert.Equal(darling.Count, int.Parse(census.Groups[1].Value));
         Assert.Equal(shared, int.Parse(census.Groups[2].Value));
         Assert.Equal(darling.Count - shared, int.Parse(census.Groups[3].Value));
+    }
+
+    /// <summary>
+    /// The root <c>README.md</c>'s Lite tool census must match the real inventory (#3072). Same reasoning as
+    /// <see cref="DarlingInstructionsCensus_MatchesTheScannedInventory"/> one level out: it is prose a reader
+    /// plans against, and nothing pinned it — which is how it sat at "77 tools" while <c>Lite/Mcp</c> exposed
+    /// eighty-seven. It is stated TWICE (the edition-comparison table and the MCP section), and both are
+    /// asserted, because the ordinary way these drift is one of them being updated alone.
+    ///
+    /// <para>The Dashboard's figure in the same two sentences is deliberately NOT pinned: <c>deprecated/</c> is
+    /// frozen, so that number cannot move, and a pin over it could only ever be noise.</para>
+    /// </summary>
+    [Fact]
+    public void RootReadmeLiteToolCensus_MatchesTheScannedInventory()
+    {
+        var lite = ExtractToolNames(LiteMcpDir);
+        var readme = ParitySource.ReadFile("README.md");
+
+        /* Both sentences, named separately so a failure says WHICH one to edit. */
+        var sites = new (string Where, Regex Pattern)[]
+        {
+            ("the edition-comparison table", new Regex(@"MCP server \(LLM integration\) \| Built-in \((\d+) tools\)")),
+            ("the Available Tools paragraph", new Regex(@"\*\*Lite\*\* exposes (\d+) tools")),
+        };
+
+        foreach (var (where, pattern) in sites)
+        {
+            var match = pattern.Match(readme);
+            Assert.True(match.Success,
+                $"README.md no longer states the Lite tool count in {where} in the pinned shape ({pattern}). "
+                + "Keep it parseable so this pin can hold it to the real inventory — or delete the number, which "
+                + "is the other sanctioned outcome (#3072) and needs this site removed from the list above.");
+
+            Assert.True(lite.Count == int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture),
+                $"README.md's Lite tool count in {where} reads {match.Groups[1].Value} but Lite/Mcp exposes "
+                + $"{lite.Count}. Update the sentence.");
+        }
     }
 
     private static string Format(IEnumerable<string> names) =>
