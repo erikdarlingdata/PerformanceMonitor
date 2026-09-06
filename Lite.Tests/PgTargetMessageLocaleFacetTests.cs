@@ -340,6 +340,15 @@ public sealed class PgTargetMessageLocaleFacetTests
     /// <para>Discovery is derived rather than listed, and the discovered set is asserted non-empty in its
     /// own right — a source walk that silently finds nothing would make this pass on an empty set, which is
     /// the failure mode that turns a guard into false confidence.</para>
+    ///
+    /// <para><b>Why raw text and not <c>CSharpSourceWalker</c>,</b> which #2913 made the shared authority
+    /// and #3058 used for the store-side half of this: that walker strips comments, and here comments are
+    /// part of what is being guarded. These readers document their anchors in prose beside the regex, so a
+    /// comment still claiming <c>ERROR:</c> after the literal moved is documentation drift worth failing on.
+    /// The walker answers "what does the compiler see"; this asks "does anything in this file rest on an
+    /// English log label", and the second question wants the wider read. Being comment-inclusive only ever
+    /// adds tokens to the set every one of which is then asserted, so it cannot mask a change — a literal
+    /// mutated to <c>FEHLER:</c> is discovered and fails whether or not its comment moved with it.</para>
     /// </summary>
     [Fact]
     public void EveryTargetSideLogReader_AnchorsOnATokenTheSatisfiedLocaleSetGuarantees()
