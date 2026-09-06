@@ -338,7 +338,7 @@ public class CrossAppGuardCiGateTests
                     $"[{string.Join(", ", evaluation.ItemCounts.Select(kv => kv.Key + "=" + kv.Value))}]");
             }
 
-            var found = CrossAppItems(fixture, Path.GetDirectoryName(project)!, evaluation, DarlingTrees)
+            var found = CrossAppItems(fixture, evaluation, DarlingTrees)
                 .Select(r => r.Rooted)
                 .ToHashSet(StringComparer.Ordinal);
 
@@ -370,7 +370,7 @@ public class CrossAppGuardCiGateTests
 
             /* Origin attribution comes from MSBuild's own DefiningProjectFullPath, so the item defined in
                the imported file names THAT file rather than the project that consumed it. */
-            var fromImport = CrossAppItems(fixture, Path.GetDirectoryName(project)!, evaluation, DarlingTrees)
+            var fromImport = CrossAppItems(fixture, evaluation, DarlingTrees)
                 .Single(r => r.Rooted.Equals("Darling/Darling.Tests/FromImport.cs", StringComparison.Ordinal));
             Assert.Contains("Imported.props", fromImport.Origin, StringComparison.Ordinal);
 
@@ -519,12 +519,13 @@ public class CrossAppGuardCiGateTests
                 $"the XML parse found no path under {project}'s OWN trees, so it is not reading the file " +
                 "and every comparison below is superset-of-nothing");
 
-            var evaluation = Evaluate(repo, projectFiles[0]);
-            AssertInvocationSucceeded(evaluation);
-
-            var evaluated = CrossAppItems(repo, projectRoot, evaluation, other)
-                .Select(r => r.Rooted)
-                .ToHashSet(StringComparer.Ordinal);
+            var evaluated = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var file in projectFiles)
+            {
+                var evaluation = Evaluate(repo, file);
+                AssertInvocationSucceeded(evaluation);
+                evaluated.UnionWith(CrossAppItems(repo, evaluation, other).Select(r => r.Rooted));
+            }
 
             if (floor is not null)
             {
@@ -535,8 +536,11 @@ public class CrossAppGuardCiGateTests
             var missed = parsedCross.Except(evaluated, StringComparer.Ordinal).ToList();
             Assert.True(
                 missed.Count == 0,
-                $"the evaluated read of {project} does not contain what a parse of the same XML sees, so " +
-                "it has moved the blind spot rather than closed it: " + string.Join(", ", missed) +
+                $"the evaluated read of {project} does not contain what a parse of the same XML sees: " +
+                string.Join(", ", missed) + ". Either the evaluated read has moved the blind spot rather " +
+                "than closed it, or MSBuild is correctly excluding an item the crude parse over-read — a " +
+                "cross-app path behind a Condition that never holds, or inside a comment. Both want a " +
+                "human: decide whether that path is a read worth covering" +
                 $". Evaluated: [{string.Join(", ", evaluated.OrderBy(p => p, StringComparer.Ordinal))}]");
         }
     }
@@ -680,16 +684,23 @@ public class CrossAppGuardCiGateTests
                 p => p.Contains("/bin/", StringComparison.Ordinal) ||
                      p.Contains("/obj/", StringComparison.Ordinal));
 
-            AssertInvocationSucceeded(scan.Evaluated);
+            /* The manifest's OWN evaluation, located by name rather than by position: a floor read off
+               whichever project sorted first would answer about the wrong one the moment a second
+               project file appears under the same tree. */
+            var evaluated = Assert.Single(
+                scan.Evaluated,
+                e => Rooted(repo, e.Project).Equals(manifest, StringComparison.Ordinal));
+
+            AssertInvocationSucceeded(evaluated);
 
             /* The two types a test project cannot honestly be empty of. */
             foreach (var structural in new[] { "Compile", "ProjectReference" })
             {
                 Assert.True(
-                    scan.Evaluated.ItemCounts.TryGetValue(structural, out var count) && count > 0,
+                    evaluated.ItemCounts.TryGetValue(structural, out var count) && count > 0,
                     $"{project} evaluated to no {structural} items, which no test project does — the " +
                     "invocation answered about something other than this project. Counts: " +
-                    $"[{string.Join(", ", scan.Evaluated.ItemCounts.Select(kv => kv.Key + "=" + kv.Value))}]");
+                    $"[{string.Join(", ", evaluated.ItemCounts.Select(kv => kv.Key + "=" + kv.Value))}]");
             }
 
             /* The property set is populated, established through the one property whose value is known
@@ -697,7 +708,7 @@ public class CrossAppGuardCiGateTests
                empty build-file paths read the same whether MSBuild found none or returned nothing. */
             Assert.Equal(
                 Path.GetFullPath(Path.Combine(repo, manifest.Replace('/', Path.DirectorySeparatorChar))),
-                scan.Evaluated.Properties.TryGetValue("MSBuildProjectFullPath", out var self) ? self : null);
+                evaluated.Properties.TryGetValue("MSBuildProjectFullPath", out var self) ? self : null);
 
             /* MSBuild's own answer for the build files it imports unnamed. The two Directory.Build names
                are absent from this tree, and Directory.Packages.props is not — which is the half a
@@ -705,7 +716,7 @@ public class CrossAppGuardCiGateTests
             Assert.Equal(
                 new[] { string.Empty, string.Empty, Path.Combine(repo, "Directory.Packages.props") },
                 ImportedBuildFileProperties
-                    .Select(p => scan.Evaluated.Properties.TryGetValue(p, out var v) ? v : "<absent>")
+                    .Select(p => evaluated.Properties.TryGetValue(p, out var v) ? v : "<absent>")
                     .ToArray());
 
             if (named is not null)
@@ -850,9 +861,14 @@ public class CrossAppGuardCiGateTests
             $"the MSBuild stage found no project file under {scannedProject}, so a cross-app reference " +
             "written as an Include= attribute is invisible again");
 
-        /* The shell-out, floored in the three places it can fail without saying so. Asserted here and not
-           only in the pins, because this is where an empty answer becomes a pass. */
-        AssertInvocationSucceeded(scan.Evaluated);
+        /* The shell-out, floored in the three places it can fail without saying so, for every project
+           evaluated. Asserted here and not only in the pins, because this is where an empty answer
+           becomes a pass. */
+        Assert.NotEmpty(scan.Evaluated);
+        foreach (var evaluation in scan.Evaluated)
+        {
+            AssertInvocationSucceeded(evaluation);
+        }
 
         /* An <Import>'s own path is the one cross-app read the evaluated population does not carry, so a
            project that grows one is a failure rather than a silent partial scan. */
@@ -917,7 +933,7 @@ public class CrossAppGuardCiGateTests
     private readonly record struct CrossAppScan(
         int CSharpFiles,
         IReadOnlyList<string> ProjectFiles,
-        Evaluation Evaluated,
+        IReadOnlyList<Evaluation> Evaluated,
         IReadOnlyList<string> UnreportedImports,
         IReadOnlyList<(string Raw, string Probe, string Origin)> References);
 
@@ -1056,11 +1072,14 @@ public class CrossAppGuardCiGateTests
             throw new FileNotFoundException($"no project file under {project} to evaluate");
         }
 
-        var evaluation = Evaluate(repo, projectFiles[0]);
+        /* EVERY project file, not the first of them. There is one under each test project today, and
+           taking only one would be a silent miss the moment a second arrives - the read would answer
+           about whichever sorted first and say nothing about the other. */
+        var evaluations = projectFiles.Select(f => Evaluate(repo, f)).ToList();
 
-        if (evaluation.Failure.Length == 0)
+        foreach (var evaluation in evaluations.Where(e => e.Failure.Length == 0))
         {
-            foreach (var (rooted, origin) in CrossAppItems(repo, projectRoot, evaluation, other))
+            foreach (var (rooted, origin) in CrossAppItems(repo, evaluation, other))
             {
                 Note(seen, rooted, origin);
             }
@@ -1070,10 +1089,14 @@ public class CrossAppGuardCiGateTests
            files AND over whichever build files MSBuild says it imported unnamed, since an Import in one
            of those is imported into this project just the same. */
         var unreportedImports = new List<string>();
-        foreach (var file in projectFiles.Concat(
-            ImportedBuildFileProperties
-                .Select(p => evaluation.Properties.TryGetValue(p, out var v) ? v : string.Empty)
-                .Where(v => v.Length > 0 && File.Exists(v))))
+        var importCandidates = projectFiles.Concat(
+            evaluations
+                .SelectMany(e => ImportedBuildFileProperties.Select(
+                    p => e.Properties.TryGetValue(p, out var v) ? v : string.Empty))
+                .Where(v => v.Length > 0 && File.Exists(v))
+                .Distinct(StringComparer.Ordinal));
+
+        foreach (var file in importCandidates)
         {
             foreach (var element in ImportElements(File.ReadAllText(file)))
             {
@@ -1084,7 +1107,7 @@ public class CrossAppGuardCiGateTests
         return new CrossAppScan(
             csharpFiles,
             projectFiles.Select(f => Rooted(repo, f)).ToList(),
-            evaluation,
+            evaluations,
             unreportedImports,
             Resolve(repo, seen).ToList());
     }
@@ -1377,7 +1400,7 @@ public class CrossAppGuardCiGateTests
     /// point outside the project's own tree, and a <c>Directory.Build.props</c> under another SKU is a
     /// read of it whatever its item groups say.</para></summary>
     private static IEnumerable<(string Rooted, string Origin)> CrossAppItems(
-        string repo, string projectRoot, Evaluation evaluation, SkuTrees other)
+        string repo, Evaluation evaluation, SkuTrees other)
     {
         foreach (var item in evaluation.Items)
         {
