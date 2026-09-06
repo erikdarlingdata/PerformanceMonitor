@@ -1121,9 +1121,32 @@ public sealed class TsqlConventionGuardTests
     /// and <c>foreach</c> are not member names in any C# program, so a label that is one is wrong without
     /// anything having to agree about how members are found. <see cref="Unknown"/> is the other arm, and it
     /// is the resolver's own admission — it is what a shape the declaration regex cannot read resolves to,
-    /// which is why that regex is allowed to be narrow. The two arms bracket the resolver from both sides:
-    /// one refuses a wrong answer, the other refuses no answer, and there is no third thing it can
-    /// return.</para>
+    /// which is why that regex is allowed to be narrow.</para>
+    ///
+    /// <para><b>What these two arms bracket is keyword-or-nothing, NOT wrong-or-nothing, and the
+    /// difference is the whole limitation of this assertion.</b> A label that is a plausible
+    /// user-defined identifier but not the enclosing member passes both arms in silence. That is not a
+    /// hypothetical shape: of the four misattributions
+    /// <see cref="MemberAttributionSites"/> was built from, only <c>if</c> was a keyword —
+    /// <c>SqlConnectionStringBuilder</c> (a BCL type), <c>optimizeForSequentialKey</c> and <c>sql</c>
+    /// (locals) are all identifier-shaped, so THREE of the four are shapes this test cannot see. They are
+    /// pinned by exact comparison at five sites; a regression to that shape anywhere in the rest of the
+    /// corpus is undetected here and is caught only if it happens to land on one of those five.</para>
+    ///
+    /// <para><b>The consequence worth naming: widening <see cref="DeclarationHead"/>'s modifier list is
+    /// fixture-guarded only.</b> That field's own note explains that admitting a bare <c>const</c> or
+    /// <c>static</c> would re-admit the local-variable case — and a re-admitted local produces an
+    /// identifier-shaped label, which is precisely what this assertion is blind to. So the guard against
+    /// that widening is a comment on <see cref="DeclarationHead"/> plus five fixture rows, not a
+    /// corpus-scale test. The two comments point at each other deliberately.</para>
+    ///
+    /// <para><b>And the obvious detector is a trap, so it is deliberately absent.</b> Asserting that the
+    /// label appears among <c>map.Declarations</c>' names cannot fail: <see cref="EnclosingMember"/>
+    /// returns <see cref="DeclaredRange.Name"/> taken from that very map, so the check and the thing it
+    /// validates are the same value read twice. It is #3089's tautology one artifact over, and a pin that
+    /// cannot fail is worse than a limitation that is written down — it converts this paragraph into
+    /// false confidence. Closing the gap for real needs a second, independent derivation of "which member
+    /// is this offset in", which is a bigger change than the message this PR fixes.</para>
     /// </summary>
     [Fact]
     public void EveryTsqlLiteralInTheCorpus_IsAttributedToADeclaredMember()
@@ -2239,6 +2262,13 @@ public sealed class TsqlConventionGuardTests
     /// reds on it by name. Widening the modifier list to admit a bare <c>const</c> or <c>static</c> would
     /// re-admit the local-variable case, so the resolution fails toward the worse label instead: an honest
     /// <c>&lt;unknown&gt;</c> a reader escalates, not a plausible name a reader trusts.</para>
+    ///
+    /// <para><b>That widening is guarded by this comment and by five fixture rows, and by nothing else.</b>
+    /// A re-admitted local produces an identifier-shaped label, and
+    /// <see cref="EveryTsqlLiteralInTheCorpus_IsAttributedToADeclaredMember"/> can only see a label that
+    /// is a keyword or nothing — so it would report a clean run across the rest of the corpus. Its doc
+    /// comment states the same bound from the other side; if you are here to widen the list, read
+    /// it.</para>
     ///
     /// <para><b>The trailing lookahead excludes an ACCESSOR</b>, which is the one place an access modifier
     /// appears INSIDE another member's body. <c>ArchiveService.IsArchiving</c> is the whole population and
