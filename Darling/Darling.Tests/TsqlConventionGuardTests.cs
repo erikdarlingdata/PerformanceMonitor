@@ -50,7 +50,7 @@ namespace Darling.Tests;
 /// a built-in, so nothing T-SQL could fall outside the population. Testing that instead of stating it
 /// found two counter-examples — and one of them mattered: Darling's Extended Events provisioning DDL was
 /// real T-SQL going to production servers with no marker in it at all. That is fixed (the markers now
-/// reach <c>EVENT SESSION</c>, <c>sqlserver.</c> and <c>package0.</c>) and what remains is pinned at set
+/// reach <c>EVENT SESSION</c>) and what remains is pinned at set
 /// equality by <see cref="TheTsqlTheMarkerSetCannotSee_IsTheseAndNoOthers"/>.</para>
 ///
 /// <para><b>Stated bound: SQL assembled across several literals is judged per literal.</b>
@@ -450,7 +450,7 @@ public sealed class TsqlConventionGuardTests
     /// Extended Events provisioning DDL (<c>CREATE EVENT SESSION … ADD EVENT sqlserver.blocked_process_report
     /// …</c>) was real T-SQL sent to production servers and entirely outside the population, and
     /// <c>FactRemediation</c>'s cursor fetch still is. The first was fixed by adding
-    /// <c>EVENT SESSION</c>, <c>sqlserver.</c> and <c>package0.</c> to <see cref="TsqlMarkers"/>. The second
+    /// <c>EVENT SESSION</c> to <see cref="TsqlMarkers"/>. The second
     /// is here.</para>
     ///
     /// <para><b>The discriminator, and why it is narrow on purpose.</b> The complement is over 500 literals,
@@ -1210,6 +1210,11 @@ public sealed class TsqlConventionGuardTests
     /// <see cref="EverySqlServerCollectorDefinitionsFile_ContributesATsqlStatement"/> is the per-site check
     /// that the set has not gone blind on any collector.
     ///
+    /// <para><c>sqlserver.</c> and <c>package0.</c> went in beside <c>EVENT SESSION</c> and were then
+    /// REMOVED: measured, every statement in the corpus carrying either also carries <c>EVENT SESSION</c>,
+    /// so no fixture could show them mattering and a mutation deleting them stayed green. A marker nothing
+    /// depends on is a claim nothing holds.</para>
+    ///
     /// <para>The stated bound: this is a marker list, not a parser. T-SQL written with none of these tokens —
     /// a bare <c>SELECT a FROM b WHERE c = 1;</c> against a monitored server — is not judged. No such
     /// statement exists in the corpus, because every read of a monitored SQL Server goes through a DMV, a
@@ -1230,9 +1235,7 @@ public sealed class TsqlConventionGuardTests
         + @"|\bTOP\s*\("
         + @"|\bSET\s+TRANSACTION\s+ISOLATION\s+LEVEL"
         + @"|\bSET\s+NOCOUNT\b"
-        + @"|\bEVENT\s+SESSION\b"
-        + @"|\bsqlserver\.[a-z_]"
-        + @"|\bpackage0\.",
+        + @"|\bEVENT\s+SESSION\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>Whether the literal opens a SQL statement of ANY dialect — the half of the population test
