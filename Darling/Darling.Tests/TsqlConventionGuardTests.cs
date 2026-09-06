@@ -1271,6 +1271,14 @@ public sealed class TsqlConventionGuardTests
     /// Code plus dynamic SQL: comments, quoted identifiers and XQuery arguments blanked, other single-quoted
     /// spans kept. What the token checks read.
     ///
+    /// <para><b>The cost of keeping them, since it is a real one.</b> A string VALUE that happens to contain
+    /// a banned token reads as the token: <c>WHERE d.state_desc = N'DATETIME'</c> would be reported as an
+    /// uppercase data type. There is no such value in the corpus — the scan measures zero on the covered
+    /// subset — and the failure direction is a spurious red on correct SQL rather than a hidden violation,
+    /// which is the direction to be wrong in. Blanking string values instead would trade that for missing
+    /// every violation inside dynamic SQL, which is written all over the scanned trees — and one
+    /// <c>sp_executesql</c> body held one of the nine violations this change fixed.</para>
+    ///
     /// <para>Keeping non-XQuery strings is what let this guard see the <c>COUNT(*)</c> inside Lite's
     /// <c>EXEC sys.sp_executesql N'SELECT @c = COUNT(*) …'</c>: that text is T-SQL that runs. Blanking
     /// quoted identifiers is what keeps a column named <c>[INT]</c> from reading as a type.</para>
