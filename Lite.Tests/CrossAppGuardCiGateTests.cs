@@ -8,10 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Security;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Xunit;
 
@@ -39,9 +42,30 @@ namespace Lite.Tests;
 /// <para><b>Two populations, because a cross-app read is not always C#.</b> A linked compile —
 /// <c>&lt;Compile Include="..\Darling\Darling.Tests\X.cs" /&gt;</c> — is a read of exactly the kind this
 /// guard exists to require be filter-reachable, and #3063 was filed because a <c>*.cs</c>-only scan could not
-/// see one: the file was never opened. So the scan reads project XML as well, and the MSBuild path
-/// normaliser is self-validated against known answers alongside the glob matcher, for the same reason —
-/// a relative <c>Include=</c> resolving to the WRONG repo-rooted path finds nothing and passes.</para>
+/// see one: the file was never opened. So the second population is the project's ITEMS — and
+/// <b>MSBuild evaluates them rather than this file parsing them.</b>
+/// <c>dotnet msbuild &lt;project&gt; -getItem:… -getProperty:…</c> answers with properties expanded, imports
+/// followed, <c>Condition</c>s applied, wildcards expanded, and the <c>Directory.Build.props</c> probe
+/// already performed, in one offline invocation that builds nothing. Reading the XML by regex meant
+/// re-implementing MSBuild's evaluator, and each correctness fix to it exposed the next construct it could
+/// not evaluate; asking MSBuild retires the class rather than the instance.</para>
+///
+/// <para><b>Shelling out is a new failure mode, and it fails in this guard's dangerous direction.</b> A run
+/// that reports no cross-app references because a process never started is worse than a regex that reported
+/// too few, so the invocation is floored in three places that are asserted separately — it exited zero, its
+/// output parsed, and it returned items — before anything asks WHAT those items are. The per-type floor is
+/// not decoration either: an item type MSBuild does not recognise comes back as a present-but-EMPTY array
+/// with exit 0, so a typo in <see cref="EvaluatedItemTypes"/> is invisible to any check on the real tree
+/// (<c>Content</c>, <c>EmbeddedResource</c> and <c>Reference</c> are all legitimately empty here). Only
+/// <see cref="TheEvaluatedRead_SurvivesEveryFormThatDefeatsAnXmlParse"/>'s synthetic two-SKU fixture, which
+/// carries one item of every requested type, can tell a typo from an honest zero.</para>
+///
+/// <para><b>The one thing the evaluated read does not report is an <c>&lt;Import&gt;</c>'s own path.</b>
+/// Items an imported file DEFINES arrive with the rest; the imported file's path is not an item, and
+/// <c>-getProperty</c> answers only for the build files MSBuild locates itself. So a scanned project
+/// carrying an <c>&lt;Import&gt;</c> element fails <see cref="Check"/> loudly rather than being quietly
+/// half-scanned. There are none in this repository, which is what makes a gate cheaper than an
+/// evaluator.</para>
 ///
 /// <para><b>A SKU owns more than one tree, which is #3067.</b> Every anchor here was the APP directory,
 /// and <c>Lite.Tests</c> is a SIBLING of <c>Lite</c> rather than a child — so four reads of Lite's test
@@ -72,10 +96,29 @@ public class CrossAppGuardCiGateTests
     private static readonly SkuTrees LiteTrees = new(LiteAppDir, LiteTestsDir);
     private static readonly SkuTrees DarlingTrees = new(DarlingAppDir, DarlingTestsDir);
 
-    /* The build files MSBuild imports into a project without being named, in the order it probes
-       them. Shared by the walk and by the pin that floors where the walk looked. */
-    private static readonly string[] BuildFileNames =
-        { "Directory.Build.props", "Directory.Build.targets" };
+    /* Every item type that can carry a path to another app's file. Requested in one invocation, and
+       floored PER TYPE against the synthetic fixture rather than against this repository: an item type
+       MSBuild does not recognise returns an empty array and exit 0, so a typo here is indistinguishable
+       on a tree where three of the six are legitimately empty. */
+    private static readonly string[] EvaluatedItemTypes =
+        { "Compile", "None", "Content", "EmbeddedResource", "Reference", "ProjectReference" };
+
+    /* MSBuild's own answer to "which build files did you import without being named", which is the
+       question a hand-rolled upward probe of Directory.Build.props / .targets was asking. It is also a
+       wider answer than that probe: Directory.Packages.props is imported into every project here and is
+       not one of the two names such a probe looks for. Empty string when there is none, which is how this
+       repository reads for the first two. */
+    private static readonly string[] EvaluatedProperties =
+        { "MSBuildProjectFullPath", "DirectoryBuildPropsPath", "DirectoryBuildTargetsPath", "DirectoryPackagesPropsPath" };
+
+    /* The build files among those properties - MSBuildProjectFullPath is the project itself and is the
+       floor that a returned property set was actually populated. */
+    private static readonly string[] ImportedBuildFileProperties =
+        { "DirectoryBuildPropsPath", "DirectoryBuildTargetsPath", "DirectoryPackagesPropsPath" };
+
+    /* A guard that hangs is a guard that never reports. Generous against a cold SDK on a CI runner and
+       still far below any job timeout; measured at ~0.3s per project on a warm one. */
+    private static readonly TimeSpan EvaluationTimeout = TimeSpan.FromMinutes(2);
 
     /// <summary>One SKU's two top-level trees.
     ///
@@ -244,210 +287,305 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>
-    /// The MSBuild half of the self-validation above, and for the same reason: a relative
-    /// <c>Include=</c> that normalised to the WRONG repo-rooted path would match no filter pattern and
-    /// find no file on disk, so <see cref="Resolve"/> would drop it and every coverage check would pass
-    /// having seen nothing. The first case is #3059's linked compile — the reference #3063 exists for.
+    /// The evaluated project read, driven against a synthetic two-SKU tree rather than this repository.
+    ///
+    /// <para><b>This is where <see cref="EvaluatedItemTypes"/> is floored, and it is the only place that
+    /// can be.</b> An item type MSBuild does not recognise comes back as a present-but-empty array with
+    /// exit 0 — pinned directly below — and <c>Content</c>, <c>EmbeddedResource</c> and <c>Reference</c>
+    /// are all legitimately empty in this repository, so a typo in that list changes nothing any check on
+    /// the real tree can see. The fixture carries one item of every requested type, so a type that stops
+    /// being asked for, or is asked for by the wrong name, reds here.</para>
+    ///
+    /// <para><b>And it is the only place <c>HintPath</c> can be proven.</b> There is no <c>Reference</c>
+    /// item anywhere in this repository, so the metadata route to a cross-app assembly has no live
+    /// example; the fixture supplies one, written relatively, which is both the ordinary spelling and the
+    /// one that needs resolving — MSBuild returns <c>HintPath</c> AS WRITTEN rather than rooted, unlike
+    /// <c>FullPath</c>.</para>
+    ///
+    /// <para><b>The rest of the fixture is the reason this stage stopped parsing XML.</b> Each construct
+    /// below is one an XML parse has to grow a rule for, and MSBuild already answers: a property, an item
+    /// group behind a <c>Condition</c>, a <c>Choose</c>/<c>When</c>, an item DEFINED in an imported props
+    /// file, an <c>@(Item-&gt;'…')</c> transform, and a wildcard. Each is asserted in both directions —
+    /// the arm that holds is FOUND and the arm that does not is ABSENT — so a fixture that failed to build
+    /// its tree cannot pass by finding nothing.</para>
     /// </summary>
     [Fact]
-    public void TheMsBuildPathNormaliser_AgreesWithKnownAnswers()
+    public void TheEvaluatedRead_SurvivesEveryFormThatDefeatsAnXmlParse()
     {
-        var repo = RepoRoot();
-        var liteTests = Path.Combine(repo, LiteTestsDir);
-        var darlingTests = Path.Combine(repo, DarlingTestsDir.Replace('/', Path.DirectorySeparatorChar));
+        var fixture = Path.Combine(
+            Path.GetTempPath(), "crossapp-getitem-" + Guid.NewGuid().ToString("n"));
 
-        Assert.Equal(
-            "Darling/Darling.Tests/CSharpSourceWalker.cs",
-            RepoRooted(repo, liteTests, @"..\Darling\Darling.Tests\CSharpSourceWalker.cs", DarlingTrees));
+        try
+        {
+            /* A miniature of this repository's shape: the consuming project under one SKU's test tree,
+               the files it reaches under the other SKU's app tree AND its sibling test tree, so the
+               #3067 anchor is exercised on the evaluated population too. */
+            var project = WriteCrossAppFixture(fixture);
 
-        /* Forward slashes are legal in MSBuild too, and so is a redundant segment. */
-        Assert.Equal(
-            "Darling/Darling.Tests/CSharpSourceWalker.cs",
-            RepoRooted(repo, liteTests, "../Darling/./Darling.Tests/CSharpSourceWalker.cs", DarlingTrees));
+            var evaluation = Evaluate(fixture, project);
+            AssertInvocationSucceeded(evaluation);
 
-        /* The other direction is two levels up, out of Darling/Darling.Tests. */
-        Assert.Equal(
-            "Lite/Services/DataImportService.cs",
-            RepoRooted(repo, darlingTests, @"..\..\Lite\Services\DataImportService.cs", LiteTrees));
-
-        /* #3067 on this side of the fence: a linked compile reaching Lite's TEST project, which is a
-           sibling of Lite rather than a child. It normalises exactly as the line above does, and the
-           app-only anchor then threw it away — the same silent drop as the C# stage, one population
-           over, and the one a Compile Include would take. Spelled against a directory that does not
-           exist for the reason the wildcard case below gives. */
-        Assert.Equal(
-            "Lite.Tests/NoSuchArea/Linked.cs",
-            RepoRooted(repo, darlingTests, @"..\..\Lite.Tests\NoSuchArea\Linked.cs", LiteTrees));
-
-        /* And the widening stops at a root boundary: a tree merely PREFIXED by a root is not that root,
-           in either length order. */
-        Assert.Null(RepoRooted(repo, darlingTests, @"..\..\Lite.TestsExtra\Nope.cs", LiteTrees));
-        Assert.Null(RepoRooted(repo, darlingTests, @"..\..\LiteTests\Nope.cs", LiteTrees));
-
-        /* Same app, so not this guard's business — and the discrimination a relative path cannot make
-           until it is resolved, since both spellings open with the same "..\". */
-        Assert.Null(RepoRooted(repo, liteTests, @"..\Lite\Mcp\McpHostService.cs", DarlingTrees));
-        Assert.Null(RepoRooted(repo, liteTests, @"Fixtures\SystemHealth\*.xml", DarlingTrees));
-
-        /* A wildcard over the other app IS a read, so it becomes the directory it enumerates. Spelled
-           against a directory that does not exist, deliberately: an expected value written as a real
-           repo-rooted path is itself matched by the C# stage above, and would put a path nothing
-           actually reads into the found set. The normaliser never touches the disk, so a fictional
-           directory tests it exactly as well. */
-        Assert.Equal(
-            "Darling/NoSuchArea/Fixtures",
-            RepoRooted(repo, liteTests, @"..\Darling\NoSuchArea\Fixtures\*.xml", DarlingTrees));
-
-        /* Out of the tree entirely, and not a path at all. */
-        Assert.Null(RepoRooted(repo, liteTests, @"..\..\Darling\X.cs", DarlingTrees));
-        Assert.Null(RepoRooted(repo, liteTests, "xunit.v3", DarlingTrees));
-
-        /* The base directory is the whole answer for an Import inside an imported build file, and the
-           two rules disagree there. A repo-root Directory.Build.props writing
-           <Import Project="Darling\Shared.targets" /> means <repo>/Darling/Shared.targets, because
-           Import resolves against its own file. Resolved against the CONSUMING project it would be
-           Lite.Tests/Darling/Shared.targets, which fails the anchor and disappears - a silent miss, not
-           a wrong answer, which is why it is pinned from both bases. */
-        Assert.Equal(
-            "Darling/Shared.targets",
-            RepoRooted(repo, repo, @"Darling\Shared.targets", DarlingTrees));
-        Assert.Null(RepoRooted(repo, liteTests, @"Darling\Shared.targets", DarlingTrees));
-    }
-
-    /// <summary>
-    /// Both MSBuild spellings, because MSBuild accepts both and the element one is the common form.
-    ///
-    /// <para><c>HintPath</c> is item METADATA, and metadata may be written as an attribute or as a child
-    /// element — the element form being what Visual Studio emits for a legacy <c>&lt;Reference&gt;</c>.
-    /// Reading only the attribute form would be #3063 recurring one attribute over: the scan would
-    /// advertise a population wider than the one it has, which is the actual shape of that defect.
-    /// <c>Include</c>, <c>Update</c> and <c>Import</c>'s <c>Project</c> are item operations rather than
-    /// metadata and have no element spelling.</para>
-    ///
-    /// <para>Fed the shipped matchers rather than a retyped copy, so the pin cannot pass while the code
-    /// drifts underneath it.</para>
-    /// </summary>
-    [Fact]
-    public void TheMsBuildMatchers_ReadBothSpellings()
-    {
-        const string Xml = """
-            <Project>
-              <ItemGroup>
-                <Compile Include="..\Other\A.cs" Link="A.cs" />
-                <None Update='..\Other\B.xml' />
-                <Reference Include="SomeLib">
-                  <HintPath>..\Other\bin\SomeLib.dll</HintPath>
-                </Reference>
-                <Reference Include="Other" HintPath="..\Other\C.dll" />
-                <Compile Remove="..\Other\Removed.cs" />
-                <Reference Include="Gated">
-                  <HintPath Condition="'$(Platform)'=='x64'">..\Other\x64\Gated.dll</HintPath>
-                </Reference>
-                <Reference Include="Angled">
-                  <HintPath Condition="'$(V)'>'1'">..\Other\Angled.dll</HintPath>
-                </Reference>
-              </ItemGroup>
-              <Import Project="..\Other\D.props" />
-            </Project>
-            """;
-
-        Assert.Equal(
-            new[]
+            /* The per-type floor. Every requested type present AND non-empty - key presence alone proves
+               nothing, which the pin below measures. */
+            foreach (var type in EvaluatedItemTypes)
             {
-                /* Item paths resolve against the consuming project, so RelativeToItsOwnFile is false for
-                   every one of them. Import's Project is the single exception, and getting that wrong is
-                   a silent miss rather than a wrong answer: it would resolve one directory off, fail the
-                   root anchor, and vanish. */
-                (@"..\Other\A.cs", false),
-                (@"..\Other\B.xml", false),
-                ("SomeLib", false),
-                ("Other", false),
-                (@"..\Other\C.dll", false),
-                ("Gated", false),
-                ("Angled", false),
-                (@"..\Other\D.props", true),
+                Assert.True(
+                    evaluation.ItemCounts.TryGetValue(type, out var count) && count > 0,
+                    $"the fixture declares one {type} item and the evaluated read returned " +
+                    $"{(evaluation.ItemCounts.TryGetValue(type, out var c) ? c.ToString(System.Globalization.CultureInfo.InvariantCulture) : "no such key")}. " +
+                    $"An unrecognised item type answers with an EMPTY array and exit 0, so this is what a " +
+                    $"typo in {nameof(EvaluatedItemTypes)} looks like. Counts: " +
+                    $"[{string.Join(", ", evaluation.ItemCounts.Select(kv => kv.Key + "=" + kv.Value))}]");
+            }
 
-                /* The element spellings are collected after the attributes, and are the cases the
-                   attribute matcher alone cannot see at all. The last two carry their own attribute on
-                   the open tag - Condition, for a platform-specific hint path - and the last one's
-                   Condition holds a raw '>', which is legal in an attribute value and would end the tag
-                   early for a matcher that scanned to the next angle bracket. */
-                (@"..\Other\bin\SomeLib.dll", false),
-                (@"..\Other\x64\Gated.dll", false),
-                (@"..\Other\Angled.dll", false),
-            },
-            MsBuildPaths(Xml));
+            var found = CrossAppItems(fixture, Path.GetDirectoryName(project)!, evaluation, DarlingTrees)
+                .Select(r => r.Rooted)
+                .ToHashSet(StringComparer.Ordinal);
 
-        /* Remove= is absent by design: dropping an item from a glob is not a read of it. */
-        Assert.DoesNotContain(
-            MsBuildPaths(Xml),
-            p => p.Raw.Equals(@"..\Other\Removed.cs", StringComparison.Ordinal));
+            /* HintPath, relative, reaching the other app - the route with no live example here. */
+            Assert.Contains("Darling/PerformanceMonitor.Darling.Service/Hinted.dll", found);
+
+            /* An Include= carrying a property, and one reaching the other SKU's SIBLING test tree. */
+            Assert.Contains("Darling/Darling.Tests/FromProperty.cs", found);
+
+            /* An item group behind a Condition that HOLDS, and the one behind a Condition that does not. */
+            Assert.Contains("Darling/Darling.Tests/ConditionTrue.cs", found);
+            Assert.DoesNotContain("Darling/Darling.Tests/ConditionFalse.cs", found);
+
+            /* Choose/When, both arms. */
+            Assert.Contains("Darling/Darling.Tests/ChosenWhen.cs", found);
+            Assert.DoesNotContain("Darling/Darling.Tests/ChosenOtherwise.cs", found);
+
+            /* An item DEFINED in an imported props file - invisible to any scan that opens only the
+               project, and resolved by MSBuild against the CONSUMING project's directory. */
+            Assert.Contains("Darling/Darling.Tests/FromImport.cs", found);
+
+            /* An item transform. */
+            Assert.Contains("Darling/Darling.Tests/Transformed.cs", found);
+
+            /* A wildcard, which arrives as the concrete files it matched rather than as a directory to
+               probe - so the sibling that does not match is absent. */
+            Assert.Contains("Darling/Fixtures/Globbed.xml", found);
+            Assert.DoesNotContain("Darling/Fixtures/NotGlobbed.txt", found);
+
+            /* Origin attribution comes from MSBuild's own DefiningProjectFullPath, so the item defined in
+               the imported file names THAT file rather than the project that consumed it. */
+            var fromImport = CrossAppItems(fixture, Path.GetDirectoryName(project)!, evaluation, DarlingTrees)
+                .Single(r => r.Rooted.Equals("Darling/Darling.Tests/FromImport.cs", StringComparison.Ordinal));
+            Assert.Contains("Imported.props", fromImport.Origin, StringComparison.Ordinal);
+
+            /* And the anchor still refuses a tree merely PREFIXED by a root, on this population too. */
+            Assert.DoesNotContain("DarlingExtra/Nope.cs", found);
+        }
+        finally
+        {
+            if (Directory.Exists(fixture))
+            {
+                Directory.Delete(fixture, recursive: true);
+            }
+        }
     }
 
     /// <summary>
-    /// The two base directories, exercised through the shipped read rather than through
-    /// <see cref="RepoRooted"/> alone.
+    /// The shell-out's failure modes, each pinned to fail LOUDLY rather than to return nothing.
     ///
-    /// <para>An <c>Import</c>'s <c>Project</c> resolves against the file CONTAINING it; an item's path
-    /// resolves against the CONSUMING project. For a <c>.csproj</c> those are the same directory, so the
-    /// divergence only appears in an imported build file — and there is none in this repository, which
-    /// is why this is driven with synthetic XML rather than repo content.</para>
+    /// <para>This guard's success condition is an empty offender list, so every way of producing an empty
+    /// answer without looking is a way of passing while broken. Three exist for a child process — it never
+    /// started, it exited non-zero, or its output did not parse — and one exists for MSBuild itself: an
+    /// item type it does not recognise answers with a present, EMPTY array and exit 0. That last one is
+    /// why <see cref="EvaluatedItemTypes"/> cannot be floored against this repository, and it is measured
+    /// here rather than assumed.</para>
     ///
-    /// <para>Both spellings below name a file under the other app, and <b>neither single base produces
-    /// both answers</b>: one base for everything drops the <c>Import</c> (it lands under the consuming
-    /// project) or drops the item (it climbs out of the repository). So the assertion is two-sided in
-    /// both directions at once. It matters because the wrong base is a SILENT miss — the reference fails
-    /// the anchor and vanishes, rather than resolving to something visibly wrong.</para>
+    /// <para><see cref="Evaluation.Failure"/> carries the reason as data instead of throwing, so a caller
+    /// asserts on it in the same shape as the rest of the population floors and the message arrives with
+    /// the command line and the process output attached.</para>
     /// </summary>
     [Fact]
-    public void TheTwoResolutionBases_AreBothUsedWhereTheyDiverge()
+    public void TheEvaluatedRead_FailsLoudlyRatherThanReturningNothing()
+    {
+        var scratch = Path.Combine(
+            Path.GetTempPath(), "crossapp-getitem-fail-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(scratch);
+
+        try
+        {
+            /* A project that does not exist. */
+            var missing = Evaluate(scratch, Path.Combine(scratch, "NoSuchProject.csproj"));
+            Assert.NotEqual(0, missing.ExitCode);
+            Assert.NotEqual(string.Empty, missing.Failure);
+            Assert.Empty(missing.Items);
+
+            /* A project whose XML does not load. Distinct from the case above: MSBuild reports this one
+               on stderr and writes nothing at all to stdout, so a parse of an empty string is what a
+               lenient reader would call "no items". */
+            var malformed = Path.Combine(scratch, "Malformed.csproj");
+            File.WriteAllText(
+                malformed,
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><Compile Include=</ItemGroup></Project>");
+            var broken = Evaluate(scratch, malformed);
+            Assert.NotEqual(0, broken.ExitCode);
+            Assert.NotEqual(string.Empty, broken.Failure);
+            Assert.Empty(broken.Items);
+
+            /* Output that is not the expected JSON is a failure and not an empty answer. Driven through
+               the shipped parser rather than through a process, because there is no invocation that
+               produces this today - the point is that the reader does not treat it as zero items. */
+            Assert.NotEqual(string.Empty, ParseEvaluation("Build succeeded.", out _, out _));
+            Assert.NotEqual(string.Empty, ParseEvaluation(string.Empty, out _, out _));
+            Assert.NotEqual(string.Empty, ParseEvaluation("{\"Properties\":{}}", out _, out _));
+
+            /* And an item type MSBuild does not recognise: exit 0, the key present, the array empty. This
+               is the shape of a typo in EvaluatedItemTypes, and the reason the fixture pin above floors
+               every type by name. */
+            var probe = Path.Combine(scratch, "Probe.csproj");
+            File.WriteAllText(
+                probe,
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>"
+                + "<TargetFramework>net10.0</TargetFramework><EnableDefaultItems>false</EnableDefaultItems>"
+                + "</PropertyGroup><ItemGroup><Compile Include=\"Real.cs\" /></ItemGroup></Project>");
+
+            var (exitCode, stdout, stderr) = RunDotnet(
+                scratch,
+                new[] { "msbuild", probe, "-getItem:Compile;NoSuchItemTypeAtAll" });
+
+            Assert.True(
+                exitCode == 0,
+                $"the probe invocation itself failed, so nothing below is measuring MSBuild's answer to an "
+              + $"unknown item type. exit={exitCode}, stderr={Truncate(stderr)}, stdout={Truncate(stdout)}");
+
+            using var doc = JsonDocument.Parse(stdout);
+            var items = doc.RootElement.GetProperty("Items");
+            Assert.Equal(1, items.GetProperty("Compile").GetArrayLength());
+            Assert.Equal(0, items.GetProperty("NoSuchItemTypeAtAll").GetArrayLength());
+        }
+        finally
+        {
+            if (Directory.Exists(scratch))
+            {
+                Directory.Delete(scratch, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The evaluated set has to CONTAIN what a text scan of the same XML finds, not merely differ from it.
+    ///
+    /// <para>A replacement that found different things rather than more things would read as an
+    /// improvement while having moved the blind spot, so <see cref="ParsedProjectXmlPaths"/> stays as a
+    /// deliberately crude second opinion — quoted attribute values and element text, resolved against the
+    /// project directory and anchored the same way. It is not the live route and is not a good one: it
+    /// over-reads (a path inside a comment counts) and under-reads (anything needing evaluation
+    /// disappears). Both are the safe direction for a lower bound.</para>
+    ///
+    /// <para><b>Superset of nothing is free</b>, which is the way this pin passes while measuring nothing
+    /// at all. So the crude side is floored twice: run against the arm's OWN trees it must find something
+    /// (proving the parse read the file and can resolve and anchor a path), and on the Lite arm the
+    /// cross-app answer is floored BY NAME on the linked compile #3063 was filed about — the one live
+    /// cross-app project item in this repository. <c>Darling.Tests</c>' project names no file under
+    /// <c>Lite</c> or <c>Lite.Tests</c> at all, so its cross-app answer is legitimately empty on both
+    /// sides and only the own-tree floor is available there.</para>
+    /// </summary>
+    [Fact]
+    public void TheEvaluatedSet_ContainsEverythingAParseOfTheSameXmlFinds()
     {
         var repo = RepoRoot();
-        var seen = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
-        var unevaluable = new List<string>();
 
-        ReadMsBuildPaths(
-            repo,
-            "<Project>"
-                + "<Import Project=\"Darling\\NoSuchArea\\Imported.targets\" />"
-                + "<ItemGroup><None Include=\"..\\Darling\\NoSuchArea\\Item.cs\" /></ItemGroup>"
-                + "</Project>",
-            origin: "Directory.Build.props",
-            projectDir: Path.Combine(repo, LiteTestsDir),
-            ownDir: repo,
-            other: DarlingTrees,
-            seen,
-            unevaluable);
+        var arms = new[]
+        {
+            (Project: LiteTestsDir, Own: LiteTrees, Other: DarlingTrees,
+                Floor: $"{DarlingTestsDir}/CSharpSourceWalker.cs"),
+            (Project: DarlingTestsDir, Own: DarlingTrees, Other: LiteTrees, Floor: (string?)null),
+        };
 
-        Assert.Empty(unevaluable);
-        Assert.Equal(
-            new[] { "Darling/NoSuchArea/Imported.targets", "Darling/NoSuchArea/Item.cs" },
-            seen.Keys);
+        foreach (var (project, own, other, floor) in arms)
+        {
+            var projectRoot = Path.Combine(repo, project.Replace('/', Path.DirectorySeparatorChar));
+            var projectFiles = TrackedFiles(projectRoot, "*.csproj").ToList();
+            Assert.True(projectFiles.Count > 0, $"no project file under {project} to parse");
+
+            var parsedOwn = new SortedSet<string>(StringComparer.Ordinal);
+            var parsedCross = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var file in projectFiles)
+            {
+                var xml = File.ReadAllText(file);
+                var dir = Path.GetDirectoryName(file)!;
+                parsedOwn.UnionWith(ParsedProjectXmlPaths(repo, dir, xml, own));
+                parsedCross.UnionWith(ParsedProjectXmlPaths(repo, dir, xml, other));
+            }
+
+            /* The crude side works at all: it read the file, resolved a relative path and anchored it. */
+            Assert.True(
+                parsedOwn.Count > 0,
+                $"the XML parse found no path under {project}'s OWN trees, so it is not reading the file " +
+                "and every comparison below is superset-of-nothing");
+
+            var evaluation = Evaluate(repo, projectFiles[0]);
+            AssertInvocationSucceeded(evaluation);
+
+            var evaluated = CrossAppItems(repo, projectRoot, evaluation, other)
+                .Select(r => r.Rooted)
+                .ToHashSet(StringComparer.Ordinal);
+
+            if (floor is not null)
+            {
+                Assert.Contains(floor, parsedCross);
+                Assert.Contains(floor, evaluated);
+            }
+
+            var missed = parsedCross.Except(evaluated, StringComparer.Ordinal).ToList();
+            Assert.True(
+                missed.Count == 0,
+                $"the evaluated read of {project} does not contain what a parse of the same XML sees, so " +
+                "it has moved the blind spot rather than closed it: " + string.Join(", ", missed) +
+                $". Evaluated: [{string.Join(", ", evaluated.OrderBy(p => p, StringComparer.Ordinal))}]");
+        }
     }
 
     /// <summary>
-    /// A value this scan cannot resolve has to be reported, not dropped.
+    /// An <c>&lt;Import&gt;</c>'s own path is the one cross-app read the evaluated population cannot
+    /// report, so it is gated rather than evaluated — and the gate is pinned in both directions here.
     ///
-    /// <para>An unrecognised MSBuild expression is the worst case for this guard: it falls through as a
-    /// literal relative path, resolves to nothing, and vanishes from the found set — silently, which is
-    /// the direction #3063 exists to close. So the classification covers every form MSBuild evaluates
-    /// rather than the two that happen to be common. There are three, and no fourth: a property or
-    /// property function, item metadata, and an item list or transform.</para>
+    /// <para>Items an imported file DEFINES arrive with everything else, which is the interesting half;
+    /// the imported file's own path is not an item and no <c>-getItem</c> or <c>-getProperty</c> answer
+    /// carries it. There is no <c>&lt;Import&gt;</c> element in any project file in this repository, so a
+    /// gate that fails the moment one appears costs three lines where an evaluator costs a rule per
+    /// construct.</para>
+    ///
+    /// <para>It flags a commented-out import too. That is the right direction for a gate whose whole
+    /// purpose is to stop a construct arriving unnoticed, and the message says what to do about it.</para>
     /// </summary>
     [Fact]
-    public void TheEvaluabilityCheck_CoversEveryMsBuildExpressionForm()
+    public void TheImportGate_SeesAnImportElementAndNothingMerelyNamedLikeOne()
     {
-        Assert.True(NeedsMsBuildToEvaluate(@"$(RepoRoot)Darling\X.cs"));
-        Assert.True(NeedsMsBuildToEvaluate(@"$([MSBuild]::GetPathOfFileAbove('Directory.Build.props'))"));
-        Assert.True(NeedsMsBuildToEvaluate(@"%(RecursiveDir)X.cs"));
+        Assert.Equal(
+            new[] { "<Import Project=\"..\\Darling\\Shared.targets\" />" },
+            ImportElements("<Project><Import Project=\"..\\Darling\\Shared.targets\" /></Project>"));
 
-        /* An item list, and an item transform - neither carries $( or %( anywhere. */
-        Assert.True(NeedsMsBuildToEvaluate("@(SharedSources)"));
-        Assert.True(NeedsMsBuildToEvaluate(@"@(SharedSources->'..\Darling\%(Filename)%(Extension)')"));
+        /* The Sdk-attribute and Sdk-element spellings resolve through MSBuild's SDK resolver rather than a
+           path, and an Import inside a comment is still an Import arriving unnoticed. */
+        Assert.Equal(
+            new[] { "<Import Project=\"$(P)\" />" },
+            ImportElements("<Project><!-- <Import Project=\"$(P)\" /> --></Project>"));
 
-        /* A literal path is readable, and so is one that merely contains the sigils unparenthesised. */
-        Assert.False(NeedsMsBuildToEvaluate(@"..\Darling\Darling.Tests\CSharpSourceWalker.cs"));
-        Assert.False(NeedsMsBuildToEvaluate("Fixtures/100%-coverage@home.xml"));
+        /* And nothing merely named like one: an item type, an attribute, or a property whose name opens
+           with the same six characters. */
+        Assert.Empty(ImportElements(
+            "<Project><ItemGroup><ImportedThing Include=\"x\" /></ItemGroup>"
+            + "<PropertyGroup><ImportDirectoryBuildProps>true</ImportDirectoryBuildProps></PropertyGroup>"
+            + "</Project>"));
+
+        /* The live tree, which is what makes the gate cheap. Read through the shipped scan so the two
+           cannot disagree. */
+        var repo = RepoRoot();
+        foreach (var (project, other) in new[]
+        {
+            (LiteTestsDir, DarlingTrees),
+            (DarlingTestsDir, LiteTrees),
+        })
+        {
+            var scan = Scan(repo, project, other);
+            Assert.Empty(scan.UnreportedImports);
+        }
     }
 
     /// <summary>
@@ -484,27 +622,45 @@ public class CrossAppGuardCiGateTests
     ///
     /// <para>The collector enumerated <c>*.cs</c> only, so a cross-app read expressed as
     /// <c>&lt;Compile Include="..\Darling\Darling.Tests\X.cs" /&gt;</c> was invisible — the file holding it
-    /// was never opened. A widened collector that reaches no project files passes exactly as the narrow one
-    /// did, which would be the same defect committed by its own fix. So the file that WOULD carry such a
-    /// reference is required to be in the population, by name, rather than merely counted.</para>
+    /// was never opened. A widened collector that reaches no project items passes exactly as the narrow one
+    /// did, which would be the same defect committed by its own fix. So the linked compile that reference was
+    /// filed about is required in the evaluated set BY NAME rather than merely counted, and the two item
+    /// types a test project cannot honestly be empty of are floored by count.</para>
     ///
-    /// <para><see cref="ImportedBuildFiles"/> is reported and not floored: there is no
-    /// <c>Directory.Build.props</c> or <c>Directory.Build.targets</c> in this repository today, and asserting
-    /// one exists would be asserting a fiction. It is in the population so the first one is read, and it
-    /// takes only the NEAREST of each name, as MSBuild does.</para>
+    /// <para><b>Which types can be floored on this tree is not a matter of taste.</b> <c>Content</c>,
+    /// <c>EmbeddedResource</c> and <c>Reference</c> are all genuinely empty in both projects, and an item
+    /// type MSBuild does not recognise is ALSO empty — so a floor over those three would either red on a
+    /// clean tree or say nothing. <c>Compile</c> and <c>ProjectReference</c> are structural for a test
+    /// project that compiles and references its own SKU, so those two carry the count floor and
+    /// <see cref="TheEvaluatedRead_SurvivesEveryFormThatDefeatsAnXmlParse"/> carries the other four.</para>
+    ///
+    /// <para><see cref="ImportedBuildFileProperties"/> is reported and not floored on the first two names:
+    /// there is no <c>Directory.Build.props</c> or <c>Directory.Build.targets</c> in this repository and
+    /// asserting one exists would be asserting a fiction. What IS floored is that the property set came back
+    /// populated at all, through <c>MSBuildProjectFullPath</c> naming the project that was asked — so
+    /// "MSBuild says there are none" is distinguishable from "no properties were returned".
+    /// <c>Directory.Packages.props</c> is asserted because it is imported into every project here, and
+    /// because a two-name upward probe of <c>Directory.Build.*</c> is exactly the answer that misses
+    /// it.</para>
     /// </summary>
     [Fact]
-    public void ThePopulationReachesTheProjectFiles_AndNotOnlyTheCSharp()
+    public void ThePopulationReachesTheProjectItems_AndNotOnlyTheCSharp()
     {
         var repo = RepoRoot();
 
         var expectations = new[]
         {
-            (Project: LiteTestsDir, Other: DarlingTrees, Manifest: $"{LiteTestsDir}/Lite.Tests.csproj"),
-            (Project: DarlingTestsDir, Other: LiteTrees, Manifest: $"{DarlingTestsDir}/Darling.Tests.csproj"),
+            (Project: LiteTestsDir, Other: DarlingTrees, Manifest: $"{LiteTestsDir}/Lite.Tests.csproj",
+                /* #3059's linked compile, and the reference #3063 exists for. */
+                Named: (string?)$"{DarlingTestsDir}/CSharpSourceWalker.cs"),
+            (Project: DarlingTestsDir, Other: LiteTrees, Manifest: $"{DarlingTestsDir}/Darling.Tests.csproj",
+                /* Darling.Tests' project names no file under Lite or Lite.Tests, so there is nothing to
+                   require by name here and a fabricated expectation would be worse than none. Its own arm
+                   of the #3067 floor in Check is taken over the C# population instead. */
+                Named: null),
         };
 
-        foreach (var (project, other, manifest) in expectations)
+        foreach (var (project, other, manifest, named) in expectations)
         {
             var scan = Scan(repo, project, other);
 
@@ -512,7 +668,7 @@ public class CrossAppGuardCiGateTests
 
             Assert.True(
                 scan.ProjectFiles.Contains(manifest, StringComparer.Ordinal),
-                $"the MSBuild stage did not open {manifest}, so an Include= naming {other.AppDir} there " +
+                $"the MSBuild stage did not evaluate {manifest}, so an Include= naming {other.AppDir} there " +
                 "would " +
                 $"be invisible. Opened: [{string.Join(", ", scan.ProjectFiles)}]");
 
@@ -524,42 +680,45 @@ public class CrossAppGuardCiGateTests
                 p => p.Contains("/bin/", StringComparison.Ordinal) ||
                      p.Contains("/obj/", StringComparison.Ordinal));
 
-            /* The imported-build-file half needs the same protection as ProjectFiles above and cannot
-               have it in the same shape: nothing in this repository imports a Directory.Build.props, so
-               flooring the found COUNT would red on a clean tree. What is floored instead is that the
-               collector reached the locations MSBuild itself would probe — the two names in every
-               directory from the project up to and including the repo root — so "we looked and there
-               were none" is distinguishable from "we never looked". The chain is re-derived here from
-               the project path rather than read back off the walk. */
-            var directories = new List<string>();
-            for (var d = project; ; )
-            {
-                directories.Add(d);
-                var cut = d.LastIndexOf('/');
-                if (cut < 0)
-                {
-                    break;
-                }
+            AssertInvocationSucceeded(scan.Evaluated);
 
-                d = d[..cut];
+            /* The two types a test project cannot honestly be empty of. */
+            foreach (var structural in new[] { "Compile", "ProjectReference" })
+            {
+                Assert.True(
+                    scan.Evaluated.ItemCounts.TryGetValue(structural, out var count) && count > 0,
+                    $"{project} evaluated to no {structural} items, which no test project does — the " +
+                    "invocation answered about something other than this project. Counts: " +
+                    $"[{string.Join(", ", scan.Evaluated.ItemCounts.Select(kv => kv.Key + "=" + kv.Value))}]");
             }
 
-            directories.Add(string.Empty);
-
+            /* The property set is populated, established through the one property whose value is known
+               before the call: MSBuild answered about the project that was asked. Without this, three
+               empty build-file paths read the same whether MSBuild found none or returned nothing. */
             Assert.Equal(
-                directories.SelectMany(d => BuildFileNames.Select(n => d.Length == 0 ? n : $"{d}/{n}")),
-                scan.ImportedBuildProbes);
+                Path.GetFullPath(Path.Combine(repo, manifest.Replace('/', Path.DirectorySeparatorChar))),
+                scan.Evaluated.Properties.TryGetValue("MSBuildProjectFullPath", out var self) ? self : null);
 
-            /* And what it opened is exactly the NEAREST existing probe of each name, which is MSBuild's
-               own rule. Holds at zero, so a clean tree passes honestly rather than by not being asked. */
+            /* MSBuild's own answer for the build files it imports unnamed. The two Directory.Build names
+               are absent from this tree, and Directory.Packages.props is not — which is the half a
+               two-name upward probe of the Directory.Build names cannot see. */
             Assert.Equal(
-                BuildFileNames
-                    .Select(n => scan.ImportedBuildProbes.FirstOrDefault(
-                        p => p.EndsWith(n, StringComparison.Ordinal) &&
-                             File.Exists(Path.Combine(repo, p.Replace('/', Path.DirectorySeparatorChar)))))
-                    .Where(p => p is not null)
-                    .OrderBy(p => p, StringComparer.Ordinal),
-                scan.ImportedBuildFiles.OrderBy(p => p, StringComparer.Ordinal));
+                new[] { string.Empty, string.Empty, Path.Combine(repo, "Directory.Packages.props") },
+                ImportedBuildFileProperties
+                    .Select(p => scan.Evaluated.Properties.TryGetValue(p, out var v) ? v : "<absent>")
+                    .ToArray());
+
+            if (named is not null)
+            {
+                Assert.True(
+                    scan.References.Any(r =>
+                        r.Raw.Equals(named, StringComparison.Ordinal) &&
+                        r.Origin.Contains(manifest, StringComparison.Ordinal)),
+                    $"{manifest} declares a linked compile of {named} and the evaluated read did not " +
+                    "attribute it there, so the project-item population is not reaching the file that " +
+                    "carries it. Found: " +
+                    $"[{string.Join(", ", scan.References.Select(r => r.Raw + " <- " + r.Origin))}]");
+            }
         }
     }
 
@@ -688,26 +847,22 @@ public class CrossAppGuardCiGateTests
         Assert.True(scan.CSharpFiles > 0, $"the C# stage opened no files under {scannedProject}");
         Assert.True(
             scan.ProjectFiles.Count > 0,
-            $"the MSBuild stage opened no project files under {scannedProject}, so a cross-app reference " +
+            $"the MSBuild stage found no project file under {scannedProject}, so a cross-app reference " +
             "written as an Include= attribute is invisible again");
 
-        /* The imported-build-file stage is floored on where it LOOKED, not on what it found: there is no
-           Directory.Build.props anywhere in this repository, so a count floor would red on a clean tree
-           while still not distinguishing "probed nowhere" from "probed and found none". */
-        Assert.True(
-            scan.ImportedBuildProbes.Count > 0,
-            $"the imported-build-file stage probed nowhere for {scannedProject}, so an item group in a " +
-            "Directory.Build.props or .targets is invisible. Probed: " +
-            $"[{string.Join(", ", scan.ImportedBuildProbes)}], opened: " +
-            $"[{string.Join(", ", scan.ImportedBuildFiles)}]");
+        /* The shell-out, floored in the three places it can fail without saying so. Asserted here and not
+           only in the pins, because this is where an empty answer becomes a pass. */
+        AssertInvocationSucceeded(scan.Evaluated);
 
-        /* This guard's failure direction is not noticing, so a path it CANNOT read has to be loud rather
-           than absent from the found set. */
+        /* An <Import>'s own path is the one cross-app read the evaluated population does not carry, so a
+           project that grows one is a failure rather than a silent partial scan. */
         Assert.True(
-            scan.UnevaluablePaths.Count == 0,
-            "MSBuild path attributes this scan cannot evaluate, so it cannot say whether they cross apps — " +
-            "spell the path literally, or teach RepoRooted the property:\n  " +
-            string.Join("\n  ", scan.UnevaluablePaths));
+            scan.UnreportedImports.Count == 0,
+            "project files under " + scannedProject + " carry an <Import> element, and the evaluated read " +
+            "reports the ITEMS an imported file defines but not the imported file's own path — so whether " +
+            "that path crosses apps is unanswered here. Resolve it by hand, or add coverage for the " +
+            "construct:\n  " +
+            string.Join("\n  ", scan.UnreportedImports));
 
         /* #3067's floor, and the one the stage floors above cannot provide. Both arms opened hundreds of
            files and found a healthy pile of references while the other SKU's TEST tree contributed NONE
@@ -762,30 +917,40 @@ public class CrossAppGuardCiGateTests
     private readonly record struct CrossAppScan(
         int CSharpFiles,
         IReadOnlyList<string> ProjectFiles,
-        IReadOnlyList<string> ImportedBuildProbes,
-        IReadOnlyList<string> ImportedBuildFiles,
-        IReadOnlyList<string> UnevaluablePaths,
+        Evaluation Evaluated,
+        IReadOnlyList<string> UnreportedImports,
         IReadOnlyList<(string Raw, string Probe, string Origin)> References);
 
-    /* The MSBuild attributes that can carry a path to another app's file. Remove= is deliberately
-       absent: dropping an item from a glob is not a read of it. */
-    private static readonly Regex MsBuildPathAttribute = new(
-        "\\b(?<name>Include|Update|Project|HintPath)\\s*=\\s*(?:\"(?<dq>[^\"]*)\"|'(?<sq>[^']*)')",
-        RegexOptions.Compiled);
+    /// <summary>One <c>dotnet msbuild -getItem -getProperty</c> answer, carried with the evidence needed
+    /// to tell a real empty answer from a failed one.
+    ///
+    /// <para><see cref="Failure"/> is the empty string when the process ran and its output parsed, and a
+    /// reason otherwise. Carried as data rather than thrown so a caller floors it in the same shape as
+    /// every other population floor here, and so the message can arrive with the command line and the
+    /// process output attached.</para></summary>
+    private readonly record struct Evaluation(
+        string Project,
+        string CommandLine,
+        int ExitCode,
+        string Failure,
+        string Diagnostics,
+        IReadOnlyDictionary<string, int> ItemCounts,
+        IReadOnlyList<EvaluatedItem> Items,
+        IReadOnlyDictionary<string, string> Properties);
 
-    /* HintPath is item METADATA, and MSBuild lets metadata be written as an attribute OR as a child
-       element — the element form being what Visual Studio emits for a legacy <Reference>. Reading only
-       the attribute spelling would be this issue recurring one attribute over: a cross-app assembly
-       reference written the ordinary way, silently invisible. Include, Update and Import's Project are
-       item operations rather than metadata and have no element spelling, so this one matcher covers the
-       whole difference between the two grammars. */
-    /* The open tag carries its own attributes - Condition is the usual one, for a platform-specific
-       hint path - so they are skipped by matching quoted values rather than by "anything up to the next
-       >". An attribute value may legally contain a raw > (only < and & must be escaped), and
-       [^>]* would end the tag inside it. */
-    private static readonly Regex MsBuildPathElement = new(
-        "<HintPath(?:\\s+[\\w:.-]+\\s*=\\s*(?:\"[^\"]*\"|'[^']*'))*\\s*>([^<]*)</HintPath\\s*>",
-        RegexOptions.Compiled);
+    /// <summary>One evaluated item, reduced to what a cross-app decision needs.
+    ///
+    /// <para><see cref="Path"/> is absolute and already normalised by MSBuild — for most item types from
+    /// <c>FullPath</c>, and for a <c>Reference</c> from its <c>HintPath</c> metadata resolved against the
+    /// project directory, because MSBuild returns that one AS WRITTEN. <see cref="DefinedIn"/> is
+    /// MSBuild's <c>DefiningProjectFullPath</c>, which attributes an item to the file that actually
+    /// declared it rather than to the project that consumed it.</para></summary>
+    private readonly record struct EvaluatedItem(
+        string ItemType,
+        string Via,
+        string Identity,
+        string Path,
+        string DefinedIn);
 
     /// <summary>The paths one C# file's text names that belong to <paramref name="other"/>, in the two
     /// spellings this repository's pins use, repo-rooted and forward-slashed.
@@ -858,7 +1023,6 @@ public class CrossAppGuardCiGateTests
     {
         /* Keyed by the reference, valued by every file that named it, so a failure says where to go. */
         var seen = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
-        var unevaluable = new List<string>();
         var projectRoot = Path.Combine(repo, project.Replace('/', Path.DirectorySeparatorChar));
         if (!Directory.Exists(projectRoot))
         {
@@ -880,43 +1044,48 @@ public class CrossAppGuardCiGateTests
         /* The second population, and the one #3063 was filed for. No C# matcher can see a linked
            compile: the path is relative and backslashed, so the root anchor never fires — but that is
            downstream of the real reason, which is that project XML is not a *.cs file and was never
-           opened. The project's own files first, then the build files MSBuild imports into it unnamed. */
+           opened. MSBuild evaluates it here rather than this file parsing it. */
         var projectFiles = TrackedFiles(projectRoot, "*.csproj")
             .OrderBy(f => f, StringComparer.Ordinal)
             .ToList();
-        var (importedProbes, importedBuildFiles) = ImportedBuildFiles(repo, projectRoot);
 
-        foreach (var file in projectFiles)
+        if (projectFiles.Count == 0)
         {
-            /* A .csproj is its own consumer, so both bases are its directory. */
-            var dir = Path.GetDirectoryName(file)!;
-            ReadMsBuildPaths(
-                repo, File.ReadAllText(file), Rooted(repo, file), dir, dir, other, seen, unevaluable);
+            /* Loud rather than an empty Evaluation carried forward: every floor below reads a population,
+               and a zero population that arrived by not looking is the failure this guard exists for. */
+            throw new FileNotFoundException($"no project file under {project} to evaluate");
         }
 
-        foreach (var file in importedBuildFiles)
+        var evaluation = Evaluate(repo, projectFiles[0]);
+
+        if (evaluation.Failure.Length == 0)
         {
-            /* The two bases diverge here, and both are needed. MSBuild resolves a relative ITEM path in
-               an imported file against the consuming project's directory — which is why these get
-               projectRoot even for a Directory.Build.props sitting at the repo root — while an Import's
-               own Project attribute resolves against the file that contains it. */
-            ReadMsBuildPaths(
-                repo,
-                File.ReadAllText(file),
-                Rooted(repo, file),
-                projectRoot,
-                Path.GetDirectoryName(file)!,
-                other,
-                seen,
-                unevaluable);
+            foreach (var (rooted, origin) in CrossAppItems(repo, projectRoot, evaluation, other))
+            {
+                Note(seen, rooted, origin);
+            }
+        }
+
+        /* The gate for the construct the evaluated answer does not carry. Read over the project's own
+           files AND over whichever build files MSBuild says it imported unnamed, since an Import in one
+           of those is imported into this project just the same. */
+        var unreportedImports = new List<string>();
+        foreach (var file in projectFiles.Concat(
+            ImportedBuildFileProperties
+                .Select(p => evaluation.Properties.TryGetValue(p, out var v) ? v : string.Empty)
+                .Where(v => v.Length > 0 && File.Exists(v))))
+        {
+            foreach (var element in ImportElements(File.ReadAllText(file)))
+            {
+                unreportedImports.Add($"{Rooted(repo, file)}: {element}");
+            }
         }
 
         return new CrossAppScan(
             csharpFiles,
             projectFiles.Select(f => Rooted(repo, f)).ToList(),
-            importedProbes.Select(f => Rooted(repo, f)).ToList(),
-            importedBuildFiles.Select(f => Rooted(repo, f)).ToList(),
-            unevaluable,
+            evaluation,
+            unreportedImports,
             Resolve(repo, seen).ToList());
     }
 
@@ -943,208 +1112,536 @@ public class CrossAppGuardCiGateTests
                 !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
                 !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
 
-    /// <summary>The build files MSBuild imports into a project without being named.
+    /// <summary>What <c>dotnet msbuild -getItem -getProperty</c> answers about one project.
     ///
-    /// <para>There are none in this repository today, and nothing here asserts there are. They are in the
-    /// population because an <c>ItemGroup</c> in one can legally carry a cross-app <c>Compile Include</c> —
-    /// for a file OUTSIDE the project cone there is no duplicate-item conflict with the SDK's later default
-    /// glob, so it works — which is the same invisible shape as a <c>.csproj</c> entry in a file no
-    /// <c>.csproj</c> scan would open. The point is that the first one is read rather than this test needing
-    /// to be edited first.</para>
+    /// <para>The answer is FULLY EVALUATED: properties expanded, imports followed, <c>Condition</c>s
+    /// applied, wildcards expanded, and MSBuild's own <c>Directory.Build.props</c> probe already
+    /// performed. Nothing is built and no <c>obj/</c> is written — evaluation reads the project and its
+    /// import closure and stops — so this is offline and costs about a third of a second per project.</para>
     ///
-    /// <para><b>Nearest wins, per name, because that is what MSBuild does.</b>
-    /// <c>Microsoft.Common.props</c> probes upward for ONE <c>Directory.Build.props</c> and stops; it does
-    /// not chain through every one above the project, and it probes the two names independently. Collecting
-    /// all of them would attribute an item group to a project that never imports it, and a guard whose
-    /// findings are not trustworthy stops being read.</para>
+    /// <para><c>-p:EnableWindowsTargeting=true</c> is what lets a non-Windows host work with this
+    /// project's <c>net10.0-windows</c> target framework at all. Evaluation alone measures fine without
+    /// it, but it is a no-op on the Windows runner and removes a host-dependent difference from a guard
+    /// that has to answer the same way in CI and on a macOS verification run.</para>
     ///
-    /// <para>A nearest file that deliberately chains to its parent does so through an <c>Import</c> whose
-    /// path is a property function, and <see cref="ReadMsBuildPaths"/> reports an unevaluable path as a
-    /// failure rather than ignoring it — so the chain is loud, not silently uncollected. That is the right
-    /// direction for a guard whose whole defect class is not noticing.</para>
-    ///
-    /// <para><b>Every location looked at is returned alongside what was there</b>, which is why this
-    /// hands back <c>Probed</c> as well as <c>Found</c>. A stage that probed nowhere and a stage that
-    /// probed everywhere and found nothing both leave an empty found list, and on a tree with no such
-    /// file anywhere — this one — a count floor cannot tell them apart without redding on a clean
-    /// checkout. The probe list can, so it is what gets floored.</para></summary>
-    private static (List<string> Probed, List<string> Found) ImportedBuildFiles(
-        string repo, string projectRoot)
+    /// <para><see cref="Evaluation.Failure"/> rather than an exception, because the caller is asserting on
+    /// a population: the three ways this returns nothing without having looked are floored by
+    /// <see cref="AssertInvocationSucceeded"/> in the same shape as every other floor here.</para></summary>
+    private static Evaluation Evaluate(string repo, string projectPath)
     {
-        var root = Path.GetFullPath(repo).TrimEnd(Path.DirectorySeparatorChar);
-        var probed = new List<string>();
-        var found = new List<string>();
-        var claimed = new HashSet<string>(StringComparer.Ordinal);
-
-        for (var dir = new DirectoryInfo(Path.GetFullPath(projectRoot)); dir is not null; dir = dir.Parent)
+        var arguments = new[]
         {
-            foreach (var name in BuildFileNames)
+            "msbuild",
+            projectPath,
+            "-getItem:" + string.Join(";", EvaluatedItemTypes),
+            "-getProperty:" + string.Join(";", EvaluatedProperties),
+            "-p:EnableWindowsTargeting=true",
+        };
+
+        var commandLine = "dotnet " + string.Join(" ", arguments);
+        var (exitCode, stdout, stderr) = RunDotnet(repo, arguments);
+        var diagnostics = $"exit={exitCode}, stderr={Truncate(stderr)}, stdout={Truncate(stdout)}";
+
+        if (exitCode != 0)
+        {
+            return new Evaluation(
+                projectPath, commandLine, exitCode, "the invocation exited non-zero", diagnostics,
+                new Dictionary<string, int>(StringComparer.Ordinal),
+                Array.Empty<EvaluatedItem>(),
+                new Dictionary<string, string>(StringComparer.Ordinal));
+        }
+
+        var failure = ParseEvaluation(stdout, out var items, out var properties);
+        var counts = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        foreach (var item in items)
+        {
+            counts.TryGetValue(item.ItemType, out var seen);
+            counts[item.ItemType] = seen + 1;
+        }
+
+        /* A requested type with no items still gets a count, so a per-type floor reads zero rather than
+           "no such key" - the two are the same defect and only one of them is legible. */
+        foreach (var type in EvaluatedItemTypes)
+        {
+            if (!counts.ContainsKey(type))
             {
-                var candidate = Path.Combine(dir.FullName, name);
+                counts[type] = 0;
+            }
+        }
 
-                /* Probing continues to the root even once a name is claimed. The walk costs two
-                   File.Exists calls per directory, and a probe list that stopped early could not be
-                   floored against the locations MSBuild would consider. */
-                probed.Add(candidate);
+        return new Evaluation(
+            projectPath, commandLine, exitCode, failure, diagnostics, counts, items, properties);
+    }
 
-                if (!claimed.Contains(name) && File.Exists(candidate))
+    /// <summary>The JSON <c>-getItem</c> / <c>-getProperty</c> answer, or a reason it is not one.
+    ///
+    /// <para>Strict on purpose. Output that is not the expected shape is a FAILURE and not an empty item
+    /// set: a lenient reader that shrugged at a banner, an error summary or a truncated stream would
+    /// report "no cross-app references" for a run that never answered the question, which is strictly
+    /// worse than the parse this replaces.</para>
+    ///
+    /// <para>Separate from the process call so the malformed-output cases can be pinned without an
+    /// invocation that produces them.</para></summary>
+    private static string ParseEvaluation(
+        string stdout,
+        out IReadOnlyList<EvaluatedItem> items,
+        out IReadOnlyDictionary<string, string> properties)
+    {
+        items = Array.Empty<EvaluatedItem>();
+        properties = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        if (stdout.Length == 0)
+        {
+            return "the invocation wrote nothing to stdout";
+        }
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(stdout);
+        }
+        catch (JsonException error)
+        {
+            return "the invocation's output is not JSON: " + error.Message;
+        }
+
+        using (document)
+        {
+            if (!document.RootElement.TryGetProperty("Items", out var itemsElement) ||
+                itemsElement.ValueKind != JsonValueKind.Object)
+            {
+                return "the invocation's output carries no Items object";
+            }
+
+            var collected = new List<EvaluatedItem>();
+            foreach (var type in itemsElement.EnumerateObject())
+            {
+                if (type.Value.ValueKind != JsonValueKind.Array)
                 {
-                    claimed.Add(name);
-                    found.Add(candidate);
+                    return $"the Items entry for {type.Name} is not an array";
+                }
+
+                foreach (var element in type.Value.EnumerateArray())
+                {
+                    var identity = Metadata(element, "Identity");
+
+                    /* FullPath is MSBuild's own rooted, normalised answer for the item's identity. */
+                    var fullPath = Metadata(element, "FullPath");
+                    if (fullPath.Length > 0)
+                    {
+                        collected.Add(new EvaluatedItem(type.Name, "FullPath", identity, fullPath, Metadata(element, "DefiningProjectFullPath")));
+                    }
+
+                    /* HintPath is the path a Reference actually names, and MSBuild hands it back AS
+                       WRITTEN rather than rooted - unlike FullPath, whose value for a Reference is the
+                       assembly NAME resolved under the project directory and means nothing. Resolved
+                       against the project directory, which is where MSBuild resolves it. */
+                    var hintPath = Metadata(element, "HintPath");
+                    if (hintPath.Length > 0)
+                    {
+                        var projectDirectory = Path.GetDirectoryName(
+                            Metadata(element, "DefiningProjectFullPath")) ?? string.Empty;
+                        var resolved = Absolute(projectDirectory, hintPath);
+                        if (resolved is not null)
+                        {
+                            collected.Add(new EvaluatedItem(type.Name, "HintPath", identity, resolved, Metadata(element, "DefiningProjectFullPath")));
+                        }
+                    }
                 }
             }
 
-            if (string.Equals(
-                    dir.FullName.TrimEnd(Path.DirectorySeparatorChar), root, StringComparison.Ordinal))
+            var readProperties = new SortedDictionary<string, string>(StringComparer.Ordinal);
+            if (document.RootElement.TryGetProperty("Properties", out var propertiesElement) &&
+                propertiesElement.ValueKind == JsonValueKind.Object)
             {
-                break;
+                foreach (var property in propertiesElement.EnumerateObject())
+                {
+                    readProperties[property.Name] = property.Value.GetString() ?? string.Empty;
+                }
+            }
+
+            foreach (var expected in EvaluatedProperties)
+            {
+                if (!readProperties.ContainsKey(expected))
+                {
+                    return $"the invocation's output carries no {expected} property";
+                }
+            }
+
+            items = collected;
+            properties = readProperties;
+            return string.Empty;
+        }
+    }
+
+    private static string Metadata(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object &&
+        element.TryGetProperty(name, out var value) &&
+        value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : string.Empty;
+
+    /// <summary>The three ways the evaluated read returns nothing without having looked, asserted
+    /// separately from anything about WHAT it returned.
+    ///
+    /// <para>This guard passes on an empty offender list, so an invocation that never ran produces the
+    /// same green as a clean tree. Read from <see cref="Check"/> as well as from the pins, so a floor
+    /// cannot hold in one and be missing from the other.</para></summary>
+    private static void AssertInvocationSucceeded(in Evaluation evaluation)
+    {
+        Assert.True(
+            evaluation.ExitCode == 0,
+            $"the evaluated project read exited non-zero, so it reports no items for a reason that has " +
+            $"nothing to do with the tree. {evaluation.CommandLine}\n  {evaluation.Diagnostics}");
+
+        Assert.True(
+            evaluation.Failure.Length == 0,
+            $"the evaluated project read did not answer: {evaluation.Failure}. " +
+            $"{evaluation.CommandLine}\n  {evaluation.Diagnostics}");
+
+        Assert.True(
+            evaluation.Items.Count > 0,
+            $"the evaluated project read returned no items at all, which no project does. " +
+            $"{evaluation.CommandLine}\n  {evaluation.Diagnostics}");
+    }
+
+    /// <summary><c>dotnet</c> with both streams drained concurrently and a deadline.
+    ///
+    /// <para>Reading one stream to completion before the other deadlocks on an output this size — the
+    /// item answer for the larger project runs past half a megabyte — and a child that never exits would
+    /// hang the suite rather than fail it, which for a guard is the same as being deleted.</para>
+    ///
+    /// <para>Launched by name rather than through a resolved host path: <c>DOTNET_HOST_PATH</c> is not set
+    /// for a process started by <c>dotnet run</c>, which is how this suite runs. A missing <c>dotnet</c>
+    /// on PATH surfaces as a non-zero exit with the exception text, so it fails loudly rather than as an
+    /// empty answer.</para></summary>
+    private static (int ExitCode, string StdOut, string StdErr) RunDotnet(
+        string workingDirectory, IEnumerable<string> arguments)
+    {
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        /* Anything the CLI would print ahead of the JSON turns a valid answer into a parse failure. The
+           parse stays strict regardless - this only removes the two banners that are switchable. */
+        startInfo.Environment["DOTNET_NOLOGO"] = "1";
+        startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+
+        try
+        {
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return (-1, string.Empty, "dotnet did not start");
+            }
+
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+
+            if (!process.WaitForExit((int)EvaluationTimeout.TotalMilliseconds))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                    /* Exited between the deadline and the kill; the exit code below is still read. */
+                }
+
+                return (-1, string.Empty, $"dotnet did not exit within {EvaluationTimeout}");
+            }
+
+            return (process.ExitCode, stdout.GetAwaiter().GetResult(), stderr.GetAwaiter().GetResult());
+        }
+        catch (System.ComponentModel.Win32Exception error)
+        {
+            return (-1, string.Empty, "dotnet could not be started: " + error.Message);
+        }
+    }
+
+    /// <summary>The evaluated items and imported build files that name a tree of
+    /// <paramref name="other"/>, repo-rooted, each paired with the file MSBuild says declared it.
+    ///
+    /// <para>The build files MSBuild locates itself are checked too: <c>$(DirectoryBuildPropsPath)</c> can
+    /// point outside the project's own tree, and a <c>Directory.Build.props</c> under another SKU is a
+    /// read of it whatever its item groups say.</para></summary>
+    private static IEnumerable<(string Rooted, string Origin)> CrossAppItems(
+        string repo, string projectRoot, Evaluation evaluation, SkuTrees other)
+    {
+        foreach (var item in evaluation.Items)
+        {
+            var rooted = CrossAppPath(repo, item.Path, other);
+            if (rooted is not null)
+            {
+                yield return (rooted, $"{Declarer(repo, item.DefinedIn)} ({item.ItemType} {item.Via})");
             }
         }
 
-        return (probed, found);
-    }
-
-    /* Every expression form MSBuild evaluates, and there is no fourth: a property or property function,
-       item metadata, and an item list or transform. Anything carrying one of these is a path this scan
-       cannot read, and it has to say so rather than let the value fall through as a literal relative
-       path that resolves to nothing and disappears. */
-    private static readonly string[] MsBuildExpressionForms = { "$(", "%(", "@(" };
-
-    /// <summary>Whether a path attribute's value can only be resolved by MSBuild itself.</summary>
-    private static bool NeedsMsBuildToEvaluate(string path) =>
-        MsBuildExpressionForms.Any(form => path.Contains(form, StringComparison.Ordinal));
-
-    /// <summary>Every path-bearing value one MSBuild file's XML names, in both spellings MSBuild accepts,
-    /// each paired with WHICH directory MSBuild resolves it against.
-    ///
-    /// <para>The two rules differ and the difference is load-bearing. An item's path
-    /// (<c>Include</c> / <c>Update</c> / <c>HintPath</c>) is relative to the CONSUMING project's
-    /// directory — that is why <c>$(MSBuildThisFileDirectory)</c> has to exist. <c>Import</c>'s
-    /// <c>Project</c> is relative to the directory of the file CONTAINING the import. They coincide for a
-    /// <c>.csproj</c>, which is its own consumer, and diverge for an imported build file — which is
-    /// precisely where a cross-app <c>Import</c> would live.</para>
-    ///
-    /// <para>Shared by the walk and by the pin that reads it back, so the pin cannot drift from what
-    /// ships.</para></summary>
-    private static IEnumerable<(string Raw, bool RelativeToItsOwnFile)> MsBuildPaths(string xml) =>
-        MsBuildPathAttribute.Matches(xml)
-            .Select(m => (
-                Raw: m.Groups["dq"].Success ? m.Groups["dq"].Value : m.Groups["sq"].Value,
-                RelativeToItsOwnFile: m.Groups["name"].Value.Equals("Project", StringComparison.Ordinal)))
-            .Concat(MsBuildPathElement.Matches(xml)
-                .Select(m => (Raw: m.Groups[1].Value.Trim(), RelativeToItsOwnFile: false)));
-
-    /// <summary>The paths one MSBuild file names that belong to <paramref name="other"/>, repo-rooted
-    /// into <paramref name="seen"/>.</summary>
-    private static void ReadMsBuildPaths(
-        string repo,
-        string xml,
-        string origin,
-        string projectDir,
-        string ownDir,
-        SkuTrees other,
-        SortedDictionary<string, SortedSet<string>> seen,
-        List<string> unevaluable)
-    {
-        /* $(MSBuildThisFileDirectory) carries a trailing separator by MSBuild's own convention, and a
-           path is written expecting it. */
-        var thisFileDir = ownDir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-
-        foreach (var (raw, relativeToItsOwnFile) in MsBuildPaths(xml))
+        foreach (var name in ImportedBuildFileProperties)
         {
-            /* The two properties a hand-written cross-app include actually uses. Both mean what they say
-               regardless of which base the value itself resolves against. */
-            var expanded = raw
-                .Replace("$(MSBuildThisFileDirectory)", thisFileDir, StringComparison.Ordinal)
-                .Replace("$(MSBuildProjectDirectory)", projectDir, StringComparison.Ordinal);
-
-            if (NeedsMsBuildToEvaluate(expanded))
+            if (!evaluation.Properties.TryGetValue(name, out var path) || path.Length == 0)
             {
-                /* Only MSBuild can evaluate what is left. Recorded rather than dropped, so the caller
-                   can be loud about a path this guard cannot read. An unrecognised expression would
-                   otherwise fall through as a literal relative path, resolve to nothing, and vanish —
-                   which is this guard's own defect class. */
-                unevaluable.Add($"{origin}: {raw}");
                 continue;
             }
 
-            var rooted = RepoRooted(
-                repo,
-                relativeToItsOwnFile ? thisFileDir : projectDir,
-                expanded,
-                other);
-
+            var rooted = CrossAppPath(repo, path, other);
             if (rooted is not null)
             {
-                Note(seen, rooted, origin);
+                yield return (rooted, $"{Rooted(repo, evaluation.Project)} (${name})");
             }
         }
     }
 
-    /// <summary>One MSBuild path attribute, expressed the way the rest of this class reasons about paths:
-    /// repo-rooted, forward slashes.
+    /// <summary>The file that declared an item, for a message.
     ///
-    /// <para>This is the whole difficulty of #3063's fix. An <c>Include=</c> is RELATIVE to the project
-    /// directory and spelled with backslashes (<c>..\Darling\Darling.Tests\X.cs</c>), so it names no app at
-    /// all until it is resolved — the root anchor the C# matchers open with cannot fire on it, and
-    /// applying that anchor AFTER normalisation is what leaves every coverage decision downstream of
-    /// here unchanged.</para>
-    ///
-    /// <para>Null when the path names no tree belonging to <paramref name="other"/>, resolves outside the
-    /// repository, or is not a path at all (a <c>PackageReference</c>'s Include is a package id).</para></summary>
-    private static string? RepoRooted(string repo, string projectDir, string raw, SkuTrees other)
+    /// <para>MSBuild attributes an item to the file that declared it, which for the SDK's default globs is
+    /// a <c>.props</c> inside the installed SDK. Reduced to its file name when it is outside the
+    /// repository — the absolute path is a machine path on a public repository's CI log, and the name is
+    /// the whole of what a reader needs.</para></summary>
+    private static string Declarer(string repo, string definedIn)
     {
-        if (raw.Length == 0)
+        if (definedIn.Length == 0)
         {
-            return null;
+            return "<unattributed>";
         }
 
-        var native = raw.Replace('\\', Path.DirectorySeparatorChar)
-                        .Replace('/', Path.DirectorySeparatorChar);
+        var rooted = Rooted(repo, definedIn);
+        return Path.IsPathRooted(rooted) ? Path.GetFileName(rooted) : rooted;
+    }
 
-        string full;
-        try
-        {
-            full = Path.GetFullPath(Path.Combine(projectDir, native));
-        }
-        catch (ArgumentException)
+    /// <summary>The repo-rooted spelling of an absolute path that names a tree belonging to
+    /// <paramref name="other"/>, or null when it does not.
+    ///
+    /// <para>The anchor is every root the SKU owns, which is #3067: a linked compile reaching a SIBLING
+    /// test project resolves to <c>Lite.Tests/X.cs</c>, which an anchor on <c>Lite</c> alone rejected
+    /// because it neither equals <c>Lite</c> nor opens with <c>Lite/</c>. A root still has to be followed
+    /// by a SEPARATOR, so a tree merely PREFIXED by a root's name is no more a read of that SKU than
+    /// before.</para></summary>
+    private static string? CrossAppPath(string repo, string absolute, SkuTrees other)
+    {
+        if (absolute.Length == 0 || !Path.IsPathRooted(absolute))
         {
             return null;
         }
 
         var prefix = Path.GetFullPath(repo).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (!full.StartsWith(prefix, StringComparison.Ordinal))
+        if (!absolute.StartsWith(prefix, StringComparison.Ordinal))
         {
             /* Outside the tree, so no path filter could name it. */
             return null;
         }
 
-        var rooted = full[prefix.Length..].Replace(Path.DirectorySeparatorChar, '/');
+        var rooted = absolute[prefix.Length..].Replace(Path.DirectorySeparatorChar, '/');
 
-        /* An MSBuild wildcard is a real file set. In C# source a glob is the opposite — there the pattern
-           IS the assertion, which is why Resolve excludes those outright — so reduce it to the directory
-           it enumerates and let the directory arm probe it, rather than dropping a genuine read. */
-        var wildcard = rooted.IndexOfAny(new[] { '*', '?' });
-        if (wildcard >= 0)
-        {
-            var cut = rooted.LastIndexOf('/', wildcard);
-            if (cut <= 0)
-            {
-                return null;
-            }
-
-            rooted = rooted[..cut];
-        }
-
-        /* Every root the other SKU owns, not just its app directory. A linked compile reaching a
-           SIBLING test project - ..\..\Lite.Tests\X.cs out of Darling/Darling.Tests - normalises to
-           Lite.Tests/X.cs, which the app-only check rejected because it neither equals "Lite" nor opens
-           with "Lite/". Same #3067 anchor as the C# stage, one population over. */
         return other.Roots.Any(root =>
             rooted.Equals(root, StringComparison.Ordinal)
             || rooted.StartsWith(root + "/", StringComparison.Ordinal))
                 ? rooted
                 : null;
+    }
+
+    /// <summary><c>Path.GetFullPath</c> that answers null instead of throwing on a value that is not a
+    /// path — a wildcard is not a legal path component on every host, and an item identity is not always
+    /// a path at all.</summary>
+    private static string? Absolute(string baseDirectory, string relative)
+    {
+        try
+        {
+            return Path.GetFullPath(Path.Combine(
+                baseDirectory,
+                relative.Replace('\\', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar)));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Every <c>&lt;Import&gt;</c> element one MSBuild file's XML carries.
+    ///
+    /// <para>The one cross-app read the evaluated population does not report: items an imported file
+    /// DEFINES arrive with the rest, but the imported file's own path is not an item and no
+    /// <c>-getProperty</c> answer carries it. So this is a gate rather than a reader — it says that the
+    /// construct is present, not where it points — and there are none in this repository, which is what
+    /// makes a gate the cheap answer.</para>
+    ///
+    /// <para>A commented-out import counts. A gate exists to stop a construct arriving unnoticed, and a
+    /// reader that skipped comments would be re-implementing the XML grammar to be MORE permissive, which
+    /// is the wrong direction twice.</para></summary>
+    private static IEnumerable<string> ImportElements(string xml) =>
+        Regex.Matches(xml, "<Import\\s[^>]*/?>", RegexOptions.None)
+            .Select(m => m.Value);
+
+    /// <summary>The cross-app paths a crude TEXT scan of one project file finds: every quoted attribute
+    /// value and every element's text, resolved against the project directory and anchored the same way
+    /// the evaluated read is.
+    ///
+    /// <para>Not the live route, and deliberately not a good one. It exists so the switch to MSBuild can
+    /// be asserted rather than asserted-about: the evaluated set has to CONTAIN what this finds, or the
+    /// replacement has moved the blind spot rather than closed it.</para>
+    ///
+    /// <para>Crude in both directions, and both are the safe direction for a lower bound. It over-reads —
+    /// a path inside a comment, or behind a <c>Condition</c> that never holds, counts — and it under-reads
+    /// anything needing evaluation, since a value carrying <c>$(</c> resolves to no real path and falls
+    /// out. A lower bound that is sometimes too low is a floor; one that is ever too high is an
+    /// oracle.</para></summary>
+    private static IEnumerable<string> ParsedProjectXmlPaths(
+        string repo, string projectDir, string xml, SkuTrees other)
+    {
+        foreach (Match match in Regex.Matches(
+            xml, "\"(?<dq>[^\"]*)\"|'(?<sq>[^']*)'|>(?<text>[^<>]*)<"))
+        {
+            var raw =
+                match.Groups["dq"].Success ? match.Groups["dq"].Value
+                : match.Groups["sq"].Success ? match.Groups["sq"].Value
+                : match.Groups["text"].Value.Trim();
+
+            if (raw.Length == 0)
+            {
+                continue;
+            }
+
+            var absolute = Absolute(projectDir, raw);
+            if (absolute is null)
+            {
+                continue;
+            }
+
+            var rooted = CrossAppPath(repo, absolute, other);
+            if (rooted is not null)
+            {
+                yield return rooted;
+            }
+        }
+    }
+
+    /// <summary>A bounded slice of process output, so a failure message carries the reason without the
+    /// half-megabyte of item JSON behind it.</summary>
+    private static string Truncate(string text) =>
+        text.Length <= 600 ? text : text[..600] + $"… (+{text.Length - 600} chars)";
+
+    /// <summary>A synthetic two-SKU tree carrying one item of every requested type and one instance of
+    /// every construct an XML parse needs a rule for. Returns the consuming project's path.
+    ///
+    /// <para><b>Synthetic because the repository cannot supply it.</b> There is no <c>Reference</c> item
+    /// anywhere here, so the <c>HintPath</c> route to a cross-app assembly has no live example; nor is
+    /// there a <c>Condition</c>, a <c>Choose</c>, an imported props file, a transform or a cross-app
+    /// wildcard. Each construct is written with a HOLDING arm and a NOT-holding arm so the pin reading it
+    /// asserts presence and absence over the same fixture, and a tree that failed to be written cannot
+    /// pass by finding nothing.</para>
+    ///
+    /// <para>Shaped like this repository — the consuming project under one SKU's test tree, the files it
+    /// reaches under the other SKU's app tree and its SIBLING test tree — so the #3067 anchor is exercised
+    /// on the evaluated population and not only on the C# one.</para></summary>
+    private static string WriteCrossAppFixture(string root)
+    {
+        var consumer = Path.Combine(root, LiteTestsDir);
+        var otherTests = Path.Combine(root, DarlingTestsDir.Replace('/', Path.DirectorySeparatorChar));
+        var otherApp = Path.Combine(root, DarlingAppDir);
+        var globbed = Path.Combine(otherApp, "Fixtures");
+
+        Directory.CreateDirectory(consumer);
+        Directory.CreateDirectory(otherTests);
+        Directory.CreateDirectory(Path.Combine(otherApp, "PerformanceMonitor.Darling.Service"));
+        Directory.CreateDirectory(globbed);
+        Directory.CreateDirectory(Path.Combine(root, DarlingAppDir + "Extra"));
+
+        foreach (var name in new[]
+        {
+            "FromProperty.cs", "ConditionTrue.cs", "ConditionFalse.cs", "ChosenWhen.cs",
+            "ChosenOtherwise.cs", "FromImport.cs", "Transformed.cs",
+        })
+        {
+            File.WriteAllText(Path.Combine(otherTests, name), "// fixture\n");
+        }
+
+        File.WriteAllText(
+            Path.Combine(otherApp, "PerformanceMonitor.Darling.Service", "Hinted.dll"), "fixture");
+        File.WriteAllText(Path.Combine(globbed, "Globbed.xml"), "<x />");
+        File.WriteAllText(Path.Combine(globbed, "NotGlobbed.txt"), "fixture");
+        File.WriteAllText(Path.Combine(root, DarlingAppDir + "Extra", "Nope.cs"), "// fixture");
+        File.WriteAllText(
+            Path.Combine(otherTests, "Darling.Tests.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>"
+            + "<TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n");
+
+        /* The item this one defines is the case no scan of the consuming project alone can see, and its
+           relative Include is resolved by MSBuild against the CONSUMING project's directory rather than
+           against this file's. */
+        File.WriteAllText(
+            Path.Combine(consumer, "Imported.props"),
+            """
+            <Project>
+              <PropertyGroup>
+                <OtherTests>..\Darling\Darling.Tests</OtherTests>
+                <FixtureGate>yes</FixtureGate>
+              </PropertyGroup>
+              <ItemGroup>
+                <Compile Include="$(OtherTests)\FromImport.cs" Link="FromImport.cs" />
+                <TransformSeed Include="Transformed.cs" />
+              </ItemGroup>
+            </Project>
+
+            """.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+        var project = Path.Combine(consumer, "Fixture.csproj");
+        File.WriteAllText(
+            project,
+            """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <EnableDefaultItems>false</EnableDefaultItems>
+              </PropertyGroup>
+              <Import Project="Imported.props" />
+              <ItemGroup>
+                <Compile Include="$(OtherTests)\FromProperty.cs" />
+                <None Include="..\Darling\Fixtures\*.xml" />
+                <Content Include="$(OtherTests)\ChosenWhen.cs" Link="Content.cs" />
+                <EmbeddedResource Include="$(OtherTests)\ConditionTrue.cs" />
+                <Reference Include="SomeCrossAppLib">
+                  <HintPath>..\Darling\PerformanceMonitor.Darling.Service\Hinted.dll</HintPath>
+                </Reference>
+                <ProjectReference Include="$(OtherTests)\Darling.Tests.csproj" />
+                <Compile Include="..\DarlingExtra\Nope.cs" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(FixtureGate)' == 'yes'">
+                <Compile Include="$(OtherTests)\ConditionTrue.cs" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(FixtureGate)' == 'no'">
+                <Compile Include="$(OtherTests)\ConditionFalse.cs" />
+              </ItemGroup>
+              <Choose>
+                <When Condition="'$(FixtureGate)' == 'yes'">
+                  <ItemGroup>
+                    <Compile Include="$(OtherTests)\ChosenWhen.cs" />
+                  </ItemGroup>
+                </When>
+                <Otherwise>
+                  <ItemGroup>
+                    <Compile Include="$(OtherTests)\ChosenOtherwise.cs" />
+                  </ItemGroup>
+                </Otherwise>
+              </Choose>
+              <ItemGroup>
+                <None Include="@(TransformSeed->'$(OtherTests)\%(Identity)')" />
+              </ItemGroup>
+            </Project>
+
+            """.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+        return project;
     }
 
     /// <summary>Each collected reference paired with a concrete file path to test coverage against.</summary>
