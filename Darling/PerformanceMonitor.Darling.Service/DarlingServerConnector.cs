@@ -95,7 +95,7 @@ SELECT
     CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
     CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
     HAS_DBACCESS(N'msdb') AS has_msdb_access,
-    -- #2228: which database this connection actually landed in. Appended; see the comment above.
+    /* #2228: which database this connection actually landed in. Appended; see the comment above. */
     DB_NAME() AS connected_database";
 
     /// <summary>

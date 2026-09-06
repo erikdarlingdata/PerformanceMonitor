@@ -91,7 +91,7 @@ DECLARE
 
 DECLARE
     @db_name sysname,
-    @sql nvarchar(MAX);
+    @sql nvarchar(max);
 
 DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
     SELECT
@@ -182,7 +182,7 @@ SELECT
     growth_pct =
         CASE WHEN mf.is_percent_growth = 1 THEN mf.growth ELSE NULL END,
     vlf_count =
-        CASE WHEN mf.type = 1 /*LOG*/ THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(mf.database_id) AS li WHERE li.file_id = mf.file_id) ELSE NULL END
+        CASE WHEN mf.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(mf.database_id) AS li WHERE li.file_id = mf.file_id) ELSE NULL END
 FROM sys.master_files AS mf
 JOIN sys.databases AS d
   ON d.database_id = mf.database_id
@@ -297,7 +297,7 @@ SELECT
     growth_pct =
         CASE WHEN df.is_percent_growth = 1 THEN df.growth ELSE NULL END,
     vlf_count =
-        CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END
+        CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END
 FROM sys.database_files AS df;
 
 /* The sibling databases, on the one connection that can see them. Newest sample per database: the older

@@ -83,7 +83,7 @@ IF CONVERT(int, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
    AND OBJECT_ID(N'sys.availability_groups') IS NOT NULL
 BEGIN
     EXEC sys.sp_executesql
-        N'SELECT @c = COUNT(*) FROM sys.availability_groups WHERE basic_features = 0;',
+        N'SELECT @c = CONVERT(integer, COUNT_BIG(*)) FROM sys.availability_groups WHERE basic_features = 0;',
         N'@c int OUTPUT', @c = @count OUTPUT;
 END;
 SELECT @count;";
@@ -115,8 +115,8 @@ SELECT @count;";
             await sqlConn.OpenAsync();
 
             using var editionCmd = new SqlCommand(
-                "SELECT CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128)), " +
-                "CAST(SERVERPROPERTY('ProductMajorVersion') AS INT)", sqlConn);
+                "SELECT CAST(SERVERPROPERTY('Edition') AS nvarchar(128)), " +
+                "CAST(SERVERPROPERTY('ProductMajorVersion') AS integer)", sqlConn);
             editionCmd.CommandTimeout = 30;
             using var editionReader = await editionCmd.ExecuteReaderAsync();
             string edition = "";
