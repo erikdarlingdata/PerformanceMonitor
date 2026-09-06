@@ -87,11 +87,22 @@ namespace PerformanceMonitor.Common
     /// Returning them together is what makes dropping one a visible edit rather than an omission.
     /// </summary>
     /// <param name="IsOnline">Reachability: true = fresh or stale, false = offline, null = not reached yet.</param>
-    /// <param name="HasCollectorErrors">The amber warning flag — in Darling, a stale collection.</param>
+    /// <param name="CollectionStale">The amber warning flag: the newest collection has lagged past
+    /// <see cref="ServerHealthThresholds.StaleThreshold"/> but is not old enough to call the server dark. It is
+    /// <see cref="ServerFreshness.Stale"/> and nothing else — no error count, no <c>collection_log</c> read.
+    ///
+    /// <para><b>It is named for freshness because that is its whole population, and the name is load-bearing.</b>
+    /// Lite carries a flag of the same shape on its own card (<c>ServerCardStatusRules.Classify</c>) fed from
+    /// <c>ErroringCollectors &gt; 0</c> — collectors that are actually failing. Two agents made four wrong
+    /// inferences from this one in a day (#3098), every one of them a reasonable reading of a name that said
+    /// errors, and the reading each time was falsified by the store: cards flagged with every collector
+    /// <c>HEALTHY</c>, and cards clear with <c>ERROR</c> rows inside their own published window. Failure is
+    /// reported on the axis that measures it — <c>failed_collector_count</c> and
+    /// <see cref="ServerHealthClassifier.CollectorSeverity"/>.</para></param>
     /// <param name="AwaitingFirstCollection">No collection has EVER landed (a bootstrap state, not an outage).</param>
     public readonly record struct ServerCollectionFlags(
         bool? IsOnline,
-        bool HasCollectorErrors,
+        bool CollectionStale,
         bool AwaitingFirstCollection);
 
     /// <summary>
@@ -114,14 +125,14 @@ namespace PerformanceMonitor.Common
     public static class ServerCollectionStatusRules
     {
         /// <summary>
-        /// The (<c>IsOnline</c>, <c>HasCollectorErrors</c>, <c>AwaitingFirstCollection</c>) triple, resolved.
+        /// The (<c>IsOnline</c>, <c>CollectionStale</c>, <c>AwaitingFirstCollection</c>) triple, resolved.
         /// The order matters and is the #2429 reading: an online server's flags win over an awaiting marker,
         /// so a stale card cannot also claim to be awaiting its first collection.
         /// </summary>
-        public static ServerCollectionStatus Classify(bool? isOnline, bool hasCollectorErrors, bool awaitingFirstCollection) =>
+        public static ServerCollectionStatus Classify(bool? isOnline, bool collectionStale, bool awaitingFirstCollection) =>
             isOnline switch
             {
-                true when hasCollectorErrors => ServerCollectionStatus.Stale,
+                true when collectionStale => ServerCollectionStatus.Stale,
                 true => ServerCollectionStatus.Online,
                 false => ServerCollectionStatus.Offline,
                 _ => awaitingFirstCollection ? ServerCollectionStatus.AwaitingFirstCollection : ServerCollectionStatus.Unknown,
@@ -150,7 +161,7 @@ namespace PerformanceMonitor.Common
         public static ServerCollectionStatus FromFreshness(ServerFreshness freshness)
         {
             var flags = FlagsFor(freshness);
-            return Classify(flags.IsOnline, flags.HasCollectorErrors, flags.AwaitingFirstCollection);
+            return Classify(flags.IsOnline, flags.CollectionStale, flags.AwaitingFirstCollection);
         }
 
         /// <summary>The words a human reads. They are also the <c>DataTrigger</c> values the WPF sidebar keys
@@ -474,7 +485,7 @@ namespace PerformanceMonitor.Common
         /// a never-collected (queued-during-bootstrap) server -> Warning (attention-worthy but not the red overlay);
         /// else the card's worst metric band, with a stale collection also Warning.
         /// </summary>
-        public static FleetHealthBand ClassifyBand(bool? isOnline, bool awaitingFirstCollection, bool hasCollectorErrors, HealthSeverity overallMetricSeverity)
+        public static FleetHealthBand ClassifyBand(bool? isOnline, bool awaitingFirstCollection, bool collectionStale, HealthSeverity overallMetricSeverity)
         {
             if (isOnline == false)
             {
@@ -490,7 +501,7 @@ namespace PerformanceMonitor.Common
             {
                 HealthSeverity.Critical => FleetHealthBand.Critical,
                 HealthSeverity.Warning => FleetHealthBand.Warning,
-                _ => hasCollectorErrors ? FleetHealthBand.Warning : FleetHealthBand.Healthy,
+                _ => collectionStale ? FleetHealthBand.Warning : FleetHealthBand.Healthy,
             };
         }
 

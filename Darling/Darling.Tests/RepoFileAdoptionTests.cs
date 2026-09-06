@@ -79,14 +79,17 @@ public sealed class RepoFileAdoptionTests
     /// <summary>
     /// The pins whose anchors span a line break, and which therefore read LF-normalised text.
     ///
-    /// <para>These six carried the normalising helper before consolidation; the other twenty-eight
-    /// deliberately did not. The list is compared against the tree rather than trusted, for the reason in
-    /// this class's summary: moving a pin between the two readers changes whether its multi-line
-    /// assertions can fire at all.</para>
+    /// <para>Membership is a property of a pin's ANCHORS, not of its subject: a pin belongs here exactly
+    /// when one of its anchors crosses a newline. The list is compared against the tree rather than trusted,
+    /// for the reason in this class's summary — moving a pin between the two readers changes whether its
+    /// multi-line assertions can fire at all. Consolidation found six of the thirty-four carrying the
+    /// normalising helper and twenty-eight deliberately not; that was a census of one moment, and this is
+    /// the live set, so it carries no count of its own to go stale.</para>
     /// </summary>
     private static readonly string[] s_lfReaders =
     {
         "ChartWindowDomainTests.cs",
+        "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         "FleetPageAttentionFilterTests.cs",
         "ServerPageTabsTests.cs",
         "StartupFailureTriageTests.cs",

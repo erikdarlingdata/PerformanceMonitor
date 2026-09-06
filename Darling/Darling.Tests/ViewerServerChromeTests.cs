@@ -37,7 +37,7 @@ public sealed class ViewerServerChromeTests
         server.ApplyFreshness(now.AddSeconds(-30), now);
 
         Assert.True(server.IsOnline);
-        Assert.False(server.HasCollectorErrors);
+        Assert.False(server.CollectionStale);
         Assert.Equal("Online", server.DotStatus);
     }
 
@@ -51,7 +51,7 @@ public sealed class ViewerServerChromeTests
         server.ApplyFreshness(now.AddMinutes(-5), now);
 
         Assert.True(server.IsOnline);
-        Assert.True(server.HasCollectorErrors);
+        Assert.True(server.CollectionStale);
         Assert.Equal("Warning", server.DotStatus);
     }
 

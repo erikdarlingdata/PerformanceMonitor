@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -416,8 +416,11 @@ public sealed class ServerSummaryItem
     public System.Collections.Generic.IReadOnlyList<ServerTagPill> TagPills { get; set; } =
         System.Array.Empty<ServerTagPill>();
 
-    /// <summary>Warning (amber) state — in the viewer this means the collection has gone stale.</summary>
-    public bool HasCollectorErrors { get; set; }
+    /// <summary>Warning (amber) state: the newest collection has lagged past
+    /// <see cref="ServerHealthThresholds.StaleThreshold"/>. Freshness only — collectors that are failing are
+    /// counted by <see cref="FailedCollectorCount"/> and banded by <see cref="CollectorSeverity"/>, and the two
+    /// axes disagree routinely and correctly (#3098).</summary>
+    public bool CollectionStale { get; set; }
 
     /// <summary>
     /// True when no collection has EVER landed for this server (<see cref="ServerFreshness.NeverCollected"/>):
@@ -646,7 +649,7 @@ public sealed class ServerSummaryItem
         ? ViewerTimeHelper.ForDisplay(LastCollectionTime.Value).ToString("HH:mm:ss")
         : "Never";
 
-    /* Collection status. The (IsOnline, HasCollectorErrors, AwaitingFirstCollection) triple is resolved by
+    /* Collection status. The (IsOnline, CollectionStale, AwaitingFirstCollection) triple is resolved by
        ServerCollectionStatusRules.Classify and nowhere else in the viewer — the sidebar row's dot carried its
        own four-state copy until #2473, which is how a never-collected server got a grey "Unknown" dot beside
        this card's amber "Awaiting first collection". Everything downstream — the word, the colour, the
@@ -656,7 +659,7 @@ public sealed class ServerSummaryItem
 
        The null arm distinguishes "not reached yet" (bootstrap) from a legacy unknown. */
     public ServerCollectionStatus CardStatus =>
-        ServerCollectionStatusRules.Classify(IsOnline, HasCollectorErrors, AwaitingFirstCollection);
+        ServerCollectionStatusRules.Classify(IsOnline, CollectionStale, AwaitingFirstCollection);
 
     public string StatusDisplay => CardStatus.Word();
 
@@ -764,7 +767,7 @@ public sealed class ServerSummaryItem
             {
                 HealthSeverity.Critical => s_criticalBrush,
                 HealthSeverity.Warning => s_warningBrush,
-                _ => HasCollectorErrors || AwaitingFirstCollection ? MakeBrush("#FFD54F") : MakeBrush("#2a2d35"),
+                _ => CollectionStale || AwaitingFirstCollection ? MakeBrush("#FFD54F") : MakeBrush("#2a2d35"),
             };
         }
     }
@@ -793,7 +796,7 @@ public sealed class ServerSummaryItem
     {
         var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, nowUtc));
         IsOnline = flags.IsOnline;
-        HasCollectorErrors = flags.HasCollectorErrors;
+        CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;
     }
 

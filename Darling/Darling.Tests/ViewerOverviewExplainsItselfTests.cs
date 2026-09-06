@@ -52,7 +52,7 @@ public sealed class ViewerOverviewExplainsItselfTests
         };
 
     private static ServerSummaryItem Stale(string name = "s1", int id = 3) =>
-        new() { DisplayName = name, ServerId = id, IsOnline = true, HasCollectorErrors = true };
+        new() { DisplayName = name, ServerId = id, IsOnline = true, CollectionStale = true };
 
     private static ServerSummaryItem Offline(string name = "o1", int id = 4) =>
         new() { DisplayName = name, ServerId = id, IsOnline = false };
@@ -228,7 +228,7 @@ public sealed class ViewerOverviewExplainsItselfTests
                 ServerId = 1,
                 IsOnline = o,
                 AwaitingFirstCollection = a,
-                HasCollectorErrors = st,
+                CollectionStale = st,
                 CpuPercent = c,
                 MaxBlockingWaitMs = blockMs,
                 FailedCollectorCount = failed,
@@ -289,7 +289,7 @@ public sealed class ViewerOverviewExplainsItselfTests
             "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Overview.cs"));
         Assert.Contains("public ServerCollectionStatus CardStatus =>", overview, StringComparison.Ordinal);
         Assert.Contains(
-            "ServerCollectionStatusRules.Classify(IsOnline, HasCollectorErrors, AwaitingFirstCollection);",
+            "ServerCollectionStatusRules.Classify(IsOnline, CollectionStale, AwaitingFirstCollection);",
             overview, StringComparison.Ordinal);
         Assert.Contains("public string StatusDisplay => CardStatus.Word();", overview, StringComparison.Ordinal);
         Assert.Contains("public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch", overview, StringComparison.Ordinal);

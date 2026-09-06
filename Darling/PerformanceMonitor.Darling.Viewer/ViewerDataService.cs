@@ -24,7 +24,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// One row of the servers table, as the viewer's server list shows it. Was a positional record; it is now
 /// a class because the ported Lite server-row chrome needs mutable, change-notifying runtime state on each
 /// row — the favorite star (<see cref="IsFavorite"/>, matched from the viewer's registry) and the
-/// collection-freshness status dot (<see cref="IsOnline"/> / <see cref="HasCollectorErrors"/> /
+/// collection-freshness status dot (<see cref="IsOnline"/> / <see cref="CollectionStale"/> /
 /// <see cref="AwaitingFirstCollection"/> → <see cref="CardStatus"/> → <see cref="DotStatus"/>) update in
 /// place on the refresh timers without resetting the list's selection.
 /// The Postgres-sourced fields stay immutable (get-only); only the sidebar overlay state is settable.
@@ -139,18 +139,20 @@ public sealed class DarlingServer : INotifyPropertyChanged
         }
     }
 
-    private bool _hasCollectorErrors;
+    private bool _collectionStale;
 
-    /// <summary>Warning (amber) state — in the viewer this means the collection has gone stale.</summary>
-    public bool HasCollectorErrors
+    /// <summary>Warning (amber) state: the newest collection has lagged past
+    /// <see cref="ServerHealthThresholds.StaleThreshold"/>. Freshness only, and named for it — a collector that
+    /// is failing is a different axis, reported by the Collection Health tab (#3098).</summary>
+    public bool CollectionStale
     {
-        get => _hasCollectorErrors;
+        get => _collectionStale;
         set
         {
-            if (_hasCollectorErrors != value)
+            if (_collectionStale != value)
             {
-                _hasCollectorErrors = value;
-                OnPropertyChanged(nameof(HasCollectorErrors));
+                _collectionStale = value;
+                OnPropertyChanged(nameof(CollectionStale));
                 RaiseDotChanged();
             }
         }
@@ -187,7 +189,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// with one discriminant there is no flag combination left for the renderings to disagree about.
     /// </summary>
     public ServerCollectionStatus CardStatus =>
-        ServerCollectionStatusRules.Classify(IsOnline, HasCollectorErrors, AwaitingFirstCollection);
+        ServerCollectionStatusRules.Classify(IsOnline, CollectionStale, AwaitingFirstCollection);
 
     /// <summary>
     /// Sidebar status-dot vocabulary — the SAME words the Overview card's <c>StatusDisplay</c> shows, because
@@ -246,7 +248,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
         var flags = ServerCollectionStatusRules.FlagsFor(
             ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc));
         IsOnline = flags.IsOnline;
-        HasCollectorErrors = flags.HasCollectorErrors;
+        CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;
     }
 
