@@ -527,15 +527,21 @@ public sealed class PgPanelTabOwnershipTests
             + "comment cannot count — so this is the scan failing, not the source:\n  "
             + string.Join("\n  ", dropped));
 
-        /* The check above is the only one here that CANNOT disagree with the scan on today's wiring, and
-           saying so is better than implying otherwise: MethodRanges and BodyDiagnosis read the same walked
-           text and do the same brace walk, so the diagnosis is a tripwire for a future edit repointing the
-           scan at other text, not an active check against the shipped file.
+        /* Two over-run checks, and they cover different inputs rather than one superseding the other.
 
-           This one is active, and independent by construction: a body may not extend past a LATER
-           declaration. The bound comes from MethodDeclaration's match OFFSETS rather than from any brace,
-           so a scan that over-extends for any reason at all - a real unbalanced code brace, a walker
-           regression, a rewritten scan - swallows the next loader whole and is named here. */
+           THIS one is active against the shipped file and independent by construction: a body may not
+           extend past a LATER declaration, and the bound is MethodDeclaration's match OFFSETS rather than
+           any brace. So a scan that over-runs for any reason at all - a real unbalanced code brace in the
+           source, which no source walker can help with, a walker regression, a rewritten scan - swallows
+           the next loader whole and is named here.
+
+           The brace re-check BELOW cannot disagree with the scan on today's wiring, and saying so is better
+           than implying otherwise: MethodRanges and BodyDiagnosis read the same walked text and do the same
+           walk, so the diagnosis always answers WholeMethod. It earns its place on the one input this bound
+           is blind to - the LAST loader in the file has no later declaration to swallow, so an over-run
+           there passes this check in silence and only the brace walk can see it. Repointing MethodRanges at
+           loaderSource is the other thing that makes it fire, which is why the raw text and the walked text
+           are separate locals. */
         var declarationStarts = MethodDeclaration.Matches(loaderCode)
             .Select(m => (Name: m.Groups["name"].Value, m.Index))
             .OrderBy(m => m.Index)
