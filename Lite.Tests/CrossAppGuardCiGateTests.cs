@@ -150,6 +150,12 @@ public class CrossAppGuardCiGateTests
                 </Reference>
                 <Reference Include="Other" HintPath="..\Other\C.dll" />
                 <Compile Remove="..\Other\Removed.cs" />
+                <Reference Include="Gated">
+                  <HintPath Condition="'$(Platform)'=='x64'">..\Other\x64\Gated.dll</HintPath>
+                </Reference>
+                <Reference Include="Angled">
+                  <HintPath Condition="'$(V)'>'1'">..\Other\Angled.dll</HintPath>
+                </Reference>
               </ItemGroup>
               <Import Project="..\Other\D.props" />
             </Project>
@@ -163,11 +169,18 @@ public class CrossAppGuardCiGateTests
                 "SomeLib",
                 "Other",
                 @"..\Other\C.dll",
+                "Gated",
+                "Angled",
                 @"..\Other\D.props",
 
-                /* The element spelling is collected after the attributes, and is the case the attribute
-                   matcher alone cannot see at all. */
+                /* The element spellings are collected after the attributes, and are the cases the
+                   attribute matcher alone cannot see at all. The last two carry their own attribute on
+                   the open tag - Condition, for a platform-specific hint path - and the last one's
+                   Condition holds a raw '>', which is legal in an attribute value and would end the tag
+                   early for a matcher that scanned to the next angle bracket. */
                 @"..\Other\bin\SomeLib.dll",
+                @"..\Other\x64\Gated.dll",
+                @"..\Other\Angled.dll",
             },
             MsBuildPaths(Xml));
 
@@ -446,8 +459,12 @@ public class CrossAppGuardCiGateTests
        reference written the ordinary way, silently invisible. Include, Update and Import's Project are
        item operations rather than metadata and have no element spelling, so this one matcher covers the
        whole difference between the two grammars. */
+    /* The open tag carries its own attributes - Condition is the usual one, for a platform-specific
+       hint path - so they are skipped by matching quoted values rather than by "anything up to the next
+       >". An attribute value may legally contain a raw > (only < and & must be escaped), and
+       [^>]* would end the tag inside it. */
     private static readonly Regex MsBuildPathElement = new(
-        "<HintPath\\s*>([^<]*)</HintPath\\s*>",
+        "<HintPath(?:\\s+[\\w:.-]+\\s*=\\s*(?:\"[^\"]*\"|'[^']*'))*\\s*>([^<]*)</HintPath\\s*>",
         RegexOptions.Compiled);
 
     /// <summary>Repo-relative paths naming <paramref name="otherApp"/> that a test in
