@@ -235,13 +235,28 @@ public class AuroraOnlySqlIsGatedTests
     /// non-comment views it exposes are asked: the code, and the literal bodies. Blanking interpolation
     /// holes inside those bodies costs nothing, because a surface NAME is never assembled out of a
     /// hole.</para>
+    ///
+    /// <para><b>The raw-text gate is not an optimisation to taste.</b> This read enumerates every
+    /// <c>*.cs</c> file in the repository — 1,345 of them — once per test, four times over, and the walk is a
+    /// per-character pass with a <c>StringBuilder</c> behind it. Measured: walking unconditionally took the
+    /// class from 0.55s to 5.53s, a 10x regression on a guard that is not the thing under test. The gate is
+    /// EXACT rather than approximate, which is what makes it safe to skip the walk on: blanking only ever
+    /// replaces a character with a space or a newline, and no surface name contains either, so a needle
+    /// absent from the raw text is absent from every view of it. Roughly six files in the tree get past it,
+    /// and the class is back to 0.49s.</para>
     /// </summary>
     private static bool NamesAnAuroraSurfaceOutsideAComment(string path)
     {
         var text = File.ReadAllText(path);
 
-        if (AuroraSurfaces.Any(s =>
-            CSharpSourceWalker.StripCommentsAndStrings(text).Contains(s, StringComparison.Ordinal)))
+        if (!AuroraSurfaces.Any(s => text.Contains(s, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+        if (AuroraSurfaces.Any(s => code.Contains(s, StringComparison.Ordinal)))
         {
             return true;
         }
