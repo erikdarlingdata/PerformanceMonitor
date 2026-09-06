@@ -270,8 +270,9 @@ public sealed class TsqlConventionGuardTests
                 var name = Path.GetFileName(path);
                 var isAnchor = string.Equals(path, anchorPath, StringComparison.Ordinal);
 
-                /* Once per file, not once per finding: the map walks the whole source. */
-                var members = MemberMapOf(text);
+                /* Once per file at most, and only once a finding needs it: the map walks the whole
+                   source, and most scanned files hold no T-SQL at all. */
+                MemberMap? members = null;
 
                 foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
                 {
@@ -292,6 +293,7 @@ public sealed class TsqlConventionGuardTests
 
                     foreach (var (rule, detail) in Findings(body))
                     {
+                        members ??= MemberMapOf(text);
                         offenders.Add(
                             $"{name}:{LineOf(text, start)} in {EnclosingMember(members, start)} "
                             + $"[{rule}] {detail}");
@@ -1380,6 +1382,8 @@ public sealed class TsqlConventionGuardTests
             {
                 private const string Preceding = "SELECT 1 FROM sys.databases;";
 
+                public string Auto { get; set; } = "SELECT 7 FROM sys.schemas;";
+
                 private static readonly (string Name, string Sql)[] Table =
                 {
                     ("first", "SELECT 5 FROM sys.tables;"),
@@ -1425,7 +1429,7 @@ public sealed class TsqlConventionGuardTests
         /* Both members were read, and read as members — a map that resolved neither would satisfy every
            equality below by returning <unknown> twice, which is not the same answer. */
         Assert.Equal(
-            new[] { "Constrained", "First", "Preceding", "Second", "Table" },
+            new[] { "Auto", "Constrained", "First", "Preceding", "Second", "Table" },
             map.Declarations.Where(d => d.Kind == DeclarationKind.Member)
                             .Select(d => d.Name)
                             .OrderBy(n => n, StringComparer.Ordinal)
@@ -1462,6 +1466,12 @@ public sealed class TsqlConventionGuardTests
         Assert.Equal(
             "Constrained",
             EnclosingMember(map, source.IndexOf("SELECT 6", StringComparison.Ordinal)));
+
+        /* An AUTO-PROPERTY with an initialiser, where the braced group is the accessor list and the
+           literal is after it. This is the shape whose truncation ShapeOf cannot report — the range
+           would stop at the accessor list's } , still closed and still under NextStart — so it is the
+           one case where a wrong range is silent everywhere and only this assertion is left. */
+        Assert.Equal("Auto", EnclosingMember(map, source.IndexOf("SELECT 7", StringComparison.Ordinal)));
 
         /* The difference. Move the same literal text from the second member into the first and the answer
            has to follow it; an answer driven by the nearest name above would not move, because the names
@@ -2497,6 +2507,15 @@ public sealed class TsqlConventionGuardTests
     /// <para>Deliberately UNBOUNDED — it reads to the end of the file rather than stopping at the next
     /// declaration, so <see cref="DeclaredRange.NextStart"/> stays an independent bound that a runaway
     /// count can be caught by. Clamping here would make the two agree by construction.</para>
+    ///
+    /// <para><b>A braced group does not always end the declaration.</b> An accessor list can be followed
+    /// by <c>= initialiser;</c>, and on an auto-property that initialiser is where a literal lives. This
+    /// is the one truncation <see cref="ShapeOf"/> is structurally unable to report — a range that stops
+    /// short of its own member is still closed and still well under
+    /// <see cref="DeclaredRange.NextStart"/>, so it reads as
+    /// <see cref="RangeShape.WholeMember"/> — which is why it is handled here rather than described as a
+    /// bound. <c>Auto</c> in <see cref="TheResolver_AttributesByScope_NotByTheNearestNameAbove"/> is the
+    /// pin; found in review of #3097, where it resolved to <see cref="Unknown"/> in silence.</para>
     /// </summary>
     private static int DeclarationEnd(string code, int from)
     {
@@ -2533,21 +2552,62 @@ public sealed class TsqlConventionGuardTests
             }
             else if (c == '{')
             {
-                var depth = 0;
+                var close = BraceGroupEnd(code, i);
 
-                for (var j = i; j < code.Length; j++)
+                if (close < 0)
                 {
-                    if (code[j] == '{')
-                    {
-                        depth++;
-                    }
-                    else if (code[j] == '}' && --depth == 0)
-                    {
-                        return j + 1;
-                    }
+                    return -1;
                 }
 
-                return -1;
+                /* An accessor list can be followed by "= initialiser;", and on an auto-property that
+                   initialiser is exactly where a literal lives:
+
+                       public string QueryText { get; set; } = "SELECT …";
+
+                   Returning at the accessor list's closing brace ends the range BEFORE the literal, so
+                   the literal is contained by nothing and labelled <unknown> — and neither arm of
+                   ShapeOf can see it, because a range that stops short of its own member is still well
+                   under NextStart and still closed. That is a truncation with no detector, which is the
+                   one shape this scan must not produce.
+
+                   An '=' is the only thing that can legally follow the brace inside the same
+                   declaration; anything else there belongs to the next one, so the brace ends this
+                   range. */
+                var after = close;
+
+                while (after < code.Length && char.IsWhiteSpace(code[after]))
+                {
+                    after++;
+                }
+
+                if (after < code.Length && code[after] == '=')
+                {
+                    i = after;
+                    continue;
+                }
+
+                return close;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>One past the <c>}</c> that closes the brace group opening at <paramref name="open"/>, or
+    /// <c>-1</c> if it never closes.</summary>
+    private static int BraceGroupEnd(string code, int open)
+    {
+        var depth = 0;
+
+        for (var j = open; j < code.Length; j++)
+        {
+            if (code[j] == '{')
+            {
+                depth++;
+            }
+            else if (code[j] == '}' && --depth == 0)
+            {
+                return j + 1;
             }
         }
 
