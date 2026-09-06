@@ -23,7 +23,7 @@ namespace Darling.Tests;
 /// <para><c>CONTRIBUTING.md</c>'s <b>T-SQL Style</b> list opens "All T-SQL code must follow", and until #3081
 /// nothing enforced any of it. PR #3078 introduced <c>COUNT(*)</c> and <c>COUNT(DISTINCT …)</c> into a new
 /// collector query — a violation of the bullet at <c>CONTRIBUTING.md:355</c> — and passed the Linux build, the
-/// PostgreSQL tests, all four whole-tree guards, the 145-test command-deadline family, <c>review</c> and
+/// PostgreSQL tests, all four whole-tree guards, the command-deadline family, <c>review</c> and
 /// <c>verify</c>. A review bot reading the diff was the only thing that objected.</para>
 ///
 /// <para><b>This guard covers PART of that list and says which part.</b> The bullets are not equally checkable
@@ -38,8 +38,8 @@ namespace Darling.Tests;
 /// <para><b>The population is a string literal that OPENS a T-SQL statement.</b> Two factors, both required:
 /// the literal must begin with a T-SQL statement keyword once its own SQL comments are blanked, and it must
 /// carry a token that only T-SQL has (<see cref="TsqlMarkers"/>). Both halves earn their keep. The marker
-/// alone admits prose — <c>ScheduleManager</c>'s collector descriptions name <c>sys.dm_os_wait_stats</c>
-/// twenty-three times and the two MCP instruction blobs mention SQL Server throughout. The statement opener
+/// alone admits prose — <c>ScheduleManager</c>'s collector descriptions name a DMV in nearly every line of
+/// them, and the two MCP instruction blobs mention SQL Server throughout. The statement opener
 /// alone admits the store's own PostgreSQL and DuckDB SQL, where <c>COUNT_BIG()</c> does not exist and
 /// <c>--</c> is idiomatic; <c>DarlingServerConnector</c> is the clean demonstration, carrying the SAME
 /// <c>-- #2228</c> comment twice, once in a T-SQL probe (fixed here) and once in a PostgreSQL probe (left
@@ -52,13 +52,15 @@ namespace Darling.Tests;
 /// population rule a reader can hold in their head. The collectors, where the #3078 violation landed, hold
 /// whole statements in one literal each.</para>
 ///
-/// <para><b>Stated bound: C# string literals only, not standalone <c>.sql</c> files.</b> Measured on the tree
-/// at the time of writing: the deprecated Full edition's <c>install/</c> carries 6 <c>COUNT()</c>, 6 <c>--</c>
-/// comments and 75 uppercase data types; <c>upgrades/</c> carries 3 <c>@@ROWCOUNT</c>; the rigs and CI scripts
-/// under <c>tools/</c> and <c>.github/sql/</c> carry 9 <c>COUNT()</c> and 101 <c>--</c> comments. Bringing them
-/// in would mean either ~200 waivers or a remediation of code belonging to a retired SKU, and a guard whose
-/// waiver list dwarfs its findings has stopped being a guard. The two live SKUs and the shared libraries they
-/// both build on are what this scans.</para>
+/// <para><b>Stated bound: C# string literals only, not standalone <c>.sql</c> files.</b> The reason is a
+/// measurement taken WHEN THIS LANDED and not re-taken since, so read it as the evidence for a decision
+/// rather than as a live figure: the retired Full edition's <c>install/</c> carried 6 <c>COUNT()</c>, 6
+/// <c>--</c> comments and 75 uppercase data types across 60 files; <c>upgrades/</c> carried 3
+/// <c>@@ROWCOUNT</c>; the rigs and CI scripts under <c>tools/</c> and <c>.github/sql/</c> carried 9
+/// <c>COUNT()</c> and 101 <c>--</c> comments. Two orders of magnitude more waivers than findings, all of
+/// them against a retired SKU or a test rig, and a guard whose waiver list dwarfs its findings has stopped
+/// being a guard. The two live SKUs and the shared libraries they both build on are what this scans, and
+/// that population IS re-measured on every run by the floors below.</para>
 ///
 /// <para><b>Both SKUs, and one class rather than two.</b> The scan reads the shared libraries, all of
 /// <c>Darling/</c> and all of <c>Lite/</c> — the #3078 violation landed in <c>PerformanceMonitor.Collectors</c>,
@@ -470,7 +472,7 @@ public sealed class TsqlConventionGuardTests
     /// <see cref="RuleBullets"/>'s <c>Data types</c> note is derived from the same population the enforced
     /// checks read, and compared to what the note says.
     ///
-    /// <para><b>The direction that matters is DOWNWARD.</b> If those 33 sites get fixed, the reason for
+    /// <para><b>The direction that matters is DOWNWARD.</b> If those sites get fixed, the reason for
     /// leaving the rule out disappears and this pin says so — a rule left uncovered because remediation was
     /// expensive, after the remediation, is just an unguarded rule. The detector for it lives here and runs;
     /// it is <see cref="Findings"/> that deliberately does not emit it.</para>
@@ -738,7 +740,7 @@ public sealed class TsqlConventionGuardTests
             "INSERT INTO config.servers (server_id, name) VALUES ($1, $2) ON CONFLICT (server_id) DO UPDATE SET name = $2",
             /* DuckDB: Lite's store dialect, and the same file that holds Lite's T-SQL holds these. */
             "SELECT\n    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,\n    COUNT(*) AS sample_count\nFROM v_memory_stats\nWHERE server_id = $1",
-            /* Prose that names DMVs — ScheduleManager's collector descriptions, twenty-three of them. */
+            /* Prose that names DMVs — the shape ScheduleManager's collector descriptions all have. */
             "Wait statistics from sys.dm_os_wait_stats",
             "Server-wide session summary (idle/leak signal): total/running/sleeping counts from sys.dm_exec_sessions",
             /* A log message that interpolates a server name and mentions a DMV. */
