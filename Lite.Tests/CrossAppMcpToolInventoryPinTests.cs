@@ -138,6 +138,13 @@ public sealed class CrossAppMcpToolInventoryPinTests
            payload dimensions, so there is no Lite twin to port. */
         "get_store_metrics",
 
+        /* #3021: the store-log census read (get_store_log) over collect.store_log_events - the central
+           Postgres store reading its OWN server log, classified into a per-class census. Darling-ONLY by
+           architecture and for a harder reason than get_store_metrics above: Lite's store is DuckDB, which
+           is an embedded file format with no server and therefore no server log. There is no file for a Lite
+           twin to point at, so this is a SKU boundary rather than a porting to-do. */
+        "get_store_log",
+
         /* #2674: the collector-cost read (get_collector_cost) over collect.collector_cost — the tool measuring
            its OWN per-collector cost on the monitored servers. Darling-ONLY by architecture, the same as
            get_store_metrics: it is an internal self-metric over the central store, which Lite has no twin of. */
