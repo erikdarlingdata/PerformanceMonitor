@@ -534,6 +534,31 @@ cover it, and which one goes red tells you where to look:
 - **build** (Windows) — runs `Lite.Tests` and `Darling.Tests` without a live store. This is where a
   two-store parity gap surfaces.
 
+### Writing a Test That Reads the Other SKU's Source
+
+Parity guards read the other product's source as text — `Darling.Tests` opens files under `Lite/`,
+`Lite.Tests` opens files under `Darling/`. A guard like that only guards if CI runs it on the edit it
+exists to catch, and which suite runs is decided by the `lite` and `darling` path filters in
+`.github/workflows/build.yml`. `CrossAppGuardCiGateTests` derives that requirement from your source: it
+scans both test projects for cross-app reads and fails when the filter gating that suite cannot reach one.
+
+It finds a read spelled three ways, and **only** these three:
+
+- a repo-rooted literal — `"Lite/Analysis/DuckDbFactCollector.QueryPerf.cs"`, either slash;
+- `Path.Combine` with the root as its **first** argument — `Path.Combine("Lite", "Services", "X.cs")`;
+- a bare root name as an element of a collection projected one element to one whole path —
+  `new[] { "Lite", "Lite.Tests" }.Select(d => Path.Combine(root, d))`.
+
+Anything else is invisible to it, and that is a decision rather than a gap — the census of shapes it
+cannot see, and the measurement behind refusing to widen it again, are in
+`TheCSharpMatchers_StillCannotSeeTheseSpellings`. The practical consequence is short: **spell the path
+one of those three ways, at the site that reads it.** A root literal buried mid-`Path.Combine`, segments
+handed to a helper, or a segment array declared in another member all read fine and leave the guard
+unable to tell whether CI can run you. Nothing warns you — it is the silent direction by construction.
+
+If the path genuinely cannot be spelled that way, add the tree you read to the filter that gates your
+suite yourself, and say in the PR why the guard cannot see it.
+
 ### SQL Server Versions
 
 Test against multiple versions if possible:
