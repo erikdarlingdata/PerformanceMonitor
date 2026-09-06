@@ -1087,13 +1087,13 @@ public sealed class TsqlConventionGuardTests
 
             Assert.Equal(site.Member, EnclosingMember(map, start));
 
-                /* The line half of the label, cross-checked by a DIFFERENT derivation: LineOf counts
+            /* The line half of the label, cross-checked by a DIFFERENT derivation: LineOf counts
                newlines in a span, this reads the file as lines and finds the anchor's own line. The
-               literal starts at or above its anchor, so the reported line must not be past it. Asserting
-               instead that the line falls inside the resolved member's range would be a tautology —
-               the member was selected by containing this very offset and LineOf is monotonic in it, so
-               the comparison could not disagree with what it validates (#3089's finding about the same
-               shape). */
+               literal starts at or above its anchor, so the reported line must not be past it.
+               Asserting instead that the line falls inside the resolved member's range would be a
+               tautology — the member was selected by containing this very offset and LineOf is
+               monotonic in it, so the comparison could not disagree with what it validates (#3089's
+               finding about the same shape). */
             var line = LineOf(text, start);
             var anchorLine = Array.FindIndex(
                 File.ReadAllLines(path),
