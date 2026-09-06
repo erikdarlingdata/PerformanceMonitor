@@ -94,9 +94,14 @@ public sealed class RefreshCeilingProvenancePinTests
     /// MINUTES. Each pattern names the doc run it is read out of, so none of them can match a similar
     /// sentence elsewhere in a four-thousand-line file.</para>
     ///
-    /// <para>ASCII-only patterns on purpose. The prose carries em dashes, and matching one through a
-    /// source-encoding round trip is a way for a pattern to stop matching for a reason that has nothing to do
-    /// with what it guards; <c>\S</c> stands in for the dash instead.</para>
+    /// <para><b>ASCII-only patterns on purpose, and the reason is <see cref="DocProseFor"/> rather than
+    /// anything in the patterns themselves.</b> It normalises <c>—</c> and <c>–</c> to <c>-</c>
+    /// before any pattern runs, so not one of the thirteen has to match a dash variant — and not one does.
+    /// Matching a dash through a source-encoding round trip is a way for a pattern to stop matching for a
+    /// reason that has nothing to do with what it guards, and normalising at the extractor removes that at
+    /// the source instead of working around it thirteen times. The single literal hyphen below, in
+    /// <c>([0-9]+)-second slot</c>, is a plain ASCII hyphen in the prose rather than a normalised
+    /// dash.</para>
     /// </summary>
     private static IEnumerable<(string Name, string Declaration, string Pattern, bool DriftSwept)> Pins()
     {
@@ -340,6 +345,37 @@ public sealed class RefreshCeilingProvenancePinTests
     }
 
     /// <summary>
+    /// The class summary claims that no pattern has to match a dash variant, because
+    /// <see cref="DocProseFor"/> normalises <c>—</c> and <c>–</c> away before any pattern runs. That is a
+    /// claim about the pattern list, so it is enforced here rather than left standing in prose.
+    ///
+    /// <para><b>Why bother, given this is a test file's own comment.</b> The review that produced this
+    /// assertion found the previous version of that paragraph justifying the ASCII-only patterns by a
+    /// <c>\S</c> dash stand-in that had been deleted three commits earlier — a comment claiming a mechanism
+    /// the code no longer implemented, which is the exact defect this whole file exists to catch, one level
+    /// up. The cheapest fix was to correct the sentence; the durable one is to make the sentence unable to
+    /// go stale in that direction again.</para>
+    /// </summary>
+    [Fact]
+    public void NoPattern_NeedsToMatchADashVariant_WhichIsWhatTheNormalisationBuys()
+    {
+        var pins = Pins().ToArray();
+        Assert.NotEmpty(pins);
+
+        Assert.All(pins, pin => Assert.True(
+            pin.Pattern.All(character => character <= 127),
+            $"{pin.Name}'s pattern carries a non-ASCII character. The class summary says none has to, "
+            + "because DocProseFor normalises dash variants to a plain hyphen before any pattern runs — so "
+            + "either the normalisation stopped covering this case or that paragraph is now wrong."));
+
+        /* And the normalisation itself, on an arranged input rather than on the tree: without this, "the
+           patterns can be ASCII-only because the extractor normalises" is a claim with nothing behind it. */
+        Assert.DoesNotContain('\u2014', DashNormalisationProbe);
+        Assert.DoesNotContain('\u2013', DashNormalisationProbe);
+        Assert.Contains("a - b - c", DashNormalisationProbe, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The pure arithmetic, kept out of the parsing so it reads without a regex in the way — and so the two
     /// figures the prose states to one decimal are held to being exactly stateable to one decimal.
     /// </summary>
@@ -514,6 +550,15 @@ public sealed class RefreshCeilingProvenancePinTests
             "these pinned sentences are declared but never verified, so they guard nothing: "
             + string.Join(", ", unused));
     }
+
+    /// <summary>
+    /// <see cref="DocProseFor"/>'s dash and emphasis normalisation, applied to an arranged doc run so the
+    /// claim can be checked without depending on which dashes happen to be in the real comment today.
+    /// </summary>
+    private static string DashNormalisationProbe =>
+        DocProseFor(
+            "    /// <summary>\r\n    /// a \u2014 b \u2013 c <b>d</b>\r\n    /// </summary>\r\n    probe marker;\r\n",
+            "probe marker");
 
     private static bool FiltersToSuccessfulRuns(string sql) =>
         Regex.IsMatch(sql, @"last_run_status\s*=\s*'Success'");
