@@ -307,8 +307,8 @@ public sealed class PgPanelTabOwnershipTests
         Assert.DoesNotContain("PgProbeGrid", rawBody, StringComparison.Ordinal);
 
         /* And the diagnosis in Read() is what turns that truncation into a red rather than a quieter rule. */
-        Assert.Null(BodyDiagnosis(walkedCode, walked["LoadPgProbeAsync"].Start, walked["LoadPgProbeAsync"].End));
-        Assert.Equal("truncated", BodyDiagnosis(walkedCode, raw["LoadPgProbeAsync"].Start, raw["LoadPgProbeAsync"].End));
+        Assert.Equal(BodyShape.WholeMethod, BodyDiagnosis(walkedCode, walked["LoadPgProbeAsync"].Start, walked["LoadPgProbeAsync"].End));
+        Assert.Equal(BodyShape.Truncated, BodyDiagnosis(walkedCode, raw["LoadPgProbeAsync"].Start, raw["LoadPgProbeAsync"].End));
 
         /* An OPENING brace in a char literal is the other direction. Mid-file the raw count runs on into the
            method below and takes its panels with it, which is the over-extension the diagnosis names. */
@@ -339,8 +339,8 @@ public sealed class PgPanelTabOwnershipTests
             overExtends[overRaw["LoadPgProbeAsync"].Start..overRaw["LoadPgProbeAsync"].End],
             StringComparison.Ordinal);
 
-        Assert.Null(BodyDiagnosis(overCode, overWalked["LoadPgProbeAsync"].Start, overWalked["LoadPgProbeAsync"].End));
-        Assert.Equal("over-extended", BodyDiagnosis(overCode, overRaw["LoadPgProbeAsync"].Start, overRaw["LoadPgProbeAsync"].End));
+        Assert.Equal(BodyShape.WholeMethod, BodyDiagnosis(overCode, overWalked["LoadPgProbeAsync"].Start, overWalked["LoadPgProbeAsync"].End));
+        Assert.Equal(BodyShape.OverExtended, BodyDiagnosis(overCode, overRaw["LoadPgProbeAsync"].Start, overRaw["LoadPgProbeAsync"].End));
 
         /* At end of file the same brace finds no closing brace at all and the method is dropped outright,
            which no per-body diagnosis can name because there is no body to diagnose. That is what the
@@ -537,10 +537,10 @@ public sealed class PgPanelTabOwnershipTests
                which. */
             switch (BodyDiagnosis(loaderCode, start, end))
             {
-                case "truncated":
+                case BodyShape.Truncated:
                     truncated.Add($"{method} (line {LineOf(loaderCode, start)}, scan ended at line {LineOf(loaderCode, end - 1)})");
                     break;
-                case "over-extended":
+                case BodyShape.OverExtended:
                     overExtended.Add($"{method} (line {LineOf(loaderCode, start)}, scan ran to line {LineOf(loaderCode, end - 1)})");
                     break;
             }
@@ -648,19 +648,38 @@ public sealed class PgPanelTabOwnershipTests
     }
 
     /// <summary>
-    /// <c>null</c> when <c>code[start..end]</c> is one whole method body — it opens a brace, returns to
-    /// depth zero exactly once, and does so on the last character. Otherwise the name of the failure:
-    /// <c>"truncated"</c> when the range ends anywhere but its own closing brace, <c>"over-extended"</c>
-    /// when depth returns to zero before the end and the scan therefore kept reading.
+    /// What the brace scan actually returned for one method. An enum rather than a string or a nullable
+    /// flag because <see cref="Read"/> dispatches on it: a mistyped string case label would match nothing,
+    /// leave the offender list empty and report a clean run on a truncated body — the exact failure this
+    /// file exists to refuse, one level up. Mistyping a member is a compile error.
+    /// </summary>
+    private enum BodyShape
+    {
+        /// <summary>One whole method body, ending on the brace that closes it.</summary>
+        WholeMethod,
+
+        /// <summary>The scan stopped short, so every assignment after the cut is missing.</summary>
+        Truncated,
+
+        /// <summary>The scan ran past the method, so the ones below it are now part of this body.</summary>
+        OverExtended,
+    }
+
+    /// <summary>
+    /// Which of three shapes <c>code[start..end]</c> is. <see cref="BodyShape.WholeMethod"/> when it opens
+    /// a brace, returns to depth zero exactly once, and does so on the last character;
+    /// <see cref="BodyShape.Truncated"/> when the range ends anywhere but its own closing brace;
+    /// <see cref="BodyShape.OverExtended"/> when depth returns to zero before the end and the scan
+    /// therefore kept reading.
     ///
     /// <para>Checked over the walked text, so a brace inside a literal or a comment is not a brace here —
-    /// which is the whole point: the diagnosis has to disagree with a scan that counted one.</para>
+    /// which is the whole point: the diagnosis has to be able to disagree with a scan that counted one.</para>
     /// </summary>
-    private static string? BodyDiagnosis(string code, int start, int end)
+    private static BodyShape BodyDiagnosis(string code, int start, int end)
     {
         if (end <= start || end > code.Length || code[end - 1] != '}')
         {
-            return "truncated";
+            return BodyShape.Truncated;
         }
 
         var depth = 0;
@@ -678,17 +697,17 @@ public sealed class PgPanelTabOwnershipTests
                 depth--;
                 if (depth < 0)
                 {
-                    return "over-extended";
+                    return BodyShape.OverExtended;
                 }
 
                 if (depth == 0 && i != end - 1)
                 {
-                    return "over-extended";
+                    return BodyShape.OverExtended;
                 }
             }
         }
 
-        return opened && depth == 0 ? null : "truncated";
+        return opened && depth == 0 ? BodyShape.WholeMethod : BodyShape.Truncated;
     }
 
     /// <summary>
