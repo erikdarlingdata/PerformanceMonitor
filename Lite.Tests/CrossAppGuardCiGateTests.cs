@@ -562,11 +562,13 @@ public class CrossAppGuardCiGateTests
     /// <para>A nearest file that deliberately chains to its parent does so through an <c>Import</c> whose
     /// path is a property function, and <see cref="ReadMsBuildPaths"/> reports an unevaluable path as a
     /// failure rather than ignoring it — so the chain is loud, not silently uncollected. That is the right
-    /// direction for a guard whose whole defect class is not noticing.</para></summary>
-    /// <para>Every location looked at is returned alongside what was there. A stage that probed nowhere
-    /// and a stage that probed everywhere and found nothing both leave an empty found list, and on a tree
-    /// with no such file anywhere — this one — a count floor cannot tell them apart without redding on a
-    /// clean checkout. The probe list can, so it is what gets floored.</para>
+    /// direction for a guard whose whole defect class is not noticing.</para>
+    ///
+    /// <para><b>Every location looked at is returned alongside what was there</b>, which is why this
+    /// hands back <c>Probed</c> as well as <c>Found</c>. A stage that probed nowhere and a stage that
+    /// probed everywhere and found nothing both leave an empty found list, and on a tree with no such
+    /// file anywhere — this one — a count floor cannot tell them apart without redding on a clean
+    /// checkout. The probe list can, so it is what gets floored.</para></summary>
     private static (List<string> Probed, List<string> Found) ImportedBuildFiles(
         string repo, string projectRoot)
     {
