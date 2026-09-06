@@ -872,6 +872,85 @@ public sealed class DocCommentHygieneTests
     }
 
     /// <summary>
+    /// The sweep reads EVERY source file under every solution project, counted against the disk.
+    ///
+    /// <para><b>Why this is a separate assertion from the floors, and the finding that produced it.</b>
+    /// Mutation-testing the per-project <c>Files &gt; 0</c> floor showed it survives: a project whose files
+    /// vanish from the sweep also loses its doc blocks, so the doc-block floor reds first and the file
+    /// floor never decides anything. That leaves the case the floors genuinely cannot see — a sweep that
+    /// reads SOME of a project's files. Doc blocks and crefs both stay well above zero, every floor passes,
+    /// and the guard is quietly running on a fraction of the tree.</para>
+    ///
+    /// <para>Both sides are derived: the census's count from the walk, and the expected count from the same
+    /// build-output filter the walk uses. So this is an equality between two derivations rather than
+    /// against a number written here, which is the only form that does not go stale as files are
+    /// added.</para>
+    /// </summary>
+    [Fact]
+    public void TheSweepReadsEveryFileUnderEverySolutionProject()
+    {
+        var root = RepoRootOrFail();
+        var projects = SolutionProjectDirectories(root);
+        var census = BuildCrefCensus(RepoSources(root), projects);
+
+        foreach (var project in projects)
+        {
+            var onDisk = Directory
+                .EnumerateFiles(
+                    Path.Combine(root, project.Replace('/', Path.DirectorySeparatorChar)),
+                    "*.cs",
+                    SearchOption.AllDirectories)
+                .Count(f => !HasBuildOutputSegment(Path.GetRelativePath(root, f)));
+
+            census.ByProject.TryGetValue(project, out var counts);
+
+            Assert.True(counts.Files == onDisk,
+                $"the sweep read {counts.Files} of the {onDisk} source file(s) under '{project}'. A partial "
+                + "read clears every population floor — the doc-block and cref counts stay far above zero — "
+                + "so nothing else here can tell it from a whole one.");
+        }
+    }
+
+    /// <summary>
+    /// The two arms of <see cref="CrefResolves"/> that cannot fail today rest on properties that are
+    /// pinned, so they are defence in depth rather than decoration.
+    ///
+    /// <para><b>Found by mutation testing, and worth keeping rather than deleting.</b> Unanchoring
+    /// <see cref="WholeIdentifier"/> changes no answer, because the universe is built from identifier
+    /// TOKENS and set membership therefore already implies identifier shape. Dropping the
+    /// <c>Length &gt; 0</c> arm changes no answer either, because <see cref="string.Split(char[])"/> never
+    /// returns an empty array. Both are true of code OUTSIDE
+    /// <see cref="CrefResolves"/> — how the universe is built, and how a target is split — and a change
+    /// there is exactly how a malformed target would start resolving. So the arms stay and the properties
+    /// they rest on are asserted here; a mutation that survives because a property holds is a different
+    /// thing from one that survives because nothing checks it.</para>
+    /// </summary>
+    [Fact]
+    public void TheRedundantArmsOfTheResolverRestOnPinnedProperties()
+    {
+        var root = RepoRootOrFail();
+        var census = BuildCrefCensus(RepoSources(root), SolutionProjectDirectories(root));
+
+        Assert.NotEmpty(census.CodeIdentifiers);
+
+        var shapeless = census.CodeIdentifiers.Where(i => !WholeIdentifier.IsMatch(i)).Take(5).ToArray();
+
+        Assert.True(shapeless.Length == 0,
+            "the identifier universe holds string(s) that are not whole identifiers: "
+            + $"[{string.Join(", ", shapeless.Select(s => $"'{s}'"))}]. Set membership no longer implies "
+            + "identifier shape, so WholeIdentifier in CrefResolves has become the only thing rejecting a "
+            + "malformed segment — check that it still does before relying on it.");
+
+        /* And the split arm: a degenerate target yields at least one segment, which is then compared and
+           rejected. If this ever came back empty, All(...) would be vacuously true and the target would
+           resolve. */
+        foreach (var degenerate in new[] { "", ".", "..", "   ", "!:", "{}", "T:", "()" })
+        {
+            Assert.NotEmpty(CrefSegments(degenerate));
+        }
+    }
+
+    /// <summary>
     /// The floors really do fail on a starved population, and they fail PER PROJECT — each of the three
     /// counts, for each project in turn, is individually load-bearing.
     ///
@@ -1629,6 +1708,11 @@ public sealed class DocCommentHygieneTests
     /// <summary>
     /// Whether every segment of <paramref name="target"/> is an identifier that
     /// <paramref name="identifiers"/> holds.
+    ///
+    /// <para>Both arms are redundant TODAY and kept deliberately;
+    /// <see cref="TheRedundantArmsOfTheResolverRestOnPinnedProperties"/> asserts the properties that make
+    /// them so, and says why deleting them would move the defence into code that does not know it is
+    /// holding it.</para>
     /// </summary>
     private static bool CrefResolves(string target, IReadOnlySet<string> identifiers)
     {
