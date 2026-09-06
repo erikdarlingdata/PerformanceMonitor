@@ -45,6 +45,14 @@ namespace Darling.Tests;
 /// <c>-- #2228</c> comment twice, once in a T-SQL probe (fixed here) and once in a PostgreSQL probe (left
 /// alone, correctly).</para>
 ///
+/// <para><b>The marker set has a residue, and it is ENUMERATED rather than asserted away.</b> An earlier
+/// draft of this comment said every read of a monitored SQL Server goes through a DMV, a catalog view or
+/// a built-in, so nothing T-SQL could fall outside the population. Testing that instead of stating it
+/// found two counter-examples — and one of them mattered: Darling's Extended Events provisioning DDL was
+/// real T-SQL going to production servers with no marker in it at all. That is fixed (the markers now
+/// reach <c>EVENT SESSION</c>, <c>sqlserver.</c> and <c>package0.</c>) and what remains is pinned at set
+/// equality by <see cref="TheTsqlTheMarkerSetCannotSee_IsTheseAndNoOthers"/>.</para>
+///
 /// <para><b>Stated bound: SQL assembled across several literals is judged per literal.</b>
 /// <c>FactRemediation</c> renders a remediation script with one <c>sb.Append</c> per line, so
 /// <c>DECLARE @plan_handle varbinary(64);</c> is in the population and the <c>-- STEP 2</c> line above it is
@@ -430,6 +438,94 @@ public sealed class TsqlConventionGuardTests
             + string.Join(Environment.NewLine, misread));
     }
 
+    /// <summary>
+    /// The T-SQL this guard's marker set does NOT reach, ENUMERATED and compared for equality — because the
+    /// first version of this file claimed there was none, and testing that claim found two.
+    ///
+    /// <para><b>Why the claim needed testing rather than stating.</b> "Every read of a monitored SQL Server
+    /// goes through a DMV, a catalog view or a built-in" is a universal quantifier, and a universal
+    /// quantifier names the one counter-example that would break it while a count only tells you to count
+    /// again. Enumerating the complement of the population — literals that open a statement and carry no
+    /// marker — and reading the members found two things the tally could never have shown: Darling's
+    /// Extended Events provisioning DDL (<c>CREATE EVENT SESSION … ADD EVENT sqlserver.blocked_process_report
+    /// …</c>) was real T-SQL sent to production servers and entirely outside the population, and
+    /// <c>FactRemediation</c>'s cursor fetch still is. The first was fixed by adding
+    /// <c>EVENT SESSION</c>, <c>sqlserver.</c> and <c>package0.</c> to <see cref="TsqlMarkers"/>. The second
+    /// is here.</para>
+    ///
+    /// <para><b>The discriminator, and why it is narrow on purpose.</b> The complement is over 500 literals,
+    /// most of them prose that happens to start with a keyword and store SQL for the other two dialects. What
+    /// separates T-SQL from both is the parameter spelling: <c>@name</c> is T-SQL's, <c>$1</c> is Npgsql's.
+    /// So the candidate set is "opens a statement, no T-SQL marker, no positional parameter, has an
+    /// <c>@name</c>" — which is a small enough set to READ, and reading it is the point. A T-SQL statement
+    /// with no marker AND no parameter at all would still be outside this net; that is the residue, and it is
+    /// a smaller residue than the one this test was written to measure.</para>
+    /// </summary>
+    [Fact]
+    public void TheTsqlTheMarkerSetCannotSee_IsTheseAndNoOthers()
+    {
+        var unmarked = 0;
+        var candidates = new List<string>();
+
+        foreach (var (_, roots, _) in ScannedTrees)
+        {
+            foreach (var path in SourceFiles(roots))
+            {
+                var text = File.ReadAllText(path);
+
+                foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
+                {
+                    var view = CommentsBlanked(body, SpanKinds(body));
+
+                    if (!StatementOpener.IsMatch(view) || TsqlMarkers.IsMatch(view))
+                    {
+                        continue;
+                    }
+
+                    unmarked++;
+
+                    if (PositionalParameter.IsMatch(view) || !NamedParameter.IsMatch(view))
+                    {
+                        continue;
+                    }
+
+                    candidates.Add(
+                        $"{Path.GetFileName(path)}: {Regex.Replace(body.Trim(), @"\s+", " ")}");
+                }
+            }
+        }
+
+        /* The complement has to be non-empty, or the enumeration below is over nothing and its equality is
+           satisfied by a broken upstream filter rather than by the tree. */
+        Assert.True(
+            unmarked > 0,
+            "no literal in the corpus opens a statement without carrying a T-SQL marker, which cannot be "
+            + "true while the stores' own PostgreSQL and DuckDB SQL is in the scanned trees. The statement "
+            + "opener or the marker set has broken, not the tree.");
+
+        Assert.Equal(
+            new[]
+            {
+                /* FactRemediation renders its plan-cache clear script one sb.Append per line, and this line
+                   is the one with no DMV, no catalog view and no built-in in it. Twice, because two of the
+                   rendered scripts carry the same cursor loop. Both are already outside the population by
+                   the per-literal bound as well — every other line of those scripts is judged — so closing
+                   this would mean resolving concatenation rather than reading literals. */
+                "FactRemediation.cs: FETCH NEXT FROM plan_cursor INTO @plan_handle;",
+                "FactRemediation.cs: FETCH NEXT FROM plan_cursor INTO @plan_handle;",
+            },
+            candidates.OrderBy(c => c, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>Npgsql's positional parameter, which is how the store's own SQL announces itself.</summary>
+    private static readonly Regex PositionalParameter = new(
+        @"\$\d", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>T-SQL's parameter and variable spelling — the one thing neither PostgreSQL nor DuckDB
+    /// writes, which is what makes it usable as a dialect tell where the marker set has gone quiet.</summary>
+    private static readonly Regex NamedParameter = new(
+        @"(?<![A-Za-z0-9_@])@[A-Za-z_]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     /* ───────────────────────── the disposition map against the document ───────────────────────── */
 
     /// <summary>
@@ -696,6 +792,11 @@ public sealed class TsqlConventionGuardTests
             "SET NOCOUNT ON; CREATE TABLE #file_space (database_id integer NOT NULL); SELECT 1 FROM sys.databases AS d;",
             /* A quoted identifier that happens to be a type name. */
             "SELECT [INT] = d.database_id FROM sys.databases AS d OPTION(RECOMPILE);",
+            /* And one containing an ESCAPED bracket, which is what makes the ]] arm of the walk
+               load-bearing: stopping at the first `]` leaves `]INT]` outside the identifier and in the
+               code stream. Synthetic - no identifier in this corpus embeds a bracket - and added
+               because the review of this change pointed out the asymmetry with the '' arm. */
+            "SELECT [a]]INT] = d.database_id FROM sys.databases AS d OPTION(RECOMPILE);",
             /* MAX the aggregate, not MAX the length spec. */
             "SELECT m = MAX(osi.runnable_tasks_count) FROM sys.dm_os_schedulers AS osi OPTION(RECOMPILE);",
             /* And the adversarial version, which is what makes the length spec's type ANCHOR load-bearing:
@@ -742,6 +843,11 @@ public sealed class TsqlConventionGuardTests
             "IF NOT EXISTS (SELECT 1/0 FROM sys.dm_xe_database_sessions AS s) BEGIN SELECT 1; END;",
             "DECLARE @plan_handle varbinary(64);",
             "EXEC sys.sp_configure N'cost threshold for parallelism', 50;",
+            /* The Extended Events provisioning DDL, which carried no marker at all until an
+               enumeration of the population's complement found it. It reaches a monitored server on
+               every session repair, so it belongs in the population as much as any collector query. */
+            "CREATE EVENT SESSION [darling_deadlocks] ON SERVER\n    ADD EVENT sqlserver.xml_deadlock_report\n    ADD TARGET package0.ring_buffer (SET max_memory = 4096);",
+            "ALTER EVENT SESSION [darling_deadlocks] ON SERVER STATE = START;",
         };
 
         foreach (var sql in tsql)
@@ -830,11 +936,11 @@ public sealed class TsqlConventionGuardTests
                 "SELECT\n    w.wait_type\n  , w.waiting_tasks_count\nFROM sys.dm_os_wait_stats AS w\nOPTION(RECOMPILE);"),
         };
 
-        var covered = 0;
+        var exercised = 0;
 
         foreach (var (rule, sql) in unguarded)
         {
-            covered++;
+            exercised++;
 
             /* Observable: the fixture reaches the detector. A case the population filters out first would
                record a limitation that is not this guard's — #3079 found three of exactly that shape. */
@@ -857,7 +963,7 @@ public sealed class TsqlConventionGuardTests
             Assert.Contains(CountBig, Findings(withCovered).Select(f => f.Rule));
         }
 
-        Assert.Equal(unguarded.Length, covered);
+        Assert.Equal(unguarded.Length, exercised);
 
         Assert.Equal(
             UncoveredRules.OrderBy(r => r, StringComparer.Ordinal).ToArray(),
@@ -1123,7 +1229,10 @@ public sealed class TsqlConventionGuardTests
         + @"|(?<![A-Za-z0-9_])N'"
         + @"|\bTOP\s*\("
         + @"|\bSET\s+TRANSACTION\s+ISOLATION\s+LEVEL"
-        + @"|\bSET\s+NOCOUNT\b",
+        + @"|\bSET\s+NOCOUNT\b"
+        + @"|\bEVENT\s+SESSION\b"
+        + @"|\bsqlserver\.[a-z_]"
+        + @"|\bpackage0\.",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>Whether the literal opens a SQL statement of ANY dialect — the half of the population test
@@ -1246,15 +1355,29 @@ public sealed class TsqlConventionGuardTests
 
             if (sql[i] == '[')
             {
+                kinds[i++] = SqlSpan.QuotedIdentifier;
+
                 while (i < sql.Length)
                 {
-                    var close = sql[i] == ']';
-                    kinds[i++] = SqlSpan.QuotedIdentifier;
-
-                    if (close)
+                    if (sql[i] == ']')
                     {
+                        /* ]] is an escaped bracket inside a quoted identifier, exactly as '' is inside a
+                           string. Stopping at the first ] ends the identifier early and hands the rest of
+                           the name to the token checks as code, so [a]]INT] reports an uppercase data type
+                           that is part of a column name. Nothing in the corpus writes one today; the
+                           asymmetry with the '' arm right above is what made it worth closing. */
+                        if (i + 1 < sql.Length && sql[i + 1] == ']')
+                        {
+                            kinds[i++] = SqlSpan.QuotedIdentifier;
+                            kinds[i++] = SqlSpan.QuotedIdentifier;
+                            continue;
+                        }
+
+                        kinds[i++] = SqlSpan.QuotedIdentifier;
                         break;
                     }
+
+                    kinds[i++] = SqlSpan.QuotedIdentifier;
                 }
 
                 continue;
