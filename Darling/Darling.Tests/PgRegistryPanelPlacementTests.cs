@@ -71,6 +71,15 @@ namespace Darling.Tests;
 /// EMPTY rather than carrying an exemption list — and it names whatever it could not resolve instead of
 /// passing on the ones it could.</para>
 ///
+/// <para><b>Read through the shared walk, not a comment regex of its own.</b> Both source files are put
+/// through <see cref="CSharpSourceWalker"/> (#3052): the registry's reasoning lives in block comments
+/// BETWEEN its constructor arguments and several of them name collectors, and the loaders' comments name
+/// grids, so prose would otherwise read as an argument or an assignment. The walk also makes the brace
+/// count that finds a method body immune to a brace inside a literal. Where a collector NAME is needed the
+/// call is matched in the walked code and the literal read out of the original text at the same offset,
+/// because the walk blanks literal text — the idiom <c>CommentFilterAdoptionTests</c> uses, sound because
+/// the two are character-aligned.</para>
+///
 /// <para><b>Ownership resolves to the OUTERMOST named <c>TabItem</c></b>, because Activity holds a sub-tab
 /// control and a panel in its Blocking sub-tab still belongs to Activity. Read by parsing the XAML rather
 /// than by line range or by the position of a <c>Header</c>: there are two <c>Header="Blocking"</c>
@@ -84,9 +93,13 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class PgRegistryPanelPlacementTests
 {
-    /// <summary>The two forms a loader uses to name the collector whose rows its panels render.</summary>
-    private static readonly Regex CollectorNamed = new(
-        @"(?:PgCollectorIsGatedOff|PanelNote)\(\s*""(?<collector>pg_[a-z_]+)""", RegexOptions.Compiled);
+    /// <summary>
+    /// The two forms a loader uses to name the collector whose rows its panels render. Matched over the
+    /// WALKED code; the name itself is then read out of the original text at the same offset, because the
+    /// walk blanks literal text.
+    /// </summary>
+    private static readonly Regex CollectorNamingCall = new(
+        @"\b(?:PgCollectorIsGatedOff|PanelNote)\(", RegexOptions.Compiled);
 
     /// <summary>A control this method assigns. Same shape as <c>PgPanelTabOwnershipTests</c>' detector.</summary>
     private static readonly Regex ControlAssignment = new(
@@ -103,13 +116,17 @@ public sealed class PgRegistryPanelPlacementTests
         @"internal const int (?<constant>Pg\w+InnerTabIndex)\s*=\s*(?<index>\d+);", RegexOptions.Compiled);
 
     /// <summary>
-    /// One registry entry, read out of <c>ViewerPostgresTabs.cs</c>: the index constant it occupies, its id,
-    /// and the collectors it claims. Parsed rather than referenced so the whole rule runs against source
-    /// files; the compiled registry's own shape is already pinned by <c>ViewerPostgresTabsTests</c>.
+    /// Where a registry entry starts, and which index constant it occupies. The entry's id, header and
+    /// collector list are string LITERALS and are read positionally from that offset — a single regex over
+    /// the whole entry would have to span the block comments the registry carries between its arguments.
+    /// Parsed rather than referenced so the whole rule runs against source files; the compiled registry's
+    /// own shape is already pinned by <c>ViewerPostgresTabsTests</c>.
     /// </summary>
-    private static readonly Regex RegistryEntry = new(
-        @"new ViewerPostgresTab\(\s*ViewerServerTab\.(?<constant>Pg\w+InnerTabIndex),\s*""(?<id>\w+)"",\s*""(?<header>[^""]+)"",\s*new\[\]\s*\{(?<collectors>[^}]*)\}",
-        RegexOptions.Compiled);
+    private static readonly Regex RegistryEntryHead = new(
+        @"new ViewerPostgresTab\(\s*ViewerServerTab\.(?<constant>Pg\w+InnerTabIndex),", RegexOptions.Compiled);
+
+    /// <summary>A collector name, to tell the registry's collector array from the note that follows it.</summary>
+    private static readonly Regex CollectorName = new(@"^pg_[a-z_]+$", RegexOptions.Compiled);
 
     /// <summary>
     /// The comparison this issue is about: a collector's panels are declared inside the tab the REGISTRY
@@ -258,15 +275,22 @@ public sealed class PgRegistryPanelPlacementTests
     public void TheRegistryParse_AgreesWithASecondReadingOfTheSameFile()
     {
         var chain = Read();
-        var source = Strip(ViewerFile("ViewerPostgresTabs.cs"));
-        var initialiser = source[source.IndexOf("All = new[]", StringComparison.Ordinal)..];
+        var source = ViewerFile("ViewerPostgresTabs.cs");
 
+        /* Two readings of one file that share no code with the parse above: how many entries the CODE
+           constructs, and which collector-shaped LITERALS it holds. A structural parse that quietly lost an
+           entry would take both rules with it and still report green. */
         Assert.Equal(
-            Regex.Matches(initialiser, @"new ViewerPostgresTab\(").Count,
+            Regex.Matches(CSharpSourceWalker.StripCommentsAndStrings(source), @"new ViewerPostgresTab\(").Count,
             chain.Registry.Count);
 
         Assert.Equal(
-            Regex.Matches(initialiser, @"""pg_[a-z_]+""").Select(m => m.Value.Trim('"')).Order(StringComparer.Ordinal).ToList(),
+            CSharpSourceWalker.StringLiteralBodies(source)
+                .Select(l => l.Text)
+                .Where(t => CollectorName.IsMatch(t))
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToList(),
             chain.Collectors.Order(StringComparer.Ordinal).ToList());
 
         /* Every entry lands on a NAMED PostgreSQL TabItem. A registry index that resolved to an unnamed
@@ -492,8 +516,13 @@ public sealed class PgRegistryPanelPlacementTests
         var indices = IndexConstant.Matches(shell)
             .ToDictionary(m => m.Groups["constant"].Value, m => int.Parse(m.Groups["index"].Value), StringComparer.Ordinal);
 
+        var registrySource = ViewerFile("ViewerPostgresTabs.cs");
+        var registryCode = CSharpSourceWalker.StripCommentsAndStrings(registrySource);
+        var registryLiterals = CSharpSourceWalker.StringLiteralBodies(registrySource).OrderBy(l => l.Start).ToList();
+        var heads = RegistryEntryHead.Matches(registryCode).ToList();
+
         var registry = new List<RegistryTab>();
-        foreach (Match entry in RegistryEntry.Matches(Strip(ViewerFile("ViewerPostgresTabs.cs"))))
+        foreach (var entry in heads)
         {
             var constant = entry.Groups["constant"].Value;
             Assert.True(indices.ContainsKey(constant),
@@ -508,30 +537,55 @@ public sealed class PgRegistryPanelPlacementTests
                 $"The TabItem at index {index} ({constant}) carries no x:Name, so no panel can be resolved "
                 + "to it and every collector on that registry entry would go unchecked.");
 
+            /* The entry's literals, in source order: id, header, then the collector array, then the note.
+               Taken as the CONTIGUOUS run of collector-shaped literals after the header, which is what the
+               array is — a note that happened to be exactly a collector name could not join it, because the
+               note comes after the array and the run has already ended. */
+            var literals = registryLiterals
+                .Where(l => l.Start > entry.Index)
+                .Select(l => l.Text)
+                .ToList();
+
+            Assert.True(literals.Count >= 3,
+                $"The registry entry at {constant} is followed by {literals.Count} string literal(s); its "
+                + "id, header and collector array cannot be read, so this file would check nothing about it.");
+
             registry.Add(new RegistryTab(
                 constant,
-                entry.Groups["id"].Value,
-                entry.Groups["header"].Value,
+                literals[0],
+                literals[1],
                 index,
                 xamlTabAt[index],
-                Regex.Matches(entry.Groups["collectors"].Value, @"""(?<name>pg_[a-z_]+)""")
-                    .Select(m => m.Groups["name"].Value)
-                    .ToList()));
+                literals.Skip(2).TakeWhile(l => CollectorName.IsMatch(l)).ToList()));
         }
 
-        var bodies = MethodBodies(Strip(ViewerFile("ViewerServerTab.Postgres.cs")));
+        var loaderSource = ViewerFile("ViewerServerTab.Postgres.cs");
+        var loaderCode = CSharpSourceWalker.StripCommentsAndStrings(loaderSource);
+        var ranges = MethodRanges(loaderCode);
 
         var namedBy = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
         var panelsOf = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
-        foreach (var (method, body) in bodies)
+        var callees = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
+        foreach (var (method, (start, end)) in ranges)
         {
-            var named = CollectorNamed.Matches(body).Select(m => m.Groups["collector"].Value).ToHashSet(StringComparer.Ordinal);
+            var body = loaderCode[start..end];
+
+            var named = CollectorNamingCall.Matches(body)
+                .Select(m => LiteralAt(loaderSource, start + m.Index + m.Length))
+                .Where(n => n is not null && CollectorName.IsMatch(n))
+                .Select(n => n!)
+                .ToHashSet(StringComparer.Ordinal);
+
             if (named.Count > 0)
             {
                 namedBy[method] = named;
             }
 
             panelsOf[method] = ControlAssignment.Matches(body).Select(m => m.Groups["name"].Value).ToHashSet(StringComparer.Ordinal);
+            callees[method] = LoaderCall.Matches(body)
+                .Select(m => m.Groups["name"].Value)
+                .Where(n => !string.Equals(n, method, StringComparison.Ordinal))
+                .ToHashSet(StringComparer.Ordinal);
         }
 
         var loadPathOf = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
@@ -545,74 +599,92 @@ public sealed class PgRegistryPanelPlacementTests
                 continue; /* a SQL Server arm — this file only speaks for the PostgreSQL run */
             }
 
-            loadPathOf[tab] = Transitive(arm.Groups["loader"].Value, bodies, new HashSet<string>(StringComparer.Ordinal));
+            loadPathOf[tab] = Transitive(arm.Groups["loader"].Value, callees, new HashSet<string>(StringComparer.Ordinal));
         }
 
         return new PlacementChain(registry, xamlTabAt, xamlHeaderAt, tabOf, namedBy, panelsOf, loadPathOf);
     }
 
     /// <summary>Every <c>LoadPg…Async</c> reachable from <paramref name="method"/>, itself included.</summary>
-    private static IReadOnlySet<string> Transitive(string method, Dictionary<string, string> bodies, HashSet<string> seen)
+    private static IReadOnlySet<string> Transitive(string method, IReadOnlyDictionary<string, IReadOnlySet<string>> callees, HashSet<string> seen)
     {
         var found = new HashSet<string>(StringComparer.Ordinal);
-        if (!seen.Add(method) || !bodies.TryGetValue(method, out var body))
+        if (!seen.Add(method) || !callees.TryGetValue(method, out var direct))
         {
             return found;
         }
 
         found.Add(method);
 
-        foreach (Match m in LoaderCall.Matches(body))
+        foreach (var callee in direct)
         {
-            var callee = m.Groups["name"].Value;
-            if (callee != method)
-            {
-                found.UnionWith(Transitive(callee, bodies, seen));
-            }
+            found.UnionWith(Transitive(callee, callees, seen));
         }
 
         return found;
     }
 
     /// <summary>
-    /// Comments out — doc, line and block — so prose naming a collector or a grid cannot read as a call or an
-    /// assignment. The registry's own reasoning is block comments INSIDE the initialiser and several of them
-    /// name collectors.
+    /// The plain <c>"…"</c> literal opening an argument list at <paramref name="at"/>, read out of the
+    /// ORIGINAL source at an offset matched in the walked text — the idiom
+    /// <c>CommentFilterAdoptionTests.PrefixFilterSites</c> uses, sound because
+    /// <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> is character-aligned with its input.
+    ///
+    /// <para>Only a plain literal is recognised: a collector named through a <c>const</c>, a verbatim
+    /// literal or an interpolation would read as null. There is no such call site today — all 27 registry
+    /// collectors are named with a plain literal — and that is a stated bound on this reader rather than a
+    /// claim about C#. <see cref="EveryRegistryCollector_ResolvesToAPanel_OrIsNamedAsUnresolved"/> is what
+    /// goes red if it stops holding, naming the collector it could no longer read.</para>
     /// </summary>
-    private static string Strip(string source)
+    private static string? LiteralAt(string source, int at)
     {
-        source = Regex.Replace(source, @"^[ \t]*///.*$", string.Empty, RegexOptions.Multiline);
-        source = Regex.Replace(source, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline);
-        return Regex.Replace(source, @"//.*$", string.Empty, RegexOptions.Multiline);
+        var i = at;
+        while (i < source.Length && char.IsWhiteSpace(source[i]))
+        {
+            i++;
+        }
+
+        if (i >= source.Length || source[i] != '"')
+        {
+            return null;
+        }
+
+        var close = source.IndexOf('"', i + 1);
+        return close < 0 ? null : source[(i + 1)..close];
     }
 
-    private static Dictionary<string, string> MethodBodies(string source)
+    /// <summary>
+    /// Each <c>LoadPg…Async</c>'s body as a half-open range over the WALKED code. Braces inside a literal or
+    /// a comment cannot unbalance the count there, which is the whole reason the walk is used rather than a
+    /// comment-stripping regex of this file's own (#3052).
+    /// </summary>
+    private static Dictionary<string, (int Start, int End)> MethodRanges(string code)
     {
-        var bodies = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (Match m in Regex.Matches(source, @"private\s+async\s+Task\s+(?<name>LoadPg[A-Za-z]+Async)\s*\("))
+        var ranges = new Dictionary<string, (int Start, int End)>(StringComparer.Ordinal);
+        foreach (Match m in Regex.Matches(code, @"private\s+async\s+Task\s+(?<name>LoadPg[A-Za-z]+Async)\s*\("))
         {
             var depth = 0;
             var started = false;
-            for (var i = m.Index; i < source.Length; i++)
+            for (var i = m.Index; i < code.Length; i++)
             {
-                if (source[i] == '{')
+                if (code[i] == '{')
                 {
                     depth++;
                     started = true;
                 }
-                else if (source[i] == '}')
+                else if (code[i] == '}')
                 {
                     depth--;
                     if (started && depth == 0)
                     {
-                        bodies[m.Groups["name"].Value] = source[m.Index..(i + 1)];
+                        ranges[m.Groups["name"].Value] = (m.Index, i + 1);
                         break;
                     }
                 }
             }
         }
 
-        return bodies;
+        return ranges;
     }
 
     /// <summary>Same <c>[CallerFilePath]</c> resolver <c>ViewerPostgresTabsTests</c> uses — no walk-up, so it
