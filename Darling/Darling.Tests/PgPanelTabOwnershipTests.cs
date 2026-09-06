@@ -527,6 +527,37 @@ public sealed class PgPanelTabOwnershipTests
             + "comment cannot count — so this is the scan failing, not the source:\n  "
             + string.Join("\n  ", dropped));
 
+        /* The check above is the only one here that CANNOT disagree with the scan on today's wiring, and
+           saying so is better than implying otherwise: MethodRanges and BodyDiagnosis read the same walked
+           text and do the same brace walk, so the diagnosis is a tripwire for a future edit repointing the
+           scan at other text, not an active check against the shipped file.
+
+           This one is active, and independent by construction: a body may not extend past a LATER
+           declaration. The bound comes from MethodDeclaration's match OFFSETS rather than from any brace,
+           so a scan that over-extends for any reason at all - a real unbalanced code brace, a walker
+           regression, a rewritten scan - swallows the next loader whole and is named here. */
+        var declarationStarts = MethodDeclaration.Matches(loaderCode)
+            .Select(m => (Name: m.Groups["name"].Value, m.Index))
+            .OrderBy(m => m.Index)
+            .ToList();
+
+        var swallowed = new List<string>();
+        foreach (var (method, (start, end)) in ranges.OrderBy(r => r.Key, StringComparer.Ordinal))
+        {
+            var next = declarationStarts.FirstOrDefault(dcl => dcl.Index > start, (Name: string.Empty, Index: int.MaxValue));
+            if (end > next.Index)
+            {
+                swallowed.Add($"{method} (line {LineOf(loaderCode, start)}) runs to line {LineOf(loaderCode, end - 1)}, "
+                    + $"past {next.Name} at line {LineOf(loaderCode, next.Index)}");
+            }
+        }
+
+        Assert.True(swallowed.Count == 0,
+            "These loader bodies extend past a later loader's own declaration, so that loader's panels are "
+            + "attributed to this one's tab and both rules above compare pairs the source never wrote. The "
+            + "bound is the next declaration's offset, not a brace count, so this is the scan over-running "
+            + "whatever the reason:\n  " + string.Join("\n  ", swallowed));
+
         var truncated = new List<string>();
         var overExtended = new List<string>();
         foreach (var (method, (start, end)) in ranges.OrderBy(r => r.Key, StringComparer.Ordinal))
