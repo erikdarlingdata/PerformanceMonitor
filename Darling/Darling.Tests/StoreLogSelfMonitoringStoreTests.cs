@@ -37,7 +37,11 @@ public class StoreLogSelfMonitoringStoreTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+
+        /* This rung is no longer the top one, so its own version is asserted where it belongs — against
+           the ladder — rather than against StorageVersion.SchemaVersion, which now names a later rung. The
+           top-rung claim travels with whichever rung is top; V110's test left the same note for this one. */
+        Assert.Contains(RungVersion, versions);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();

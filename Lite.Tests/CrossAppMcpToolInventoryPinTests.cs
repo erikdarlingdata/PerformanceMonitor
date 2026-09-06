@@ -164,6 +164,16 @@ public sealed class CrossAppMcpToolInventoryPinTests
            get_store_metrics: it is an internal self-metric over the central store, which Lite has no twin of. */
         "get_collector_cost",
 
+        /* #2880: the out-of-band stall-probe read (get_collector_stall_probes) over
+           collect.collector_stall_probes — the server-wide wait samples taken while one of OUR collectors was
+           stalled mid-read. Darling-ONLY by architecture rather than a porting to-do, and specifically because
+           the SOURCE is Darling-only: the arm that decides to spend a probe is installed by
+           DarlingCollectorRunner's server-scoped path, beside the V108/V109 drain instrumentation it reads, and
+           Lite's RemoteCollectorService.DefinitionRunner has neither the counting reader nor the phase split.
+           A Lite twin would read an always-empty DuckDB table. If Lite's runner ever gains the drain
+           forensics, port this and delete the entry; the ratchet only shrinks. */
+        "get_collector_stall_probes",
+
         /* #1562: the pre-banded fleet-overview read born from the web dashboard's DarlingFleetReader.
            Lite twin = a DuckDB fleet reader over the SAME shared ServerHealthClassifier (Common) — tracked
            in #1573 alongside unifying Lite's own card banding onto that classifier; port it, then remove
