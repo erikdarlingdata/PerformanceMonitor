@@ -17,8 +17,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// That <see cref="RepoFile"/> is the ONLY repo-file reader in this project — asserted, rather than stated
-/// in prose and left to rot.
+/// That <see cref="RepoFile"/> is the only repo-file reader in <c>Darling.Tests</c> — asserted, rather than
+/// stated in prose and left to rot. <c>Darling.Tests</c> and not "the repository": the scope is this one
+/// test project, and the paragraph on what the scan cannot see says what that leaves out.
 ///
 /// <para><b>This exists because the prose version failed for thirty-four consecutive classes.</b> Every one
 /// of them wanted to read a repo file, none of them found an authority to call, each wrote its own, and the
@@ -36,12 +37,26 @@ namespace Darling.Tests;
 /// <c>DoesNotContain</c> would stop being ABLE to fire and report clean forever. Switching a pin off the LF
 /// reader is therefore a decision, and it reds here so it gets made on purpose.</para>
 ///
-/// <para><b>What this scan cannot see, stated rather than implied.</b> It matches a DECLARATION named
-/// <c>ReadRepoFile</c> or <c>ReadRepoFileLf</c>, so a private re-implementation under some other name
-/// evades it — the regex anchors on the name, and a name is all one file's text offers. It also says nothing
-/// about the fifty-three classes in this project that still carry their own repo-ROOT walk without a reader
-/// on top of it; that is the same duplication one layer down, it is a larger population than this one was,
-/// and it is deliberately not in scope here.</para>
+/// <para><b>What this scan cannot see, stated rather than implied.</b> Three things, and the first is a
+/// boundary rather than a limitation.</para>
+///
+/// <para><b>It sweeps <c>Darling.Tests</c> only</b>, because <see cref="TestDirectory"/> is this file's own
+/// directory. <c>Lite.Tests</c> carries five private <c>ReadRepoFile</c> declarations of its own —
+/// <c>DetachedCollectorGateTests</c>, <c>GridPayloadColumnOrderPinTests</c>,
+/// <c>LiteOverviewCardExplainsItselfTests</c>, <c>LiteSidebarDotRendersTheCardStatusTests</c> and
+/// <c>QueryStoreServerGateTests</c> — and this says nothing about them. They are the same pattern in the
+/// sibling project, and <see cref="RepoFile"/> is shareable with it by the one <c>Compile Include</c> line
+/// that already brings <see cref="CSharpSourceWalker"/> across. Whoever takes that has to widen this sweep
+/// or add a sibling pin in <c>Lite.Tests</c>; a reader consolidated there while this scan still looks at one
+/// directory would be consolidated with nothing asserting it stayed that way.</para>
+///
+/// <para><b>It matches a DECLARATION by NAME</b> — <c>ReadRepoFile</c> or <c>ReadRepoFileLf</c> — so a
+/// private re-implementation under some other name evades it. The regex anchors on the name, and a name is
+/// all one file's text offers.</para>
+///
+/// <para><b>It says nothing about the fifty-three classes here that carry their own repo-ROOT walk</b>
+/// without a reader on top of it. That is the same duplication one layer down, it is a larger population
+/// than this one was, and it is deliberately not in scope.</para>
 /// </summary>
 public sealed class RepoFileAdoptionTests
 {
