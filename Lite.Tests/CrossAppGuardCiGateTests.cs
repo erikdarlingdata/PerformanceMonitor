@@ -107,7 +107,7 @@ public class CrossAppGuardCiGateTests
 
         /* A wildcard over the other app IS a read, so it becomes the directory it enumerates. Spelled
            against a directory that does not exist, deliberately: an expected value written as a real
-           "Darling/..." literal is itself matched by the C# stage above, and would put a path nothing
+           repo-rooted path is itself matched by the C# stage above, and would put a path nothing
            actually reads into the found set. The normaliser never touches the disk, so a fictional
            directory tests it exactly as well. */
         Assert.Equal(
@@ -117,6 +117,35 @@ public class CrossAppGuardCiGateTests
         /* Out of the tree entirely, and not a path at all. */
         Assert.Null(RepoRooted(repo, liteTests, @"..\..\Darling\X.cs", "Darling"));
         Assert.Null(RepoRooted(repo, liteTests, "xunit.v3", "Darling"));
+    }
+
+    /// <summary>
+    /// A reference counts only when the path it resolved to spells it back, on every host.
+    ///
+    /// <para><c>Directory.Exists</c> answers according to the HOST's path rules, and Windows trims
+    /// trailing periods from a path component: a <c>Darling</c> segment followed by three dots resolves
+    /// to <c>Darling</c> there and to nothing on macOS or Linux. This guard runs on Windows in CI and
+    /// gets verified on macOS, and the divergence is not hypothetical — a three-dot path written
+    /// illustratively inside a comment in THIS file was matched by the C# stage, resolved on Windows
+    /// only, and failed the coverage check in a way no local run could reproduce. Every case below
+    /// answers identically on all three platforms.</para>
+    /// </summary>
+    [Fact]
+    public void TheOnDiskProbe_AnswersTheSameOnEveryHost()
+    {
+        var repo = RepoRoot();
+
+        Assert.NotNull(OnDisk(repo, DarlingTestsDir));
+        Assert.NotNull(OnDisk(repo, DarlingTestsDir + "/CSharpSourceWalker.cs"));
+
+        /* Trailing periods: Windows resolves this to the Darling directory, other hosts to nothing.
+           Neither is a read of anything, so both must say so. */
+        Assert.Null(OnDisk(repo, "Darling/..."));
+
+        /* A dot segment resolves everywhere, and still is not the path it was written as. */
+        Assert.Null(OnDisk(repo, DarlingTestsDir + "/."));
+
+        Assert.Null(OnDisk(repo, "Darling/NoSuchArea/Fixtures"));
     }
 
     /// <summary>
@@ -130,7 +159,8 @@ public class CrossAppGuardCiGateTests
     ///
     /// <para><see cref="ImportedBuildFiles"/> is reported and not floored: there is no
     /// <c>Directory.Build.props</c> or <c>Directory.Build.targets</c> in this repository today, and asserting
-    /// one exists would be asserting a fiction. It is in the population so the first one is read.</para>
+    /// one exists would be asserting a fiction. It is in the population so the first one is read, and it
+    /// takes only the NEAREST of each name, as MSBuild does.</para>
     /// </summary>
     [Fact]
     public void ThePopulationReachesTheProjectFiles_AndNotOnlyTheCSharp()
@@ -399,27 +429,41 @@ public class CrossAppGuardCiGateTests
                 !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
                 !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
 
-    /// <summary>The build files MSBuild imports into a project without being named: any
-    /// <c>Directory.Build.props</c> / <c>Directory.Build.targets</c> from the project directory up to and
-    /// including the repo root.
+    /// <summary>The build files MSBuild imports into a project without being named.
     ///
     /// <para>There are none in this repository today, and nothing here asserts there are. They are in the
     /// population because an <c>ItemGroup</c> in one can legally carry a cross-app <c>Compile Include</c> —
     /// for a file OUTSIDE the project cone there is no duplicate-item conflict with the SDK's later default
     /// glob, so it works — which is the same invisible shape as a <c>.csproj</c> entry in a file no
     /// <c>.csproj</c> scan would open. The point is that the first one is read rather than this test needing
-    /// to be edited first.</para></summary>
+    /// to be edited first.</para>
+    ///
+    /// <para><b>Nearest wins, per name, because that is what MSBuild does.</b>
+    /// <c>Microsoft.Common.props</c> probes upward for ONE <c>Directory.Build.props</c> and stops; it does
+    /// not chain through every one above the project, and it probes the two names independently. Collecting
+    /// all of them would attribute an item group to a project that never imports it, and a guard whose
+    /// findings are not trustworthy stops being read.</para>
+    ///
+    /// <para>A nearest file that deliberately chains to its parent does so through an <c>Import</c> whose
+    /// path is a property function, and <see cref="ReadMsBuildPaths"/> reports an unevaluable path as a
+    /// failure rather than ignoring it — so the chain is loud, not silently uncollected. That is the right
+    /// direction for a guard whose whole defect class is not noticing.</para></summary>
     private static IEnumerable<string> ImportedBuildFiles(string repo, string projectRoot)
     {
         var root = Path.GetFullPath(repo).TrimEnd(Path.DirectorySeparatorChar);
+        var names = new[] { "Directory.Build.props", "Directory.Build.targets" };
+        var found = new HashSet<string>(StringComparer.Ordinal);
 
-        for (var dir = new DirectoryInfo(Path.GetFullPath(projectRoot)); dir is not null; dir = dir.Parent)
+        for (var dir = new DirectoryInfo(Path.GetFullPath(projectRoot));
+             dir is not null && found.Count < names.Length;
+             dir = dir.Parent)
         {
-            foreach (var name in new[] { "Directory.Build.props", "Directory.Build.targets" })
+            foreach (var name in names)
             {
                 var candidate = Path.Combine(dir.FullName, name);
-                if (File.Exists(candidate))
+                if (!found.Contains(name) && File.Exists(candidate))
                 {
+                    found.Add(name);
                     yield return candidate;
                 }
             }
@@ -551,20 +595,47 @@ public class CrossAppGuardCiGateTests
                 continue;
             }
 
-            var onDisk = Path.Combine(repo, raw.Replace('/', Path.DirectorySeparatorChar));
+            /* Anything that resolves to nothing is a message string or a moved file — not this test's
+               business. */
+            var onDisk = OnDisk(repo, raw);
+            if (onDisk is null)
+            {
+                continue;
+            }
 
             if (File.Exists(onDisk))
             {
                 yield return (raw, raw, origin);
             }
-            else if (Directory.Exists(onDisk))
+            else
             {
                 /* Directory reads are EnumerateCsFiles-shaped, so coverage of *.cs inside it is the ask. */
                 yield return (raw + " (directory)", raw.TrimEnd('/') + "/CoverageProbe.cs", origin);
             }
-
-            /* Anything that resolves to neither is a message string or a moved file — not this test's business. */
         }
+    }
+
+    /// <summary>The on-disk path a repo-rooted reference names, or null when it names nothing real.
+    ///
+    /// <para>The round-trip is the load-bearing part. <c>Directory.Exists</c> answers according to the
+    /// HOST's path rules, and Windows trims trailing periods from a path component — so
+    /// <c>Darling</c> followed by a three-dot segment resolves to <c>Darling</c> there and to nothing on
+    /// macOS or Linux. This guard runs on Windows in CI and gets verified on macOS, so a reference counts
+    /// only when the path it resolved to spells it back, and the answer is the same on every host.</para></summary>
+    private static string? OnDisk(string repo, string raw)
+    {
+        var candidate = Path.Combine(repo, raw.Replace('/', Path.DirectorySeparatorChar));
+        if (!File.Exists(candidate) && !Directory.Exists(candidate))
+        {
+            return null;
+        }
+
+        return string.Equals(
+                Rooted(repo, Path.GetFullPath(candidate)),
+                raw.TrimEnd('/'),
+                StringComparison.Ordinal)
+            ? candidate
+            : null;
     }
 
     /// <summary>A repo-relative, forward-slash spelling of an absolute path, for messages.</summary>
