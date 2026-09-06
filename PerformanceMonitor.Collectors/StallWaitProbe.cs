@@ -409,6 +409,13 @@ public static class StallWaitProbePolicy
     /// result and an idle instance would otherwise be the same absence of rows, and "answering trivial
     /// queries in milliseconds while producing rows 50x slowly, waiting on nothing" is a finding this probe
     /// has to be able to return rather than lose.</para>
+    ///
+    /// <para><c>COUNT_BIG</c> throughout, per <c>CONTRIBUTING.md</c>'s function rule, and wrapped in
+    /// <c>CONVERT(integer, …)</c> where the destination column is <c>integer</c> — the
+    /// <see cref="SessionSummaryStatsCollector"/> pattern. Scheduler and wait-type cardinality cannot
+    /// overflow, so the wrap is safe and the <c>COUNT_BIG</c> is convention rather than arithmetic; the point
+    /// of following it without exception is that the next reader does not have to work out whether an
+    /// exception was reasoned or accidental.</para>
     /// </summary>
     public const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -428,7 +435,7 @@ SELECT /* PerformanceMonitorDarling stall probe */
 FROM
 (
     SELECT
-        scheduler_count = COUNT(*),
+        scheduler_count = CONVERT(integer, COUNT_BIG(*)),
         runnable_tasks = ISNULL(SUM(CONVERT(bigint, os.runnable_tasks_count)), 0),
         work_queue_length = ISNULL(SUM(CONVERT(bigint, os.work_queue_count)), 0),
         pending_disk_io = ISNULL(SUM(CONVERT(bigint, os.pending_disk_io_count)), 0),
@@ -440,7 +447,7 @@ CROSS JOIN
 (
     SELECT
         all_waiting_tasks = COUNT_BIG(*),
-        distinct_wait_types = COUNT(DISTINCT owt.wait_type)
+        distinct_wait_types = CONVERT(integer, COUNT_BIG(DISTINCT owt.wait_type))
     FROM sys.dm_os_waiting_tasks AS owt
     WHERE owt.wait_type IS NOT NULL
     AND   owt.session_id <> @@SPID

@@ -632,6 +632,17 @@ public class StallWaitProbePolicyTests
            exactly where it would be dropped. */
         Assert.DoesNotContain("IgnoredWait", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("wait_type NOT IN", sql, StringComparison.Ordinal);
+
+        /* CONTRIBUTING.md's function rule: COUNT_BIG, never COUNT. Asserted here because nothing in the
+           repo enforces it — this query shipped two bare COUNTs through every guard and was caught by eye
+           in review. The negative reads cleanly because "COUNT(" cannot match "COUNT_BIG(". The Contains
+           beside it is a FLOOR, not a per-site check: it fails only when the query counts nothing at all,
+           which is the one way the negative could pass vacuously — it is satisfied by any single count, so
+           it cannot tell four counts from one and is not asked to. Same for @@ROWCOUNT, which this query
+           has no use for but the rule also covers. */
+        Assert.Contains("COUNT_BIG(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COUNT(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("@@ROWCOUNT", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
