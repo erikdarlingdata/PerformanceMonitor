@@ -136,10 +136,12 @@ public sealed class PgPanelTabOwnershipTests
     /// <para><b>This is what makes a partial loss loud.</b> The rule above is per-panel but it only ever
     /// looks at panels the read FOUND, so anything the read drops makes it quieter rather than red: it
     /// compares fewer pairs and reports a clean run. Its one floor — a tab's load path assigns at least one
-    /// panel — trips only when a whole tab is zeroed. Measured on the shipped tree: a stray <c>}</c> in a
-    /// literal at the top of <c>LoadPgIoAsync</c> takes the I/O tab from six panels to none and reds that
-    /// floor, and the same <c>}</c> one line later takes it from six to ONE and is completely green, with
-    /// four of the five lost panels belonging to the two loaders the truncation also stopped following.
+    /// panel — trips only when a whole tab is zeroed. Measured on the shipped tree with the brace scan run
+    /// over RAW source, which is the defect #3088 was filed for: a stray <c>}</c> in a literal at the top
+    /// of <c>LoadPgIoAsync</c> takes the I/O tab from six panels to none and reds that floor, and the same
+    /// <c>}</c> one line later takes it from six to ONE and is completely green — four of the five lost
+    /// panels belonging to the two loaders the truncation also stopped following. The walk stops that
+    /// particular cut; it does nothing about an assignment lost any other way, which is this rule's job.
     /// Asked from this direction the loss has nowhere to hide: a grid nothing fills is named, whether the
     /// assignment was dropped by a bad read or deleted from the source.</para>
     ///
@@ -370,7 +372,7 @@ public sealed class PgPanelTabOwnershipTests
     /// it.</para>
     /// </summary>
     [Fact]
-    public void TheSourceRead_IgnoresAControlNamedInABlockCommentsContinuationLine()
+    public void TheSourceRead_IgnoresAControlNamedOnABlockCommentContinuationLine()
     {
         const string source = """
             private async Task LoadPgProbeAsync()
