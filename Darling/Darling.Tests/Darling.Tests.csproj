@@ -68,5 +68,11 @@
          thing that keeps CI's cluster shaped like the product's as the catalog grows. -->
     <None Include="..\..\.github\workflows\build.yml" Link="Fixtures\build.yml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\.github\workflows\nightly.yml" Link="Fixtures\nightly.yml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #3072: Darling/README.md, copied beside the test binary so ReadmeDerivedCountPinTests parses
+         the REAL file. Its collector-inventory, V1-table, hypertable and worker-sizing figures are
+         restatements of CollectorCatalog.All / TimescaleSupport.HypertableCount, and prose cannot call
+         into the product — so the only thing that keeps them true as the catalog grows is parsing them
+         back against it. Same Link+copy delivery as the workflows above. -->
+    <None Include="..\README.md" Link="Fixtures\Darling-README.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
