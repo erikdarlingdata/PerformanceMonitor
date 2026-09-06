@@ -75,9 +75,12 @@ public sealed class McpConfigReadAvoidsSecretColumnsTests
         var offenders = Directory.GetFiles(mcpDir, "*.cs", SearchOption.AllDirectories)
             .Where(f =>
             {
-                var text = File.ReadAllText(f);
-                /* The comment explaining the skip names both types, so only real USES count. */
-                var code = string.Join("\n", text.Split('\n').Where(l => !l.TrimStart().StartsWith("/", StringComparison.Ordinal) && !l.TrimStart().StartsWith("*", StringComparison.Ordinal)));
+                /* The comment explaining the skip names both types, so only real USES count. Walked rather
+                   than filtered by line prefix: a block comment's continuation lines in this codebase carry
+                   no asterisk, so a prefix filter reads the second line of an explanatory block as code and
+                   reports the prose as a use. Both needles are property accesses, so blanking literal text
+                   along with the comments costs nothing here. */
+                var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(f));
                 return code.Contains(".Smtp", StringComparison.Ordinal) || code.Contains(".Webhooks", StringComparison.Ordinal);
             })
             .Select(Path.GetFileName)

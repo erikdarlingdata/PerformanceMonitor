@@ -52,15 +52,24 @@ public sealed class TimescaleEnableConnectionSafetyTests
         {
             var name = Path.GetFileName(file);
 
-            /* The probe is where the guarded call is SUPPOSED to live, and this file names the method in
-               prose throughout. */
-            if (name is nameof(LiveTimescaleProbe) + ".cs" or nameof(TimescaleEnableConnectionSafetyTests) + ".cs")
+            /* The probe is where the guarded call is SUPPOSED to live, so its own call is not an offender.
+               This file used to be skipped beside it because it names the method throughout in prose and in
+               regex literals; the walk below removes both, so the exemption stopped earning its place and an
+               unsafe call written HERE is now caught like any other. */
+            if (name is nameof(LiveTimescaleProbe) + ".cs")
             {
                 continue;
             }
 
-            var text = File.ReadAllText(file);
-            var lines = File.ReadAllLines(file);
+            /* Comments and literal text are blanked before anything is matched, because prose about the call
+               is not a call. A line-prefix filter cannot deliver that: a block comment's continuation lines
+               in this codebase carry no asterisk, and the worked example in this very file's
+               `IsCheckedOnTheSpot` note is one — an indented `await TimescaleSupport.TryEnableAsync(...)`
+               inside a block comment, which a prefix filter reads as an unchecked call. Newlines survive the
+               walk, so the reported line is still the file's own. */
+            var text = CSharpSourceWalker.StripCommentsAndStrings(
+                File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal));
+            var lines = text.Split('\n');
 
             /* Whitespace-tolerant, and matched against the whole FILE rather than line by line: a call split
                as `TimescaleSupport\n    .TryEnableAsync(...)` is the same call, and a guard that a line break
@@ -68,13 +77,6 @@ public sealed class TimescaleEnableConnectionSafetyTests
             foreach (Match call in Regex.Matches(text, @"TimescaleSupport\s*\.\s*TryEnableAsync\s*\("))
             {
                 var lineIndex = text.Take(call.Index).Count(c => c == '\n');
-
-                /* A doc comment mentioning it is not a call. */
-                var trimmed = lines[lineIndex].TrimStart();
-                if (trimmed.StartsWith("///", StringComparison.Ordinal) || trimmed.StartsWith("*", StringComparison.Ordinal))
-                {
-                    continue;
-                }
 
                 if (!IsCheckedOnTheSpot(lines, lineIndex))
                 {
@@ -148,6 +150,11 @@ public sealed class TimescaleEnableConnectionSafetyTests
     /// rather than reading it. The capture form is tied to its OWN variable, and the check must be the very
     /// NEXT statement: "checked somewhere nearby" is not the property that matters, since anything between
     /// the capture and the check would itself be running on a possibly-dead connection.</para>
+    ///
+    /// <para><paramref name="lines"/> is <see cref="CSharpSourceWalker.StripCommentsAndStrings"/>'s output,
+    /// which is what makes the statement split below sound: a semicolon inside a comment between the call
+    /// and its assertion would otherwise end the statement early and report a checked site as an
+    /// offender.</para>
     /// </summary>
     private static bool IsCheckedOnTheSpot(string[] lines, int index)
     {
