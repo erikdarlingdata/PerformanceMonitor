@@ -636,6 +636,24 @@ public class CrossAppGuardCiGateTests
             Assert.NotEqual(string.Empty, ParseEvaluation(string.Empty, out _, out _, out _));
             Assert.NotEqual(string.Empty, ParseEvaluation("{\"Properties\":{}}", out _, out _, out _));
 
+            /* A property whose value is not a string. GetString() RAISES on one rather than returning
+               null, and an exception out of this method would bypass the Failure floor its callers
+               assert on - so the one shape that could still throw is the one pinned here. */
+            Assert.NotEqual(
+                string.Empty,
+                ParseEvaluation(
+                    "{\"Properties\":{\"MSBuildProjectFullPath\":123},\"Items\":{}}",
+                    out _,
+                    out _,
+                    out _));
+
+            /* And an answer missing a property that was asked for, which is a different failure from a
+               malformed one: MSBuild returning fewer properties than requested would otherwise leave
+               the build-file paths reading as "there are none". */
+            Assert.NotEqual(
+                string.Empty,
+                ParseEvaluation("{\"Properties\":{},\"Items\":{}}", out _, out _, out _));
+
             /* And an item type MSBuild does not recognise: exit 0, the key present, the array empty. This
                is the shape of a typo in EvaluatedItemTypes, and the reason the fixture pin above floors
                every type by name. */
@@ -1538,6 +1556,19 @@ public class CrossAppGuardCiGateTests
             {
                 foreach (var property in propertiesElement.EnumerateObject())
                 {
+                    /* Reported rather than thrown, because everything else about a malformed answer
+                       here is - GetString() on a non-string raises instead, and an exception out of
+                       this method bypasses the Failure floor its callers assert on.
+
+                       And reported rather than coerced to the empty string the way item METADATA is:
+                       empty is MSBuild's own answer for "there is no Directory.Build.props", so
+                       flattening an unexpected shape into one would manufacture that answer instead of
+                       admitting the read did not happen. */
+                    if (property.Value.ValueKind != JsonValueKind.String)
+                    {
+                        return $"the invocation's output carries a non-string {property.Name} property";
+                    }
+
                     readProperties[property.Name] = property.Value.GetString() ?? string.Empty;
                 }
             }
