@@ -129,6 +129,14 @@ public sealed class PgRegistryPanelPlacementTests
     private static readonly Regex CollectorName = new(@"^pg_[a-z_]+$", RegexOptions.Compiled);
 
     /// <summary>
+    /// A loader declaration. A field rather than an inline literal so <see cref="Read"/> can count the
+    /// declarations WITHOUT going through the brace scan — a scan that lost a method would otherwise be
+    /// counted by the same code that lost it.
+    /// </summary>
+    private static readonly Regex MethodDeclaration = new(
+        @"private\s+async\s+Task\s+(?<name>LoadPg[A-Za-z]+Async)\s*\(", RegexOptions.Compiled);
+
+    /// <summary>
     /// The comparison this issue is about: a collector's panels are declared inside the tab the REGISTRY
     /// places it on. #3048 in one assertion — the deadlock note and grid sat in <c>PgVacuumTab</c> while the
     /// Activity entry had named <c>pg_deadlocks</c> all along.
@@ -336,6 +344,70 @@ public sealed class PgRegistryPanelPlacementTests
 
         /* Whether the SHIPPED placement is clean is the two rules above, not this one. Asserting it here as
            well would make one misplaced panel red three tests and cost a reader the attribution. */
+    }
+
+    /// <summary>
+    /// The control for the step everything else here stands on: <see cref="MethodRanges"/> counts braces, so
+    /// a brace inside a string or char literal decides whether a loader's body is read whole. Arranged rather
+    /// than measured on the shipped tree, because the shipped tree happens to balance its literal braces
+    /// today — and "safe today because they happen to balance" is precisely the standing assumption this
+    /// file exists to refuse.
+    ///
+    /// <para>Both directions are asserted, so the walk is shown to be what saves it rather than asserted to
+    /// be. A <c>}</c> in a literal ends the raw count early and TRUNCATES the body, which silently drops the
+    /// control assignments after it. A <c>{</c> in a char literal never lets the count return to zero: at
+    /// the end of a file the method is dropped outright, which is what this fixture shows, and mid-file it
+    /// OVER-EXTENDS into the methods below and attributes their panels to this one's collectors. Neither
+    /// shows up as an error anywhere downstream — a truncated body just yields fewer panels, and fewer
+    /// panels is a quieter rule, not a failing one.</para>
+    /// </summary>
+    [Fact]
+    public void TheMethodWalk_ReadsABodyWhoseLiteralsHoldUnbalancedBraces_AndTheRawCountDoesNot()
+    {
+        /* A closing brace inside a literal: the raw count reaches zero at it and stops. */
+        const string truncates = """
+            private async Task LoadPgProbeAsync()
+            {
+                PgProbeNote.Text = "no autovacuum has run } yet";
+                PgProbeGrid.ItemsSource = rows;
+            }
+            """;
+
+        var walked = MethodRanges(CSharpSourceWalker.StripCommentsAndStrings(truncates));
+        var raw = MethodRanges(truncates);
+
+        var walkedBody = truncates[walked["LoadPgProbeAsync"].Start..walked["LoadPgProbeAsync"].End];
+        Assert.Contains("PgProbeNote", walkedBody, StringComparison.Ordinal);
+        Assert.Contains("PgProbeGrid", walkedBody, StringComparison.Ordinal);
+        Assert.Equal(2, ControlAssignment.Matches(walkedBody).Count);
+
+        var rawBody = truncates[raw["LoadPgProbeAsync"].Start..raw["LoadPgProbeAsync"].End];
+        Assert.Contains("PgProbeNote", rawBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("PgProbeGrid", rawBody, StringComparison.Ordinal);
+        Assert.Equal(1, ControlAssignment.Matches(rawBody).Count);
+
+        /* And the guard in Read() is what turns that truncation into a red rather than a quieter rule. */
+        var w = walked["LoadPgProbeAsync"];
+        var r = raw["LoadPgProbeAsync"];
+        Assert.True(BodyIsWellFormed(CSharpSourceWalker.StripCommentsAndStrings(truncates), w.Start, w.End));
+        Assert.False(BodyIsWellFormed(CSharpSourceWalker.StripCommentsAndStrings(truncates), r.Start, r.End));
+
+        /* An OPENING brace in a char literal is the other direction: the raw count never returns to zero.
+           This fixture ends with the method, so there is no later brace to stop on and the method is
+           dropped entirely — the declaration-count assertion in Read() is what names that. In a real file
+           the scan instead runs into the methods below and over-extends, which the well-formedness
+           assertion names. */
+        const string drops = """
+            private async Task LoadPgProbeAsync()
+            {
+                var opener = '{';
+                PgProbeGrid.ItemsSource = rows;
+            }
+            """;
+
+        Assert.True(MethodRanges(CSharpSourceWalker.StripCommentsAndStrings(drops)).ContainsKey("LoadPgProbeAsync"));
+        Assert.Empty(MethodRanges(drops));
+        Assert.Equal(1, MethodDeclaration.Matches(drops).Count);
     }
 
     // ── The chain ────────────────────────────────────────────────────────────────────────────────
@@ -555,6 +627,37 @@ public sealed class PgRegistryPanelPlacementTests
         var loaderCode = CSharpSourceWalker.StripCommentsAndStrings(loaderSource);
         var ranges = MethodRanges(loaderCode);
 
+        /* The brace count is only sound over WALKED text, and "it is safe because the braces happen to
+           balance today" is the exact shape of assumption this file exists to refuse. So every range is
+           re-checked against the walked source INDEPENDENTLY of what the scan was handed.
+
+           Both failure directions are silent without this, and they are different failures. A '}' inside a
+           literal ends the count early and TRUNCATES the body, which yields fewer control assignments — so
+           the placement rules would cover less than they claim while staying green. A '{' inside a literal
+           never lets the count return to zero, so the scan runs on and OVER-EXTENDS into the methods below,
+           attributing their panels to this one's collectors; at end of file it finds no closing brace at
+           all and the method is dropped instead. The well-formedness assertion names the first two at the
+           method, and the declaration count names the drop, rather than either leaking into a downstream
+           total that nobody reads. */
+        var declarations = MethodDeclaration.Matches(loaderCode).Count;
+        Assert.True(ranges.Count == declarations,
+            $"{declarations} LoadPg…Async declarations are in ViewerServerTab.Postgres.cs but the brace scan "
+            + $"resolved {ranges.Count} bodies. A body whose braces never balance is DROPPED, so every "
+            + "collector it names would resolve to no panel at all. The scan reads walked source, where a "
+            + "brace inside a literal cannot count — so this is the walk failing, not the source.");
+
+        var malformed = ranges
+            .Where(r => !BodyIsWellFormed(loaderCode, r.Value.Start, r.Value.End))
+            .Select(r => $"{r.Key} (offsets {r.Value.Start}..{r.Value.End})")
+            .OrderBy(r => r, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(malformed.Count == 0,
+            "These loader bodies do not balance their own braces in the walked source, so the scan ended "
+            + "somewhere other than the method's closing brace — the body is TRUNCATED or runs past the "
+            + "method. A truncated body assigns fewer panels, and both placement rules then check less than "
+            + "they claim while reporting a clean run:\n  " + string.Join("\n  ", malformed));
+
         var namedBy = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
         var panelsOf = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
         var callees = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
@@ -679,7 +782,7 @@ public sealed class PgRegistryPanelPlacementTests
     private static Dictionary<string, (int Start, int End)> MethodRanges(string code)
     {
         var ranges = new Dictionary<string, (int Start, int End)>(StringComparer.Ordinal);
-        foreach (Match m in Regex.Matches(code, @"private\s+async\s+Task\s+(?<name>LoadPg[A-Za-z]+Async)\s*\("))
+        foreach (Match m in MethodDeclaration.Matches(code))
         {
             var depth = 0;
             var started = false;
@@ -703,6 +806,48 @@ public sealed class PgRegistryPanelPlacementTests
         }
 
         return ranges;
+    }
+
+    /// <summary>
+    /// Whether <c>code[start..end]</c> is one whole method body: it opens a brace, never closes more than
+    /// it opened, ends exactly on the brace that returns it to zero, and that brace is the last character.
+    /// Checked over the walked text, so a brace inside a literal is not a brace here.
+    /// </summary>
+    private static bool BodyIsWellFormed(string code, int start, int end)
+    {
+        if (end <= start || end > code.Length || code[end - 1] != '}')
+        {
+            return false;
+        }
+
+        var depth = 0;
+        var opened = false;
+
+        for (var i = start; i < end; i++)
+        {
+            if (code[i] == '{')
+            {
+                depth++;
+                opened = true;
+            }
+            else if (code[i] == '}')
+            {
+                depth--;
+                if (depth < 0)
+                {
+                    return false;
+                }
+
+                /* Returning to zero anywhere but the last character means the scan kept going past the
+                   method it was reading, which is the over-extension half of the same defect. */
+                if (depth == 0 && i != end - 1)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return opened && depth == 0;
     }
 
     /// <summary>Same <c>[CallerFilePath]</c> resolver <c>ViewerPostgresTabsTests</c> uses — no walk-up, so it
