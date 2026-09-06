@@ -165,27 +165,41 @@ public class StoreLogSeverityLocaleTests
 
     /// <summary>
     /// A conf block nobody appends is inert, and the failure is silent — the builder compiles, its own pin
-    /// passes, and no store ever gains the setting. So for EVERY <c>ConfMarkerV*</c> the class declares,
-    /// <c>EnsureConfAppended</c> has to test that marker. Derived from the declared constants rather than
-    /// listed, so the next versioned block is covered the moment its marker exists.
+    /// passes, and no store ever gains the setting. So every <c>ConfMarkerV*</c> the class declares has to be
+    /// written by some <c>Build*ConfAppend</c> factory, and that factory has to be called by
+    /// <c>EnsureConfAppended</c>.
+    ///
+    /// <para>Stated as reachability rather than as "the body names the marker", which is what this test
+    /// asserted first and which v8 correctly fails: v8 is the one block keyed on a hardware fingerprint
+    /// instead of on its own marker's absence, so its marker appears only inside its factory. Naming the
+    /// marker is one way to be reached, not the requirement.</para>
     /// </summary>
     [Fact]
-    public void EveryDeclaredConfMarkerIsCheckedByEnsureConfAppended()
+    public void EveryDeclaredConfMarkerIsWrittenByAFactoryEnsureConfAppendedCalls()
     {
-        var markers = typeof(DarlingManagedPostgres)
-            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
-            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.StartsWith("ConfMarker", StringComparison.Ordinal))
-            .Select(f => f.Name)
-            .OrderBy(n => n, StringComparer.Ordinal)
-            .ToArray();
-
-        Assert.NotEmpty(markers);
-
+        var markers = DeclaredConfMarkers();
+        var factories = ConfFactoryBlocks();
         var body = EnsureConfAppendedBody();
 
-        foreach (var marker in markers)
+        Assert.NotEmpty(markers);
+        Assert.NotEmpty(factories);
+
+        foreach (var (markerName, markerValue) in markers)
         {
-            Assert.Contains(marker, body, StringComparison.Ordinal);
+            var writers = factories
+                .Where(f => f.Block.Contains(markerValue, StringComparison.Ordinal))
+                .Select(f => f.Name)
+                .ToArray();
+
+            Assert.True(
+                writers.Length > 0,
+                $"{markerName} is declared but no Build*ConfAppend factory writes it, so no store's postgresql.conf "
+                + "can ever carry the block it guards.");
+
+            Assert.True(
+                writers.Any(w => body.Contains(w + "(", StringComparison.Ordinal)),
+                $"{markerName} is written only by {string.Join(", ", writers)}, and EnsureConfAppended calls none of "
+                + "them — the block compiles, its own pin passes, and no store ever gains the setting.");
         }
     }
 
@@ -226,13 +240,24 @@ public class StoreLogSeverityLocaleTests
             .ToArray();
     }
 
+    /// <summary>Every <c>ConfMarkerV*</c> constant the class declares, by name and value.</summary>
+    private static (string Name, string Value)[] DeclaredConfMarkers() =>
+        typeof(DarlingManagedPostgres)
+            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+            .Where(f => f.IsLiteral
+                        && f.FieldType == typeof(string)
+                        && f.Name.StartsWith("ConfMarker", StringComparison.Ordinal))
+            .Select(f => (f.Name, Value: (string)f.GetRawConstantValue()!))
+            .OrderBy(m => m.Name, StringComparer.Ordinal)
+            .ToArray();
+
     /// <summary>
-    /// Every conf block the product appends, concatenated — discovered by reflection over the
-    /// <c>Build*ConfAppend</c> factories rather than listed, so a locale pinned from a future block is still
-    /// found and a block that stops existing is not silently skipped. The arguments are placeholders: these
-    /// factories are pure, and nothing read out of the text here depends on a size or a port.
+    /// Every conf block the product can append, with the factory that produced it — discovered by reflection
+    /// over the <c>Build*ConfAppend</c> methods rather than listed, so a setting pinned from a future block is
+    /// still found and a block that stops existing is not silently skipped. The arguments are placeholders:
+    /// these factories are pure, and nothing read out of the text here depends on a size or a port.
     /// </summary>
-    private static string ManagedConfBlocks()
+    private static (string Name, string Block)[] ConfFactoryBlocks()
     {
         var factories = typeof(DarlingManagedPostgres)
             .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
@@ -242,17 +267,25 @@ public class StoreLogSeverityLocaleTests
             .OrderBy(m => m.Name, StringComparer.Ordinal)
             .ToArray();
 
-        Assert.NotEmpty(factories);
-
-        var blocks = new List<string>(factories.Length);
+        var blocks = new List<(string Name, string Block)>(factories.Length);
 
         foreach (var factory in factories)
         {
             var arguments = factory.GetParameters().Select(p => Placeholder(factory, p)).ToArray();
-            blocks.Add((string)factory.Invoke(null, arguments)!);
+            blocks.Add((factory.Name, (string)factory.Invoke(null, arguments)!));
         }
 
-        return string.Concat(blocks);
+        return blocks.ToArray();
+    }
+
+    /// <summary>Every conf block concatenated, in factory-name order — the text the locale scan reads.</summary>
+    private static string ManagedConfBlocks()
+    {
+        var factories = ConfFactoryBlocks();
+
+        Assert.NotEmpty(factories);
+
+        return string.Concat(factories.Select(f => f.Block));
     }
 
     /// <summary>A stand-in value for a conf factory's parameter, or a failure naming the signature this scan
