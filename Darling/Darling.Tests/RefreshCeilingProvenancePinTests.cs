@@ -356,12 +356,13 @@ public sealed class RefreshCeilingProvenancePinTests
     {
         var consumed = new HashSet<string>(StringComparer.Ordinal);
         var ceilingProse = DocProseFor(source, CeilingDeclaration);
-        var compressionProse = DocProseFor(source, CompressionMinutesDeclaration);
 
+        /* Which doc run a pin is read out of comes from the PIN'S OWN Declaration, never from its name — a
+           renamed pin must not be able to change which prose its pattern is aimed at. */
         int[] Read(string name)
         {
             consumed.Add(name);
-            return Numbers(name == "the exclude-whole occupancy sentence" ? compressionProse : ceilingProse, name);
+            return Numbers(DocProseFor(source, DeclarationFor(name)), name);
         }
 
         var series = Read("the published series");
@@ -499,13 +500,21 @@ public sealed class RefreshCeilingProvenancePinTests
 
     /* ─────────────────────────────── parsing ─────────────────────────────── */
 
-    private static string PatternFor(string name)
+    /// <summary>
+    /// The one pin with this name. Requires EXACTLY one, so a duplicated name cannot leave two patterns
+    /// competing for the same assertions with only one of them ever read.
+    /// </summary>
+    private static (string Name, string Declaration, string Pattern, bool DriftSwept) PinFor(string name)
     {
         var pins = Pins().Where(p => string.Equals(p.Name, name, StringComparison.Ordinal)).ToArray();
         Require(pins.Length == 1,
             $"{ParseMiss}: '{name}' resolves to {pins.Length} pins rather than exactly one");
-        return pins[0].Pattern;
+        return pins[0];
     }
+
+    private static string PatternFor(string name) => PinFor(name).Pattern;
+
+    private static string DeclarationFor(string name) => PinFor(name).Declaration;
 
     /// <summary>
     /// Every integer captured by the named pin, flattened — a group holding a comma-separated list
