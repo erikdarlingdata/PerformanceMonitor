@@ -100,6 +100,29 @@ export function disclosure(summaryText, detail, opts = {}) {
   return el("details", { class: "disclosure" }, [summary, el("div", { class: "disc-body" }, detail)]);
 }
 
+/*
+ * #3031: a stable id for one of a rollup tile's text rows, so the tile's NUMBER can point at it.
+ *
+ * Derived from the label rather than from a render counter so the relationship stays inspectable: whoever
+ * reads the DOM — an operator, a review, a check — can tell which figure "rollup-deadlocks-recent-sub"
+ * belongs to without counting siblings. `used` de-duplicates within one render, because two tiles sharing a
+ * label would emit a duplicate id and aria-describedby resolves a duplicate to the FIRST match: a silent
+ * mis-association rather than a visible break.
+ *
+ * Shared rather than per-page (#3045): both the fleet and the AG rollup wire their numbers with it. The
+ * de-duplication rule above is subtle enough that a second copy of it is a copy written without the `used`
+ * set — correct on a page whose labels all differ, silently wrong the day a tile repeats one. `part` names
+ * the row ("lbl", "sub"); a page with only labels passes only "lbl" and needs nothing else from this.
+ */
+export function rollupTextId(lbl, part, used) {
+  const slug = String(lbl == null ? "" : lbl).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const base = "rollup-" + (slug || "tile") + "-" + part;
+  let id = base;
+  for (let n = 2; used.has(id); n++) id = base + "-" + n;
+  used.add(id);
+  return id;
+}
+
 /* ─────────────────────────── state strips ─────────────────────────── */
 
 export function errorStrip(message) {
