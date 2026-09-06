@@ -2217,8 +2217,10 @@ public sealed class TsqlConventionGuardTests
     /// <para><b>The access modifier is the whole discriminator, and requiring it is what this regex is
     /// for.</b> Its predecessor took "the nearest name above the literal" from a pattern that also matched
     /// <c>if (…) {</c>, <c>catch (…) {</c>, <c>new SqlConnectionStringBuilder(…) {</c> and any local
-    /// <c>string x =</c> — so 48 of the corpus's 160 T-SQL literals were labelled with a bare keyword or
-    /// nothing at all, and several more with a local variable or the type being constructed. A local cannot
+    /// <c>string x =</c>. Measured on the tree it shipped against (#3094), 48 of the corpus's 160 T-SQL
+    /// literals were labelled with a bare keyword or nothing at all, and several more with a local
+    /// variable or the type being constructed — a figure about a resolver that no longer exists, which is
+    /// why it is the one number written down here. A local cannot
     /// carry an access modifier and neither can a statement keyword, so anchoring on one excludes every
     /// shape that misattributed rather than blacklisting them one at a time.</para>
     ///
@@ -2235,9 +2237,11 @@ public sealed class TsqlConventionGuardTests
     /// appears INSIDE another member's body. <c>ArchiveService.IsArchiving</c> is the whole population and
     /// the reason the exclusion is here rather than in a comment: its <c>private set =&gt; …</c> matched as
     /// a declaration of its own, which put a declaration start inside the property that holds it and made
-    /// <see cref="TheMemberScan_ReadsEveryDeclarationWhole"/> report the property as over-extended — one
-    /// member out of the 18,205 the sweep reads. An accessor is not a member a literal is attributed to;
-    /// the property is.</para>
+    /// <see cref="TheMemberScan_ReadsEveryDeclarationWhole"/> report the property as over-extended. It is
+    /// the only accessor in the scanned trees carrying an access modifier — which is why the exclusion is
+    /// here rather than in a note saying it might one day be needed, and why no count of them is written
+    /// down: that number changes on any commit and nothing would hold it true. An accessor is not a member
+    /// a literal is attributed to; the property is.</para>
     /// </summary>
     private static readonly Regex DeclarationHead = new(
         @"^[ \t]*(?:public|private|protected|internal)\b"
@@ -2334,10 +2338,10 @@ public sealed class TsqlConventionGuardTests
     /// <para><b>Every branch here is load-bearing, which took measuring rather than reasoning.</b> An
     /// earlier draft also required the <c>(</c> to follow the name with only whitespace between, and moved
     /// the name's end onto the <c>&gt;</c> that closed a generic argument list so that a generic method
-    /// would still qualify. Both were removed after dumping all 20,308 declarations in the scanned trees
-    /// with and without them and diffing: identical, every name, every file. They were a pair that only
-    /// existed to cancel each other out, and no mutation of either one could red a test — which is the
-    /// tell.</para>
+    /// would still qualify. Both were removed after dumping EVERY declaration in the scanned trees with
+    /// and without them and diffing: identical, every name, every file. They were a pair that only existed
+    /// to cancel each other out — and because each masked the other's removal, testing them one at a time
+    /// reported both as benign. No mutation of either could red a test, which is the tell.</para>
     /// </summary>
     private static (string Name, DeclarationKind Kind) DeclaredName(string code, int from)
     {
