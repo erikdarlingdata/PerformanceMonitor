@@ -1687,9 +1687,15 @@ WITH NO DATA";
     /// <para><b>What this does NOT do.</b> It does not bound what an operator may SET. The knob stays
     /// clamped [5, 100] and a value above this one fires after the slot — deliberately, because the knob
     /// judges families that have no slot, and silently retuning a live fleet's setting to satisfy this
-    /// constant would be a worse trade than the alert arriving late for one family. The slot is a property
-    /// of the grid and is bounded there (see
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> and #3044), not here.</para>
+    /// constant would be a worse trade than the alert arriving late for one family. The slot itself is
+    /// watched independently of this knob, on the grid's own terms, by #3044's
+    /// <see cref="RefreshSlotWarningSeconds"/> line — so raising the knob cannot leave the grid's
+    /// precondition unattended, which is what makes leaving the clamp alone the cheaper trade.</para>
+    ///
+    /// <para>Expressed over <see cref="RefreshPhaseSlots"/> rather than over
+    /// <see cref="RefreshPhaseSlotSeconds"/> because a percent of cadence needs no seconds at all; the two
+    /// are the same wall, and TimescaleContinuousAggregateTests asserts the fire point in SECONDS against
+    /// <see cref="RefreshPhaseSlotSeconds"/> so the identity is checked in the unit the alert compares.</para>
     /// </summary>
     public const int RefreshSlotPercentOfHourlyCadence = 100 / RefreshPhaseSlots;
 
