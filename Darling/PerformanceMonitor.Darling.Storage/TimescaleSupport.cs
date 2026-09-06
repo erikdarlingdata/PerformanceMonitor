@@ -1773,9 +1773,8 @@ WITH NO DATA";
     /// on the grid — see <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> for the number the grid is
     /// sized against and for the operating envelope that number defines. Every other hourly refresh's own
     /// ceiling is under a quarter of it (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), and that
-    /// asymmetry is
-    /// what the grid below is shaped by: one slot excluded WHOLE, the rest treated as occupied only at their
-    /// start.</para>
+    /// asymmetry is what the grid below is shaped by: one slot excluded WHOLE, the rest treated as occupied
+    /// only at their start.</para>
     /// </summary>
     public const string HeaviestHourlyRefreshView = QueryStoreStatsIntervalHourlyView;
 
