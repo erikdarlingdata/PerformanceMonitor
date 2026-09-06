@@ -1041,7 +1041,7 @@ public sealed class TsqlConventionGuardTests
     public void TheOffenderLabel_NamesTheMemberAtEverySiteInTheFixtureTable()
     {
         var repo = RepoRoot();
-        var checked_ = 0;
+        var exercised = 0;
 
         foreach (var site in MemberAttributionSites)
         {
@@ -1084,21 +1084,28 @@ public sealed class TsqlConventionGuardTests
 
             Assert.Equal(site.Member, EnclosingMember(map, start));
 
-            /* The line is the half of the label that cannot be wrong — it is a newline count over
-               character-aligned text — so it is what a reader still has when attribution fails. Pinned
-               here as being inside the resolved member rather than as a number, for the same reason the
-               offset is not pinned. */
+                /* The line half of the label, cross-checked by a DIFFERENT derivation: LineOf counts
+               newlines in a span, this reads the file as lines and finds the anchor's own line. The
+               literal starts at or above its anchor, so the reported line must not be past it. Asserting
+               instead that the line falls inside the resolved member's range would be a tautology —
+               the member was selected by containing this very offset and LineOf is monotonic in it, so
+               the comparison could not disagree with what it validates (#3089's finding about the same
+               shape). */
             var line = LineOf(text, start);
-            var member = map.Declarations.Single(
-                d => d.Kind == DeclarationKind.Member && d.Name == site.Member
-                     && start >= d.Start && start < d.End);
+            var anchorLine = Array.FindIndex(
+                File.ReadAllLines(path),
+                l => l.Contains(site.Anchor, StringComparison.Ordinal)) + 1;
 
-            Assert.InRange(line, LineOf(text, member.Start), LineOf(text, member.End - 1));
+            Assert.True(
+                anchorLine > 0 && line <= anchorLine,
+                $"the label for {site.File} reports line {line}, but the anchor is on line {anchorLine} "
+                + "of the file as read by lines. The reported line is what a reader opens the file at, so "
+                + "it must not point past the literal it labels.");
 
-            checked_++;
+            exercised++;
         }
 
-        Assert.Equal(MemberAttributionSites.Length, checked_);
+        Assert.Equal(MemberAttributionSites.Length, exercised);
     }
 
     /// <summary>
