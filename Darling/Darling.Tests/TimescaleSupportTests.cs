@@ -2621,6 +2621,19 @@ LIMIT 1", connection))
         Assert.True(
             TimescaleSupport.RefreshSlotWarningSeconds < hourlyCadenceSeconds * ShippedWarnPercent / 100,
             "the slot watch no longer fires before #2136's default cadence warning, so it adds no lead time");
+
+        /* And the evidence that #2136 does not know this job's size, as a number rather than as prose:
+           the recorded ceiling is 24.0% of the same cadence, one point under the 25% default, while the
+           clamp in DarlingAlertSettings is justified on "the production worst runs ~7% of cadence" — 252 s,
+           less than a third of it. Pinned so the doc comment's claim cannot quietly stop being true. */
+        Assert.Equal(
+            24.0,
+            100.0 * TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds / hourlyCadenceSeconds,
+            1);
+        Assert.True(
+            hourlyCadenceSeconds * 7 / 100 < TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds / 3,
+            "the ~7%-of-cadence figure #2136's clamp is justified on is no longer far below the heaviest "
+            + "refresh's recorded ceiling, so the two calibrations may have been reconciled — re-read both");
     }
 
     /// <summary>

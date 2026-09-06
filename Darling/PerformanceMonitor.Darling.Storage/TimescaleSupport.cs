@@ -4072,9 +4072,15 @@ AND   js.last_run_status = 'Success'";
     /// is a store-backed operator knob clamped [5, 100] with no relationship to
     /// <see cref="RefreshPhaseStepMinutes"/>, so raising it to 50 to quiet a busy store silently moves the
     /// effective line to 1,800 s — twice the invalidation point — and moving the grid to a 10-minute step
-    /// would leave the knob firing at 900 s against a 600 s slot, 300 s PAST invalidation. The equality is a
-    /// coincidence of two independent decisions (#2136's default was chosen against a fleet whose worst job
-    /// ran ~7% of cadence), and #2136's own remedy text — "extend the job's schedule_interval deliberately" —
+    /// would leave the knob firing at 900 s against a 600 s slot, 300 s PAST invalidation.</para>
+    ///
+    /// <para><b>That the two lines coincide is a coincidence of two independent decisions, and the clearest
+    /// evidence is that #2136 does not know this job's size.</b> Its clamp is justified in
+    /// <c>DarlingAlertSettings</c> on the grounds that "the production worst runs ~7% of cadence" — 252 s —
+    /// while <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> here records 864 s, which is <b>24.0%
+    /// of the same 3,600 s cadence</b>, one point under the 25% default. So the job this envelope is about is
+    /// already sitting just below a warning line calibrated as though it ran a third of its actual length,
+    /// and nothing connects the two numbers. #2136's own remedy text — "extend the job's schedule_interval" —
     /// is actively wrong for this one, because <see cref="HourlyRefreshScheduleInterval"/> is also the
     /// <c>end_offset</c> and widening it changes what the aggregate materializes without touching the slot.
     /// A line derived from the slot, keyed on the view, naming the actual remedy, is the form that stays
