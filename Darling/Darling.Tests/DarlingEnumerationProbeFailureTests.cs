@@ -315,5 +315,4 @@ public sealed class DarlingEnumerationProbeFailureTests
 
         return dataSet.CreateDataReader();
     }
-
 }

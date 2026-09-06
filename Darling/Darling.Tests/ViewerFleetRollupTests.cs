@@ -1134,5 +1134,4 @@ public sealed class ViewerFleetDeadlockCoverageTests
         }
         return count;
     }
-
 }

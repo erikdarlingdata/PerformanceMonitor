@@ -111,5 +111,4 @@ public sealed class FinOpsSubTabIndexPinTests
             .Select(m => m.Groups[1].Value)
             .ToList();
     }
-
 }

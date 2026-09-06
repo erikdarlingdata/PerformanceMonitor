@@ -212,5 +212,4 @@ public class DarlingHardenFilesVerbTests
         Assert.Contains("LocalSystem", body, StringComparison.Ordinal);
         Assert.Contains("WellKnownSidType.LocalSystemSid", body, StringComparison.Ordinal);
     }
-
 }

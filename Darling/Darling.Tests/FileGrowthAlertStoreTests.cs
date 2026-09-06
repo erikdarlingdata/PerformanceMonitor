@@ -147,5 +147,4 @@ public class FileGrowthAlertStoreTests
 
     private static string ReadViewerSource() =>
         ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-
 }

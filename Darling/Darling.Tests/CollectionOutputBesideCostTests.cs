@@ -531,5 +531,4 @@ public sealed class CollectionOutputBesideCostTests
 
         return map;
     }
-
 }

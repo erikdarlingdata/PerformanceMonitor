@@ -633,5 +633,4 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
 
         return kept.ToString();
     }
-
 }

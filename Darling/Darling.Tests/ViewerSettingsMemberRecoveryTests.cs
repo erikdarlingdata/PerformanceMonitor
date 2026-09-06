@@ -538,5 +538,4 @@ public sealed class ViewerSettingsMemberRecoveryTests : IDisposable
 
         return count;
     }
-
 }

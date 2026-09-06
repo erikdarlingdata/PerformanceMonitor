@@ -617,5 +617,4 @@ public sealed class DarlingFileSecurityTests
             "the per-file verification must run AFTER the owner step, or it certifies a state the installer " +
             "then changes.");
     }
-
 }

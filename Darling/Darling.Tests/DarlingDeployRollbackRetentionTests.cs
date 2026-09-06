@@ -852,5 +852,4 @@ public sealed class DarlingDeployRollbackRetentionTests
             /* A leftover temp tree is not a test failure. */
         }
     }
-
 }

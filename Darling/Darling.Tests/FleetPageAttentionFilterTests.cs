@@ -388,5 +388,4 @@ public sealed class FleetPageAttentionFilterTests
         }
         return count;
     }
-
 }

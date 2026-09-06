@@ -699,5 +699,4 @@ public class StartupFailureTriageTests
 
     private static string ReadWorkerSource()
         => ReadRepoFileLf("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
-
 }

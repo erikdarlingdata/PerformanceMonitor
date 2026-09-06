@@ -1115,5 +1115,4 @@ public class DarlingFirewallCheckTests
 
         return branch;
     }
-
 }

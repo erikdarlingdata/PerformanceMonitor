@@ -452,5 +452,4 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
             ? []
             : TopLevelElements(element[(openEnd + 1)..closeStart]);
     }
-
 }

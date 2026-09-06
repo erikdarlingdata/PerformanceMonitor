@@ -306,5 +306,4 @@ public sealed class LaneAxisAlignerTests
         Assert.True(end > open, $"{what}: SyncXAxes body is unbalanced");
         return source[open..(end + 1)];
     }
-
 }

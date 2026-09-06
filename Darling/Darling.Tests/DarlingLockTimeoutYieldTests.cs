@@ -38,5 +38,4 @@ public sealed class DarlingLockTimeoutYieldTests
         var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "DailySummarySql.cs"));
         Assert.Contains("FILTER (WHERE status = 'ERROR')", source);
     }
-
 }

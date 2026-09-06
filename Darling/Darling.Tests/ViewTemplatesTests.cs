@@ -245,5 +245,4 @@ public sealed class ViewTemplatesTests
         Assert.DoesNotContain("get_analysis_findings", js, StringComparison.Ordinal);
         Assert.DoesNotContain("get_query_store_top", js, StringComparison.Ordinal);
     }
-
 }

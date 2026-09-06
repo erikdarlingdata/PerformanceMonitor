@@ -690,5 +690,4 @@ public sealed class MigrationDataMovingRungCensusPins
             findings.Select(f =>
                 $"  V{f.Version.ToString(CultureInfo.InvariantCulture)} ({f.Name}): {f.Shape} on "
                 + $"{f.Table}, created by {f.CreatedBy}"));
-
 }

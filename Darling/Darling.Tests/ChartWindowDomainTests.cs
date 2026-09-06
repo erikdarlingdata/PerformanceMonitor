@@ -172,5 +172,4 @@ public sealed class ChartWindowDomainTests
         Assert.Contains("Math.min(rawHours, MAX_COMPOSE_WINDOW_HOURS)", compose, StringComparison.Ordinal);
         Assert.Contains("public const int MaxWindowHours = 24 * 90;", ComposeSpecCs, StringComparison.Ordinal);
     }
-
 }

@@ -69,5 +69,4 @@ public sealed class PgDeadlockLogTimezoneTests
         Assert.Contains("([^ \\n]+) \\[(\\d+)\\]", source, System.StringComparison.Ordinal);
         Assert.DoesNotContain("\\w+ \\[(\\d+)\\]", source, System.StringComparison.Ordinal);
     }
-
 }

@@ -616,5 +616,4 @@ function Get-CimInstance {
         end = -1;
         return string.Empty;
     }
-
 }

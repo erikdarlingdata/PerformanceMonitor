@@ -320,5 +320,4 @@ public class DarlingRuntimePreflightTests
         end = -1;
         return string.Empty;
     }
-
 }

@@ -151,5 +151,4 @@ public class ViewerServerInventoryEnabledTests
         var column = xaml[(xaml.LastIndexOf('<', at))..(xaml.IndexOf("/>", at, StringComparison.Ordinal) + 2)];
         Assert.DoesNotContain("StaticResource", column, StringComparison.Ordinal);
     }
-
 }

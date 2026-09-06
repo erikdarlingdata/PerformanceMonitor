@@ -118,5 +118,4 @@ public class QueryStoreTopWindowTests
         /* plan_id is the reason: it is a grouping key here and absent from every rollup. */
         Assert.Contains("plan_id", DarlingDataReader.QueryStoreTopSql, StringComparison.Ordinal);
     }
-
 }
