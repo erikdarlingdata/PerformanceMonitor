@@ -159,10 +159,13 @@ public sealed class ServerPageTabsTests
     ///
     /// <para><b>The one exemption that was taken did not survive examination</b> (#3070), which is the
     /// evidence worth carrying forward. <c>pg_plan_capture_readiness</c> was exempted as "a single row of
-    /// configuration state"; it emits one row per FACET, each with its own remedy in its own column, that
-    /// column had no reader outside the Windows Viewer, and two separate remedy strings elsewhere in the
-    /// service already pointed at a <c>get_pg_plan_capture_readiness</c> tool that did not exist. Treat a
-    /// future exemption request with that in mind rather than as a formality.</para>
+    /// configuration state"; it emits SIX rows, one per FACET, each with its own remedy in its own column,
+    /// that column had no reader outside the Windows Viewer, and two separate remedy strings elsewhere in
+    /// the service already pointed at a <c>get_pg_plan_capture_readiness</c> tool that did not exist. One
+    /// of those facets, <c>message_locale</c> (#3061), is a precondition for <c>get_pg_deadlocks</c>, whose
+    /// empty result is the HEALTHY state - so the exemption was hiding the one fact that tells a quiet
+    /// server from a read that cannot see anything. Treat a future exemption request with that in mind
+    /// rather than as a formality.</para>
     /// </summary>
     [Fact]
     public void ThePostgresCollectorsWithNoServedRead_OnlyEverShrink()
@@ -191,10 +194,12 @@ public sealed class ServerPageTabsTests
            The last exemption was pg_plan_capture_readiness, and it is worth recording why it went rather
            than only that it did (#3070). It was held to be the case this ratchet was built to tolerate — a
            single row of configuration state, a panel rather than a question anyone asks an agent — and none
-           of that survived contact. It is not one row but one per FACET, each carrying a different remedy in
-           its own detail column; that detail is the most useful thing the collector produces and had no
-           reader outside the Windows Viewer at all; and the prose reached for a get_pg_plan_capture_readiness
-           tool twice, in two different remedy strings, while no such tool existed.
+           of that survived contact. It is not one row but one per FACET - SIX of them - each carrying a
+           different remedy in its own detail column; that detail is the most useful thing the collector
+           produces and had no reader outside the Windows Viewer at all; and the prose reached for a
+           get_pg_plan_capture_readiness tool twice, in two different remedy strings, while no such tool
+           existed - #3061 then corrected the prose to stop pointing at it rather than the tool being
+           written, which is what this read finally answers.
 
            So the exemption clause above is now unused, and that is the state to keep it in. A collector
            whose whole output is genuinely a panel is still allowed to exist — raise the constant and say why

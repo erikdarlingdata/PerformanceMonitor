@@ -287,7 +287,8 @@ public sealed class DarlingMcpPgPlanTools
                 + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
                 + string.Join(" | ", unmet)
                 + " — the pg_plan_capture_readiness collector stores the full detail and the remedy "
-                + "beside each observation.");
+                + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
+                + "satisfied or not, in the order they have to be fixed in.");
         }
 
         var subject = wantedQueryId is null ? "any statement" : "this statement";
