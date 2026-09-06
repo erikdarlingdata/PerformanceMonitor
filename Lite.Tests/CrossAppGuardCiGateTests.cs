@@ -42,17 +42,129 @@ namespace Lite.Tests;
 /// see one: the file was never opened. So the scan reads project XML as well, and the MSBuild path
 /// normaliser is self-validated against known answers alongside the glob matcher, for the same reason —
 /// a relative <c>Include=</c> resolving to the WRONG repo-rooted path finds nothing and passes.</para>
+///
+/// <para><b>A SKU owns more than one tree, which is #3067.</b> Every anchor here was the APP directory,
+/// and <c>Lite.Tests</c> is a SIBLING of <c>Lite</c> rather than a child — so four reads of Lite's test
+/// project from <c>Darling.Tests</c> matched nothing at all, and an arm that opened 454 files and found
+/// 15 references looked exactly as healthy as one that had found them. The anchor is now every root a
+/// SKU owns, and each arm is FLOORED on finding at least one reference under the other SKU's test tree,
+/// because that is the population whose disappearance a reference total cannot show.</para>
+///
+/// <para><b>A filter entry is not the only thing that can cover a read.</b> <c>darling-tree-guards</c>
+/// runs the whole <c>Darling.Tests</c> suite exactly when the <c>darling</c> filter did not fire, so on
+/// that arm a read is covered either by a filter entry or by that job. The reads resting on the second
+/// are enumerated in <see cref="DarlingTestsBackstopped"/> with the bound each rests on, compared for
+/// EQUALITY against what the filter could not reach, and honoured only while
+/// <see cref="WholeTreeBackstopIsIntact"/> holds.</para>
 /// </summary>
 public class CrossAppGuardCiGateTests
 {
     /* Which filter gates which suite, per build.yml's "Run Lite tests" / "Run Darling tests" steps. */
+    private const string LiteAppDir = "Lite";
     private const string LiteTestsDir = "Lite.Tests";
+    private const string DarlingAppDir = "Darling";
     private const string DarlingTestsDir = "Darling/Darling.Tests";
+
+    /* The two SKUs, each as the pair of trees it owns. Both arms are spelled the same way even though
+       Darling's test project sits INSIDE Darling/ and its second root is therefore subsumed by its
+       first: a redundant root costs nothing, and an arm written as a special case is how the next SKU
+       inherits the sibling bug #3067 was filed for. */
+    private static readonly SkuTrees LiteTrees = new(LiteAppDir, LiteTestsDir);
+    private static readonly SkuTrees DarlingTrees = new(DarlingAppDir, DarlingTestsDir);
 
     /* The build files MSBuild imports into a project without being named, in the order it probes
        them. Shared by the walk and by the pin that floors where the walk looked. */
     private static readonly string[] BuildFileNames =
         { "Directory.Build.props", "Directory.Build.targets" };
+
+    /// <summary>One SKU's two top-level trees.
+    ///
+    /// <para>A NAMED pair rather than two positions in a list, because two different things are taken
+    /// off it and reading the wrong one is silent both ways. <see cref="Roots"/> is what a cross-app
+    /// path is anchored on; <see cref="TestsDir"/> alone is what <see cref="Check"/>'s anti-vacuity
+    /// floor is taken over — floored on the app tree instead, that floor would be satisfied by the
+    /// references #3067 never lost.</para></summary>
+    private sealed class SkuTrees
+    {
+        public SkuTrees(string appDir, string testsDir)
+        {
+            AppDir = appDir;
+            TestsDir = testsDir;
+
+            /* Longest root first. A required separator already stops "Lite" from claiming
+               "Lite.Tests/X.cs" — the '.' is not a separator — and .NET's alternation backtracks into
+               the longer arm regardless, so this ordering changes no answer today. It is here because a
+               rewrite to a non-backtracking matcher, or to a per-root StartsWith over this list, would
+               otherwise silently start letting the shorter root absorb the token under test, and the
+               reference would vanish rather than be reported wrong. */
+            Roots = new[] { appDir, testsDir }
+                .OrderByDescending(r => r.Length)
+                .ThenBy(r => r, StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        public string AppDir { get; }
+
+        public string TestsDir { get; }
+
+        public IReadOnlyList<string> Roots { get; }
+    }
+
+    /// <summary>
+    /// Cross-app reads of <see cref="LiteTestsDir"/> from <see cref="DarlingTestsDir"/> that the
+    /// <c>darling</c> filter does not reach, each with the bound its exemption rests on.
+    ///
+    /// <para><b>Why an exemption rather than a filter entry.</b> Every one of these is a read of Lite's
+    /// TEST project, and the only entry that reaches a tree enumeration is <c>Lite.Tests/**</c> —
+    /// nothing narrower covers a guard that opens every file under it. In the <c>darling</c> filter that
+    /// entry would buy no guard execution at all: what a build-job filter decides is which products get
+    /// COMPILED AND PUBLISHED, and the suite reading these files already runs on every such change — in
+    /// the build job when another entry lit <c>darling</c>, and in <c>darling-tree-guards</c> when none
+    /// did. Measured over the 100 pull requests merged to <c>dev</c> before this landed: 6 touched
+    /// <c>Lite.Tests/**</c> without touching <c>Darling/**</c>, all 6 ran the Darling suite, and the
+    /// entry would have changed only WHERE it ran, for 1 of the 6, while making that one build the
+    /// Darling Viewer and publish both Darling artifacts.</para>
+    ///
+    /// <para><b>The exemption is not standing permission.</b> It is honoured only while
+    /// <see cref="WholeTreeBackstopIsIntact"/> holds, so narrowing that job to a class filter or losing
+    /// its gate turns all of these back into failures on the next run instead of leaving them resting on
+    /// something that stopped being true. And the set is compared for EQUALITY against what the filter
+    /// could not reach, so an entry whose read is deleted — or which a later filter entry makes
+    /// reachable — fails here rather than lingering as a permission nobody needs.</para>
+    /// </summary>
+    private static readonly Dictionary<string, string> DarlingTestsBackstopped = new(StringComparer.Ordinal)
+    {
+        [$"{LiteTestsDir}/QueryHighDopStaleMaxDopParityTests.cs"] =
+            "NAMED READ. The Darling half declares this path as its `twin`, probes it with File.Exists "
+            + "and parses the ExpectedGuardCopies total declared there, so an edit to the Lite half has "
+            + "to run the Darling guard. It does: darling-tree-guards runs the whole suite exactly when "
+            + "the darling filter did not fire, which is the case a Lite.Tests-only change produces.",
+
+        [$"{LiteTestsDir}/ParameterSensitivityFiringSignatureParityTests.cs"] =
+            "NAMED READ. Same shape as the entry above, against ExpectedSignatureCopies.",
+
+        [$"{LiteTestsDir}/AnalysisPassTokenThreadingTests.cs"] =
+            "WHOLE-TREE READ. CommentFilterAdoptionTests enumerates every *.cs under BOTH test projects "
+            + "and compares the prefix-filter sites it finds against its own bounded set; this path is "
+            + "one of that set's keys and also one of the files the sweep opens. The string is a "
+            + "<project>/<filename> label, which for a file sitting directly under Lite.Tests happens "
+            + "to spell a real repo-rooted path - so requiring reachability of it is not a false "
+            + "positive, and nothing narrower than Lite.Tests/** would reach the sweep anyway.",
+
+        [$"{LiteTestsDir}/LiteSidebarDotRendersTheCardStatusTests.cs"] =
+            "WHOLE-TREE READ. The second key of that same bounded set, same sweep, same reason.",
+    };
+
+    /// <summary>The exact command <c>darling-tree-guards</c> has to run for anything in
+    /// <see cref="DarlingTestsBackstopped"/> to be covered: the WHOLE Darling suite.
+    ///
+    /// <para>Compared as a whole line rather than searched for as a substring, which is the difference
+    /// between a bound and a hope. A <c>-class</c> or <c>-method</c> filter appended to this invocation
+    /// would still CONTAIN it, so a containment check would keep reporting the backstop intact while it
+    /// had stopped running the two twin guards the exemptions above name — and those exemptions would
+    /// then be the only thing standing between an unreachable read and a green build.</para></summary>
+    private const string BackstopRunLine =
+        "run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build";
 
     [Fact]
     public void TheGlobMatcher_AgreesWithKnownAnswers()
@@ -79,6 +191,59 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>
+    /// The C# half of the self-validation, and the discrimination #3067 turned on: a SIBLING test
+    /// project is a tree of the other SKU, and a tree merely PREFIXED by a root's name is not.
+    ///
+    /// <para>Asserted as the whole ordered set rather than by containment, because both ways of getting
+    /// this wrong are silent in a containment check. A matcher that lost the sibling root passes
+    /// <c>Assert.Contains</c> on the three app-tree answers; a matcher widened into a prefix match
+    /// passes it too, and starts requiring filter coverage for trees no SKU owns. Only the set says
+    /// which of the two happened.</para>
+    ///
+    /// <para>Fed the shipped matcher, so this cannot agree with itself while <see cref="Scan"/> does
+    /// something else.</para>
+    /// </summary>
+    [Fact]
+    public void TheCSharpMatchers_SeeASiblingTestProject_AndNothingMerelyPrefixedByIt()
+    {
+        const string Text = """
+            const string twin = "Lite.Tests/QueryHighDopStaleMaxDopParityTests.cs";
+            var app = "Lite/Services/LocalDataService.cs";
+            var win = @"Lite\Windows\WaitDrillDownWindow.xaml";
+            var combined = Path.Combine("Lite.Tests", "Fixtures", "SystemHealth");
+            var prefixedRoot = "LiteTests/NotOurs.cs";
+            var longerRoot = "Lite.TestsExtra/NotOurs.cs";
+            var bareDirectory = "Lite.Tests";
+            """;
+
+        Assert.Equal(
+            new[]
+            {
+                /* The sibling read #3067 was filed for, and it is FIRST in the text on purpose: the
+                   app root is a PREFIX of the test root, so a matcher that let "Lite" claim these
+                   characters would then require a separator where the '.' is and drop the reference
+                   entirely rather than report it wrongly. */
+                "Lite.Tests/QueryHighDopStaleMaxDopParityTests.cs",
+
+                /* The app tree in both spellings, unchanged by the widening. */
+                "Lite/Services/LocalDataService.cs",
+                "Lite/Windows/WaitDrillDownWindow.xaml",
+
+                /* Path.Combine's first argument is a root in its own right, and the sibling root has to
+                   be one there too — the six-file XAML enumeration in the darling filter is exactly
+                   this shape one directory over. Collected after the quoted paths, hence last. */
+                "Lite.Tests/Fixtures/SystemHealth",
+
+                /* Absent, and each for its own reason: LiteTests/ shares no boundary with either root;
+                   Lite.TestsExtra/ is prefixed BY the longer root and is still not it; and a bare
+                   directory name with no separator was never in this matcher's language, before or
+                   after the widening (ControlPlaneReloadDurabilityTests names one, and this pin
+                   records that the scan does not see it rather than implying it does). */
+            },
+            CSharpPaths(Text, LiteTrees).ToArray());
+    }
+
+    /// <summary>
     /// The MSBuild half of the self-validation above, and for the same reason: a relative
     /// <c>Include=</c> that normalised to the WRONG repo-rooted path would match no filter pattern and
     /// find no file on disk, so <see cref="Resolve"/> would drop it and every coverage check would pass
@@ -93,22 +258,36 @@ public class CrossAppGuardCiGateTests
 
         Assert.Equal(
             "Darling/Darling.Tests/CSharpSourceWalker.cs",
-            RepoRooted(repo, liteTests, @"..\Darling\Darling.Tests\CSharpSourceWalker.cs", "Darling"));
+            RepoRooted(repo, liteTests, @"..\Darling\Darling.Tests\CSharpSourceWalker.cs", DarlingTrees));
 
         /* Forward slashes are legal in MSBuild too, and so is a redundant segment. */
         Assert.Equal(
             "Darling/Darling.Tests/CSharpSourceWalker.cs",
-            RepoRooted(repo, liteTests, "../Darling/./Darling.Tests/CSharpSourceWalker.cs", "Darling"));
+            RepoRooted(repo, liteTests, "../Darling/./Darling.Tests/CSharpSourceWalker.cs", DarlingTrees));
 
         /* The other direction is two levels up, out of Darling/Darling.Tests. */
         Assert.Equal(
             "Lite/Services/DataImportService.cs",
-            RepoRooted(repo, darlingTests, @"..\..\Lite\Services\DataImportService.cs", "Lite"));
+            RepoRooted(repo, darlingTests, @"..\..\Lite\Services\DataImportService.cs", LiteTrees));
+
+        /* #3067 on this side of the fence: a linked compile reaching Lite's TEST project, which is a
+           sibling of Lite rather than a child. It normalises exactly as the line above does, and the
+           app-only anchor then threw it away — the same silent drop as the C# stage, one population
+           over, and the one a Compile Include would take. Spelled against a directory that does not
+           exist for the reason the wildcard case below gives. */
+        Assert.Equal(
+            "Lite.Tests/NoSuchArea/Linked.cs",
+            RepoRooted(repo, darlingTests, @"..\..\Lite.Tests\NoSuchArea\Linked.cs", LiteTrees));
+
+        /* And the widening stops at a root boundary: a tree merely PREFIXED by a root is not that root,
+           in either length order. */
+        Assert.Null(RepoRooted(repo, darlingTests, @"..\..\Lite.TestsExtra\Nope.cs", LiteTrees));
+        Assert.Null(RepoRooted(repo, darlingTests, @"..\..\LiteTests\Nope.cs", LiteTrees));
 
         /* Same app, so not this guard's business — and the discrimination a relative path cannot make
            until it is resolved, since both spellings open with the same "..\". */
-        Assert.Null(RepoRooted(repo, liteTests, @"..\Lite\Mcp\McpHostService.cs", "Darling"));
-        Assert.Null(RepoRooted(repo, liteTests, @"Fixtures\SystemHealth\*.xml", "Darling"));
+        Assert.Null(RepoRooted(repo, liteTests, @"..\Lite\Mcp\McpHostService.cs", DarlingTrees));
+        Assert.Null(RepoRooted(repo, liteTests, @"Fixtures\SystemHealth\*.xml", DarlingTrees));
 
         /* A wildcard over the other app IS a read, so it becomes the directory it enumerates. Spelled
            against a directory that does not exist, deliberately: an expected value written as a real
@@ -117,11 +296,11 @@ public class CrossAppGuardCiGateTests
            directory tests it exactly as well. */
         Assert.Equal(
             "Darling/NoSuchArea/Fixtures",
-            RepoRooted(repo, liteTests, @"..\Darling\NoSuchArea\Fixtures\*.xml", "Darling"));
+            RepoRooted(repo, liteTests, @"..\Darling\NoSuchArea\Fixtures\*.xml", DarlingTrees));
 
         /* Out of the tree entirely, and not a path at all. */
-        Assert.Null(RepoRooted(repo, liteTests, @"..\..\Darling\X.cs", "Darling"));
-        Assert.Null(RepoRooted(repo, liteTests, "xunit.v3", "Darling"));
+        Assert.Null(RepoRooted(repo, liteTests, @"..\..\Darling\X.cs", DarlingTrees));
+        Assert.Null(RepoRooted(repo, liteTests, "xunit.v3", DarlingTrees));
 
         /* The base directory is the whole answer for an Import inside an imported build file, and the
            two rules disagree there. A repo-root Directory.Build.props writing
@@ -131,8 +310,8 @@ public class CrossAppGuardCiGateTests
            a wrong answer, which is why it is pinned from both bases. */
         Assert.Equal(
             "Darling/Shared.targets",
-            RepoRooted(repo, repo, @"Darling\Shared.targets", "Darling"));
-        Assert.Null(RepoRooted(repo, liteTests, @"Darling\Shared.targets", "Darling"));
+            RepoRooted(repo, repo, @"Darling\Shared.targets", DarlingTrees));
+        Assert.Null(RepoRooted(repo, liteTests, @"Darling\Shared.targets", DarlingTrees));
     }
 
     /// <summary>
@@ -178,7 +357,7 @@ public class CrossAppGuardCiGateTests
                 /* Item paths resolve against the consuming project, so RelativeToItsOwnFile is false for
                    every one of them. Import's Project is the single exception, and getting that wrong is
                    a silent miss rather than a wrong answer: it would resolve one directory off, fail the
-                   otherApp anchor, and vanish. */
+                   root anchor, and vanish. */
                 (@"..\Other\A.cs", false),
                 (@"..\Other\B.xml", false),
                 ("SomeLib", false),
@@ -236,7 +415,7 @@ public class CrossAppGuardCiGateTests
             origin: "Directory.Build.props",
             projectDir: Path.Combine(repo, LiteTestsDir),
             ownDir: repo,
-            otherApp: "Darling",
+            other: DarlingTrees,
             seen,
             unevaluable);
 
@@ -321,19 +500,20 @@ public class CrossAppGuardCiGateTests
 
         var expectations = new[]
         {
-            (Project: LiteTestsDir, OtherApp: "Darling", Manifest: $"{LiteTestsDir}/Lite.Tests.csproj"),
-            (Project: DarlingTestsDir, OtherApp: "Lite", Manifest: $"{DarlingTestsDir}/Darling.Tests.csproj"),
+            (Project: LiteTestsDir, Other: DarlingTrees, Manifest: $"{LiteTestsDir}/Lite.Tests.csproj"),
+            (Project: DarlingTestsDir, Other: LiteTrees, Manifest: $"{DarlingTestsDir}/Darling.Tests.csproj"),
         };
 
-        foreach (var (project, otherApp, manifest) in expectations)
+        foreach (var (project, other, manifest) in expectations)
         {
-            var scan = Scan(repo, project, otherApp);
+            var scan = Scan(repo, project, other);
 
             Assert.True(scan.CSharpFiles > 0, $"the C# stage opened no files under {project}");
 
             Assert.True(
                 scan.ProjectFiles.Contains(manifest, StringComparer.Ordinal),
-                $"the MSBuild stage did not open {manifest}, so an Include= naming {otherApp} there would " +
+                $"the MSBuild stage did not open {manifest}, so an Include= naming {other.AppDir} there " +
+                "would " +
                 $"be invisible. Opened: [{string.Join(", ", scan.ProjectFiles)}]");
 
             /* Build output holds a copy of the project file on any machine that has built the suite; a
@@ -393,15 +573,21 @@ public class CrossAppGuardCiGateTests
 
         Check(repo, yaml, failures,
             scannedProject: LiteTestsDir,
-            otherApp: "Darling",
+            other: DarlingTrees,
             filterName: "lite",
-            gatingStep: "Run Lite tests");
+            gatingStep: "Run Lite tests",
+            backstopped: null);
 
         Check(repo, yaml, failures,
             scannedProject: DarlingTestsDir,
-            otherApp: "Lite",
+            other: LiteTrees,
             filterName: "darling",
-            gatingStep: "Run Darling tests");
+            gatingStep: "Run Darling tests",
+            /* This arm alone, because this arm alone has a backstop: darling-tree-guards runs the whole
+               Darling suite exactly when the darling filter did not fire. There is no counterpart for
+               Lite.Tests, so the Lite arm gets no exemptions at all rather than an empty list that would
+               read as "none needed yet". */
+            backstopped: DarlingTestsBackstopped);
 
         Assert.True(
             failures.Count == 0,
@@ -451,10 +637,24 @@ public class CrossAppGuardCiGateTests
            in the file — the job that reads the outcome is the one that has to run the suite. */
         var consumingJob = yaml[consumer..];
         Assert.Contains("= \"skipped\"", consumingJob, StringComparison.Ordinal);
+
+        /* The WHOLE line, not the invocation as a substring. A -class or -method filter appended to it
+           still contains the invocation, so a containment check would report the backstop intact while
+           it had stopped running whichever guards were not in the filter — and the exemptions in
+           DarlingTestsBackstopped rest on this job running all of them. Failing on any added argument is
+           the right direction: a widened invocation reds and gets read, rather than quietly narrowing. */
         Assert.Contains(
-            "dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj",
-            consumingJob,
-            StringComparison.Ordinal);
+            BackstopRunLine,
+            consumingJob.Split('\n').Select(line => line.Trim()),
+            StringComparer.Ordinal);
+
+        /* And the same fact through the predicate the exemptions are gated on, so the two cannot drift:
+           the pin above would keep passing on a yaml this returns false for if it ever stopped reading
+           the same slice. */
+        Assert.True(
+            WholeTreeBackstopIsIntact(yaml),
+            "the wiring above reads intact but the predicate that gates the DarlingTestsBackstopped "
+          + "exemptions does not agree — they are asserting different things about the same job");
     }
 
     private static void Check(
@@ -462,9 +662,10 @@ public class CrossAppGuardCiGateTests
         string yaml,
         List<string> failures,
         string scannedProject,
-        string otherApp,
+        SkuTrees other,
         string filterName,
-        string gatingStep)
+        string gatingStep,
+        IReadOnlyDictionary<string, string>? backstopped)
     {
         var patterns = FilterPatterns(yaml, filterName);
         Assert.True(
@@ -479,7 +680,7 @@ public class CrossAppGuardCiGateTests
             yaml[step..Math.Min(step + 400, yaml.Length)],
             StringComparison.Ordinal);
 
-        var scan = Scan(repo, scannedProject, otherApp);
+        var scan = Scan(repo, scannedProject, other);
 
         /* #3063: a widened population that reaches no project files passes exactly as the *.cs-only one
            did, which is the defect committed by its own fix. Each stage is floored by name, because
@@ -508,14 +709,50 @@ public class CrossAppGuardCiGateTests
             "spell the path literally, or teach RepoRooted the property:\n  " +
             string.Join("\n  ", scan.UnevaluablePaths));
 
-        foreach (var reference in scan.References)
+        /* #3067's floor, and the one the stage floors above cannot provide. Both arms opened hundreds of
+           files and found a healthy pile of references while the other SKU's TEST tree contributed NONE
+           of them: the anchor was the app directory, and Lite.Tests is a sibling of Lite rather than a
+           child. So the floor is taken over the tree whose invisibility was the defect rather than over
+           the reference total — a total stays comfortably non-zero while a whole tree drops out of it,
+           which is exactly how this went unnoticed. */
+        Assert.True(
+            scan.References.Any(r => r.Probe.StartsWith(other.TestsDir + "/", StringComparison.Ordinal)),
+            $"{scannedProject} named no file under {other.TestsDir}, so the other SKU's test tree is out " +
+            "of the found set entirely and every decision below it is vacuous for that tree. That is " +
+            $"#3067: an anchor on {other.AppDir} alone cannot see a read of a test project that is its " +
+            $"SIBLING. Found {scan.References.Count} reference(s): " +
+            $"[{string.Join(", ", scan.References.Select(r => r.Raw))}]");
+
+        var unreachable = scan.References
+            .Where(r => !patterns.Any(p => Matches(p, r.Probe)))
+            .ToList();
+
+        foreach (var reference in unreachable)
         {
-            if (!patterns.Any(p => Matches(p, reference.Probe)))
+            if (backstopped is not null &&
+                backstopped.ContainsKey(reference.Raw) &&
+                WholeTreeBackstopIsIntact(yaml))
             {
-                failures.Add(
-                    $"{scannedProject} reads {reference.Raw} (named in {reference.Origin}) but the " +
-                    $"'{filterName}' filter does not reach it (probe path: {reference.Probe})");
+                continue;
             }
+
+            failures.Add(
+                $"{scannedProject} reads {reference.Raw} (named in {reference.Origin}) but the " +
+                $"'{filterName}' filter does not reach it (probe path: {reference.Probe})");
+        }
+
+        /* The other half of the set comparison, and the half an allow-list stops having once nobody is
+           forced to look at it: an entry whose read was deleted, or which a later filter entry made
+           reachable, is a standing permission for nothing. Reported as a failure rather than asserted
+           separately so both directions arrive in one message. */
+        foreach (var stale in (backstopped?.Keys ?? Enumerable.Empty<string>())
+            .Where(k => !unreachable.Any(r => r.Raw.Equals(k, StringComparison.Ordinal)))
+            .OrderBy(k => k, StringComparer.Ordinal))
+        {
+            failures.Add(
+                $"{nameof(DarlingTestsBackstopped)} still exempts {stale}, but {scannedProject} no longer " +
+                $"has a read of it that the '{filterName}' filter cannot reach — delete the entry rather " +
+                "than leaving an exemption nothing needs");
         }
     }
 
@@ -550,9 +787,74 @@ public class CrossAppGuardCiGateTests
         "<HintPath(?:\\s+[\\w:.-]+\\s*=\\s*(?:\"[^\"]*\"|'[^']*'))*\\s*>([^<]*)</HintPath\\s*>",
         RegexOptions.Compiled);
 
-    /// <summary>Repo-relative paths naming <paramref name="otherApp"/> that a test in
+    /// <summary>The paths one C# file's text names that belong to <paramref name="other"/>, in the two
+    /// spellings this repository's pins use, repo-rooted and forward-slashed.
+    ///
+    /// <para><b>The anchor is every root the SKU owns, which is #3067.</b> Anchored on the app directory
+    /// alone, <c>Lite.Tests/X.cs</c> matched neither <c>Lite/</c> nor anything else and left the found
+    /// set silently — the failure direction this whole class exists to close. A root still has to be
+    /// followed by a SEPARATOR, so a tree merely PREFIXED by a root's name (<c>Lite.TestsExtra/</c>) is
+    /// no more a read of that SKU than it was before.</para>
+    ///
+    /// <para>Shared by the walk and by the pin that reads it back, for the same reason
+    /// <see cref="MsBuildPaths"/> is: a retyped copy in a test is free to agree with itself while the
+    /// matcher that ships does something else.</para></summary>
+    private static IEnumerable<string> CSharpPaths(string text, SkuTrees other)
+    {
+        var anyRoot = "(?:" + string.Join("|", other.Roots.Select(Regex.Escape)) + ")";
+
+        /* "Darling/Some/Path.cs" and the backslash spelling some Windows-facing pins use. */
+        foreach (Match m in Regex.Matches(text, "\"(" + anyRoot + "[/\\\\][^\"]+)\""))
+        {
+            yield return m.Groups[1].Value.Replace('\\', '/');
+        }
+
+        /* Path.Combine("Darling", "Darling.Tests", "X.cs"). Per root rather than through the alternation
+           above: the first argument is a whole literal here, so two roots cannot both match one call. */
+        foreach (var root in other.Roots)
+        {
+            foreach (Match m in Regex.Matches(
+                text, @"Path\.Combine\(\s*""" + Regex.Escape(root) + @"""\s*,([^)]*)\)"))
+            {
+                var segments = Regex.Matches(m.Groups[1].Value, "\"([^\"]+)\"")
+                    .Select(s => s.Groups[1].Value)
+                    .ToArray();
+                if (segments.Length > 0)
+                {
+                    yield return root + "/" + string.Join("/", segments);
+                }
+            }
+        }
+    }
+
+    /// <summary>Whether <c>build.yml</c> still runs the WHOLE <c>Darling.Tests</c> suite where the area
+    /// filters do not reach, which is the bound every entry in
+    /// <see cref="DarlingTestsBackstopped"/> rests on.
+    ///
+    /// <para>Read where the exemptions are HONOURED and not only by the pin below, so an exemption
+    /// cannot outlive the thing it rests on: narrow that job to a class filter, or lose its
+    /// <c>skipped</c> gate, and all four entries turn back into failures on the next run.</para>
+    ///
+    /// <para>Sliced from the consumer onward so the build job's own identical invocation cannot satisfy
+    /// it — the job that reads the outcome is the job that has to run the suite.</para></summary>
+    private static bool WholeTreeBackstopIsIntact(string yaml)
+    {
+        var consumer = yaml.IndexOf("needs.build.outputs.darling-tests", StringComparison.Ordinal);
+        if (consumer < 0)
+        {
+            return false;
+        }
+
+        var consumingJob = yaml[consumer..];
+
+        return consumingJob.Contains("= \"skipped\"", StringComparison.Ordinal)
+            && consumingJob.Split('\n')
+                .Any(line => line.Trim().Equals(BackstopRunLine, StringComparison.Ordinal));
+    }
+
+    /// <summary>Repo-relative paths naming a tree of <paramref name="other"/> that a test in
     /// <paramref name="project"/> reads, paired with a concrete file path to test coverage against.</summary>
-    private static CrossAppScan Scan(string repo, string project, string otherApp)
+    private static CrossAppScan Scan(string repo, string project, SkuTrees other)
     {
         /* Keyed by the reference, valued by every file that named it, so a failure says where to go. */
         var seen = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
@@ -567,32 +869,17 @@ public class CrossAppGuardCiGateTests
         foreach (var file in TrackedFiles(projectRoot, "*.cs"))
         {
             csharpFiles++;
-            var text = File.ReadAllText(file);
             var origin = Rooted(repo, file);
 
-            /* "Darling/Some/Path.cs" and the backslash spelling some Windows-facing pins use. */
-            foreach (Match m in Regex.Matches(text, "\"(" + Regex.Escape(otherApp) + "[/\\\\][^\"]+)\""))
+            foreach (var path in CSharpPaths(File.ReadAllText(file), other))
             {
-                Note(seen, m.Groups[1].Value.Replace('\\', '/'), origin);
-            }
-
-            /* Path.Combine("Darling", "Darling.Tests", "X.cs") */
-            foreach (Match m in Regex.Matches(
-                text, @"Path\.Combine\(\s*""" + Regex.Escape(otherApp) + @"""\s*,([^)]*)\)"))
-            {
-                var segments = Regex.Matches(m.Groups[1].Value, "\"([^\"]+)\"")
-                    .Select(s => s.Groups[1].Value)
-                    .ToArray();
-                if (segments.Length > 0)
-                {
-                    Note(seen, otherApp + "/" + string.Join("/", segments), origin);
-                }
+                Note(seen, path, origin);
             }
         }
 
-        /* The second population, and the one #3063 was filed for. Neither matcher above can see a linked
-           compile: the path is relative and backslashed, so their otherApp anchor never fires — but that
-           is downstream of the real reason, which is that project XML is not a *.cs file and was never
+        /* The second population, and the one #3063 was filed for. No C# matcher can see a linked
+           compile: the path is relative and backslashed, so the root anchor never fires — but that is
+           downstream of the real reason, which is that project XML is not a *.cs file and was never
            opened. The project's own files first, then the build files MSBuild imports into it unnamed. */
         var projectFiles = TrackedFiles(projectRoot, "*.csproj")
             .OrderBy(f => f, StringComparer.Ordinal)
@@ -604,7 +891,7 @@ public class CrossAppGuardCiGateTests
             /* A .csproj is its own consumer, so both bases are its directory. */
             var dir = Path.GetDirectoryName(file)!;
             ReadMsBuildPaths(
-                repo, File.ReadAllText(file), Rooted(repo, file), dir, dir, otherApp, seen, unevaluable);
+                repo, File.ReadAllText(file), Rooted(repo, file), dir, dir, other, seen, unevaluable);
         }
 
         foreach (var file in importedBuildFiles)
@@ -619,7 +906,7 @@ public class CrossAppGuardCiGateTests
                 Rooted(repo, file),
                 projectRoot,
                 Path.GetDirectoryName(file)!,
-                otherApp,
+                other,
                 seen,
                 unevaluable);
         }
@@ -747,15 +1034,15 @@ public class CrossAppGuardCiGateTests
             .Concat(MsBuildPathElement.Matches(xml)
                 .Select(m => (Raw: m.Groups[1].Value.Trim(), RelativeToItsOwnFile: false)));
 
-    /// <summary>The <paramref name="otherApp"/> paths one MSBuild file names, repo-rooted into
-    /// <paramref name="seen"/>.</summary>
+    /// <summary>The paths one MSBuild file names that belong to <paramref name="other"/>, repo-rooted
+    /// into <paramref name="seen"/>.</summary>
     private static void ReadMsBuildPaths(
         string repo,
         string xml,
         string origin,
         string projectDir,
         string ownDir,
-        string otherApp,
+        SkuTrees other,
         SortedDictionary<string, SortedSet<string>> seen,
         List<string> unevaluable)
     {
@@ -785,7 +1072,7 @@ public class CrossAppGuardCiGateTests
                 repo,
                 relativeToItsOwnFile ? thisFileDir : projectDir,
                 expanded,
-                otherApp);
+                other);
 
             if (rooted is not null)
             {
@@ -799,13 +1086,13 @@ public class CrossAppGuardCiGateTests
     ///
     /// <para>This is the whole difficulty of #3063's fix. An <c>Include=</c> is RELATIVE to the project
     /// directory and spelled with backslashes (<c>..\Darling\Darling.Tests\X.cs</c>), so it names no app at
-    /// all until it is resolved — the <paramref name="otherApp"/> anchor the C# matchers open with cannot
-    /// fire on it, and applying that anchor AFTER normalisation is what leaves every coverage decision
-    /// downstream of here unchanged.</para>
+    /// all until it is resolved — the root anchor the C# matchers open with cannot fire on it, and
+    /// applying that anchor AFTER normalisation is what leaves every coverage decision downstream of
+    /// here unchanged.</para>
     ///
-    /// <para>Null when the path names something other than <paramref name="otherApp"/>, resolves outside the
+    /// <para>Null when the path names no tree belonging to <paramref name="other"/>, resolves outside the
     /// repository, or is not a path at all (a <c>PackageReference</c>'s Include is a package id).</para></summary>
-    private static string? RepoRooted(string repo, string projectDir, string raw, string otherApp)
+    private static string? RepoRooted(string repo, string projectDir, string raw, SkuTrees other)
     {
         if (raw.Length == 0)
         {
@@ -849,8 +1136,13 @@ public class CrossAppGuardCiGateTests
             rooted = rooted[..cut];
         }
 
-        return rooted.Equals(otherApp, StringComparison.Ordinal)
-            || rooted.StartsWith(otherApp + "/", StringComparison.Ordinal)
+        /* Every root the other SKU owns, not just its app directory. A linked compile reaching a
+           SIBLING test project - ..\..\Lite.Tests\X.cs out of Darling/Darling.Tests - normalises to
+           Lite.Tests/X.cs, which the app-only check rejected because it neither equals "Lite" nor opens
+           with "Lite/". Same #3067 anchor as the C# stage, one population over. */
+        return other.Roots.Any(root =>
+            rooted.Equals(root, StringComparison.Ordinal)
+            || rooted.StartsWith(root + "/", StringComparison.Ordinal))
                 ? rooted
                 : null;
     }
