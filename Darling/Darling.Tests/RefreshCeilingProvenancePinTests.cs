@@ -93,49 +93,49 @@ public sealed class RefreshCeilingProvenancePinTests
         yield return (
             "the transition run's clock arithmetic",
             CeilingDeclaration,
-            @"refresh policy \S <c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c> to <c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c> on the boundary day",
+            @"<c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c> to <c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c>",
             true);
 
         yield return (
             "the boundary timestamp",
             CeilingDeclaration,
-            @"refresh policies at <c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c>, one second BEFORE",
+            @"<c>([0-9][0-9]):([0-9][0-9]):([0-9][0-9])</c>, one second BEFORE",
             true);
 
         yield return (
             "the run count",
             CeilingDeclaration,
-            @"([0-9]+) consecutive runs of this job's refresh policy",
+            @"([0-9]+) consecutive runs",
             true);
 
         yield return (
             "the published series",
             CeilingDeclaration,
-            @"<c>([0-9]+(?:, [0-9]+)+)</c> seconds\.",
+            @"<c>([0-9]+(?:, [0-9]+)+)</c> seconds",
             true);
 
         yield return (
             "the clean-series summary",
             CeilingDeclaration,
-            @"the remaining ([0-9]+) run from <b>([0-9]+) s to ([0-9]+) s</b>, mean <b>([0-9]+) s</b>, middle reading <b>([0-9]+) s</b>",
+            @"remaining ([0-9]+) run from ([0-9]+) s to ([0-9]+) s, mean ([0-9]+) s, middle reading ([0-9]+) s",
             true);
 
         yield return (
             "the slot-clearance contrast",
             CeilingDeclaration,
-            @"The largest of the ([0-9]+) clears the slot by <b>([0-9]+) s</b>, where this constant clears it by ([0-9]+) s\.",
+            @"largest of the ([0-9]+) clears the slot by ([0-9]+) s, where this constant clears it by ([0-9]+) s",
             true);
 
         yield return (
             "the issue's median figure",
             CeilingDeclaration,
-            @"the median of the same window as ~<b>([0-9]+) s</b>",
+            @"median of the same window as ~([0-9]+) s",
             true);
 
         yield return (
             "why the issue's median is not reproducible",
             CeilingDeclaration,
-            @"([0-9]+) is the midpoint of ([0-9]+) and ([0-9]+), so a median over ([0-9]+) of the ([0-9]+) rather than the ([0-9]+) clean ones",
+            @"([0-9]+) is the midpoint of ([0-9]+) and ([0-9]+), so a median over ([0-9]+) of the ([0-9]+) rather than the ([0-9]+) clean",
             true);
 
         /* NOT drift-swept, for the reason in the class summary: these two are quoted readings, so bumping a
@@ -145,13 +145,13 @@ public sealed class RefreshCeilingProvenancePinTests
         yield return (
             "the inadmissible snapshot pair",
             CeilingDeclaration,
-            @"Two further readings of <b>([0-9]+) s</b> and <b>([0-9]+) s</b> come from the hourly",
+            @"readings of ([0-9]+) s and ([0-9]+) s come from",
             false);
 
         yield return (
             "the downward-edit consequence",
             CeilingDeclaration,
-            @"correcting toward the observed ([0-9]+) s would leave ([0-9]+) s of margin in place of ([0-9]+) s",
+            @"toward the observed ([0-9]+) s would leave ([0-9]+) s of margin in place of ([0-9]+) s",
             true);
 
         yield return (
@@ -169,7 +169,7 @@ public sealed class RefreshCeilingProvenancePinTests
         yield return (
             "the exclude-whole occupancy sentence",
             CompressionMinutesDeclaration,
-            @"occupies ([0-9]+)\.([0-9]) of the ([0-9]+) minutes in its slot",
+            @"occupies ([0-9]+)\.([0-9]) of the ([0-9]+) minutes",
             true);
     }
 
@@ -201,13 +201,26 @@ public sealed class RefreshCeilingProvenancePinTests
         Assert.NotEmpty(snapshot);
         Assert.Empty(series.Intersect(snapshot));
 
-        var mutated = source.Replace(
-            $"readings of <b>{snapshot[0]} s</b>",
-            $"readings of <b>{series[^1]} s</b>",
-            StringComparison.Ordinal);
+        /* Injected through the same ordinal rewrite the drift sweep uses, rather than by string-replacing
+           the reading. A bare Replace would depend on the surrounding emphasis tags - the very coupling
+           DocProseFor now normalises away - and would silently find nothing if someone unbolded the figure,
+           which is a mutation that proves nothing wearing a caught drift's clothes. */
+        var snapshotPattern = PatternFor("the inadmissible snapshot pair");
+        var firstReading = OrdinalOfFirstNumberInGroups(prose, snapshotPattern);
+        Assert.True(firstReading >= 0, "the snapshot pair's pattern captured no number, so its pin is vacuous.");
+
+        var mutated = RewriteNumberInDocRun(
+            source,
+            CeilingDeclaration,
+            snapshotPattern,
+            firstReading,
+            series[^1].ToString(CultureInfo.InvariantCulture));
+
+        Assert.True(mutated is not null,
+            "could not inject a series reading into the snapshot pair, so nothing was proved.");
         Assert.NotEqual(source, mutated);
 
-        var failure = Assert.ThrowsAny<Exception>(() => Verify(mutated));
+        var failure = Assert.ThrowsAny<Exception>(() => Verify(mutated!));
         Assert.DoesNotContain(ParseMiss, failure.Message, StringComparison.Ordinal);
     }
 
@@ -527,8 +540,20 @@ public sealed class RefreshCeilingProvenancePinTests
         var match = Regex.Match(prose, pattern);
         Require(match.Success,
             $"{ParseMiss}: {name} is no longer present in TimescaleSupport.cs in the pinned shape "
-            + $"({pattern}). It restates figures derived from the ceiling constant, so keep it parseable — or "
-            + "delete the figure from the prose and remove this pin with it (#3069).");
+            + $"({pattern}). Three fixes are all correct and you should pick by INTENT, not by whichever is "
+            + "quickest:\n"
+            + "  (1) the wording moved but the figures still agree - UPDATE THIS PATTERN in "
+            + "RefreshCeilingProvenancePinTests.Pins(). This is sanctioned rather than a loophole, because "
+            + "EveryNumericPin_ReportsAnInjectedDrift re-derives every case from the pattern you write: "
+            + "loosen it until it stops guarding and that test goes red, so a pattern cannot be widened into "
+            + "a no-op.\n"
+            + "  (2) a figure is now WRONG - fix the prose, not this pin. The comparison below names the "
+            + "derived value.\n"
+            + "  (3) the figure is no longer worth stating - DELETE IT FROM THE PROSE and drop this pin with "
+            + "it. Equally acceptable; a pin must not become the reason to keep a sentence nobody wants "
+            + "(#3072's rule, #3069's pin).\n"
+            + "Emphasis tags and dash style are already normalised away by DocProseFor, so a pure typo or "
+            + "reformatting fix that touches none of these words needs no change here.");
 
         return match.Groups.Cast<Group>().Skip(1)
             .SelectMany(g => Regex.Matches(g.Value, "[0-9]+").Select(m => m.Value))
@@ -568,7 +593,17 @@ public sealed class RefreshCeilingProvenancePinTests
 
         Require(run.Count > 0, $"{ParseMiss}: '{declaration}' carries no doc comment run");
 
-        var prose = Regex.Replace(string.Join(" ", run), @"\s+", " ").Trim();
+        /* NORMALISED before any pattern sees it, so two whole classes of copy-edit cannot break a pin:
+           <b> emphasis (bolding or unbolding a figure) and dash style (em, en or plain hyphen). That is
+           #3077's review complaint met at the extractor rather than argued with. What a pattern still has
+           to name is the handful of words that identify WHICH CLAIM a number belongs to, and that is not
+           removable — see the class summary on why a claim-blind numeral bag cannot do this job. */
+        var prose = string.Join(" ", run)
+            .Replace("<b>", string.Empty, StringComparison.Ordinal)
+            .Replace("</b>", string.Empty, StringComparison.Ordinal)
+            .Replace('\u2014', '-')
+            .Replace('\u2013', '-');
+        prose = Regex.Replace(prose, @"\s+", " ").Trim();
         Require(prose.StartsWith("<summary>", StringComparison.Ordinal),
             $"{ParseMiss}: the doc run above '{declaration}' does not begin at its <summary>, so the walk "
             + "reached the top of a truncated block");
@@ -618,6 +653,51 @@ public sealed class RefreshCeilingProvenancePinTests
     /// zero-padded clock component cannot break the pattern it is being tested against.</para>
     /// </summary>
     private static string? BumpNumberInsideGroups(string source, string declaration, string pattern, int ordinal)
+        => RewriteNumberInDocRun(source, declaration, pattern, ordinal, replacement: null);
+
+    /// <summary>
+    /// The doc-run-wide ordinal of the first integer that <paramref name="pattern"/> actually CAPTURES, or -1
+    /// when it captures none. Ordinals are counted over the whole run because that is the coordinate
+    /// <see cref="RewriteNumberInDocRun"/> maps back onto the source.
+    /// </summary>
+    private static int OrdinalOfFirstNumberInGroups(string prose, string pattern)
+    {
+        var match = Regex.Match(prose, pattern);
+        if (!match.Success)
+        {
+            return -1;
+        }
+
+        var numbers = Regex.Matches(prose, "[0-9]+");
+        for (var ordinal = 0; ordinal < numbers.Count; ordinal++)
+        {
+            var number = numbers[ordinal];
+            if (match.Groups.Cast<Group>().Skip(1).Any(g =>
+                    g.Success && number.Index >= g.Index && number.Index + number.Length <= g.Index + g.Length))
+            {
+                return ordinal;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Rewrites the <paramref name="ordinal"/>-th integer of the declaration's doc run in a COPY of
+    /// <paramref name="source"/>, but only when that integer sits inside one of <paramref name="pattern"/>'s
+    /// capture groups — otherwise null, so a caller can skip it.
+    ///
+    /// <para><paramref name="replacement"/> null means "add one", which is what the drift sweep wants; an
+    /// explicit value is used by the population-merge mutation. Either way the bump preserves WIDTH, so a
+    /// zero-padded clock component cannot break the pattern it is being tested against.</para>
+    ///
+    /// <para>Addressed by ORDINAL rather than by value, because a bare string replace of "36" would rewrite
+    /// every 36 in the file and prove something other than what it was aimed at — and because repeated
+    /// values (36 appears four times in this doc run, 306 twice, 9 three times) have to stay individually
+    /// addressable.</para>
+    /// </summary>
+    private static string? RewriteNumberInDocRun(
+        string source, string declaration, string pattern, int ordinal, string? replacement)
     {
         var prose = DocProseFor(source, declaration);
         var match = Regex.Match(prose, pattern);
@@ -651,8 +731,9 @@ public sealed class RefreshCeilingProvenancePinTests
             return null;
         }
 
-        var bumped = (int.Parse(number.Value, CultureInfo.InvariantCulture) + 1)
-            .ToString(CultureInfo.InvariantCulture)
+        var bumped = (replacement
+                ?? (int.Parse(number.Value, CultureInfo.InvariantCulture) + 1)
+                    .ToString(CultureInfo.InvariantCulture))
             .PadLeft(number.Value.Length, '0');
 
         var offset = start + sourceNumbers[ordinal].Index;

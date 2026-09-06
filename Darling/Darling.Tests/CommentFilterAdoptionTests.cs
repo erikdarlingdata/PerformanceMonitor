@@ -210,6 +210,204 @@ public sealed class CommentFilterAdoptionTests
             walked.Split('\n').Length);
     }
 
+    /* ───────────────── the census's own summary, which nothing was holding (#3069) ───────────────── */
+
+    /// <summary>
+    /// The kind labels every entry in <see cref="s_bounded"/> must open with, mapped to the counted claim in
+    /// this class's summary that describes them.
+    ///
+    /// <para>An enumeration for the same reason the map above is one — but note the direction: an entry
+    /// carrying a kind that is NOT here fails <see cref="KindCounts"/> loudly rather than going uncounted,
+    /// so a new kind cannot slip past by being unrecognised. That is the opposite of the way a wildcard
+    /// grows.</para>
+    /// </summary>
+    private static readonly (string Label, string Claim)[] s_kinds =
+    {
+        ("COLLECTS", "collect a doc-comment run"),
+        ("STATED BOUND", "reads a stated, measured bound"),
+        ("NOT C#", "filters SQL"),
+        ("DEMONSTRATES", "demonstrates the shape"),
+    };
+
+    /// <summary>
+    /// The numeral words this class's summary is allowed to spell its counts with. Prose reads better with
+    /// words than digits here, so the mapping is explicit rather than the digits-only convention
+    /// <c>ReadmeDerivedCountPinTests</c> uses over Markdown.
+    ///
+    /// <para><b>The bound, stated because it is the load-bearing part.</b> A count that outgrew this
+    /// vocabulary does not silently pass — the pattern stops matching and
+    /// <see cref="TheCensusSummary_CountsTheMapItDescribes"/> fails with a parse miss. Wrong toward the
+    /// worse label, which is the only direction worth being wrong in for a guard.</para>
+    /// </summary>
+    private static readonly string[] s_numeralWords =
+        { "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten" };
+
+    /// <summary>
+    /// This class's summary describes the map below it by COUNT — "Four kinds live here", then one claim per
+    /// kind — and until #3069 nothing held the two together. The prose read "Two collect a doc-comment run"
+    /// while THREE entries already did, so it was stale by one before #3069 added a fourth, and would have
+    /// been stale by two after.
+    ///
+    /// <para><b>Why a pin rather than the corrected word.</b> Fixing the word fixes this instance. The
+    /// asymmetry is the defect: <see cref="EveryLinePrefixCommentFilter_StatesTheBoundItRestsOn"/> catches a
+    /// new MEMBER of the census by name, and nothing caught the census's own SUMMARY drifting — in a file
+    /// whose entire job is adoption tracking. A counted claim that has drifted once unattended will drift
+    /// again.</para>
+    ///
+    /// <para><b>All five claims are pinned, not four.</b> The kind total and one claim per kind. A partial
+    /// pin on a summary that reads as fully pinned is worse than none, so if a claim were genuinely
+    /// underivable it would be said here rather than left out quietly. None is: the kinds come from the
+    /// entry TEXT and the counts from the map.</para>
+    /// </summary>
+    [Fact]
+    public void TheCensusSummary_CountsTheMapItDescribes()
+    {
+        VerifySummaryCounts(CensusSummaryProse(), KindCounts(s_bounded.Values), s_bounded.Count);
+    }
+
+    /// <summary>
+    /// Non-vacuity, in both directions and for the mapping in between — because the cheapest way this pin
+    /// passes while the summary is wrong is that the extraction never yields a numeral at all, and a
+    /// word-versus-digit mismatch would do exactly that.
+    /// </summary>
+    [Fact]
+    public void TheCensusSummaryPin_ReportsDriftFromEitherSide()
+    {
+        var prose = CensusSummaryProse();
+        var real = KindCounts(s_bounded.Values);
+        var injected = 0;
+
+        /* (a) the PROSE moves. One claim at a time, so each of the five is individually load-bearing. */
+        foreach (var (_, claim) in s_kinds.Select(k => (k.Label, k.Claim)).Append((string.Empty, "kinds live here")))
+        {
+            var pattern = new Regex($@"({string.Join("|", s_numeralWords)}) {Regex.Escape(claim)}");
+            var match = pattern.Match(prose);
+            Assert.True(match.Success, $"the summary no longer states a count for '{claim}', so its pin is vacuous.");
+
+            var wrong = s_numeralWords[(Array.IndexOf(s_numeralWords, match.Groups[1].Value) + 1) % s_numeralWords.Length];
+            var mutated = prose.Remove(match.Groups[1].Index, match.Groups[1].Length).Insert(match.Groups[1].Index, wrong);
+            Assert.NotEqual(prose, mutated);
+            Assert.ThrowsAny<Exception>(() => VerifySummaryCounts(mutated, real, s_bounded.Count));
+            injected++;
+        }
+
+        Assert.Equal(s_kinds.Length + 1, injected);
+
+        /* (b) the MAP moves and the prose does not — a fifth COLLECTS entry added without a copy-edit. */
+        var withAnother = KindCounts(s_bounded.Values.Append("COLLECTS a doc run. A synthetic entry, for this test only."));
+        Assert.ThrowsAny<Exception>(() => VerifySummaryCounts(prose, withAnother, s_bounded.Count + 1));
+
+        /* (c) an entry whose kind is not recognised must FAIL rather than go uncounted, or the breakdown
+               could silently stop summing to the map. */
+        Assert.ThrowsAny<Exception>(() => KindCounts(s_bounded.Values.Append("SOMETHING ELSE. an unlabelled bound.")));
+
+        /* (d) and the word mapping itself: a count spelled outside the vocabulary reds rather than passing,
+               which is the failure mode a digits-only pin would not have had to think about. */
+        Assert.ThrowsAny<Exception>(() => VerifySummaryCounts(
+            prose.Replace("kinds live here", "kinds live in here", StringComparison.Ordinal),
+            real,
+            s_bounded.Count));
+    }
+
+    /// <summary>
+    /// Each kind label paired with how many entries open with it. Throws when an entry matches none, so the
+    /// breakdown can never quietly stop accounting for the whole map.
+    /// </summary>
+    private static Dictionary<string, int> KindCounts(IEnumerable<string> bounds)
+    {
+        var counts = s_kinds.ToDictionary(k => k.Label, _ => 0, StringComparer.Ordinal);
+
+        foreach (var bound in bounds)
+        {
+            var label = s_kinds.FirstOrDefault(k => bound.StartsWith(k.Label, StringComparison.Ordinal)).Label;
+            Assert.False(label is null,
+                $"this entry opens with no recognised kind: \"{bound[..Math.Min(60, bound.Length)]}…\". Every "
+                + "entry must name its kind, because the class summary states one count per kind and "
+                + "TheCensusSummary_CountsTheMapItDescribes derives those counts from this text. Add the new "
+                + "kind to s_kinds and give it a claim in the summary.");
+            counts[label!]++;
+        }
+
+        return counts;
+    }
+
+    /// <summary>
+    /// The summary's counted claims against <paramref name="counts"/>. Separated from the map so
+    /// <see cref="TheCensusSummaryPin_ReportsDriftFromEitherSide"/> can drive it with a synthetic census and
+    /// prove the map side reds too, which reading the real map could never show.
+    /// </summary>
+    private static void VerifySummaryCounts(string prose, Dictionary<string, int> counts, int total)
+    {
+        Assert.Equal(total, counts.Values.Sum());
+        Assert.True(total > 0, "the census is empty, so every count below would be vacuously satisfiable.");
+
+        var claims = s_kinds
+            .Select(k => (k.Claim, Expected: counts[k.Label]))
+            .Append(("kinds live here", counts.Count(c => c.Value > 0)))
+            .ToArray();
+
+        foreach (var (claim, expected) in claims)
+        {
+            var pattern = new Regex($@"({string.Join("|", s_numeralWords)}) {Regex.Escape(claim)}");
+            var match = pattern.Match(prose);
+
+            Assert.True(match.Success,
+                $"this class's summary no longer states a count for \"{claim}\" as one of "
+                + $"{string.Join("/", s_numeralWords)}. It describes s_bounded by count, so keep the claim "
+                + "parseable, spell the numeral as a word from that list — or delete the count from the "
+                + "prose and remove it from s_kinds' claim, which is equally acceptable (#3069).");
+
+            var actual = Array.IndexOf(s_numeralWords, match.Groups[1].Value);
+            Assert.True(actual == expected,
+                $"the summary says {match.Groups[1].Value} ({actual}) {claim}, but the census holds "
+                + $"{expected}. Fix the word in the summary rather than this pin.");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="s_bounded"/>'s OWN doc comment — which is where the counted claims live, not the class
+    /// summary. Normalised the way <c>RefreshCeilingProvenancePinTests.DocProseFor</c> normalises the ones it
+    /// reads: emphasis tags and dash style removed, so a copy-edit that only reformats cannot break a count
+    /// pin.
+    ///
+    /// <para>Anchored on the map's declaration rather than the class's, and the difference is not academic:
+    /// aiming this at the class summary is a mistake this pin caught on its first run, because the wrong doc
+    /// run yields prose with no counted claim in it at all and the extraction fails loudly instead of
+    /// comparing nothing.</para>
+    /// </summary>
+    private static string CensusSummaryProse([CallerFilePath] string thisFile = "")
+    {
+        var source = File.ReadAllText(thisFile);
+        var declaration = source.IndexOf(
+            "private static readonly Dictionary<string, string> s_bounded", StringComparison.Ordinal);
+        Assert.True(declaration > 0, "could not find s_bounded's declaration, so its summary could not be read.");
+
+        var lines = source[..declaration].Split('\n');
+        var run = new List<string>();
+
+        for (var index = lines.Length - 2; index >= 0; index--)
+        {
+            var line = lines[index].Trim('\r', ' ', '\t');
+            if (!line.StartsWith("///", StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            run.Insert(0, line.Length > 3 ? line[3..].Trim() : string.Empty);
+        }
+
+        var prose = string.Join(" ", run)
+            .Replace("<b>", string.Empty, StringComparison.Ordinal)
+            .Replace("</b>", string.Empty, StringComparison.Ordinal)
+            .Replace('\u2014', '-')
+            .Replace('\u2013', '-');
+        prose = Regex.Replace(prose, @"\s+", " ").Trim();
+
+        Assert.StartsWith("<summary>", prose, StringComparison.Ordinal);
+        Assert.EndsWith("</summary>", prose, StringComparison.Ordinal);
+        return prose;
+    }
+
     /// <summary>
     /// Every <c>StartsWith</c> call in <paramref name="text"/> whose first argument is a comment prefix, as
     /// the offset of the call.
