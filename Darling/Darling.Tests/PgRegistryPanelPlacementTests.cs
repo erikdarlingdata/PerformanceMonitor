@@ -540,7 +540,10 @@ public sealed class PgRegistryPanelPlacementTests
             /* The entry's literals, in source order: id, header, then the collector array, then the note.
                Taken as the CONTIGUOUS run of collector-shaped literals after the header, which is what the
                array is — a note that happened to be exactly a collector name could not join it, because the
-               note comes after the array and the run has already ended. */
+               note comes after the array and the run has already ended.
+
+               entry.Index is an offset into the WALKED text and l.Start into the ORIGINAL; comparing them is
+               sound because StripCommentsAndStrings is character-aligned with its input. */
             var literals = registryLiterals
                 .Where(l => l.Start > entry.Index)
                 .Select(l => l.Text)
@@ -654,9 +657,17 @@ public sealed class PgRegistryPanelPlacementTests
     }
 
     /// <summary>
-    /// Each <c>LoadPg…Async</c>'s body as a half-open range over the WALKED code. Braces inside a literal or
-    /// a comment cannot unbalance the count there, which is the whole reason the walk is used rather than a
-    /// comment-stripping regex of this file's own (#3052).
+    /// Each <c>LoadPg…Async</c>'s body as a half-open range over the WALKED code.
+    ///
+    /// <para><b>The brace count is only sound because the input is walked, and that is measured rather than
+    /// assumed.</b> Run over raw source the count would depend on every brace in the file appearing in a
+    /// balanced pair, and an escaped <c>{{</c> in an interpolated string is the case that breaks it —
+    /// silently, by handing the rules a truncated body with nothing asserting on it.
+    /// <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> removes the hazard at the source rather than
+    /// leaving it as a standing assumption: probed against it, a brace inside a plain, verbatim, raw or char
+    /// literal, inside a comment, and an escaped <c>{{</c> or <c>}}</c> in an interpolated string — including
+    /// an unpaired <c>{{</c> — all come back blanked, while an interpolation HOLE keeps its own balanced
+    /// pair. So the only braces the loop can see are code braces.</para>
     /// </summary>
     private static Dictionary<string, (int Start, int End)> MethodRanges(string code)
     {
