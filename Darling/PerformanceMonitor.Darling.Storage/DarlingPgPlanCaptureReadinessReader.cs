@@ -28,8 +28,15 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>library_loaded</c> gates <c>capture_threshold</c>, and <c>extension_available</c> explains whether
 /// either is even possible — so sorting the unsatisfied ones to the top would break the sequence a reader
 /// has to follow. <c>extension_available</c> first, then <c>library_loaded</c>, then
-/// <c>capture_threshold</c>, then <c>plan_text_setting</c>, then <c>plan_attribution</c>: could it, does
-/// it, is it capturing, in what form, and can what it captures be joined to the statement it came from.</para>
+/// <c>capture_threshold</c>, then <c>plan_text_setting</c>, then <c>plan_attribution</c>, then
+/// <c>message_locale</c>: could it, does it, is it capturing, in what form, can what it captures be joined
+/// to the statement it came from, and is it written in a language anything here can read.</para>
+///
+/// <para><b><c>message_locale</c> is last on purpose (#3061), not least.</b> It is the only facet that can
+/// be unmet while every other one is met — a fully configured, perfectly attributed capture whose anchor
+/// line is translated is still unreadable — so it reads as the final gate rather than a prerequisite. That
+/// placement is a presentation choice and nothing more: for the DEADLOCK read it is the only facet that
+/// applies at all, since deadlock reports need nothing enabled on the target.</para>
 ///
 /// <para>Shared by the WPF tab and the MCP surface so there is one copy of this SQL, per #2530.</para>
 /// </summary>
@@ -55,8 +62,8 @@ public static class DarlingPgPlanCaptureReadinessReader
        different sorts and need the subquery.
 
        The facet order is spelled as a CASE rather than left to alphabetical, which would give
-       capture_threshold, extension_available, library_loaded, plan_attribution, plan_text_setting - close to
-       the reverse of the order somebody has to act in. */
+       capture_threshold, extension_available, library_loaded, message_locale, plan_attribution,
+       plan_text_setting - close to the reverse of the order somebody has to act in. */
     public const string PgPlanCaptureReadinessSql = """
         SELECT facet, is_satisfied, observed, detail, collection_time
         FROM (
@@ -74,7 +81,8 @@ public static class DarlingPgPlanCaptureReadinessReader
                      WHEN 'capture_threshold'   THEN 3
                      WHEN 'plan_text_setting'   THEN 4
                      WHEN 'plan_attribution'    THEN 5
-                     ELSE 6
+                     WHEN 'message_locale'      THEN 6
+                     ELSE 7
                  END,
                  facet
         LIMIT $4

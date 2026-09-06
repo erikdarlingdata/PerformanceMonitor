@@ -1660,6 +1660,46 @@ WITH NO DATA";
     public const int RefreshPhaseSlots = 60 / RefreshPhaseStepMinutes;
 
     /// <summary>
+    /// One refresh slot as a percent of the hourly cadence — and the value #2136's Store Job Over Cadence
+    /// warning knob ships as its default (<c>AlertsConfig.StoreJobCadenceWarnPercent</c>).
+    ///
+    /// <para><b>Why that alert's default belongs to the refresh grid rather than to the alert.</b> The knob
+    /// judges every store background job against a share of its own schedule interval, and the tightest
+    /// STRUCTURAL ceiling in the population it judges is this one: an hourly continuous-aggregate refresh
+    /// that outgrows its slot breaks the precondition #3035's compression phase grid rests on, because
+    /// excluding one slot is then no longer enough to keep a refresh out of a compression window. A
+    /// compression or retention policy at the same share of cadence is merely notable. So the default is the
+    /// slot, stated as the slot.</para>
+    ///
+    /// <para><b>It computed to 25 before #3060 as well, and that was a coincidence.</b> The knob was a
+    /// literal with no reference to <see cref="RefreshPhaseStepMinutes"/>, so a grid moved to a 10-minute
+    /// step would have left it firing at 900 s against a 600 s slot — AFTER the condition it exists to
+    /// precede rather than before it. Derived, that cannot happen, and the equality is a decision rather
+    /// than an accident of two independent ones.</para>
+    ///
+    /// <para><b>Integer division is load-bearing, not a rounding artifact.</b> Flooring is what guarantees
+    /// the warning fires at or BEFORE one slot for every possible <see cref="RefreshPhaseSlots"/> —
+    /// <c>this * RefreshPhaseSlots &lt;= 100</c> — while <c>(this + 1) * RefreshPhaseSlots &gt; 100</c> keeps
+    /// it the LATEST value that still does, so the derivation buys the guarantee without buying noise.
+    /// Both are pinned cross-multiplied by TimescaleContinuousAggregateTests rather than as literals,
+    /// because two literals can both be rubber-stamped by a change that freezes one.</para>
+    ///
+    /// <para><b>What this does NOT do.</b> It does not bound what an operator may SET. The knob stays
+    /// clamped [5, 100] and a value above this one fires after the slot — deliberately, because the knob
+    /// judges families that have no slot, and silently retuning a live fleet's setting to satisfy this
+    /// constant would be a worse trade than the alert arriving late for one family. The slot itself is
+    /// watched independently of this knob, on the grid's own terms, by #3044's
+    /// <see cref="RefreshSlotWarningSeconds"/> line — so raising the knob cannot leave the grid's
+    /// precondition unattended, which is what makes leaving the clamp alone the cheaper trade.</para>
+    ///
+    /// <para>Expressed over <see cref="RefreshPhaseSlots"/> rather than over
+    /// <see cref="RefreshPhaseSlotSeconds"/> because a percent of cadence needs no seconds at all; the two
+    /// are the same wall, and TimescaleContinuousAggregateTests asserts the fire point in SECONDS against
+    /// <see cref="RefreshPhaseSlotSeconds"/> so the identity is checked in the unit the alert compares.</para>
+    /// </summary>
+    public const int RefreshSlotPercentOfHourlyCadence = 100 / RefreshPhaseSlots;
+
+    /// <summary>
     /// The hourly refresh policies in phase order — the ONLY thing that decides which slot a policy gets, and
     /// it is keyed on the VIEW name.
     ///
@@ -2011,6 +2051,41 @@ WITH NO DATA";
             DailyRefreshScheduleInterval,
             DailyRefreshScheduleInterval,
             phaseMinutes: null);
+
+    /// <summary>The TimescaleDB policy proc behind a continuous-aggregate refresh job — what
+    /// <c>timescaledb_information.jobs.proc_name</c> reports, and the leading token of the job label both
+    /// <see cref="JobCadenceReadSql"/> and <see cref="StoreSelfMetrics.BackgroundJobInsertSql"/>
+    /// build.</summary>
+    public const string RefreshPolicyProcName = "policy_refresh_continuous_aggregate";
+
+    /// <summary>
+    /// Whether a background job's <c>schedule_interval</c> is ALSO its <c>end_offset</c>, decided from the
+    /// job label the store telemetry names it by.
+    ///
+    /// <para><b>It is the same argument twice for every refresh policy this product creates.</b>
+    /// <see cref="AddHourlyRefreshPolicySql"/> passes <see cref="HourlyRefreshScheduleInterval"/> as both,
+    /// and <see cref="AddDailyRefreshPolicySql"/> passes <see cref="DailyRefreshScheduleInterval"/> as both;
+    /// TimescaleContinuousAggregateTests pins that equality out of the EMITTED statement, so this predicate
+    /// cannot outlive the fact it reports.</para>
+    ///
+    /// <para><b>Which makes "widen the interval" a collection change here, not a relaxed deadline</b> — the
+    /// half of #3060 an operator actually hits. On the hourly tier it does three things at once: the refresh
+    /// materializes a narrower window, a wider still-filling tail is left unmaterialized, and
+    /// <c>QueryStoreBackfill.RollupStoreHorizon</c> — derived as <see cref="HourlyRefreshStartSpan"/> minus
+    /// that interval — silently shortens with it. Advice that is correct for a compression or retention
+    /// policy alters what gets collected here.</para>
+    ///
+    /// <para>Keyed on <c>proc_name</c> rather than the view or the job id: the policy proc is what decides
+    /// whether the interval carries a second meaning, it is uniform across every deployment, and job ids are
+    /// per-deployment (the <see cref="HourlyRefreshPhaseOrder"/> reasoning). The label is
+    /// <c>proc_name</c> followed by a space or by nothing, so an exact-or-prefixed-token match is the whole
+    /// test — never a substring, which would also match a hypertable that happened to be named after a
+    /// policy.</para>
+    /// </summary>
+    public static bool ScheduleIntervalDoublesAsEndOffset(string? jobLabel)
+        => jobLabel is not null
+            && (jobLabel.Equals(RefreshPolicyProcName, StringComparison.Ordinal)
+                || jobLabel.StartsWith(RefreshPolicyProcName + " ", StringComparison.Ordinal));
 
     /// <summary>
     /// The refresh policy for a continuous aggregate: materialize
@@ -3932,23 +4007,19 @@ WHERE j.proc_name LIKE '%compression%'
     }
 
     /// <summary>
-    /// Every background job's last-run duration against its own schedule interval (#2136) — the readings
-    /// the Store Job Over Cadence self-alert judges. <c>job_stats</c> for the same reason the #1778
-    /// observability path uses it (maintained unconditionally; the per-execution history table is empty
-    /// unless job-execution logging is on). Only a SUCCESSFUL last run judges: a failed run's duration is
-    /// not a cadence signal, and job failures are their own condition (<c>total_failures</c> rides the
-    /// V56 telemetry). Tolerant like <see cref="ReadStuckCompressionJobsAsync"/> — a plain-PG store or a
-    /// hiccup yields no readings, never an exception.
+    /// The #2136 job-cadence catalog read, public for the reason <see cref="RetentionHoldReadSql"/> is: one
+    /// of its projections is now load-bearing for what an ALERT SAYS, so it belongs in CI rather than only
+    /// in a throwaway harness. <see cref="StoreJobCadenceReading.JobName"/> is built <c>proc_name</c> FIRST,
+    /// which is what lets <see cref="ScheduleIntervalDoublesAsEndOffset"/> decide whether widening this
+    /// job's interval would move an <c>end_offset</c>; reversing the concatenation would keep collecting
+    /// perfectly good readings while silently restoring the wrong remedy text.
+    ///
+    /// <para><c>job_stats</c> for the same reason the #1778 observability path uses it (maintained
+    /// unconditionally; the per-execution history table is empty unless job-execution logging is on). Only
+    /// a SUCCESSFUL last run judges: a failed run's duration is not a cadence signal, and job failures are
+    /// their own condition (<c>total_failures</c> rides the V56 telemetry).</para>
     /// </summary>
-    public static async Task<IReadOnlyList<StoreJobCadenceReading>> ReadJobCadenceReadingsAsync(
-        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
-    {
-        if (connection is null)
-        {
-            throw new ArgumentNullException(nameof(connection));
-        }
-
-        const string sql = @"
+    public const string JobCadenceReadSql = @"
 SELECT
     j.job_id,
     j.proc_name || coalesce(' ' || j.hypertable_name, ''),
@@ -3958,10 +4029,24 @@ FROM timescaledb_information.job_stats AS js
 JOIN timescaledb_information.jobs AS j USING (job_id)
 WHERE js.last_run_status = 'Success'";
 
+    /// <summary>
+    /// Every background job's last-run duration against its own schedule interval (#2136) — the readings the
+    /// Store Job Over Cadence self-alert judges. Tolerant like
+    /// <see cref="ReadStuckCompressionJobsAsync"/> — a plain-PG store or a hiccup yields no readings, never
+    /// an exception. See <see cref="JobCadenceReadSql"/> for the statement and its decisions.
+    /// </summary>
+    public static async Task<IReadOnlyList<StoreJobCadenceReading>> ReadJobCadenceReadingsAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
         var readings = new List<StoreJobCadenceReading>();
         try
         {
-            using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            using var command = new NpgsqlCommand(JobCadenceReadSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
