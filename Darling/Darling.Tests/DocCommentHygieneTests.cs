@@ -900,8 +900,7 @@ public sealed class DocCommentHygieneTests
         var onDisk = Directory.EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories)
             .Select(p => Path.GetRelativePath(root, p).Replace('\\', '/'))
             .Where(p => !HasBuildOutputSegment(p))
-            .Where(p => p.Contains('/', StringComparison.Ordinal))
-            .Select(p => p[..p.LastIndexOf('/')])
+            .Select(DirectoryOf)
             .Distinct(StringComparer.Ordinal)
             .ToHashSet(StringComparer.Ordinal);
 
@@ -934,11 +933,13 @@ public sealed class DocCommentHygieneTests
 
         foreach (var project in projects)
         {
+            /* TopDirectoryOnly for the root project, because IsUnder gives it only the files sitting
+               directly there — every deeper file belongs to some other project or to none. */
             var onDisk = Directory
                 .EnumerateFiles(
                     Path.Combine(root, project.Replace('/', Path.DirectorySeparatorChar)),
                     "*.cs",
-                    SearchOption.AllDirectories)
+                    project.Length == 0 ? SearchOption.TopDirectoryOnly : SearchOption.AllDirectories)
                 .Count(f => !HasBuildOutputSegment(Path.GetRelativePath(root, f)));
 
             census.ByProject.TryGetValue(project, out var counts);
@@ -986,6 +987,51 @@ public sealed class DocCommentHygieneTests
         {
             Assert.NotEmpty(CrefSegments(degenerate));
         }
+    }
+
+    /// <summary>
+    /// A project at the repository ROOT is a project directory like any other: it is derived, it is
+    /// floored, and its files are attributed to it.
+    ///
+    /// <para><b>Driven on an arranged population because the tree has no such project.</b> The review on
+    /// #3086 found that a separator-less path was filtered out of BOTH sides of
+    /// <see cref="TheDerivedProjectListCoversEveryProjectInTheTree"/>'s difference, which made that check
+    /// structurally unable to report the one thing it exists to report. Waiting for a root-level
+    /// <c>.csproj</c> to appear before exercising the path is the shape #3079 rejected three times: a case
+    /// nothing drives is a case nobody knows is broken.</para>
+    /// </summary>
+    [Fact]
+    public void TheRootIsAProjectDirectoryLikeAnyOther()
+    {
+        Assert.Equal(string.Empty, DirectoryOf("RootProject.csproj"));
+        Assert.Equal("Nested", DirectoryOf("Nested/Project.csproj"));
+        Assert.Equal("A/B", DirectoryOf("A/B/Project.csproj"));
+
+        /* A file at the root belongs to the root project and to nothing deeper; a file one level down does
+           not belong to the root. Both directions, because getting either wrong silently moves files
+           between projects and the per-project floors would then be counting the wrong tree. */
+        Assert.True(IsUnder("RootFile.cs", string.Empty));
+        Assert.False(IsUnder("Nested/File.cs", string.Empty));
+        Assert.True(IsUnder("Nested/File.cs", "Nested"));
+        Assert.False(IsUnder("RootFile.cs", "Nested"));
+        /* A separator is still required, so a tree merely PREFIXED by a project's name is not that
+           project — the #3067 property, restated here because IsUnder is where it now lives. */
+        Assert.False(IsUnder("NestedExtra/File.cs", "Nested"));
+
+        /* And through the census: the root project is populated, floored and counted. A deeper project in
+           the same population is the negative control, so "everything lands in the root" cannot pass. */
+        var census = BuildCrefCensus(
+            new[]
+            {
+                ("RootFile.cs", "/// <summary><see cref=\"Marker\"/></summary>\nclass Marker { }"),
+                ("Nested/File.cs", "/// <summary><see cref=\"Marker\"/></summary>\nclass Marker { }"),
+            },
+            new[] { string.Empty, "Nested" });
+
+        AssertCrefPopulationFloors(census, new[] { string.Empty, "Nested" }, Array.Empty<string>());
+
+        Assert.Equal((1, 1, 1), census.ByProject[string.Empty]);
+        Assert.Equal((1, 1, 1), census.ByProject["Nested"]);
     }
 
     /// <summary>
@@ -1593,8 +1639,7 @@ public sealed class DocCommentHygieneTests
 
         foreach (var (path, text) in sources)
         {
-            var project = byLength.FirstOrDefault(
-                p => path.StartsWith(p + "/", StringComparison.Ordinal));
+            var project = byLength.FirstOrDefault(p => IsUnder(path, p));
 
             void Add(int files, int blocks, int crefs)
             {
@@ -1810,17 +1855,51 @@ public sealed class DocCommentHygieneTests
     }
 
     /// <summary>
+    /// The directory part of a repo-relative forward-slashed path, with the repository ROOT spelled as the
+    /// empty string.
+    ///
+    /// <para><b>Why the root is a value and not a filtered-out case, which is the review finding on
+    /// #3086.</b> The obvious guard against <c>LastIndexOf('/')</c> returning -1 is to drop
+    /// separator-less paths — and dropping them is what makes the check below structurally unable to see
+    /// them. <see cref="TheDerivedProjectListCoversEveryProjectInTheTree"/> compares the solution's
+    /// project directories against the ones on disk, and the SAME filter gated both sides: a
+    /// <c>.csproj</c> at the repository root was excluded from both, so the difference was empty for it by
+    /// construction and it would never have been given a per-project floor. A guard blind to exactly the
+    /// case its own prose warns about is worse than one that never claimed the coverage. There is no such
+    /// project today, which is why <see cref="TheRootIsAProjectDirectoryLikeAnyOther"/> drives it on an
+    /// arranged population instead of waiting for one.</para>
+    /// </summary>
+    private static string DirectoryOf(string relativePath)
+    {
+        var separator = relativePath.LastIndexOf('/');
+
+        return separator < 0 ? string.Empty : relativePath[..separator];
+    }
+
+    /// <summary>
+    /// Whether <paramref name="relativePath"/> is a file of the project rooted at
+    /// <paramref name="directory"/> — where the empty directory means the repository root, and a file is
+    /// only ITS file when it sits directly there.
+    ///
+    /// <para>Shared by the attribution in <see cref="BuildCrefCensus"/> and by the counts read back
+    /// against it, so the two cannot come to disagree about which project a file belongs to.</para>
+    /// </summary>
+    private static bool IsUnder(string relativePath, string directory) =>
+        directory.Length == 0
+            ? !relativePath.Contains('/', StringComparison.Ordinal)
+            : relativePath.StartsWith(directory + "/", StringComparison.Ordinal);
+
+    /// <summary>
     /// Every project directory the solution builds, repo-relative and forward-slashed, derived from
-    /// <c>PerformanceMonitor.sln</c> rather than written down.
+    /// <c>PerformanceMonitor.sln</c> rather than written down. A project at the repository root comes back
+    /// as the empty string rather than being dropped — see <see cref="DirectoryOf"/>.
     /// </summary>
     private static IReadOnlyList<string> SolutionProjectDirectories(string root)
     {
         var solution = File.ReadAllText(Path.Combine(root, "PerformanceMonitor.sln"));
 
         var directories = Regex.Matches(solution, "\"([^\"]+\\.csproj)\"")
-            .Select(m => m.Groups[1].Value.Replace('\\', '/'))
-            .Where(p => p.Contains('/', StringComparison.Ordinal))
-            .Select(p => p[..p.LastIndexOf('/')])
+            .Select(m => DirectoryOf(m.Groups[1].Value.Replace('\\', '/')))
             .Distinct(StringComparer.Ordinal)
             .OrderBy(p => p, StringComparer.Ordinal)
             .ToArray();
