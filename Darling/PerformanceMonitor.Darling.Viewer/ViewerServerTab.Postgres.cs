@@ -298,7 +298,7 @@ public partial class ViewerServerTab
 
         await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask);
 
-        /* Released here rather than at the closing brace: the six sub-tab loads at the end of this method
+        /* Released here rather than at the closing brace: the four sub-tab loads at the end of this method
            run after these five have finished, so they do not contend with them. */
         readFanOut.Release();
 
@@ -332,9 +332,7 @@ public partial class ViewerServerTab
             "No database counter moved in this window.");
 
         await LoadPgLockStatsAsync(startUtc, endUtc);
-        await LoadPgWaitSamplingAsync(startUtc, endUtc);
         await LoadPgKernelStatsAsync(startUtc, endUtc);
-        await LoadPgPredicateStatsAsync(startUtc, endUtc);
         await LoadPgPlanCaptureAsync(startUtc, endUtc);
         await LoadPgDeadlocksAsync(startUtc, endUtc);
     }
@@ -673,8 +671,21 @@ public partial class ViewerServerTab
                       + "without %Q in log_line_prefix every captured plan is an orphan.";
     }
 
-    /// <summary>Waits — Aurora's cumulative wait counters. Shown on stock PostgreSQL too, where the panel
-    /// carries the capability sentence rather than a blank rectangle; see the type header.</summary>
+    /// <summary>
+    /// Waits — the two wait instruments, side by side. <c>pg_wait_stats</c> is Aurora's cumulative
+    /// counters and exists only there; <c>pg_wait_sampling</c> attributes each wait to the query that
+    /// waited and runs on any PostgreSQL that loads the module. Both panels are shown on either
+    /// engine: where a collector does not apply the panel carries the capability sentence rather
+    /// than a blank rectangle; see the type header.
+    ///
+    /// <para>Both are loaded here because the tab is read by COMPARING them: on most servers exactly
+    /// one of the two has rows, and which one it is says which instrument the server offers. A panel
+    /// filled by some other tab's load path cannot carry that reading — it is blank on arrival, and a
+    /// blank instrument reads as an absent one (#3050).</para>
+    ///
+    /// <para>Sequential rather than a declared fan-out: the sampling read is issued after this one has
+    /// returned, so neither contends with the other and each keeps the single-read deadline.</para>
+    /// </summary>
     private async Task LoadPgWaitsAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
@@ -686,6 +697,8 @@ public partial class ViewerServerTab
         PgWaitStatsGrid.ItemsSource = rows.Select(PgDisplay.Wait).ToList();
         PgWaitsNote.Text = PanelNote("pg_wait_stats", rows.Count,
             "No wait time was recorded for this server in this window.");
+
+        await LoadPgWaitSamplingAsync(startUtc, endUtc);
     }
 
     /// <summary>I/O — <c>pg_stat_io</c>, differenced over the window.</summary>
@@ -842,6 +855,11 @@ public partial class ViewerServerTab
     /// Storage - the per-table bloat estimate and per-index usage. Both reads fire together: they are one
     /// tab answering one question (where the space went, and whether it is earning its keep), so moving
     /// between the two grids needs no second round trip.
+    ///
+    /// <para>The predicate panel loads here too, on the tab that renders it: it is the other half of the
+    /// index question the grids above ask, it is where the hypothetical-index experiment (#2612) is driven
+    /// from, and an index candidate nobody can see until some other tab has been visited is not a candidate
+    /// anybody acts on (#3050).</para>
     /// </summary>
     private async Task LoadPgStorageAsync()
     {
@@ -854,7 +872,7 @@ public partial class ViewerServerTab
 
         await Task.WhenAll(bloatTask, indexTask);
 
-        /* Released here — the two sub-tab loads at the end of this method do not contend with these two. */
+        /* Released here — the three sub-tab loads at the end of this method do not contend with these two. */
         readFanOut.Release();
 
         var bloat = bloatTask.Result;
@@ -899,6 +917,7 @@ public partial class ViewerServerTab
 
         await LoadPgColumnStatsAsync(startUtc, endUtc);
         await LoadPgIndexBloatAsync(startUtc, endUtc);
+        await LoadPgPredicateStatsAsync(startUtc, endUtc);
     }
 
     /// <summary>
