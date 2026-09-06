@@ -1766,6 +1766,98 @@ WITH NO DATA";
     public const int HeaviestHourlyRefreshObservedCeilingSeconds = 864;
 
     /// <summary>
+    /// The slot width in seconds — the bound
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>'s envelope is stated against, named once so
+    /// the build-time assertion and the runtime watch below cannot disagree about what the wall is.
+    ///
+    /// <para>Derived from <see cref="RefreshPhaseStepMinutes"/> rather than restated, for the same reason
+    /// <see cref="RefreshPhaseSlots"/> is: a grid moved to a different step must move every bound that was
+    /// sized against it, and a literal 900 would sit still while the grid changed underneath it.</para>
+    /// </summary>
+    public const int RefreshPhaseSlotSeconds = RefreshPhaseStepMinutes * 60;
+
+    /// <summary>
+    /// The line at which the heaviest hourly refresh's LIVE runtime is worth a warning — five sixths of
+    /// <see cref="RefreshPhaseSlotSeconds"/>, so 750 s against today's 900 s slot.
+    ///
+    /// <para><b>Why this exists at all, which is the whole of #3044.</b> The assertion on
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> bounds a CONSTANT, and the thing it bounds is
+    /// a RUNTIME that moves with data volume. It fires when someone edits the constant and never when reality
+    /// changes underneath it. The grid's precondition can therefore become false with every test still green.
+    /// This is the same bound applied to the figure the envelope is actually about, on the hourly sweep that
+    /// already reads the job catalog.</para>
+    ///
+    /// <para><b>Five sixths is a lead-time choice, and it is applied to the derived slot rather than written
+    /// down as an answer</b> — the same shape as <see cref="CompressionPhaseGuardMinutes"/>, whose <c>/2</c> is
+    /// also a chosen fraction of a derived quantity. Two things had to hold. It must clear the routine band:
+    /// five consecutive live readings during #3044's own review came back 335 s, 594 s, 465 s, 359 s and
+    /// 293 s — 32.6% to 66.0% of the slot — so a line at 83.3% leaves the observed peak a full sixth of the
+    /// slot below it and cannot cry wolf on load this store has already carried. And it must leave usable lead
+    /// time: the remaining sixth is 150 s here, while the walk that carries this job through the hour advances
+    /// by its own runtime each cycle (see the finish-to-start note on
+    /// <see cref="SetCompressionSchedulePhaseSql"/>), so the warning lands while the job still finishes inside
+    /// its slot and the grid's stated precondition is still TRUE. A tempting alternative — slot less one
+    /// <see cref="CompressionPhaseGuardMinutes"/> band, 480 s — was rejected on those same readings: it would
+    /// have fired on three of the five.</para>
+    ///
+    /// <para><b>This line sits BELOW <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>, deliberately,
+    /// and that is not a contradiction.</b> 750 &lt; 864 means the recorded ceiling itself classifies as a
+    /// warning — which is exactly the state #3044 was filed on: the constant the grid is sized against is
+    /// already 96.0% of the slot, 36 seconds clear. So a live reading in this band is not news about the
+    /// ceiling; it is the signal that the store is back at the top of its own measured range, where the next
+    /// move is the one that invalidates the grid. Pinned as that relationship rather than as two numbers.</para>
+    /// </summary>
+    public const int RefreshSlotWarningSeconds = RefreshPhaseSlotSeconds * 5 / 6;
+
+    /// <summary>
+    /// Where one live reading of <see cref="HeaviestHourlyRefreshView"/>'s runtime sits against the slot it
+    /// has to fit inside. <see cref="ClassifyRefreshSlotHeadroom"/> produces it; nothing here reads a clock or
+    /// a catalog, so it pins directly.
+    /// </summary>
+    public enum RefreshSlotHeadroom
+    {
+        /// <summary>Under <see cref="RefreshSlotWarningSeconds"/> — the routine band, and the one every
+        /// reading taken so far falls in. Not worth a line above Debug.</summary>
+        InsideSlot,
+
+        /// <summary>At or past <see cref="RefreshSlotWarningSeconds"/> but still inside
+        /// <see cref="RefreshPhaseSlotSeconds"/>: the grid's precondition still holds, and there is still
+        /// time to re-derive it deliberately.</summary>
+        ApproachingSlot,
+
+        /// <summary>At or past <see cref="RefreshPhaseSlotSeconds"/>. The refresh no longer fits inside its
+        /// own slot, so excluding one slot is no longer enough — the compression grid's stated precondition
+        /// is FALSE and #3035 has to be re-derived rather than renumbered.</summary>
+        SlotExceeded,
+    }
+
+    /// <summary>
+    /// Classifies one observed runtime of <see cref="HeaviestHourlyRefreshView"/> against its slot.
+    ///
+    /// <para><b>Both boundaries are inclusive, and that is the point of the function rather than an
+    /// implementation detail.</b> The build-time assertion is
+    /// <c>HeaviestHourlyRefreshObservedCeilingSeconds &lt; RefreshPhaseStepMinutes * 60</c>, so a value AT the
+    /// slot width already fails it. <see cref="RefreshSlotHeadroom.SlotExceeded"/> therefore starts at
+    /// <c>&gt;=</c> the same width: the runtime watch and the constant's assertion agree on where the wall is
+    /// by construction, which is the property a second hand-written comparison could not offer.</para>
+    ///
+    /// <para>Negative and NaN readings classify as <see cref="RefreshSlotHeadroom.InsideSlot"/> rather than
+    /// throwing: this feeds a log line on an observability sweep, and a catalog that hands back something
+    /// impossible must cost the line, never the sweep.</para>
+    /// </summary>
+    public static RefreshSlotHeadroom ClassifyRefreshSlotHeadroom(double observedSeconds)
+    {
+        if (observedSeconds >= RefreshPhaseSlotSeconds)
+        {
+            return RefreshSlotHeadroom.SlotExceeded;
+        }
+
+        return observedSeconds >= RefreshSlotWarningSeconds
+            ? RefreshSlotHeadroom.ApproachingSlot
+            : RefreshSlotHeadroom.InsideSlot;
+    }
+
+    /// <summary>
     /// The longest run recorded for any hourly refresh OTHER than
     /// <see cref="HeaviestHourlyRefreshView"/> — the number <see cref="CompressionPhaseGuardMinutes"/> is
     /// derived from. The first full staggered cycle came back 26 s / 2 s / 864 s / 140 s, so this is the 140.
@@ -3889,6 +3981,150 @@ WHERE js.last_run_status = 'Success'";
     }
 
     /// <summary>
+    /// The last SUCCESSFUL run of <see cref="HeaviestHourlyRefreshView"/>'s refresh policy, in seconds — the
+    /// live figure <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>'s envelope is about (#3044).
+    ///
+    /// <para><b>Keyed on the VIEW, and the join is <see cref="ContinuousAggregateRefreshStateSql"/>'s
+    /// measured one rather than a fresh guess.</b> A refresh job's identity cannot be a job id — those are
+    /// assigned per deployment — and it cannot be the display string the V56 telemetry builds either, because
+    /// matching on a concatenation is the drifting paraphrase this file keeps warning about. It has to be the
+    /// view name, which is what the grid is keyed on. The OR-join is copied deliberately: the
+    /// materialization-hypertable form alone was measured to find NOTHING, and the two identities are disjoint
+    /// (a user view lives in <c>collect</c>, a materialization hypertable in
+    /// <c>_timescaledb_internal</c>), so at most one row matches per job.</para>
+    ///
+    /// <para><c>last_run_status = 'Success'</c> for the reason #2136's read has it: a failed run's duration is
+    /// not an envelope reading, and job failures are their own condition. <see cref="HeaviestHourlyRefreshView"/>
+    /// is a compile-time constant, so it interpolates like every other literal here.</para>
+    ///
+    /// <para><b>Deliberately a SAMPLE and not a record of every run.</b> The refresh and the sweep that reads
+    /// this both tick hourly but on independent anchors, and the refresh's start-minute walks (finish-to-start,
+    /// so it advances by its own runtime each cycle), so some runs are seen twice and some not at all. That is
+    /// adequate and it is what the condition needs: the thing being watched is a runtime trending with volume
+    /// over days, and a figure that persists near the line is seen by every tick. The complete per-run series
+    /// already exists in <c>collect.store_metrics</c> (<c>object_kind = 'background_job'</c>, #2136/V56) — this
+    /// read supplies the BOUND, which is what was missing, not the history.</para>
+    /// </summary>
+    public static string HeaviestRefreshRuntimeSql =>
+        $@"
+SELECT
+    ca.view_name,
+    EXTRACT(EPOCH FROM js.last_run_duration)::double precision AS last_run_seconds
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+JOIN timescaledb_information.job_stats AS js USING (job_id)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'
+AND   ca.view_name = '{HeaviestHourlyRefreshView}'
+AND   js.last_run_status = 'Success'";
+
+    /// <summary>
+    /// Reads <see cref="HeaviestRefreshRuntimeSql"/>. Returns null when there is no reading — a fresh store
+    /// whose policy has not completed a run, a plain-PostgreSQL store, a store hiccup — never a synthesized
+    /// zero, which would read as "finished instantly" and is the honest-empty rule this store's collectors are
+    /// held to. Failure-isolated to null the same way <see cref="ReadCompressionActivityAsync"/> is to an empty
+    /// list: observability must never be able to break the sweep that carries it.
+    /// </summary>
+    public static async Task<HeaviestRefreshSlotReading?> ReadHeaviestRefreshRuntimeAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            using var command = new NpgsqlCommand(HeaviestRefreshRuntimeSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1))
+            {
+                return null;
+            }
+
+            return new HeaviestRefreshSlotReading(
+                reader.GetString(0),
+                Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Heaviest-refresh slot headroom: could not read job stats: {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Logs <see cref="ReadHeaviestRefreshRuntimeAsync"/>'s reading at a level proportionate to what it says —
+    /// the #3044 watch, and the reason it is a LOG LINE rather than a health band or a self-alert.
+    ///
+    /// <para><b>Not a band.</b> The Collection Health bands are keyed on (server, collector). This is a
+    /// store-side background job, which is neither, so there is no row for it — and #1852's inherited
+    /// constraints are that the band order and semantics do not change and that a new informational signal
+    /// never reaches the banding at all.</para>
+    ///
+    /// <para><b>Not a second self-alert, and the reason is arithmetic rather than taste.</b> #2136's Store Job
+    /// Over Cadence already judges this job's <c>last_run_duration</c> against its own schedule interval, and
+    /// its default warning knob of 25% of a 3,600 s cadence lands on 900 s — EXACTLY one slot, because a slot
+    /// is <c>3600 / RefreshPhaseSlots</c>. So an alert at the slot width would double-fire with #2136 on the
+    /// same job, the same reading and the same hour. What it would not do is make the bound reliable: that 25%
+    /// is a store-backed operator knob clamped [5, 100] with no relationship to
+    /// <see cref="RefreshPhaseStepMinutes"/>, so raising it to 50 to quiet a busy store silently moves the
+    /// effective line to 1,800 s — twice the invalidation point — and moving the grid to a 10-minute step
+    /// would leave the knob firing at 900 s against a 600 s slot, 300 s PAST invalidation.</para>
+    ///
+    /// <para><b>That the two lines coincide is a coincidence of two independent decisions, and the clearest
+    /// evidence is that #2136 does not know this job's size.</b> Its clamp is justified in
+    /// <c>DarlingAlertSettings</c> on the grounds that "the production worst runs ~7% of cadence" — 252 s —
+    /// while <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> here records 864 s, which is <b>24.0%
+    /// of the same 3,600 s cadence</b>, one point under the 25% default. So the job this envelope is about is
+    /// already sitting just below a warning line calibrated as though it ran a third of its actual length,
+    /// and nothing connects the two numbers. #2136's own remedy text — "extend the job's schedule_interval" —
+    /// is actively wrong for this one, because <see cref="HourlyRefreshScheduleInterval"/> is also the
+    /// <c>end_offset</c> and widening it changes what the aggregate materializes without touching the slot.
+    /// A line derived from the slot, keyed on the view, naming the actual remedy, is the form that stays
+    /// correct when either of those numbers moves.</para>
+    ///
+    /// <para><b>Levels.</b> The routine band is Debug — every reading taken so far is in it, and an hourly
+    /// Information line about a healthy job is how a signal gets buried (the discipline
+    /// <see cref="LogCompressionActivity"/> already states). Approaching the slot is a Warning: still true,
+    /// still time to act. At or past the slot it is an Error, because a documented precondition of the shipped
+    /// compression grid is now FALSE — the highest level a log line has, and still not an alert, because the
+    /// action it calls for is re-deriving #3035's grid rather than anything an operator does tonight.</para>
+    /// </summary>
+    public static void LogHeaviestRefreshSlotHeadroom(HeaviestRefreshSlotReading? reading, ILogger? logger)
+    {
+        if (logger is null || reading is null)
+        {
+            return;
+        }
+
+        switch (reading.Headroom)
+        {
+            case RefreshSlotHeadroom.SlotExceeded:
+                logger.LogError(
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s, at or past the {Slot}s refresh slot ({Percent:F1}% of it) — it no longer fits inside its own slot, so excluding one slot is no longer enough and the compression phase grid's stated precondition is false. The grid has to be RE-DERIVED (#3035), not renumbered: a {Step}-minute grid can no longer hold thirteen hourly refreshes, so the fix is fewer slots, a longer cadence for this aggregate, or splitting it (#3044).",
+                    reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot, RefreshPhaseStepMinutes);
+                break;
+
+            case RefreshSlotHeadroom.ApproachingSlot:
+                logger.LogWarning(
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run series is collect.store_metrics where object_kind = 'background_job' (#3044).",
+                    reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot,
+                    reading.ClearOfSlotSeconds, RefreshSlotWarningSeconds);
+                break;
+
+            default:
+                logger.LogDebug(
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s, {Percent:F1}% of its {Slot}s slot ({Clear:F0}s clear, watch line {Warn}s).",
+                    reading.View, reading.LastRunSeconds, reading.PercentOfSlot, RefreshPhaseSlotSeconds,
+                    reading.ClearOfSlotSeconds, RefreshSlotWarningSeconds);
+                break;
+        }
+    }
+
+    /// <summary>
     /// The steady-state deadline for the hourly job-catalog reads (#2813 review). Deliberately NOT
     /// <see cref="SetupTimeoutSeconds"/>: that 300s budget is documented for one-time BULK SETUP — the
     /// migrate session's first <c>migrate_data</c>, hypertable conversion — and reusing it here would let a
@@ -4187,6 +4423,32 @@ public sealed record StuckCompressionJob(long JobId, string? HypertableName, str
 /// <c>[job_id]</c> suffix (the id rides separately as the alert key).
 /// </summary>
 public sealed record StoreJobCadenceReading(long JobId, string JobName, long? LastRunDurationMs, long ScheduleIntervalMs);
+
+/// <summary>
+/// One live reading of the heaviest hourly refresh's runtime against the slot it has to fit inside (#3044),
+/// from <see cref="TimescaleSupport.ReadHeaviestRefreshRuntimeAsync"/>.
+///
+/// <para>Carries the derived answers rather than leaving them to each caller, so a consumer cannot log the
+/// seconds and drop the classification — the same reason the readings this file's siblings return compute
+/// their own ratios. <see cref="View"/> is the CAGG's user-view name, which is the identity the phase grid is
+/// keyed on; a job id would name a different job on any other deployment.</para>
+/// </summary>
+public sealed record HeaviestRefreshSlotReading(string View, double LastRunSeconds)
+{
+    /// <summary>Where this reading sits against the slot — see
+    /// <see cref="TimescaleSupport.ClassifyRefreshSlotHeadroom"/>.</summary>
+    public TimescaleSupport.RefreshSlotHeadroom Headroom =>
+        TimescaleSupport.ClassifyRefreshSlotHeadroom(LastRunSeconds);
+
+    /// <summary>How many seconds of the slot were left unused. Goes NEGATIVE past the slot width rather than
+    /// clamping at zero: how far THROUGH the wall a run went is the number that sizes the re-derivation, and
+    /// clamping would report every breach as a dead heat.</summary>
+    public double ClearOfSlotSeconds => TimescaleSupport.RefreshPhaseSlotSeconds - LastRunSeconds;
+
+    /// <summary>This reading as a percentage of the slot — 96.0% for the 864 s recorded ceiling, which is the
+    /// margin #3044 was filed on.</summary>
+    public double PercentOfSlot => 100.0 * LastRunSeconds / TimescaleSupport.RefreshPhaseSlotSeconds;
+}
 
 /// <summary>
 /// One retention policy's armed state and the consequence of it being held (#2813), from
