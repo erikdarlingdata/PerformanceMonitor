@@ -138,14 +138,20 @@ public sealed class RefreshCeilingProvenancePinTests
             @"([0-9]+) is the midpoint of ([0-9]+) and ([0-9]+), so a median over ([0-9]+) of the ([0-9]+) rather than the ([0-9]+) clean",
             true);
 
-        /* NOT drift-swept, for the reason in the class summary: these two are quoted readings, so bumping a
-           digit only produces another number the code cannot contradict. Their real hazard is being folded
-           into the admissible series, which
-           TheInadmissibleReadings_CannotBeFoldedIntoTheStatusVerifiedSeries mutates for directly. */
+        /* ARITY-FREE, and that is the point rather than a convenience. This list gains a reading every hour
+           the job runs - it went from two to three while #3077 was in review - so a pattern shaped
+           "(N) s and (N) s" would encode the count and go stale on the next snapshot. Encoding a count in a
+           regex is the stale-enumeration defect with a test wrapped around it, which is the exact thing this
+           file exists to prevent. One group holding the whole list, flattened by Numbers().
+
+           NOT drift-swept either: these are quoted readings, so bumping a digit only produces another number
+           the code cannot contradict. What IS checked is the rule the paragraph is actually about - see
+           TheInadmissibleReadings_CannotBeFoldedIntoTheStatusVerifiedSeries and the as-at scope guard in
+           Verify. */
         yield return (
-            "the inadmissible snapshot pair",
+            "the inadmissible snapshot readings",
             CeilingDeclaration,
-            @"readings of ([0-9]+) s and ([0-9]+) s come from",
+            @"\(([0-9]+ s(?:, [0-9]+ s)*)\) say the series stayed flat",
             false);
 
         yield return (
@@ -195,7 +201,7 @@ public sealed class RefreshCeilingProvenancePinTests
         var prose = DocProseFor(source, CeilingDeclaration);
 
         var series = Numbers(prose, "the published series");
-        var snapshot = Numbers(prose, "the inadmissible snapshot pair");
+        var snapshot = Numbers(prose, "the inadmissible snapshot readings");
 
         Assert.NotEmpty(series);
         Assert.NotEmpty(snapshot);
@@ -205,7 +211,7 @@ public sealed class RefreshCeilingProvenancePinTests
            the reading. A bare Replace would depend on the surrounding emphasis tags - the very coupling
            DocProseFor now normalises away - and would silently find nothing if someone unbolded the figure,
            which is a mutation that proves nothing wearing a caught drift's clothes. */
-        var snapshotPattern = PatternFor("the inadmissible snapshot pair");
+        var snapshotPattern = PatternFor("the inadmissible snapshot readings");
         var firstReading = OrdinalOfFirstNumberInGroups(prose, snapshotPattern);
         Assert.True(firstReading >= 0, "the snapshot pair's pattern captured no number, so its pin is vacuous.");
 
@@ -455,12 +461,21 @@ public sealed class RefreshCeilingProvenancePinTests
             "the quoted run no longer ends exactly one second after the quoted boundary, so the "
             + "transition-run reading the whole provenance paragraph rests on is not what the numbers say");
 
-        /* The snapshot readings stay out of the admissible population. */
-        var snapshot = Read("the inadmissible snapshot pair");
+        /* The snapshot readings stay out of the admissible population, HOWEVER MANY of them there are. */
+        var snapshot = Read("the inadmissible snapshot readings");
         Require(snapshot.Length > 0, "the inadmissible snapshot readings parsed to nothing");
         Require(!snapshot.Intersect(series).Any(),
             $"an unfiltered snapshot reading appears in the status-verified series {Join(series)}, so the two "
             + "populations have been run together");
+
+        /* THE SCOPE MARKER, which is what stops that list reading as a complete enumeration. The series it
+           quotes gains a reading every hour, so a list without an as-at is a frozen enumeration wearing a
+           complete one's clothes - #3072's defect exactly. Checked for PRESENCE and not for value: the
+           timestamp is evidence, and pinning it to a derived quantity would be inventing a bound. */
+        Require(Regex.IsMatch(ceilingProse, @"Snapshot readings as at <c>[0-9][0-9]:[0-9][0-9]Z</c> \("),
+            "the snapshot readings are no longer scoped by an as-at stamp, so the list now reads as a "
+            + "complete enumeration of a series that gains a reading every hour this job runs. Restore the "
+            + "scope, or drop the enumeration and keep only the rule - the rule is the timeless part");
 
         /* CompressionPhaseMinutes' exclude-whole reasoning, in minutes. */
         Require(Ceiling * 10 % 60 == 0,

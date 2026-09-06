@@ -1807,15 +1807,21 @@ WITH NO DATA";
     /// of 335 and 359, so a median over 8 of the 10 rather than the 9 clean ones — which is why the figure
     /// held here is the one the listed series yields.)</para>
     ///
-    /// <para><b>The hole, and two readings that are corroboration only.</b> The run starting near
-    /// <c>00:35:05</c> was never observed: by the next look the catalog's last-run figure had already
-    /// advanced past it. Two further readings of <b>342 s</b> and <b>348 s</b> come from the hourly
-    /// self-metrics snapshot (<see cref="StoreSelfMetrics.BackgroundJobInsertSql"/>,
-    /// <c>object_kind = 'background_job'</c>), which records <c>last_run_duration</c> with NO STATUS COLUMN
-    /// AT ALL — while <see cref="HeaviestRefreshRuntimeSql"/> and #2136's <see cref="JobCadenceReadSql"/>
-    /// both filter <c>last_run_status = 'Success'</c>. An unfiltered series can carry an aborted run's
-    /// duration, so those two say the series stayed flat and are NOT ADMISSIBLE in setting this constant.
-    /// They are kept out of the ten above for that reason rather than for tidiness.</para>
+    /// <para><b>The hole.</b> The run starting near <c>00:35:05</c> was never observed: by the next look
+    /// the catalog's last-run figure had already advanced past it. That is a gap in the ten above, not a
+    /// reading that was dropped.</para>
+    ///
+    /// <para><b>And the rule that keeps a whole SERIES out of this constant, stated as a rule because the
+    /// series keeps growing.</b> The hourly self-metrics snapshot
+    /// (<see cref="StoreSelfMetrics.BackgroundJobInsertSql"/>, <c>object_kind = 'background_job'</c>)
+    /// records <c>last_run_duration</c> with NO STATUS COLUMN AT ALL, while
+    /// <see cref="HeaviestRefreshRuntimeSql"/> and #2136's <see cref="JobCadenceReadSql"/> both filter
+    /// <c>last_run_status = 'Success'</c>. An unfiltered series can carry an aborted run's duration, so NO
+    /// reading from it may set this constant — a statement about the SOURCE, deliberately not about any
+    /// particular reading, because that series gains one every hour this job runs and an enumeration of it
+    /// would be stale within the hour. Snapshot readings as at <c>04:20Z</c> (342 s, 348 s, 286 s) say the
+    /// series stayed flat, which is corroboration and nothing more. They are kept out of the ten above for
+    /// the rule's sake rather than for tidiness.</para>
     ///
     /// <para><b>Why the value is unchanged in BOTH directions, which is #3069's whole resolution.</b> Upward
     /// is asserted as a failure by design (#3055) — see the slot paragraph below. Downward is the subtler
