@@ -13,7 +13,7 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
-import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtPct, fmtMb, fmtMs, bandClass } from "../util.js";
+import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
 import { VIZ, navigateServer } from "../panels.js";
 
 const BAND_RANK = { Offline: 0, Critical: 1, Warning: 2, Healthy: 3 };
@@ -476,30 +476,14 @@ function deadlockCoverageSub(coverage) {
     : { text: "read " + fmtInt(read) + " of " + fmtInt(total) + " " + noun, partial: true };
 }
 
-/*
- * #3031: a stable id for one of a rollup tile's text rows, so the tile's NUMBER can point at it.
- *
- * Derived from the label rather than from a render counter so the relationship stays inspectable: whoever
- * reads the DOM — an operator, a review, a check — can tell which figure "rollup-deadlocks-recent-sub"
- * belongs to without counting siblings. `used` de-duplicates within one render, because two tiles sharing a
- * label would emit a duplicate id and aria-describedby resolves a duplicate to the FIRST match: a silent
- * mis-association rather than a visible break.
- */
-function rollupTextId(lbl, part, used) {
-  const slug = String(lbl == null ? "" : lbl).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  const base = "rollup-" + (slug || "tile") + "-" + part;
-  let id = base;
-  for (let n = 2; used.has(id); n++) id = base + "-" + n;
-  used.add(id);
-  return id;
-}
-
 function rollup(d) {
   /* #3031: every tile's number is programmatically tied to the text that says what it counts. The label and
      the coverage sub-line carry stable ids and the number describes itself with them, so the figure and its
      meaning travel together for a consumer that reaches the number's node on its own rather than browsing
      the tile top to bottom. Reading order alone leaves that relationship inferable but not determinable, and
      it is the same on all seven tiles — which is why it is wired once here in the helper and at no call site.
+     `rollupTextId` lives in util.js because the AG rollup is wired the same way (#3045), so the
+     de-duplication rule it carries has one implementation rather than one per page.
 
      The label rides in aria-describedby rather than aria-label / aria-labelledby because .num is a plain
      div: ARIA prohibits NAMING role=generic, so a name set there is invalid and may be dropped on the floor,

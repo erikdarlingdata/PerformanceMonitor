@@ -33,6 +33,7 @@ import {
   fmtText,
   bandClass,
   sevClass,
+  rollupTextId,
 } from "../util.js";
 import { VIZ } from "../panels.js";
 
@@ -95,11 +96,30 @@ function pageHead(d) {
    than one monitored replica, and that difference is the thing a reader needs to understand before wondering why
    the same AG name appears twice. */
 function rollup(d) {
-  const tile = (num, lbl, cls) =>
-    el("div", { class: "tile " + (cls || "") }, [
-      el("div", { class: "num", text: fmtInt(num) }),
-      el("div", { class: "lbl", text: lbl }),
+  /* #3045: every tile's number is programmatically tied to the text that says what it counts — the wiring
+     #3038 put on the fleet rollup, from the shared helper, because the defect was identical and the two
+     pages have no code path in common to fix it once. The label carries a stable id and the number describes
+     itself with it, so the figure and its meaning travel together for a consumer that reaches the number's
+     node on its own rather than browsing the tile top to bottom. Reading order alone leaves that
+     relationship inferable but not determinable. Wired here in the helper and at no call site, so a fourth
+     tile cannot be added half-wired.
+
+     The label rides in aria-describedby rather than aria-label / aria-labelledby because .num is a plain
+     div: ARIA prohibits NAMING role=generic, so a name set there is invalid and may be dropped on the floor,
+     while a description is a supported property on it. Description is the carrier that works without
+     inventing a widget role for a static figure.
+
+     No sub-line and no title here, unlike the fleet tile: that rollup qualifies one of its numbers with a
+     coverage line and carries a long coverage note. These three counts qualify nothing and hover over
+     nothing, so there is no second text row for an id to point at. */
+  const usedIds = new Set();
+  const tile = (num, lbl, cls) => {
+    const lblId = rollupTextId(lbl, "lbl", usedIds);
+    return el("div", { class: "tile " + (cls || "") }, [
+      el("div", { class: "num", text: fmtInt(num), "aria-describedby": lblId }),
+      el("div", { class: "lbl", id: lblId, text: lbl }),
     ]);
+  };
 
   return el("div", { class: "rollup" }, [
     el("div", { class: "rollup-group" }, [
