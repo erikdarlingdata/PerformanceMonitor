@@ -168,6 +168,7 @@ public static class PgMigrations
         new Migration(109, "collection-log-drain-forensics", V109Sql),
         new Migration(110, "collection-log-fetch-phase-sums", V110Sql),
         new Migration(111, "store-log-self-monitoring", V111Sql),
+        new Migration(112, "collector-stall-wait-probes", V112Sql),
     };
 
     /// <summary>
@@ -2692,6 +2693,100 @@ ALTER TABLE collect.collection_log
    read goes through would keep serving the pre-V110 column list forever - invisible on an UPGRADED store
    while working fine on a fresh one. The V14 lesson, V80's, V108's and V109's. */
 CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
+
+    /// <summary>
+    /// V112 — <c>collect.collector_stall_probes</c>: what the whole monitored INSTANCE was waiting on during a
+    /// collector stall, sampled out of band because nothing inside the sweep can answer it (#2880).
+    ///
+    /// <para><b>Why the rung is required rather than a column family on <c>collection_log</c>.</b> V108, V109
+    /// and V110 all widened that row, and this deliberately does not, for one reason: a probe folded onto the
+    /// stalled run's log row would have to be AWAITED by the run before the row could be written. That puts
+    /// the watchdog on the collector's critical path — it would carry up to
+    /// <see cref="!:StallWaitProbePolicy.HardBudget"/> into <c>duration_ms</c>, and it would delay the next
+    /// collector on a server whose sweep is already blown, on exactly the ~1% of runs the instrument exists
+    /// for. Its own table is what lets the probe be dispatched and forgotten. The join back to the stalled run
+    /// is <c>(server_id, collector_name, probe_time)</c> against <c>v_collection_log</c>, which is explicit
+    /// rather than free, and that is the price paid for the decoupling.</para>
+    ///
+    /// <para><b>NOT a collector.</b> It is not in <c>CollectorCatalog.All</c>, so it is absent from the
+    /// generator-parity pins, the catalog-driven hypertable conversion and the catalog retention purge —
+    /// hand-written DDL is correct here rather than a parity miss, the V53 / V105 / V111 shape. A plain table,
+    /// not a hypertable: the arrival rate is one row per stalled run, which the measured population puts at
+    /// roughly 90 rows a day across a 43-server fleet (2 servers, 2 collectors, ~1% of ~2,400 runs each), so
+    /// chunking would cost more than it saves. Bounded by <c>StallWaitProbeRunner</c>'s own retention DELETE,
+    /// the way <c>store_metrics</c> and <c>collector_cost</c> are — a bounded arrival rate over unbounded time
+    /// is unbounded.</para>
+    ///
+    /// <para><b>The trigger columns are stored, not just the sample.</b> <c>trigger_elapsed_ms</c>,
+    /// <c>trigger_rows_read</c>, <c>trigger_bytes_read</c>, <c>trigger_last_read_ms</c> and <c>budget_ms</c>
+    /// are what the client believed at the instant it decided to spend a probe, so "why did this fire" is
+    /// answerable from the row instead of from a log line on a box. <c>trigger_last_read_ms</c> in particular
+    /// is recorded and was NOT part of the decision: the measured failure mode streams slowly with 0-3 ms of
+    /// terminal silence on 8 of 8 abandoned runs, so a firing condition keyed on the reader having gone quiet
+    /// would never fire on the actual defect. Storing it beside the decision is how a later reader can check
+    /// that for themselves.</para>
+    ///
+    /// <para><b><c>outcome</c> is NOT NULL and a probe that could not connect is one of its values.</b> Whether
+    /// a connection can be obtained mid-stall has never been tested — the one open in evidence
+    /// (<c>open:104ms</c>) is the stalled collector's OWN open, taken before the stall — so
+    /// <c>CONNECT_FAILED</c> / <c>CONNECT_TIMED_OUT</c> are expected results that answer an open question, and
+    /// they get a stored row with <c>connect_ms</c> and <c>error_message</c> rather than a swallowed log line.
+    /// Every value comes from <c>StallWaitProbePolicy.Outcomes</c>; no CHECK constraint, for
+    /// <c>collection_log.status</c>'s reason — the reads bucket by explicit list, never by complement, so a
+    /// value added later joins no bucket instead of silently joining the wrong one.</para>
+    ///
+    /// <para><b><c>scheduler_count</c> is the sample's own denominator.</b> Zero waiting tasks is a real and
+    /// interesting answer — an instance answering trivial queries in milliseconds, producing rows 50x slowly,
+    /// and waiting on nothing — but it is indistinguishable from a result set that described no instance at
+    /// all. Every live SQL Server reports at least one <c>VISIBLE ONLINE</c> scheduler, so a positive count
+    /// beside an empty wait list is what makes the all-clear readable, and a sample without one is stored as
+    /// <c>NO_SAMPLE</c> rather than as a row of zeros. The same reasoning <c>get_pg_blocking</c> carries its
+    /// capture counts for.</para>
+    ///
+    /// <para><b>No Lite twin, structurally.</b> The parity rule exists so state added to one store does not
+    /// read as permanently empty on the other. The source is Darling-only: the arm is installed by
+    /// <c>DarlingCollectorRunner</c>'s server-scoped path beside the V108/V109 instrumentation it reads, and
+    /// Lite's runner has neither. A DuckDB twin would be an always-empty table. V109's situation, not
+    /// <c>get_deadlocks</c>'.</para>
+    ///
+    /// <para>Naive UTC per the store contract, and it is the PROBE's clock — the instant the sample was taken
+    /// on the client, not a timestamp read off the target, so nothing here depends on the monitored server's
+    /// <c>timezone</c>.</para>
+    /// </summary>
+    private const string V112Sql = @"
+CREATE TABLE IF NOT EXISTS collect.collector_stall_probes
+(
+    probe_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    collector_name text NOT NULL,
+    outcome text NOT NULL,
+    budget_ms integer NOT NULL,
+    trigger_elapsed_ms integer NOT NULL,
+    trigger_rows_read bigint,
+    trigger_bytes_read bigint,
+    trigger_last_read_ms integer,
+    connect_ms integer,
+    query_ms integer,
+    waiting_task_count bigint,
+    distinct_wait_types integer,
+    top_wait_type text,
+    top_wait_total_ms bigint,
+    top_wait_max_ms bigint,
+    wait_summary text,
+    scheduler_count integer,
+    runnable_tasks bigint,
+    work_queue_length bigint,
+    pending_disk_io bigint,
+    max_runnable_tasks integer,
+    error_message text
+);
+
+/* The read is newest-first per server, and the retention DELETE is by time alone, so one index serves both.
+   Not UNIQUE: two collectors on one server can stall in the same millisecond, and a unique key would drop
+   the second sample - the one that proves the degradation is not confined to a single collector. */
+CREATE INDEX IF NOT EXISTS idx_collector_stall_probes_time
+    ON collect.collector_stall_probes(server_id, probe_time);";
 
     /// <summary>
     /// V105 — <c>collect.collector_cost</c>, the tool's own per-collector cost on the monitored servers

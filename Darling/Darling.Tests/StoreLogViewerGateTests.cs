@@ -29,13 +29,10 @@ public class StoreLogViewerGateTests
     /// <summary>The probe ordinal this rung's sentinel occupies. Its OWN ordinal, which never moves.</summary>
     internal const int ProbeOrdinal = 86;
 
-    /// <summary>The version a store one rung behind this one reports.</summary>
-    private const int PreviousVersion = 110;
-
     /// <summary>
-    /// The connect-time gate. A TABLE sentinel, because all three objects are new at this rung. Being the
-    /// TOP rung, a fully-migrated store must map to exactly this version or the viewer refuses a store that
-    /// is perfectly current — permanently, because no later upgrade changes the answer.
+    /// The connect-time gate. A TABLE sentinel, because all three objects are new at this rung. This rung's
+    /// sentinel and ordinal are still pinned here — they never move — while a fully-migrated store maps to
+    /// whatever the current top rung is.
     /// </summary>
     [Fact]
     public void TheProbeAsksForTheTable_AndMapsAFullyMigratedStoreToThisRung()
@@ -54,23 +51,19 @@ public class StoreLogViewerGateTests
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The sentinel count and the ordinal have to agree, or the ordinal literal above is pinning a
-           position that no longer exists. */
-        Assert.Equal(arity - 1, ProbeOrdinal);
+        /* The ordinal has to still exist in the signature, or the literal above is pinning a position that
+           was never there. Not `arity - 1` any more: that form asserted this rung was the LAST sentinel,
+           which stopped being true the moment a later rung appended its own. */
+        Assert.True(ProbeOrdinal < arity);
 
-        /* Every sentinel true = a fully-migrated store, which must map to THIS rung. As the top rung this is
-           also the "and no more than that" guard: a later rung appending a sentinel without its own arm
-           would leave this returning 111 for a store that is actually further along. Built by reflection so
-           the arity tracks the signature — the literal-true form silently defaults a newly added sentinel to
-           false and maps one version low. */
+        /* Every sentinel true = a fully-migrated store, which must map to the CURRENT top rung. Built by
+           reflection so the arity tracks the signature — the literal-true form silently defaults a newly
+           added sentinel to false and maps one version low. This rung is no longer the top one, so the
+           "one rung behind" half of this check now belongs to whichever rung is (V112's own test carries
+           it); keeping a copy here that names 110 would assert this rung is still newest, which is how the
+           NEXT rung's build goes red — the note V110's test already left for this one. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        /* One rung behind: every sentinel present EXCEPT this one must report 110, not 111. Without this the
-           arm above could be satisfied by an unconditional return and nothing would notice. */
-        var allButMine = Enumerable.Repeat((object)true, arity).ToArray();
-        allButMine[ProbeOrdinal] = false;
-        Assert.Equal(PreviousVersion, (int)method.Invoke(null, allButMine)!);
     }
 
     private static string ReadSource(string relativePath)

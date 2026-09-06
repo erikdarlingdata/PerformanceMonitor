@@ -569,6 +569,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                    surface beside get_store_metrics. */
                 .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
                 .WithGeminiCompatibleTools<DarlingMcpCollectorCostTools>()
+                /* #2880 get_collector_stall_probes - the out-of-band server-wide wait samples taken
+                   while one of OUR collectors was stalled mid-read. Darling-only: the arm is installed by
+                   DarlingCollectorRunner's server-scoped path, which Lite's runner does not have. */
+                .WithGeminiCompatibleTools<DarlingMcpStallProbeTools>()
                 /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
                    the duration threshold + attentions), over Darling's Postgres store (STORED read). */
                 .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()
