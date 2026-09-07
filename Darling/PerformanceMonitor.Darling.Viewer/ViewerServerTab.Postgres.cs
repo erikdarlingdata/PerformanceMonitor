@@ -979,11 +979,16 @@ public partial class ViewerServerTab
     /// The column-statistics panel (#2543) — the planner inputs that explain WHY a plan was chosen, and the
     /// same statistics the bloat estimate above is computed from.
     ///
-    /// <para><b>Zero rows has two causes and the note must not collapse them.</b> <c>pg_stats</c> filters on
-    /// <c>has_column_privilege</c>, so a monitoring login without SELECT on a table sees nothing for it —
-    /// measured: a <c>pg_monitor</c>-only role gets zero rows where a superuser gets all of them. Row-level
-    /// security empties it the same way. Neither is an absence of problems, and reporting "no statistics" as
-    /// though the data were clean is the exact claim the miss vocabulary exists to prevent.</para>
+    /// <para><b>Zero rows has several causes and the note names WHICH, rather than listing them.</b> Listing
+    /// them is what this panel used to do: <c>pg_stats</c> filters on <c>has_column_privilege</c> so a
+    /// monitoring login without SELECT sees nothing, and a server with no table above the collector's floor
+    /// has nothing to read — and an operator reading both in one sentence learns which two things it might
+    /// be and not which one it is. <see cref="PgColumnStatsCoverage"/> selects the arm from what
+    /// <c>pg_table_bloat_stats</c> already measured, and this panel prints it (#3154).</para>
+    ///
+    /// <para><b>Printed on the POPULATED path as well.</b> A partial view is the same defect one degree
+    /// weaker — the grid ranks what it was given and cannot show what was withheld — so the coverage
+    /// sentence rides both branches rather than being an empty-state message.</para>
     /// </summary>
     private async Task LoadPgColumnStatsAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -1000,17 +1005,25 @@ public partial class ViewerServerTab
 
         var skewed = rows.Count(r => r.TopValueFrequency >= 0.25);
 
+        /* The SAME classifier the MCP tool calls, deliberately (#3154). The panel and the tool answering
+           the same question differently is how a defect gets fixed in one surface and left in the other,
+           and the arm selection is the whole content of the answer here - so neither surface authors it. */
+        var coverage = await _dataService.GetPgColumnStatsCoverageAsync(
+            _server.ServerId, endUtc, rows.Count);
+
         PgColumnStatsNote.Text = rows.Count == 0
-            ? "No column statistics were collected. That is NOT the same as clean statistics, and it has two "
-              + "causes worth telling apart: pg_stats is filtered by SELECT privilege, so a monitoring login "
-              + "without it on a table sees nothing for that table (row-level security empties the view the "
-              + "same way) — or the server genuinely has no table above the 1 MB floor this collects at."
+            ? "No column statistics were collected. That is NOT the same as clean statistics. "
+              + coverage.Message
             : $"Ranked by suspicion, not alphabetically. {skewed:N0} column(s) have a single value covering "
               + "a quarter or more of the table, which is the PostgreSQL analogue of parameter sniffing: a "
               + "plan that suits most values is catastrophic for that one. Low correlation on a wide column "
               + "is the other shape, and it is why an index scan was rejected on a column that obviously "
               + "has an index. Distinct is NEGATIVE when it is a ratio of row count — -1 means nearly every "
               + "row is unique, not minus one value. Most-common VALUES and histogram bounds are "
-              + "deliberately not collected: they hold raw column data.";
+              + "deliberately not collected: they hold raw column data. "
+              /* On the POPULATED path too. A grid that ranks the columns of four tables while sixteen more
+                 are withheld by the privilege filter reads as a ranking of the server, and the operator has
+                 no way to see the difference from the grid itself. */
+              + coverage.Message;
     }
 }
