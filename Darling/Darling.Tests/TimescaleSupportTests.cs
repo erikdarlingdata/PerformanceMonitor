@@ -2656,6 +2656,11 @@ LIMIT 1", connection))
             approaching);
         Assert.StartsWith("Warning:", approaching.Joined, StringComparison.Ordinal);
 
+        /* #3119: the Warning line names the route that can answer a maximum question. The hourly
+           self-metrics series serves a last-snapshot-per-day point, so it cannot stand alone as the
+           per-run history an operator following this line goes looking for. */
+        Assert.Contains("timescaledb_information.job_history", approaching.Joined, StringComparison.Ordinal);
+
         var exceeded = new CapturingTestLogger();
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
             new HeaviestRefreshSlotReading(

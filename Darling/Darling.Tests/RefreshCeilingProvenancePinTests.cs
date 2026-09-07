@@ -36,8 +36,9 @@ namespace Darling.Tests;
 /// <see cref="TimescaleSupport.RefreshPhaseSlotSeconds"/>,
 /// <see cref="TimescaleSupport.RefreshPhaseStepMinutes"/>,
 /// <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/>) or from the POPULATION THE COMMENT ITSELF
-/// PUBLISHES. A pin that restated the summary would go stale by precisely the mechanism it exists to
-/// stop.</para>
+/// PUBLISHES — or, for the live envelope, from a QUOTED READING the same sentence states, with the
+/// figures drawn against that reading derived rather than restated. A pin that restated the summary
+/// would go stale by precisely the mechanism it exists to stop.</para>
 ///
 /// <para><b>One pin is written to expire, deliberately.</b> The comment's reason for taking the maximum
 /// rather than a percentile is partly that at this sample size the 95th percentile IS the maximum by nearest
@@ -64,7 +65,12 @@ namespace Darling.Tests;
 /// mode that matters: an unfiltered reading migrating into the population a constant may be set from. The
 /// pre-narrowing band and the 3.8x ratio drawn against it are likewise evidence — that band is #3012's
 /// measurement and no constant here spells it — so they carry no pin. The excluded run's 1.45x ratio to the
-/// population maximum IS pinned, because both of its terms are stated here.</para>
+/// population maximum IS pinned, because both of its terms are stated here. The live envelope's measured
+/// maximum is evidence on the same footing, and its day count with it; what IS pinned is every figure the
+/// prose draws AGAINST that maximum — the slot margin, the share of the slot and the distance past the
+/// watch line are all arithmetic over it and the grid's own constants, plus the band the shipped
+/// classifier actually returns for it, so the paragraph cannot state a verdict the code does not
+/// produce.</para>
 ///
 /// <para><b>The guard is itself guarded, three ways.</b> Every extraction asserts its pattern MATCHED before
 /// a value is compared. <see cref="EveryNumericPin_ReportsAnInjectedDrift"/> bumps each captured number ONE
@@ -210,6 +216,17 @@ public sealed class RefreshCeilingProvenancePinTests
             "the margin sentence",
             CeilingDeclaration,
             @"At ([0-9]+) s against a ([0-9]+)-second slot the margin is ([0-9]+) seconds",
+            true);
+
+        /* THE LIVE ENVELOPE (#3119). The measured maximum itself is a quoted reading and derives from
+           nothing here — but it is captured anyway, because every figure stated against it is derived
+           from it and from the grid's constants, so a bump to the reading has to disagree with all of
+           them rather than pass as a second opinion. Every group is a pair, since each figure is stated
+           to one decimal and the verification works in tenths. */
+        yield return (
+            "the measured live envelope",
+            CeilingDeclaration,
+            @"this job's maximum was ([0-9]+)\.([0-9]+) s\. That leaves ([0-9]+)\.([0-9]+) s of the slot, ([0-9]+)\.([0-9]+)% of it, and sits ([0-9]+)\.([0-9]+) s PAST",
             true);
 
         yield return (
@@ -657,6 +674,63 @@ public sealed class RefreshCeilingProvenancePinTests
         Require(margin[0] == Ceiling, $"stated ceiling {margin[0]} s against {Ceiling} s");
         Require(margin[1] == Slot, $"stated slot {margin[1]} s against {Slot} s");
         Require(margin[2] == Slot - Ceiling, $"stated margin {margin[2]} s against {Slot - Ceiling} s derived");
+
+        /* THE LIVE ENVELOPE (#3119), which is the margin sentence's counterpart: that one states the
+           clearance the published population carries and this one states what a measured day leaves. In
+           TENTHS throughout, because each figure is stated to one decimal and integer arithmetic keeps a
+           rounding mode from being able to move an assertion. */
+        var live = Read("the measured live envelope");
+        var measured10 = live[0] * 10 + live[1];
+        var statedMargin10 = live[2] * 10 + live[3];
+        var statedShareTenths = live[4] * 10 + live[5];
+        var statedPastWatch10 = live[6] * 10 + live[7];
+
+        Require(measured10 > Ceiling * 10,
+            $"the measured maximum {measured10 / 10}.{measured10 % 10} s is at or below the {Ceiling} s "
+            + "recorded ceiling, so a paragraph stating it as an envelope NARROWER than the population's "
+            + "clearance is describing something that is not the case");
+
+        /* THE VERDICT, from the SHIPPED classifier and ABOVE the arithmetic, because Verify is fail-fast:
+           a maximum restated low enough to change its band trips the margin equality below on the way
+           past, and a verdict clause underneath that one could not go red on its own. It is also the only
+           clause here that reads the code rather than the constants - the two inequalities say where the
+           reading sits, and only the classifier says what the shipped code does with it. */
+        Require(
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(measured10 / 10.0)
+                == TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
+            $"ClassifyRefreshSlotHeadroom bands {measured10 / 10}.{measured10 % 10} s as "
+            + $"{TimescaleSupport.ClassifyRefreshSlotHeadroom(measured10 / 10.0)} rather than "
+            + "ApproachingSlot, so the live envelope paragraph states a verdict the shipped classifier "
+            + $"does not produce. Against a {Slot} s slot the warning band opens at {WatchLine} s");
+
+        Require(statedMargin10 == Slot * 10 - measured10,
+            $"stated slot margin {statedMargin10 / 10}.{statedMargin10 % 10} s against "
+            + $"{(Slot * 10 - measured10) / 10}.{(Slot * 10 - measured10) % 10} s derived from the "
+            + $"{Slot} s slot less the measured maximum");
+
+        /* The distance PAST the watch line, which also carries the strict-past claim: a maximum at or
+           below the line makes this difference zero or negative, and no figure the pattern can hold
+           equals that. */
+        Require(statedPastWatch10 == measured10 - WatchLine * 10,
+            $"stated distance past the watch line {statedPastWatch10 / 10}.{statedPastWatch10 % 10} s "
+            + $"against {(measured10 - WatchLine * 10) / 10}.{(measured10 - WatchLine * 10) % 10} s "
+            + $"derived from the {WatchLine} s line");
+
+        Require(statedShareTenths == statedMargin10 * 1000 / (Slot * 10),
+            $"stated {statedShareTenths / 10}.{statedShareTenths % 10}% of the slot against "
+            + $"{statedMargin10 * 1000 / (Slot * 10) / 10}.{statedMargin10 * 1000 / (Slot * 10) % 10}% "
+            + $"derived from {statedMargin10 / 10}.{statedMargin10 % 10} s over the {Slot} s slot, "
+            + "truncated to one decimal as the prose states it");
+
+        /* AND ITS CLOSING SCOPE, the same rule the snapshot enumeration below carries. An absolute day
+           has ENDED and stays true; "recently", "the latest day" or a bare "currently" is read against a
+           clock a doc comment does not have, so it rots while looking scoped. */
+        Require(
+            Regex.IsMatch(ceilingProse,
+                @"Over <c>[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]</c> - one closed day"),
+            "the live envelope's population is no longer CLOSED by an absolute day, so those figures read "
+            + "as a claim about current load and are false as soon as the load moves. Restore a window "
+            + "that has ended, or drop the figures and keep the mechanism, which is the timeless half");
 
         /* The EXCLUDED run. Its clock arithmetic has to reproduce its own stated duration, it has to end one
            second after the stated boundary, and its ratio to the population maximum has to be the ratio the
