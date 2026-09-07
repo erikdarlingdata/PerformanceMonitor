@@ -579,12 +579,13 @@ public partial class AddServerDialog : Window
             using var document = JsonDocument.Parse(resultJson);
             var root = document.RootElement;
 
-            var major = root.TryGetProperty("majorVersion", out var mv) && mv.ValueKind == JsonValueKind.Number ? mv.GetInt32() : 0;
             var edition = root.TryGetProperty("engineEditionDescription", out var ed) && ed.ValueKind == JsonValueKind.String
                 ? ed.GetString()
                 : null;
 
-            var versionLabel = ViewerDataService.SqlVersionLabel(major == 0 ? null : major);
+            /* Engine-aware, and shared with AddMultipleServersDialog rather than formatted here: the probe
+               reports which engine it reached, so the version it reports gets that engine's vocabulary. */
+            var versionLabel = ViewerDataService.ProbeVersionLabel(root);
             var parts = new System.Collections.Generic.List<string> { "Connected" };
             if (!string.IsNullOrEmpty(versionLabel))
             {

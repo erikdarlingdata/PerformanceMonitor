@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -861,7 +862,11 @@ public sealed class DarlingMcpDataTools
         {
             server_name = s.ServerName,
             display_name = string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName,
-            sql_version = SqlVersionLabel(s.SqlMajorVersion),
+            /* Engine-aware (#3145). The KEY stays sql_version because a field an MCP client keys on is a
+               consumer API; the VALUE is now the label for whichever engine the row describes, so a
+               PostgreSQL target reads "PostgreSQL 18" instead of the "SQL Server v0" its 0-valued
+               sql_major_version used to produce. */
+            sql_version = MonitoredEngineVersion.DescribeEngineVersion(s.EngineKind, s.SqlMajorVersion, s.PostgresMajorVersion),
             status = FreshnessStatus(s.LastCollection, nowUtc),
             read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
             last_collection = s.LastCollection?.ToString("o")
@@ -1219,21 +1224,6 @@ public sealed class DarlingMcpDataTools
         ServerCollectionStatusRules
             .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc))
             .McpToken();
-
-    /// <summary>Product-name label for a sql_major_version (the viewer's <c>SqlVersionLabel</c>); 2016+ is
-    /// what the product supports, older/unknown majors fall back to a bare version tag, null to empty.</summary>
-    private static string SqlVersionLabel(int? sqlMajorVersion) => sqlMajorVersion switch
-    {
-        null => "",
-        11 => "SQL Server 2012",
-        12 => "SQL Server 2014",
-        13 => "SQL Server 2016",
-        14 => "SQL Server 2017",
-        15 => "SQL Server 2019",
-        16 => "SQL Server 2022",
-        17 => "SQL Server 2025",
-        _ => $"SQL Server v{sqlMajorVersion}",
-    };
 
     [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost.")]
     public static async Task<string> GetCollectionLog(
