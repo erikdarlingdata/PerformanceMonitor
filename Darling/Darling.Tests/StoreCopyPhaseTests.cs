@@ -7,7 +7,12 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Data.Common;
+using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -213,6 +218,21 @@ public class StoreCopyPhaseTests
            which phase is in force. */
         Assert.Equal(1, Regex.Matches(runner, @"copyPhase = StoreCopyPhase\.Data;").Count);
 
+        /* And exactly one assignment of Start — the declaration itself, which this pattern matches as a
+           substring of `var copyPhase = ...`. SYMMETRIC with the Data count above, and it closes the one
+           construction the other four assertions here are all blind to: a bare
+           `copyPhase = StoreCopyPhase.Start;` added anywhere below the row loop. That mutation keeps the
+           Data count at one, does not move the transition, and is not a Stamp call, so it passes every
+           other assertion in this test — while making a post-row-loop fault carry Start.
+
+           Which is not merely a wrong label. StoreWriteReattempt.IsSafeToReattempt re-runs a collector's
+           batch on Start, so a fault that had already written rows would be re-attempted: the batch is
+           duplicated into aggregates that cannot separate the copies, and every delta is re-derived
+           against an already-advanced CollectorDeltaCalculator baseline and committed as a zero. The
+           realistic route in is a reset for a second COPY in this method, which is exactly the edit that
+           would not touch anything else here. */
+        Assert.Equal(1, Regex.Matches(runner, @"copyPhase = StoreCopyPhase\.Start;").Count);
+
         /* The fault arm stamps whatever phase was live and rethrows BARE — no wrapping, so the type,
            message, stack and inner chain reaching the handlers upstream are unchanged. */
         Assert.Matches(
@@ -293,5 +313,188 @@ public class StoreCopyPhaseTests
 
         Assert.Contains("The unbounded start phase is tracked on #3095.", runner, StringComparison.Ordinal);
         Assert.DoesNotContain("Tracked as a residual on #2874.", runner, StringComparison.Ordinal);
+    }
+    /* ── the instance half: what a source pin structurally cannot see (#3099) ── */
+
+    /// <summary>
+    /// A fault out of the REAL <c>BeginBinaryImportAsync</c>, on the real write path, carries
+    /// <see cref="StoreCopyPhase.Start"/>.
+    ///
+    /// <para><b>Why this exists alongside the source pin above, not instead of it.</b> The two fail
+    /// differently and neither covers the other's blind spot. The pin catches every edit of a shape it
+    /// anticipated — a moved transition, a second one, an explicit <c>Stamp(ex, Start)</c> — and is blind
+    /// to constructions nobody thought of; the gap that let a bare post-loop
+    /// <c>copyPhase = StoreCopyPhase.Start;</c> pass all five of its assertions was exactly that. This
+    /// test is indifferent to how the source got there: it runs the path and reads the stamp off a real
+    /// exception, so an unanticipated construction that produces the wrong phase fails here even when
+    /// every regex still matches.</para>
+    ///
+    /// <para>No live store is needed and that is the point of using an UNOPENED connection: the real
+    /// <c>BeginBinaryImportAsync</c> refuses before it reaches a socket, which is precisely a start-phase
+    /// fault — the importer never returned. The definition's <c>WritePayload</c> throws a distinctive
+    /// exception, so if the row loop were ever reached this would surface as that fault instead of the
+    /// connection's, and the assertion would name which.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFaultOutOfBeginBinaryImportCarriesStart_OnTheRealPath()
+    {
+        var fault = await CopyFaultAsync(new PhaseProbeDefinition());
+
+        Assert.False(
+            fault is PhaseProbeReachedTheRowLoopException,
+            "the row loop must not be reachable when Begin refuses: WritePayload ran, so this test is no "
+            + "longer exercising the start phase.");
+
+        Assert.Equal(StoreCopyPhase.Start, CollectorFaultCopyPhase.For(fault));
+    }
+
+    /// <summary>
+    /// The negative control, and without it the test above proves much less: it would pass just as well if
+    /// <c>Start</c> were stamped unconditionally on every COPY fault. Here the row loop IS reached — the
+    /// definition's <c>WritePayload</c> throws once Begin has returned — and the stamp must read
+    /// <see cref="StoreCopyPhase.Data"/>.
+    ///
+    /// <para>Begin has to succeed for the loop to be entered, so this one needs a real store and is gated
+    /// on <c>DARLING_TEST_PG</c> like the rest of the live suite. The COPY targets a table that does not
+    /// exist only in the negative case above; here it targets a real one so Begin returns.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFaultInsideTheRowLoopCarriesData_OnTheRealPath()
+    {
+        var pg = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(pg), "Set DARLING_TEST_PG to run the data-phase instance check.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var dataSource = NpgsqlDataSource.Create(pg!);
+        await using (var migrateConnection = await dataSource.OpenConnectionAsync(ct))
+        {
+            await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(migrateConnection, ct);
+        }
+
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        var fault = await CopyFaultAsync(new PhaseProbeDefinition("wait_stats"), dataSource, connection, ct);
+
+        Assert.True(
+            fault is PhaseProbeReachedTheRowLoopException,
+            $"Begin must have returned so the row loop is entered; got {fault.GetType().Name}: {fault.Message}");
+
+        Assert.Equal(StoreCopyPhase.Data, CollectorFaultCopyPhase.For(fault));
+    }
+
+    /* ── probe plumbing ── */
+
+    private const string UnreachableStore = "Host=127.0.0.1;Port=1;Username=probe;Database=probe";
+
+    /// <summary>
+    /// Drives the SHIPPED private COPY body and returns the fault it raised. Reflection because the method
+    /// is private and <c>InternalsVisibleTo</c> does not reach private members; a rename breaks this
+    /// loudly, which is the correct failure for a test whose whole subject is that method.
+    /// </summary>
+    private static async Task<Exception> CopyFaultAsync(
+        PhaseProbeDefinition definition,
+        NpgsqlDataSource? dataSource = null,
+        NpgsqlConnection? connection = null,
+        CancellationToken cancellationToken = default)
+    {
+        var ownsDataSource = dataSource is null;
+        dataSource ??= NpgsqlDataSource.Create(UnreachableStore);
+        var ownsConnection = connection is null;
+        /* Deliberately NOT opened in the default case - see the test's remarks. */
+        connection ??= new NpgsqlConnection(UnreachableStore);
+
+        try
+        {
+            var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
+            var method = typeof(DarlingCollectorRunner)
+                .GetMethod("CopyBatchOnceAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.NotNull(method);
+
+            var server = new ServerRuntime
+            {
+                Config = new MonitoredServer { Name = "phase-probe", Host = "phase-probe-host" },
+                ConnectionString = "Server=phase-probe-host",
+                Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+                StorageName = "phase-probe-host",
+                ServerId = -3099,
+                EngineEdition = 3,
+            };
+
+            var context = new CollectorContext
+            {
+                ServerId = server.ServerId,
+                ServerName = server.StorageName,
+                CollectionTime = DateTime.UtcNow,
+                Deltas = new CollectorDeltaCalculator(),
+                Target = server.Target,
+            };
+
+            var task = (Task)method!.MakeGenericMethod(typeof(int)).Invoke(
+                runner,
+                new object?[]
+                {
+                    connection, definition, new List<int> { 1 }, server,
+                    DateTime.UtcNow, context, cancellationToken,
+                })!;
+
+            try
+            {
+                await task;
+            }
+            catch (Exception ex)
+            {
+                return ex;
+            }
+
+            Assert.Fail("the COPY body was expected to fault");
+            throw new InvalidOperationException("unreachable");
+        }
+        finally
+        {
+            if (ownsConnection)
+            {
+                await connection.DisposeAsync();
+            }
+
+            if (ownsDataSource)
+            {
+                await dataSource.DisposeAsync();
+            }
+        }
+    }
+
+    private sealed class PhaseProbeReachedTheRowLoopException : Exception
+    {
+        public PhaseProbeReachedTheRowLoopException() : base("WritePayload was reached") { }
+    }
+
+    /// <summary>
+    /// A minimal non-diverting definition. Non-diverting matters: a diverting collector opens a
+    /// transaction BEFORE the try, which on an unopened connection would throw outside the stamped region
+    /// and the probe would read Unknown for a reason that has nothing to do with the phase.
+    /// </summary>
+    private sealed class PhaseProbeDefinition : CollectorDefinitionBase<int>
+    {
+        private readonly string _table;
+
+        public PhaseProbeDefinition(string table = "phase_probe_no_such_table") => _table = table;
+
+        public override string Name => "phase_probe";
+
+        public override string TargetTable => _table;
+
+        public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } =
+            new[] { new CollectorColumn("wait_type", CollectorColumnType.Varchar) };
+
+        public override CollectorQuery BuildQuery(CollectorContext context)
+            => throw new NotSupportedException("the probe never fetches");
+
+        public override ValueTask<List<int>> ReadAsync(
+            DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
+            => throw new NotSupportedException("the probe never fetches");
+
+        /* Throws so the row loop is DETECTABLE: in the start-phase case it must never run, and in the
+           data-phase case it is how the loop is entered and then faulted. */
+        public override void WritePayload(int row, ICollectorRowWriter writer, CollectorContext context)
+            => throw new PhaseProbeReachedTheRowLoopException();
     }
 }
