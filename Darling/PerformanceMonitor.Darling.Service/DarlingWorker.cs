@@ -6586,8 +6586,25 @@ LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #3095: the COPY phase is named when the fault carries one. This arm is where a collector's
+               binary COPY into the STORE lands — the store connection is Npgsql whatever the target's
+               engine is, so a store-write fault reaches neither the SQLSTATE arm above (it is not a
+               PostgresException) nor the PostgreSQL-target timeout arm (that one requires a PostgreSQL
+               target) — and "Exception while reading from stream" is all it said. Both COPY phases produce
+               that same string, and the start phase is the one still on the connection's undocumented 30 s
+               default, so the message could not say which deadline had been reached.
+
+               Computed once and used for BOTH the app log and the collection_log row, because the stored
+               row is the instrument any measurement of this population reads; naming the phase only in the
+               app log would leave the store's own error rows as ambiguous as they are today.
+
+               Total by construction: a fault with no phase — which is every fault that is not a COPY —
+               gets the very string it has now, with nothing allocated. That matters here specifically,
+               because this arm is also the OutOfMemoryException landing pad. */
+            var message = CollectorFaultCopyPhase.Describe(ex);
+
             _logger.LogError("  [{Server}] {Collector} => ERROR: {Message}",
-                server.Config.DisplayName, collectorName, ex.Message);
+                server.Config.DisplayName, collectorName, message);
 
             /* A dead connection poisons every collector — force a reconnect + reprobe. The Postgres arm
                matters as much as the SQL Server one and is deliberately NARROWER than "any
@@ -6625,7 +6642,7 @@ LIMIT 1";
                    Read from the stopwatch rather than from the exception, because most faults carry
                    no duration at all. */
                 await DarlingObservability.LogCollectionAsync(
-                    _postgres!, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                    _postgres!, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             }
             catch
             {

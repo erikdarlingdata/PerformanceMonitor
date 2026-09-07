@@ -2456,52 +2456,87 @@ public sealed class DarlingCollectorRunner
         /* Naive-UTC storage — see PgCollectorRowWriter. */
         var storedCollectionTime = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
 
-        using (var importer = await pgConnection.BeginBinaryImportAsync(
-            PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
+        /* #3095: which COPY phase a fault came out of, stamped onto the exception by the arm below so a
+           handler upstream can tell a start-phase failure from a data-phase one. Both render as
+           "Exception while reading from stream", so nothing about the exception itself carries this.
+
+           Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
+           mean strictly "the importer never came back", because that is the state whose two properties a
+           consumer relies on — no row started, so a COPY ... FROM STDIN cannot have committed, and no
+           delta baseline moved, since CollectorDeltaCalculator advances inside WritePayload below. A
+           fault anywhere past this line forfeits both, so it must read as Data even where it happens to
+           have sent nothing. The unsafe mislabel is the one that would report Start for a fault that had
+           already sent rows; this ordering makes that unreachable rather than unlikely.
+
+           The dimension flush and commit after the block are deliberately left unstamped: they are not the
+           COPY, and Unknown is the honest answer for them. */
+        var copyPhase = StoreCopyPhase.Start;
+
+        try
         {
-            /* #2874: the COPY's own deadline — and a DIFFERENT property from every other site in this
-               regime. NpgsqlBinaryImporter.Timeout is a TimeSpan on the importer, not the int seconds of
-               NpgsqlCommand.CommandTimeout, and there is neither an NpgsqlCommand nor a CreateCommand here,
-               so no regex written for either command shape can see this site. Left unset it is initialised
-               from the connection's CommandTimeout, so this write — PgCollectorRowWriter.CopyCommandFor over
-               every collector, every server, every cycle — inherited the same undocumented 30 s default as
-               the rest of the regime while being invisible to every pin that closed them.
-
-               It takes the SAME constant because it is the same regime: no enclosing budget, one sweep permit
-               and one borrowed store connection held for the duration, retried on the collector's own cadence.
-
-               And it NARROWS rather than closes. Measured against Npgsql 10.0.3: this bounds StartRowAsync /
-               Write / CompleteAsync, but NOT the BeginBinaryImportAsync above it. Begin sends the COPY and
-               awaits CopyInResponse under the CONNECTION's CommandTimeout, which Npgsql exposes read-only and
-               BeginBinaryImportAsync has no overload for — so the start phase, which is where a lock wait
-               stalls, stays on 30 s. Both phases surface as "Exception while reading from stream", which is
-               why the distinction is invisible in a log. Deliberately not closed by putting CommandTimeout on
-               the shared data source's connection string: that would silently re-bound every site this sweep
-               has not reached yet. Tracked as a residual on #2874. */
-            importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
-
-            writer.Importer = importer;
-
-            foreach (var row in rows)
+            using (var importer = await pgConnection.BeginBinaryImportAsync(
+                PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
             {
-                await importer.StartRowAsync(cancellationToken);
+                copyPhase = StoreCopyPhase.Data;
 
-                if (definition.IncludesCollectionId)
+                /* #2874: the COPY's own deadline — and a DIFFERENT property from every other site in this
+                   regime. NpgsqlBinaryImporter.Timeout is a TimeSpan on the importer, not the int seconds of
+                   NpgsqlCommand.CommandTimeout, and there is neither an NpgsqlCommand nor a CreateCommand here,
+                   so no regex written for either command shape can see this site. Left unset it is initialised
+                   from the connection's CommandTimeout, so this write — PgCollectorRowWriter.CopyCommandFor over
+                   every collector, every server, every cycle — inherited the same undocumented 30 s default as
+                   the rest of the regime while being invisible to every pin that closed them.
+
+                   It takes the SAME constant because it is the same regime: no enclosing budget, one sweep permit
+                   and one borrowed store connection held for the duration, retried on the collector's own cadence.
+
+                   And it NARROWS rather than closes. Measured against Npgsql 10.0.3: this bounds StartRowAsync /
+                   Write / CompleteAsync, but NOT the BeginBinaryImportAsync above it. Begin sends the COPY and
+                   awaits CopyInResponse under the CONNECTION's CommandTimeout, which Npgsql exposes read-only and
+                   BeginBinaryImportAsync has no overload for — so the start phase, which is where a lock wait
+                   stalls, stays on 30 s. Both phases surface as "Exception while reading from stream", which is
+                   why the distinction is invisible in a log; the copyPhase stamp above is what separates them,
+                   and it does not bound anything. Deliberately not closed by putting CommandTimeout on the
+                   shared data source's connection string: that would silently re-bound every site this sweep
+                   has not reached yet. The unbounded start phase is tracked on #3095. */
+                importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
+
+                writer.Importer = importer;
+
+                foreach (var row in rows)
                 {
-                    writer.Value(CollectionIdGenerator.Next());
+                    await importer.StartRowAsync(cancellationToken);
+
+                    if (definition.IncludesCollectionId)
+                    {
+                        writer.Value(CollectionIdGenerator.Next());
+                    }
+
+                    writer.Value(storedCollectionTime)
+                          .Value(server.ServerId)
+                          .Value(server.StorageName);
+
+                    writer.BeginPayload();
+                    definition.WritePayload(row, writer, context);
+                    writer.EndPayload(definition.PayloadColumns.Count);
+                    rowsWritten++;
                 }
 
-                writer.Value(storedCollectionTime)
-                      .Value(server.ServerId)
-                      .Value(server.StorageName);
-
-                writer.BeginPayload();
-                definition.WritePayload(row, writer, context);
-                writer.EndPayload(definition.PayloadColumns.Count);
-                rowsWritten++;
+                await importer.CompleteAsync(cancellationToken);
             }
+        }
+        /* Stamped, then rethrown bare: the fault keeps its own type, message and stack, so every
+           classification arm upstream — PostgresTargetProvider.Classify, the reconnect decision in
+           DarlingWorker's general handler, and any predicate walking the inner chain for a transport
+           fault — sees exactly what it sees today. The phase rides alongside as an independent axis.
 
-            await importer.CompleteAsync(cancellationToken);
+           OperationCanceledException is excluded because a stopping token is not a COPY phase: it says the
+           service is shutting down, not which protocol exchange was in flight, and a consumer must not be
+           able to read a shutdown as a recoverable start-phase stall. */
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            CollectorFaultCopyPhase.Stamp(ex, copyPhase);
+            throw;
         }
 
         if (transaction is not null)
