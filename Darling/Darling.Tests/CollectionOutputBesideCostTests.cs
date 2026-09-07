@@ -76,7 +76,15 @@ public sealed class CollectionOutputBesideCostTests
            them, ordered notes-first, so a positive count always has a note to point at. Kept
            consistent here rather than set independently, because a row with a count and no note
            is a state the read cannot produce. */
-        NoteCount = noteCount,
+        // note_count is COUNT(error_message) over SUCCESS runs, so a fixture claiming more
+        // notes than successes describes a row no query can return. Caught here because the
+        // formatter does not validate the count, so such a fixture passes while testing nothing.
+        NoteCount = noteCount <= MeasuredSuccesses
+            ? noteCount
+            : throw new ArgumentOutOfRangeException(
+                nameof(noteCount),
+                noteCount,
+                $"note_count cannot exceed the {MeasuredSuccesses} SUCCESS runs it is counted over."),
         LastNote = noteCount > 0 ? "enumeration yielded 0 items - nothing to collect this cycle" : null,
     };
 
@@ -138,7 +146,7 @@ public sealed class CollectionOutputBesideCostTests
     [Fact]
     public void TheNotedZero_DefersToTheNote_AndTheUnnotedZeroKeepsTheCategoryReading()
     {
-        var noted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: MeasuredRuns);
+        var noted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: MeasuredSuccesses);
         var unnoted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: 0);
 
         Assert.NotNull(noted.OutputFinding);
