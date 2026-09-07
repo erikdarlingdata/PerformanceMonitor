@@ -1965,24 +1965,14 @@ public sealed class DarlingManagedPostgres
     /// Whether an exception is a transport-level fault worth retrying (socket reset, stream write failure,
     /// timeout) rather than a definitive answer from a working server (bad password, missing role).
     /// <see cref="PostgresException"/> means the server replied, so it is never transient by this test.
+    ///
+    /// <para>The predicate itself lives in <see cref="PostgresTransportFault"/>, shared with the collector
+    /// runner's store-write re-attempt. The RETRY POLICY stays here — six attempts two seconds apart, sized
+    /// for the post-start shared-memory race above — because that is what differs between the two regimes;
+    /// the question asked of the exception does not.</para>
     /// </summary>
     private static bool IsTransientConnectionFault(Exception exception)
-    {
-        for (var current = exception; current is not null; current = current.InnerException)
-        {
-            if (current is PostgresException)
-            {
-                return false;
-            }
-
-            if (current is SocketException or IOException or TimeoutException)
-            {
-                return true;
-            }
-        }
-
-        return exception is NpgsqlException;
-    }
+        => PostgresTransportFault.IsTransportFault(exception);
 
     private string ReadStoredPassword()
     {

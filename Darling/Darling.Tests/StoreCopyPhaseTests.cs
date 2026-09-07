@@ -199,19 +199,39 @@ public class StoreCopyPhaseTests
 
         /* Start is the value in force before the COPY is opened. */
         Assert.Matches(
-            new Regex(@"var copyPhase = StoreCopyPhase\.Start;[\s\S]{0,600}?BeginBinaryImportAsync\("),
+            new Regex(@"var copyPhase\s*=\s*StoreCopyPhase\.Start;[\s\S]{0,600}?BeginBinaryImportAsync\("),
             runner);
 
         /* The transition sits between Begin and the first row, and nothing sends a row before it. The
            bounded window admits the deadline assignment and the writer hand-off, and would not admit a
            transition moved below the loop. */
         Assert.Matches(
-            new Regex(@"BeginBinaryImportAsync\([\s\S]{0,200}?\{\s*copyPhase = StoreCopyPhase\.Data;"),
+            new Regex(@"BeginBinaryImportAsync\([\s\S]{0,200}?\{\s*copyPhase\s*=\s*StoreCopyPhase\.Data;"),
             runner);
 
         /* Exactly one transition, and it is to Data. Two would mean a second, unreviewed opinion about
            which phase is in force. */
-        Assert.Equal(1, Regex.Matches(runner, @"copyPhase = StoreCopyPhase\.Data;").Count);
+        Assert.Equal(1, Regex.Matches(runner, @"copyPhase\s*=\s*StoreCopyPhase\.Data;").Count);
+
+        /* And exactly one assignment of Start — the declaration itself, which this pattern matches as a
+           substring of `var copyPhase = ...`. SYMMETRIC with the Data count above, and it closes the one
+           construction the other four assertions here are all blind to: a bare
+           `copyPhase = StoreCopyPhase.Start;` added anywhere below the row loop. That mutation keeps the
+           Data count at one, does not move the transition, and is not a Stamp call, so it passes every
+           other assertion in this test — while making a post-row-loop fault carry Start.
+
+           Which is not merely a wrong label. StoreWriteReattempt.IsSafeToReattempt re-runs a collector's
+           batch on Start, so a fault that had already written rows would be re-attempted: the batch is
+           duplicated into aggregates that cannot separate the copies, and every delta is re-derived
+           against an already-advanced CollectorDeltaCalculator baseline and committed as a zero. The
+           realistic route in is a reset for a second COPY in this method, which is exactly the edit that
+           would not touch anything else here. */
+        /* Both counts, and the two positional patterns above, spell the assignment `\s*=\s*` rather
+           than with literal single spaces: `copyPhase=StoreCopyPhase.Start;` is valid C# and evaded every
+           literal form. Low probability — a formatter normalises it and this repo's style is consistent —
+           but the cost of closing it is four characters, and a pin that a reformat can slip past is not a
+           pin. */
+        Assert.Equal(1, Regex.Matches(runner, @"copyPhase\s*=\s*StoreCopyPhase\.Start;").Count);
 
         /* The fault arm stamps whatever phase was live and rethrows BARE — no wrapping, so the type,
            message, stack and inner chain reaching the handlers upstream are unchanged. */

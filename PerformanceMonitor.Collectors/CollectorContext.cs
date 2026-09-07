@@ -566,6 +566,22 @@ public sealed class CollectorContext
     /// host reads it right after building that database's query.
     /// </summary>
     public bool CatchupClampApplied { get; set; }
+
+    /// <summary>
+    /// How many of this cycle's store writes stored their rows only on a second attempt (#3099). Set by the
+    /// host, never by a definition, like the phase and drain fields above.
+    ///
+    /// <para>A COUNT rather than a flag because the fan-out paths write once per database or per enumerated
+    /// item: "one batch of thirty re-attempted" and "every batch re-attempted" are a momentary blip and a
+    /// store in trouble, and a bool cannot tell them apart. Zero — the default, and what an ordinary cycle
+    /// leaves it at — is the honest reading of "no write needed a second attempt", not "unmeasured", because
+    /// the host increments unconditionally on the one path that can.</para>
+    ///
+    /// <para>Read once per cycle, after the writes, to compose the collection_log note. The count is what
+    /// keeps the re-attempt visible in the store: a write that fails and then succeeds writes a SUCCESS row,
+    /// and without this the row is indistinguishable from a write that never faulted at all.</para>
+    /// </summary>
+    public int StoreWriteReattempts { get; set; }
 }
 
 /// <summary>
