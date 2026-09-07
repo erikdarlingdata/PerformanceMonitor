@@ -190,11 +190,28 @@ public static class AppLogger
         Log("WARN", source, message);
     }
 
-    public static void Error(string source, string message, Exception? ex = null)
+    public static void Error(string source, string message, Exception? ex = null) =>
+        Error(LogLevel.Error, source, message, ex);
+
+    /// <summary>
+    /// The error sink, gated on the level the CALLER logged at rather than on
+    /// <see cref="LogLevel.Error"/>.
+    ///
+    /// <para><b>Why the level is a parameter.</b> <see cref="AppLoggerAdapter{T}"/> routes both
+    /// <see cref="LogLevel.Error"/> and <see cref="LogLevel.Critical"/> here, so a fixed
+    /// <c>IsEnabled(Error)</c> would answer for the wrong level on the Critical half: at a minimum of
+    /// <c>Critical</c> the adapter admits a Critical line and this gate then drops it, which makes
+    /// <c>Critical</c> silence the log as completely as <c>None</c> — a documented level quietly meaning
+    /// something else. The <c>Trace</c>/<c>Debug</c> pair does not have the same problem in the other
+    /// direction, because there the sink is the HIGHER of the two: admitting <c>Trace</c> requires a
+    /// minimum at or below it, which already admits <c>Debug</c>. Taking the level makes both pairs answer
+    /// from one comparison instead of relying on that asymmetry holding.</para>
+    /// </summary>
+    internal static void Error(LogLevel level, string source, string message, Exception? ex)
     {
         /* Gated once here rather than inside Log, so an exception's stack and its whole inner chain are
            admitted or dropped together — a half-written error is harder to read than none. */
-        if (!IsEnabled(LogLevel.Error)) return;
+        if (!IsEnabled(level)) return;
 
         if (ex != null)
         {

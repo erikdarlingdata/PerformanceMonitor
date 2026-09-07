@@ -258,6 +258,56 @@ public sealed class LiteLogLevelGateTests : IDisposable
     }
 
     /// <summary>
+    /// <para>The same property through the ADAPTER, at every level and every minimum: an
+    /// <c>ILogger&lt;T&gt;</c> call reaches the log exactly when <see cref="AppLogger.IsEnabled"/> says its
+    /// level is on.</para>
+    ///
+    /// <para><b>Why the static sweep above is not enough.</b> That one calls the four entry points by
+    /// name, so it never exercises the adapter's MAPPING — and the mapping is where the two gates can
+    /// disagree, because it collapses two levels onto one sink twice. Those two collapses are not
+    /// symmetric: <c>Trace</c>/<c>Debug</c> lands on the higher of the pair, so admitting the outer level
+    /// already admits the sink's, while <c>Error</c>/<c>Critical</c> lands on the LOWER, where it does not.
+    /// A minimum of <c>Critical</c> therefore admitted a Critical line at the adapter and dropped it at the
+    /// sink, making a documented level silence the log as completely as <c>None</c>. Sweeping the product
+    /// of levels and minima is what makes that reachable rather than relying on someone noticing the
+    /// asymmetry.</para>
+    /// </summary>
+    [Fact]
+    public void EveryLevelThroughTheAdapter_ReachesTheLogExactlyWhenItIsEnabled()
+    {
+        var levels = new[]
+        {
+            LogLevel.Trace, LogLevel.Debug, LogLevel.Information,
+            LogLevel.Warning, LogLevel.Error, LogLevel.Critical,
+        };
+
+        var minima = levels.Append(LogLevel.None).ToArray();
+        ILogger<RemoteCollectorService> logger = new AppLoggerAdapter<RemoteCollectorService>();
+
+        foreach (var minimum in minima)
+        {
+            AppLogger.SetMinimumLevel(minimum);
+
+            foreach (var level in levels)
+            {
+                var tag = Guid.NewGuid().ToString("N");
+                AppLogger.DrainBufferedLines();
+
+                logger.Log(level, default, $"probe {tag}", null, (s, _) => s);
+
+                var reached = Tagged(tag).Count > 0;
+
+                Assert.True(
+                    reached == AppLogger.IsEnabled(level),
+                    $"with the minimum at {minimum}, an ILogger call at {level} "
+                        + (reached ? "reached" : "did not reach")
+                        + $" the log while IsEnabled({level}) is {AppLogger.IsEnabled(level)}. The adapter's "
+                        + "mapping must not re-decide a level the gate has already answered (#3104).");
+            }
+        }
+    }
+
+    /// <summary>
     /// Raising the minimum puts the line back, which is the half a gate alone does not deliver. Suppressing
     /// a diagnostic and deleting one look identical in a log; the difference is whether an operator can
     /// reach it, and that is what this asserts.

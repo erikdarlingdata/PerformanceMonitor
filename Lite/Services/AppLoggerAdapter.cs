@@ -52,7 +52,11 @@ public sealed class AppLoggerAdapter<T> : ILogger<T>
                 break;
             case LogLevel.Error:
             case LogLevel.Critical:
-                AppLogger.Error(_categoryName, message, exception);
+                /* The level travels with the call. Both arms land on one sink, and that sink gates on what
+                   it is handed — without it, the Critical arm would be gated as an Error and a minimum of
+                   Critical would drop the very lines it names. The two arms still render as ERROR, which
+                   is this switch's own collapse and predates the gate. */
+                AppLogger.Error(logLevel, _categoryName, message, exception);
                 break;
         }
     }
