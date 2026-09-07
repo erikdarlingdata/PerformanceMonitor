@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+/* THROWAWAY: a shared-library edit, to observe the Darling gate's run arm. Never merged. */
+
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
