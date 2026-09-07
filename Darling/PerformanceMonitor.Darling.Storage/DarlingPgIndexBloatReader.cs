@@ -33,16 +33,27 @@ namespace PerformanceMonitor.Darling.Storage;
 /// the one most likely to be holding reclaimable space, so a read that filtered it out would hide the
 /// biggest candidate behind a performance optimisation.</para>
 ///
+/// <para><b>An EMPTY index has no density, and it still gets a row (#3121).</b> <c>pgstatindex</c> returns
+/// NaN for both float columns when there are no leaf pages to average over, so the read normalises NaN to
+/// NULL and reports 0 reclaimable — the index is measured, and what it holds is nothing. Filtering the row
+/// out instead would serve the read successfully while hiding a real index, which is the failure mode that
+/// looks most like a fix.</para>
+///
 /// <para>Shared by the WPF tab and the MCP surface so there is one copy of this SQL, per #2530.</para>
 /// </summary>
 public static class DarlingPgIndexBloatReader
 {
-    /// <param name="AvgLeafDensity">The server's raw figure. NULL when the index was skipped.</param>
+    /// <param name="AvgLeafDensity">The server's raw figure. NULL when the index was skipped, and NULL when
+    /// the index is EMPTY — <c>pgstatindex</c> divides by a leaf-page count of zero and returns NaN, which
+    /// is not a density and cannot be carried to any consumer here (see the SQL's own note).</param>
+    /// <param name="LeafFragmentation">As above, and NaN on an empty index for the same reason.</param>
     /// <param name="EstimatedReclaimableBytes">What a rebuild might return, derived from the density
-    /// shortfall against a 90% healthy floor. NULL when not measured, and 0 when the index is at or above
-    /// that floor.</param>
+    /// shortfall against a 90% healthy floor. NULL when not measured, and 0 both when the index is at or
+    /// above that floor and when it is empty — an index with no leaf pages holds nothing to reclaim, which
+    /// is a measurement rather than an absence of one.</param>
     /// <param name="SkippedReason">Non-null means this index was NOT measured — its bloat is unknown rather
-    /// than zero.</param>
+    /// than zero. An empty index leaves this NULL: it was measured, and the measurement is that it is
+    /// empty.</param>
     public sealed record PgIndexBloatRow(
         string? DatabaseName,
         string? SchemaName,
@@ -70,22 +81,56 @@ public static class DarlingPgIndexBloatReader
        91.48.
 
        NULLIF guards the division: a density of 0 is not something pgstatindex returns for a live index, but
-       a divide-by-zero would turn one odd row into a failed read for the whole grid. */
+       a divide-by-zero would turn one odd row into a failed read for the whole grid.
+
+       THE THIRD STATE OF A FLOAT COLUMN (#3121). pgstatindex reports avg_leaf_density and
+       leaf_fragmentation as NaN for an EMPTY b-tree index - verified on PostgreSQL 18.6 against a real index
+       on a table with no rows, which is an entirely ordinary object (a fresh partition, a table whose rows
+       were all deleted, a constraint index on an unpopulated table). avg_leaf_density is double precision in
+       the store, so NaN is representable, persists, and is re-read on every later call. An IS NULL guard
+       reads as "handle the missing case" and covers only two of the three states a float column has, and
+       the surviving NaN reached a ::bigint cast that raises 22003 - failing the WHOLE read, not the row.
+
+       nullif(x, 'NaN'::double precision) is the whole normalisation, and it turns on a PostgreSQL semantic
+       that is the opposite of the C one: NaN compares EQUAL to itself here, so nullif catches it and
+       IS NOT DISTINCT FROM would too, while an IEEE-style self-inequality check (x <> x) is false and
+       catches nothing. It is identity on a real density and on NULL, so the two states that already worked
+       are untouched.
+
+       Normalising is not optional decoration on the density columns themselves: a NaN that clears the SQL
+       still reaches System.Text.Json, whose default number handling REJECTS NaN, so it would take down the
+       MCP read and the web page one layer up from the cast. Nothing may leave this read as NaN.
+
+       AN EMPTY INDEX REPORTS 0 RECLAIMABLE, NOT NULL. NULL in this column means "not measured" - that is
+       what a skipped row carries, and the read hoists those to the top on the strength of it. An empty
+       index WAS measured, and what was measured is that it holds nothing to reclaim, so it takes the same 0
+       an above-floor index takes and ranks where a 0 belongs. Reporting NULL would sort it among the
+       unmeasured and claim its bloat was unknown when it is known to be nil.
+
+       THE ESTIMATE IS COMPUTED ONCE, in the inner scope, and the outer projection and the outer ORDER BY
+       both reference that one column. Two copies of the expression is what made a three-state guard a
+       correctness hazard rather than a typo: they have to agree, and the failure of a disagreement is the
+       ordering raising while the projection succeeds - a read that half works, for a reason no reader could
+       see. One expression cannot drift from itself. */
     public const string PgIndexBloatSql = """
         SELECT database_name, schema_name, table_name, index_name, index_bytes, tree_level,
-               empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation,
-               CASE
-                   WHEN avg_leaf_density IS NULL THEN NULL
-                   ELSE GREATEST(
-                       0,
-                       (index_bytes * (90.0 - avg_leaf_density) / NULLIF(90.0, 0))::bigint)
-               END AS estimated_reclaimable_bytes,
+               empty_pages, deleted_pages,
+               nullif(avg_leaf_density, 'NaN'::double precision) AS avg_leaf_density,
+               nullif(leaf_fragmentation, 'NaN'::double precision) AS leaf_fragmentation,
+               estimated_reclaimable_bytes,
                skipped_reason,
                collection_time
         FROM (
             SELECT DISTINCT ON (database_name, schema_name, table_name, index_name)
                    database_name, schema_name, table_name, index_name, index_bytes, tree_level,
                    empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation,
+                   CASE
+                       WHEN avg_leaf_density IS NULL THEN NULL
+                       WHEN avg_leaf_density = 'NaN'::double precision THEN 0::bigint
+                       ELSE GREATEST(
+                           0,
+                           (index_bytes * (90.0 - avg_leaf_density) / NULLIF(90.0, 0))::bigint)
+                   END AS estimated_reclaimable_bytes,
                    skipped_reason, collection_time
             FROM pg_index_bloat
             WHERE server_id = $1
@@ -97,9 +142,7 @@ public static class DarlingPgIndexBloatReader
            ones by a reclaimable figure it does not have. Then by reclaimable bytes, never by density: a
            small index at 40% is worth nothing next to a large one at 70%. */
         ORDER BY (skipped_reason IS NOT NULL) DESC,
-                 CASE WHEN avg_leaf_density IS NULL THEN NULL
-                      ELSE GREATEST(0, (index_bytes * (90.0 - avg_leaf_density) / 90.0)::bigint)
-                 END DESC NULLS LAST,
+                 latest.estimated_reclaimable_bytes DESC NULLS LAST,
                  index_bytes DESC
         LIMIT $4
         """;

@@ -71,6 +71,12 @@ public sealed class DarlingMcpPgIndexTools
 
             var truncated = rows.Count >= limit;
             var measured = rows.Count(r => r.SkippedReason is null);
+            /* An EMPTY index is the one row whose null density does NOT mean "not measured", and nothing
+               else in the payload distinguishes it: pgstatindex has no leaf pages to derive a density from,
+               so the read nulls it, while skipped_reason stays null because the measurement succeeded. Named
+               here because the note below spends two sentences teaching the reader that a null measurement
+               is absence of data, and on this row that lesson is wrong. */
+            var empty = rows.Count(r => r.SkippedReason is null && r.AvgLeafDensity is null);
 
             var indexes = rows.Select(r => new
             {
@@ -81,7 +87,9 @@ public sealed class DarlingMcpPgIndexTools
                 index_bytes = r.IndexBytes,
                 index_mb = Math.Round(r.IndexBytes / 1024.0 / 1024.0, 1),
                 /* Null on a skipped row, and deliberately not zero: zero density would read as a
-                   catastrophically bloated index, which is the opposite of "we did not look". */
+                   catastrophically bloated index, which is the opposite of "we did not look". Also null on
+                   an empty index, where there are no leaf pages to have a density - the note distinguishes
+                   the two, since only one of them means the index was not looked at. */
                 avg_leaf_density = r.AvgLeafDensity,
                 leaf_fragmentation = r.LeafFragmentation,
                 tree_level = r.TreeLevel,
@@ -110,6 +118,12 @@ public sealed class DarlingMcpPgIndexTools
                      + "absence of data, never a clean result."
                      + (measured < rows.Count
                          ? $" {rows.Count - measured} of the {rows.Count} row(s) RETURNED are labelled rather than measured."
+                         : string.Empty)
+                     + (empty > 0
+                         ? $" {empty} row(s) have NO skipped_reason and a null avg_leaf_density: those "
+                           + "indexes are EMPTY. pgstatindex has no leaf pages to derive a density from, so "
+                           + "there is no density to report — the measurement succeeded and found nothing, "
+                           + "which is why estimated_reclaimable_bytes is 0 rather than null."
                          : string.Empty)
                      + (truncated
                          ? " TRUNCATED at the row limit: there are more indexes than this. Raise the limit "
