@@ -111,15 +111,16 @@ public sealed class AlertReadFailureSurfaceTests
             .Where(n => n != "EqualityContract")
             .ToList();
 
-        Assert.Equal(6, readingMembers.Count);
+        Assert.Equal(7, readingMembers.Count);
 
-        /* Six from the record plus the two composed values. */
-        Assert.Equal(8, rendered.Count);
+        /* Seven from the record plus the two composed values. */
+        Assert.Equal(9, rendered.Count);
         Assert.Equal(
             new[]
             {
                 "counting_since", "finding", "instance_read_failures", "last_failure_at",
-                "last_failure_read", "note", "server_alert_passes", "server_read_failures",
+                "last_failure_elapsed_ms", "last_failure_read", "note", "server_alert_passes",
+                "server_read_failures",
             },
             rendered.OrderBy(f => f, StringComparer.Ordinal).ToArray());
     }

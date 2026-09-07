@@ -14,6 +14,8 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using Xunit;
@@ -53,9 +55,9 @@ public sealed class AlertReadFailureSurfaceTests
            the instance total and in no server's count. */
         var counter = new AlertReadFailureCounter();
 
-        counter.RecordReadFailure("101", "deadlocks");
-        counter.RecordReadFailure("202", "blocking");
-        counter.RecordReadFailure(null, "store background-job health reads");
+        counter.RecordReadFailure("101", "deadlocks", 10_067);
+        counter.RecordReadFailure("202", "blocking", 12);
+        counter.RecordReadFailure(null, "store background-job health reads", 4_211);
 
         Assert.Equal(1, counter.ReadFor("101").ServerReadFailures);
         Assert.Equal(1, counter.ReadFor("202").ServerReadFailures);
@@ -105,8 +107,8 @@ public sealed class AlertReadFailureSurfaceTests
            "0 failures" — that is true about the server and misleading about the instance the operator is
            standing on. */
         var counter = new AlertReadFailureCounter();
-        counter.RecordReadFailure(null, "store background-job health reads");
-        counter.RecordReadFailure("999", "deadlocks");
+        counter.RecordReadFailure(null, "store background-job health reads", 10_004);
+        counter.RecordReadFailure("999", "deadlocks", 7);
 
         var reading = counter.ReadFor("101");
         Assert.Equal(0, reading.ServerReadFailures);
@@ -124,11 +126,198 @@ public sealed class AlertReadFailureSurfaceTests
         /* A future call site that passes an empty name must not produce a finding whose sentence trails
            off into nothing. It counts, and it says so with a placeholder rather than silently. */
         var counter = new AlertReadFailureCounter();
-        counter.RecordReadFailure("101", "   ");
+        counter.RecordReadFailure("101", "   ", 0);
 
         var reading = counter.ReadFor("101");
         Assert.Equal(1, reading.ServerReadFailures);
         Assert.Equal("unnamed read", reading.LastFailureRead);
+    }
+
+    [Fact]
+    public void TheElapsedIsCarriedVerbatim_AndSharesTheStampsCurrencyTest()
+    {
+        /* The elapsed is the term that says WHOSE deadline ended the read — at the bound means this process
+           stopped waiting while the statement still ran on the store, well below it means the store returned
+           a fault — so a counter that rounded it, clamped it to a band or lost it would destroy the only
+           discriminator this population has. Verbatim, per bucket, newest wins.
+
+           And it shares ONE currency test with the stamp, deliberately: an elapsed with no stamp beside it
+           would be a duration belonging to no event, which is the shape #3010 already cost this surface
+           once. Asserted in both directions so neither half can drift. */
+        var counter = new AlertReadFailureCounter();
+
+        var quiet = counter.ReadFor("101");
+        Assert.Null(quiet.LastFailureAtUtc);
+        Assert.Null(quiet.LastFailureElapsedMs);
+
+        counter.RecordReadFailure("101", "forced-plan failures", 10_067);
+        var atTheBound = counter.ReadFor("101");
+        Assert.Equal(10_067, atTheBound.LastFailureElapsedMs);
+        Assert.NotNull(atTheBound.LastFailureAtUtc);
+
+        /* Newest wins rather than max or sum: this is a currency slot, exactly like last_failure_read. A
+           later FASTER failure must be able to lower it, or the field becomes a rolling maximum that never
+           decays and real improvement reads as flat. */
+        counter.RecordReadFailure("101", "database state", 41);
+        Assert.Equal(41, counter.ReadFor("101").LastFailureElapsedMs);
+
+        /* Zero is a reading, not an absence — a read that faulted on connect really did run for no
+           measurable time, and the stamp is what says an event happened at all. */
+        counter.RecordReadFailure("202", "deadlocks", 0);
+        var immediate = counter.ReadFor("202");
+        Assert.Equal(0, immediate.LastFailureElapsedMs);
+        Assert.NotNull(immediate.LastFailureAtUtc);
+
+        /* A negative is clamped rather than stored: a negative duration on a health surface reads as a
+           broken instrument, and there is no useful reading of it. */
+        counter.RecordReadFailure("303", "blocking", -5);
+        Assert.Equal(0, counter.ReadFor("303").LastFailureElapsedMs);
+
+        /* Buckets do not bleed. */
+        Assert.Equal(41, counter.ReadFor("101").LastFailureElapsedMs);
+    }
+
+    /// <summary>
+    /// The newest failure's stamp, name and elapsed always describe ONE failure, under concurrency.
+    ///
+    /// <para><b>Why the single-threaded pin above is not enough.</b>
+    /// <see cref="TheElapsedIsCarriedVerbatim_AndSharesTheStampsCurrencyTest"/> asserts the trio cannot
+    /// disagree, and it would pass just as happily over three independent fields — which can be observed
+    /// part-applied. Two failures landing in the same bucket concurrently could leave a reader with one
+    /// failure's elapsed beside the other's name, and that is not a stale reading, it is a confident
+    /// classification of the wrong read. The fleet bucket makes it reachable rather than theoretical:
+    /// several call sites record with a null key, so they all share it.</para>
+    ///
+    /// <para>The pairs are chosen so a blend is DETECTABLE — each read name has exactly one legal elapsed,
+    /// and the two sets are disjoint — because a test that recorded the same elapsed from every thread
+    /// could not fail no matter how torn the write was.</para>
+    /// </summary>
+    [Fact]
+    public void TheNewestFailuresFactsAreNeverABlendOfTwo()
+    {
+        const string Key = "500";
+        const int WritesPerWriter = 200_000;
+
+        /* One legal elapsed per read name, disjoint across writers, so a blend is DETECTABLE. A test that
+           recorded the same elapsed from every thread could not fail no matter how torn the write was. */
+        var pairs = new (string Read, long ElapsedMs)[]
+        {
+            ("forced-plan failures", 10_067),
+            ("collection-health self-alert", 41),
+            ("capture-down self-alert", 10_004),
+            ("database state", 7),
+        };
+        var legal = pairs.ToDictionary(p => p.Read, p => p.ElapsedMs, StringComparer.Ordinal);
+
+        var counter = new AlertReadFailureCounter();
+
+        /* Seeded before the writers start, so a read can never observe an empty bucket. The first version
+           of this test time-boxed the writers and counted observations instead, and its own
+           "observed nothing" guard fired on a CI runner: five queued work items on a small box left the
+           reader unscheduled until the window had closed. Bounded work plus a seeded bucket makes the
+           observation count a property of the code rather than of the runner's core count. */
+        counter.RecordReadFailure(Key, pairs[0].Read, pairs[0].ElapsedMs);
+
+        var writers = pairs
+            .Select(pair => Task.Factory.StartNew(
+                () =>
+                {
+                    for (var i = 0; i < WritesPerWriter; i++)
+                    {
+                        counter.RecordReadFailure(Key, pair.Read, pair.ElapsedMs);
+
+                        /* Null key too: the fleet bucket is the one several production sites share, and so
+                           the one where a collision is likeliest. */
+                        counter.RecordReadFailure(null, pair.Read, pair.ElapsedMs);
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default))
+            .ToArray();
+
+        /* The reader is THIS thread rather than a sixth queued work item, so it cannot go unscheduled. */
+        var blends = new List<string>();
+        var observations = 0;
+
+        while (!writers.All(w => w.IsCompleted))
+        {
+            var reading = counter.ReadFor(Key);
+            observations++;
+
+            Assert.NotNull(reading.LastFailureRead);
+
+            if (!legal.TryGetValue(reading.LastFailureRead!, out var expected))
+            {
+                blends.Add($"unknown read name '{reading.LastFailureRead}'");
+            }
+            else if (reading.LastFailureElapsedMs != expected)
+            {
+                blends.Add(
+                    $"'{reading.LastFailureRead}' paired with {reading.LastFailureElapsedMs} ms, which "
+                    + $"belongs to another failure (its own is {expected} ms)");
+            }
+            else if (reading.LastFailureAtUtc is null)
+            {
+                blends.Add($"'{reading.LastFailureRead}' with an elapsed and no stamp");
+            }
+        }
+
+        Task.WaitAll(writers);
+
+        /* Guaranteed rather than hoped for: the bucket was seeded, so the first iteration observed a
+           complete trio whatever the scheduler did. */
+        Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
+        Assert.True(
+            blends.Count == 0,
+            $"{blends.Count} blended reading(s) over {observations} observation(s): "
+            + string.Join(" | ", blends.Take(5)));
+
+        /* And the settled trio is one writer's, not a mixture — asserted after the writers stop, so this
+           half is about the VALUE rather than about timing. */
+        var settled = counter.ReadFor(Key);
+        Assert.NotNull(settled.LastFailureRead);
+        Assert.Equal(legal[settled.LastFailureRead!], settled.LastFailureElapsedMs);
+        Assert.NotNull(settled.LastFailureAtUtc);
+
+        /* The fleet bucket reaches no per-server reading by design, so its trio is checked through the
+           instance read, which carries the stamp and the name. The elapsed is not on that surface — stated
+           because it bounds what this half proves. */
+        var (instanceFailures, instanceStamp, instanceRead) = counter.ReadInstance();
+        Assert.True(instanceFailures > 0);
+        Assert.NotNull(instanceStamp);
+        Assert.True(
+            legal.ContainsKey(instanceRead!),
+            $"the instance-wide newest read name is '{instanceRead}', which no writer recorded");
+    }
+
+    [Fact]
+    public void TheFinding_RendersTheElapsedAndTellsTheReaderWhatToCompareItTo()
+    {
+        /* An elapsed that reached the count and not the sentence would be a measurement an operator has to
+           go and find. And a bare number is not enough on this surface: the whole point is the comparison
+           to the read's own deadline, so the sentence has to name what to compare it to. It deliberately
+           does NOT name a threshold — the bound is the calling SKU's constant, and a number baked into this
+           shared formatter would be wrong for one of the two. */
+        var counter = new AlertReadFailureCounter();
+        counter.RecordReadFailure("101", "forced-plan failures", 10_067);
+
+        var finding = AlertReadFailureCounter.FormatFinding(counter.ReadFor("101"));
+
+        Assert.NotNull(finding);
+        Assert.Contains("10067 ms", finding, StringComparison.Ordinal);
+        Assert.Contains("command deadline", finding, StringComparison.Ordinal);
+
+        /* All THREE readings, not two. A sentence offering only "at the bound" and "well below it" hands an
+           operator a binary for a figure that some entries can legitimately make neither — the shared
+           engine sweep's awaited operation is a whole alert pass. That caveat lived in the class doc and the
+           tool description and not in the text a per-failure reader sees. */
+        Assert.Contains("well ABOVE", finding, StringComparison.Ordinal);
+        Assert.Contains("not a single bounded read", finding, StringComparison.Ordinal);
+
+        /* The control: the same Contains form finds a threshold nowhere, so its silence is a real absence
+           and not a matcher that never matches. */
+        Assert.DoesNotContain("10000 ms", finding, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -206,6 +395,19 @@ public sealed class AlertReadFailureSurfaceTests
     private const int WorkerExemptSites = 7;
 
     /// <summary>
+    /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
+    /// each assertion: the census, the name-distinctness pin and the measurement-coverage pin all describe
+    /// the same population, and three independent literals would let two of them go stale while the third
+    /// still read correctly.
+    ///
+    /// <para>Cross-checked against the compiler rather than counted by eye: making the counter's elapsed
+    /// parameter required errored at exactly 13 sites in <c>AlertEngine.cs</c>, 5 in
+    /// <c>DarlingSelfAlertEvaluator.cs</c>, 9 in <c>DarlingWorker.cs</c> and 0 in Lite, which is a census
+    /// that cannot miss a site or invent one.</para>
+    /// </summary>
+    private const int CountedSites = 27;
+
+    /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
     /// reason. Keyed on the message because that is the one part of a catch block that names what it was
     /// handling; the source itself carries the same reason as a comment at the site.
@@ -248,6 +450,22 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly Regex s_catch = new(
         @"catch\s*\(\s*(?!OperationCanceledException\b)(?:System\s*\.\s*)?[A-Za-z_][A-Za-z0-9_.]*\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// A counted call, with its read name and the CLOCK it took its elapsed from.
+    ///
+    /// <para>The third argument is required to be <c>&lt;identifier&gt;.ElapsedMilliseconds</c> and the
+    /// close paren is anchored, which is what makes this pattern a coverage check rather than a name
+    /// extractor: a site that passed a literal, a constant, a field or a computed number would not match,
+    /// and every count asserted over these matches would fall short and say which file. The narrower
+    /// alternative — reading the name and separately hoping a duration went along — is the shape that lets
+    /// a site ship with <c>0</c> in the slot and a log line that reads correctly.</para>
+    /// </summary>
+    private const string s_recordCall =
+        @"RecordReadFailure\([^,]+,\s*""(?<name>[^""]+)""\s*,\s*(?<clock>[A-Za-z_][A-Za-z0-9_]*)\.ElapsedMilliseconds\s*\)";
+
+    /// <summary>The one rendering of the measurement in a log line, so a log census greps one token.</summary>
+    private const string ElapsedPlaceholder = "after {ElapsedMs} ms";
 
     [Fact]
     public void EverySwallowedAlertingRead_IsCountedOrExplicitlyExempt()
@@ -299,7 +517,7 @@ public sealed class AlertReadFailureSurfaceTests
 
         /* The whole-tree totals, so a site MOVED between the scoped regions still has to be re-counted by
            a person rather than netting out silently. */
-        Assert.Equal(27, totalCounted);
+        Assert.Equal(CountedSites, totalCounted);
         Assert.Equal(18, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
@@ -415,13 +633,13 @@ public sealed class AlertReadFailureSurfaceTests
         })
         {
             var raw = ReadSource(relative);
-            foreach (Match m in Regex.Matches(raw, @"RecordReadFailure\([^,]+,\s*""([^""]+)""\s*\)"))
+            foreach (Match m in Regex.Matches(raw, s_recordCall))
             {
-                names.Add((m.Groups[1].Value, relative));
+                names.Add((m.Groups["name"].Value, relative));
             }
         }
 
-        Assert.Equal(27, names.Count);
+        Assert.Equal(CountedSites, names.Count);
         Assert.All(names, n => Assert.False(string.IsNullOrWhiteSpace(n.Name)));
 
         var duplicates = names
@@ -431,6 +649,722 @@ public sealed class AlertReadFailureSurfaceTests
             .ToList();
 
         Assert.True(duplicates.Count == 0, $"duplicate read name(s): {string.Join(", ", duplicates)}");
+    }
+
+    /// <summary>
+    /// Every counted alerting read records HOW LONG it ran before it failed, in its log line and in the
+    /// counter, from a clock that was running while the read was.
+    ///
+    /// <para><b>The property, and why the count alone was not enough.</b> The name says which condition
+    /// went blind; the elapsed says whose deadline ended it. A read that gives up AT its own command
+    /// deadline was cut off by this process while the statement was still running on the store; one that
+    /// fails far below the bound carries a fault the store returned. Those have different remedies and the
+    /// exception text cannot separate them, because Npgsql renders a client-side deadline as a torn stream
+    /// with no SQLSTATE — the same rendering as a dropped connection. So the duration is the discriminator,
+    /// and a population whose elapsed clusters at a bound and never below it is client-side expiry. That
+    /// argument was already available for the COLLECTOR population from <c>collection_log.duration_ms</c>;
+    /// this population writes no <c>collection_log</c> row by design, so before this it recorded no elapsed
+    /// time anywhere.</para>
+    ///
+    /// <para><b>Derived from the property's violation routes rather than from reading the call sites.</b>
+    /// Reading them finds a site that measures WRONGLY; only enumerating the ways the property can be
+    /// broken finds the site that does not measure at all. Five routes, each with its own message:</para>
+    /// <list type="number">
+    /// <item>the counter is handed a value rather than a measurement — a literal, a constant, a field;</item>
+    /// <item>the measurement reaches the counter and not the log line, which is the surface the census of
+    /// this population actually reads, so the argument would stay unavailable;</item>
+    /// <item>the log line renders an elapsed from a DIFFERENT clock than the one recorded, so two numbers
+    /// describing one event disagree;</item>
+    /// <item>the clock is started inside the catch, which compiles, reads correctly and can only ever
+    /// measure zero;</item>
+    /// <item>the clock is shared with another read in the same method, so a later read reports the elapsed
+    /// of the whole pass — closed by requiring the clock to be started on the line immediately above THIS
+    /// try, which is a structural property rather than a naming convention.</item>
+    /// </list>
+    ///
+    /// <para>The population is DISCOVERED, by the same catch-block walk the census uses, so a twenty-eighth
+    /// site is inside this pin the moment it is written — a pin naming twenty-seven sites is blind to the
+    /// twenty-eighth. The site count is asserted against <see cref="CountedSites"/> in both directions, so
+    /// a walk that silently stopped reaching cannot report clean.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCountedAlertingRead_MeasuresHowLongItRanBeforeItFailed()
+    {
+        var violations = new List<string>();
+        var sites = 0;
+
+        foreach (var (relative, _, _) in s_wholeFileScopes)
+        {
+            var raw = ReadSource(relative);
+            sites += ClassifyMeasurement(
+                raw, CSharpSourceWalker.StripCommentsAndStrings(raw), relative, violations);
+        }
+
+        var workerRaw = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var workerStripped = CSharpSourceWalker.StripCommentsAndStrings(workerRaw);
+        foreach (var member in s_workerAlertMembers)
+        {
+            var (start, end) = MemberBody(workerStripped, member);
+            sites += ClassifyMeasurement(
+                workerRaw[start..end], workerStripped[start..end], $"DarlingWorker.{member}", violations);
+        }
+
+        /* Offenders before the count, so a real violation reports as itself rather than as an off-by-one. */
+        Assert.True(
+            violations.Count == 0,
+            $"{violations.Count} counted alerting read(s) do not record how long they ran before failing: "
+            + string.Join(" | ", violations));
+
+        Assert.Equal(CountedSites, sites);
+    }
+
+    /// <summary>
+    /// The positive control for the scan above, through the IDENTICAL <see cref="ClassifyMeasurement"/>
+    /// call. Without it the scan could match nothing and report clean, which is how a source-scanning
+    /// guard starts lying — and this one has more ways to do that than the census does, because it asserts
+    /// four separate things about each block it finds.
+    ///
+    /// <para>One fixture per violation route, each asserted to red for ITS OWN reason rather than merely
+    /// to red: a control that only counts violations would pass while the scan reported the wrong one.</para>
+    /// </summary>
+    [Fact]
+    public void TheMeasurementScanner_RedsOnEachWayASiteCanDropTheMeasurement()
+    {
+        /* The compliant shape, which must pass — otherwise every red below proves nothing. */
+        AssertScan(
+            """
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                Read();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Failed to check widgets for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "widgets", readClock.ElapsedMilliseconds);
+            }
+            """,
+            expectedSites: 1,
+            expectedViolation: null);
+
+        /* Route 1: a value in the slot where a measurement belongs. This is the one that compiles, logs a
+           number, satisfies a "does it pass an elapsed" check and is worthless. */
+        AssertScan(
+            """
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                Read();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Failed to check widgets for {Server} after {ElapsedMs} ms: {Message}", serverName, 0, ex.Message);
+                _readFailures?.RecordReadFailure(key, "widgets", 0);
+            }
+            """,
+            expectedSites: 1,
+            expectedViolation: "without an <identifier>.ElapsedMilliseconds measurement");
+
+        /* Route 2: measured, recorded, and absent from the log line — so the population's own census, which
+           reads the service log, still cannot classify it. */
+        AssertScan(
+            """
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                Read();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Failed to check widgets for {Server}: {Message}", serverName, ex.Message);
+                _readFailures?.RecordReadFailure(key, "widgets", readClock.ElapsedMilliseconds);
+            }
+            """,
+            expectedSites: 1,
+            expectedViolation: "log line does not render");
+
+        /* Route 3: two clocks, so the log line and the counter describe one event with different numbers. */
+        AssertScan(
+            """
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                Read();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Failed to check widgets for {Server} after {ElapsedMs} ms: {Message}", serverName, passClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "widgets", readClock.ElapsedMilliseconds);
+            }
+            """,
+            expectedSites: 1,
+            expectedViolation: "a different clock");
+
+        /* Route 4: started in the handler for the failure it is meant to time. Compiles, reads correctly,
+           always zero. */
+        AssertScan(
+            """
+            try
+            {
+                Read();
+            }
+            catch (Exception ex)
+            {
+                var readClock = Stopwatch.StartNew();
+                _logger?.LogError("Failed to check widgets for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "widgets", readClock.ElapsedMilliseconds);
+            }
+            """,
+            expectedSites: 1,
+            expectedViolation: "inside the catch block");
+
+        /* Route 5: one clock covering two reads, which is legal C# and reports the elapsed of the PASS for
+           whichever read fails second. The tell is structural — the clock is not started immediately above
+           this try — which is why the check is not a naming convention. */
+        AssertScan(
+            """
+            var readClock = Stopwatch.StartNew();
+            var rows = ReadFirst();
+            try
+            {
+                Read();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Failed to check widgets for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "widgets", readClock.ElapsedMilliseconds);
+            }
+            """,
+            expectedSites: 1,
+            expectedViolation: "not started on the line immediately above");
+
+        /* And a block that records nothing is not this scan's subject at all — the census owns that case,
+           and double-reporting it here would make a missing exemption look like a missing measurement. */
+        AssertScan(
+            """
+            try
+            {
+                Write();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Alert resolution callback failed for {Server}: {Message}", serverName, ex.Message);
+            }
+            """,
+            expectedSites: 0,
+            expectedViolation: null);
+    }
+
+    /// <summary>
+    /// The <c>await</c> keyword, and nothing about what is being awaited.
+    ///
+    /// <para><b>Why the callee is deliberately not parsed.</b> The first version of this pin matched
+    /// <c>await</c> followed by a dotted qualifier and a callee name, then classified the callee as a
+    /// store read or not from two explicit tables. The pattern could not match
+    /// <c>await x!.Method(…)</c> — the null-forgiving operator is not in a dotted-identifier qualifier —
+    /// so five awaits in <c>EvaluateCompressionJobHealthAsync</c> were invisible to it, three of them
+    /// applies sitting between reads. The pin reported clean over 84 awaits when there were 89, and the
+    /// missing five were exactly the defect. A pattern shaped like the expected answer returns a
+    /// confident partial count and no error.</para>
+    ///
+    /// <para>So the property was changed to one that needs no callee at all: a clock boundary between
+    /// EVERY pair of consecutive awaits. Finding a bare <c>await</c> token cannot be partial the way a
+    /// qualifier pattern can, and there is no classification left to get wrong.</para>
+    ///
+    /// <para><c>await using</c> is excluded, narrowly: its await is the scope's <c>DisposeAsync</c> at
+    /// block exit rather than an operation at that point in the text, so requiring a boundary between it
+    /// and the call on the same line would require something both impossible and meaningless. The cost is
+    /// stated rather than hidden — a fault in that disposal reports the last operation's elapsed plus the
+    /// disposal's.</para>
+    /// </summary>
+    private static readonly Regex s_awaitToken = new(
+        @"\bawait\b(?!\s+using\b)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The figure a counted block records is ONE awaited operation's, not the whole block's.
+    ///
+    /// <para><b>The defect this closes, which the sibling pin could not see.</b> Every check in
+    /// <see cref="EveryCountedAlertingRead_MeasuresHowLongItRanBeforeItFailed"/> is satisfied by a single
+    /// clock started at the top of the block — and a block that performs several awaited operations then
+    /// reports the SUM of everything that ran. The PostgreSQL predictor group reads four store tables and
+    /// the store background-job group five, each bounded separately, so an ordinary client-side cutoff of
+    /// the last one would record well ABOVE the per-read deadline: a value the whole
+    /// at-the-bound-versus-below-it argument has no bucket for. It would have shipped reading perfectly
+    /// plausibly.</para>
+    ///
+    /// <para><b>The property.</b> Between any two consecutive awaits in a counted block there is a clock
+    /// restart, so whatever faults, the elapsed is that operation's. Expressed as a substring between two
+    /// offsets rather than by parsing statements, which is what lets it catch the shape that started this:
+    /// reads awaited inside ONE argument list, where no restart can sit between them at all. Those are
+    /// hoisted into locals for exactly that reason, and this pin is what says none are left.</para>
+    ///
+    /// <para><b>Every await, not every read</b> — see <see cref="s_awaitToken"/>. An apply or a delivery
+    /// between two reads inflates the later read's figure exactly as another read would, and it can push
+    /// the total BELOW the bound rather than above it, which misreads a client cutoff as a store fault.
+    /// Restricting the rule to reads required classifying callees, and the classifier was the part that
+    /// was wrong.</para>
+    ///
+    /// <para>A block's LAST await needs no boundary after it: nothing follows that could inflate the
+    /// figure. The count of pairs is asserted in both directions, so a walk that silently stopped
+    /// reaching cannot report clean.</para>
+    ///
+    /// <para><b>The loop arm asks about every enclosing block, not the nearest one.</b> An await nested in
+    /// an <c>if</c> inside a <c>foreach</c> executes once per iteration exactly as a direct child of the
+    /// loop body does, so the walk steps outward until it finds a loop or reaches the try body. Consulting
+    /// only the nearest block classifies such an await non-loop and skips it — and when that await is also
+    /// the block's last, the consecutive-pair arm does not cover it either, so a missing restart there
+    /// would pass this pin silently. Two of the five loop-body awaits in these blocks have that exact
+    /// shape (the per-subject cooldown seed reads), which is why the floor below is set above what the
+    /// nearest-block rule can reach.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCountedBlock_GivesTheFailingOperationTheClockToItself()
+    {
+        var violations = new List<string>();
+        var blocks = 0;
+        var pairs = 0;
+        var loopAwaits = 0;
+
+        void Scan(string raw, string stripped, string where)
+        {
+            foreach (Match m in s_catch.Matches(stripped))
+            {
+                var open = stripped.IndexOf('{', m.Index);
+                if (open < 0)
+                {
+                    continue;
+                }
+
+                var strippedBody = CSharpSourceWalker.BraceBalanced(stripped, open);
+                if (!strippedBody.Contains("RecordReadFailure(", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                blocks++;
+                var rawBody = raw[open..(open + strippedBody.Length)];
+                var call = Regex.Match(rawBody, s_recordCall);
+                if (!call.Success)
+                {
+                    /* The sibling pin owns that case and names it; reporting it twice would make one
+                       defect look like two. */
+                    continue;
+                }
+
+                var clock = call.Groups["clock"].Value;
+                var readName = call.Groups["name"].Value;
+
+                /* The try body this catch belongs to — the same sibling-indent walk the sibling pin uses. */
+                var lineStart = raw.LastIndexOf('\n', m.Index) + 1;
+                var indent = raw[lineStart..m.Index];
+                var sibling = new Regex(@"\r?\n" + Regex.Escape(indent) + @"try[ \t]*\r?\n");
+                Match? nearest = null;
+                foreach (Match t in sibling.Matches(raw[..m.Index]))
+                {
+                    nearest = t;
+                }
+
+                Assert.NotNull(nearest);
+                var tryOpen = stripped.IndexOf('{', nearest!.Index + nearest.Length - 1);
+                Assert.True(tryOpen > 0, $"{where}: the {readName} block's try has no body");
+
+                /* STRIPPED, so an await written in prose cannot register as an operation and a Restart()
+                   mentioned in a comment cannot satisfy the property. Length is preserved, so the offsets
+                   still line up with the raw source. */
+                var body = CSharpSourceWalker.BraceBalanced(stripped, tryOpen);
+
+                var restart = clock + ".Restart();";
+                var offsets = s_awaitToken.Matches(body).Select(a => a.Index).ToList();
+                for (var i = 0; i < offsets.Count - 1; i++)
+                {
+                    pairs++;
+                    if (!body[offsets[i]..offsets[i + 1]].Contains(restart, StringComparison.Ordinal))
+                    {
+                        violations.Add(
+                            $"{where}: in the {readName} block, the awaits at offsets {offsets[i]} and "
+                            + $"{offsets[i + 1]} have no {clock}.Restart() between them, so a fault in the "
+                            + "later one records both");
+                    }
+                }
+
+                /* The LOOP arm. Everything above compares consecutive await TOKENS, and a token inside a
+                   loop body is many executions: iteration two starts with iteration one's time still on
+                   the clock. Two real sites hid there — a delivery loop in the PostgreSQL predictor group
+                   and the poison-wait Cleared loop, the latter behind the "a block's last await needs no
+                   boundary" rule, which is true of one execution and false of a loop.
+
+                   So an await whose innermost enclosing block is a LOOP must be followed by a restart
+                   before that block ends, whether or not another await follows it textually. An
+                   unrecognised controlling construct counts as a loop: this check fails toward demanding
+                   a boundary, because the cost of a spare restart is nothing and the cost of a missing one
+                   is a figure that sums two operations. */
+                foreach (var at in offsets)
+                {
+                    var loopClose = EnclosingLoopClose(body, at);
+                    if (loopClose < 0)
+                    {
+                        continue;
+                    }
+
+                    loopAwaits++;
+                    if (!body[at..loopClose].Contains(restart, StringComparison.Ordinal))
+                    {
+                        violations.Add(
+                            $"{where}: in the {readName} block, the await at offset {at} sits in a loop "
+                            + $"body with no {clock}.Restart() before the body ends, so a fault on one "
+                            + "iteration records the previous iterations too");
+                    }
+                }
+            }
+        }
+
+        foreach (var (relative, _, _) in s_wholeFileScopes)
+        {
+            var raw = ReadSource(relative);
+            Scan(raw, CSharpSourceWalker.StripCommentsAndStrings(raw), relative);
+        }
+
+        var workerRaw = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var workerStripped = CSharpSourceWalker.StripCommentsAndStrings(workerRaw);
+        foreach (var member in s_workerAlertMembers)
+        {
+            var (start, end) = MemberBody(workerStripped, member);
+            Scan(workerRaw[start..end], workerStripped[start..end], $"DarlingWorker.{member}");
+        }
+
+        Assert.True(
+            violations.Count == 0,
+            $"{violations.Count} counted block(s) can record more than one operation's elapsed: "
+            + string.Join(" | ", violations));
+
+        Assert.Equal(CountedSites, blocks);
+
+        /* The other direction, for both arms. A scan that found no consecutive pairs — or no awaits in
+           any loop body — would satisfy the loops above vacuously, and these blocks demonstrably have
+           both. The loop arm's floor is the load-bearing one: it is the arm that was missing, so a change
+           that stopped finding loop bodies would put the hole straight back.*/
+        Assert.True(pairs >= 55, $"only {pairs} consecutive await pair(s) were examined");
+        /* Five awaits in these blocks sit inside a loop body; the arm reports one more than that, because
+           an unrecognised controlling construct counts as a loop and one `else if` chain in AlertEngine
+           reads that way. The floor is the five, and it is set there deliberately: a rule that consulted
+           only an await's NEAREST enclosing block reaches just three of them, so a floor of five cannot be
+           satisfied by a walk that stopped stepping outward. */
+        Assert.True(loopAwaits >= 5, $"only {loopAwaits} await(s) in a loop body were examined");
+    }
+
+    /// <summary>
+    /// The positive control for the scan above, through the same substring property — including the two
+    /// shapes that each cost a review round: an apply between two reads, and two awaits inside one
+    /// argument list where no inserted line can go.
+    /// </summary>
+    [Fact]
+    public void TheRestartScanner_RedsWhenAnyTwoAwaitsShareOneClock()
+    {
+        static List<int> Scan(string body, string clock)
+        {
+            var offsets = s_awaitToken.Matches(body).Select(a => a.Index).ToList();
+            var bad = new List<int>();
+
+            for (var i = 0; i < offsets.Count - 1; i++)
+            {
+                if (!body[offsets[i]..offsets[i + 1]]
+                        .Contains(clock + ".Restart();", StringComparison.Ordinal))
+                {
+                    bad.Add(i);
+                }
+            }
+
+            return bad;
+        }
+
+        /* Bracketed: every operation gets the clock to itself. */
+        Assert.Empty(Scan(
+            """
+            var a = await GetXminHorizonAsync(id, ct);
+            readClock.Restart();
+            await ApplyAsync(a);
+            readClock.Restart();
+            var b = await GetWraparoundRiskAsync(id, ct);
+            readClock.Restart();
+            await DeliverAsync(a, b);
+            """,
+            "readClock"));
+
+        /* Two reads under one clock — the first class the review found. */
+        Assert.Equal(new[] { 0 }, Scan(
+            """
+            var a = await GetXminHorizonAsync(id, ct);
+            var b = await GetWraparoundRiskAsync(id, ct);
+            readClock.Restart();
+            await DeliverAsync(a, b);
+            """,
+            "readClock"));
+
+        /* An APPLY between two reads, with the null-forgiving spelling the old pattern could not see.
+           This is the arm that would have passed before: the apply was invisible, so the two reads
+           looked adjacent and their single restart looked sufficient. */
+        Assert.Equal(new[] { 1 }, Scan(
+            """
+            var a = await ReadStuckCompressionJobsAsync(c, log, ct);
+            readClock.Restart();
+            await _selfAlerts!.EvaluateCompressionJobsAsync(a, ct);
+            var b = await ReadJobCadenceReadingsAsync(c, log, ct);
+            readClock.Restart();
+            await _selfAlerts!.EvaluateStoreJobCadenceAsync(b, ct);
+            """,
+            "readClock"));
+
+        /* And the shape no inserted line can fix: two awaits inside one argument list. */
+        Assert.Equal(new[] { 0 }, Scan(
+            """
+            var findings = Evaluate(
+                await GetWraparoundRiskAsync(id, ct),
+                await GetXminHorizonAsync(id, ct));
+            readClock.Restart();
+            await DeliverAsync(findings);
+            """,
+            "readClock"));
+
+        /* `await using` is not an operation at that point in the text, so it is not half of a pair —
+           otherwise every block that opens a connection that way would red on something unfixable. */
+        Assert.Empty(Scan(
+            """
+            await using var connection = await OpenConnectionAsync(ct);
+            readClock.Restart();
+            await ReadCompressionActivityAsync(connection, log, ct);
+            """,
+            "readClock"));
+
+        /* The control that stops the scan flagging everything: a single await is no pair at all. */
+        Assert.Empty(Scan("var a = await GetXminHorizonAsync(id, ct);", "readClock"));
+    }
+
+    /// <summary>
+    /// The close index of the innermost LOOP block enclosing <paramref name="at"/>, or -1 when no loop
+    /// encloses it.
+    ///
+    /// <para>Asked of every enclosing block out to the try body, innermost first — not just the nearest
+    /// one. An await nested in an <c>if</c> inside a <c>foreach</c> executes once per iteration exactly as
+    /// a direct child of the loop body does, but its nearest enclosing block is the <c>if</c>, which is not
+    /// a loop. A rule that consulted only that block would classify such an await non-loop and skip it;
+    /// and when the await is also its block's LAST, the consecutive-await arm does not cover it either, so
+    /// a missing restart there would pass the scan silently.</para>
+    ///
+    /// <para>The try body itself terminates the walk: it is entered once per pass with the clock started
+    /// fresh above it, so nothing follows that execution to inflate the figure.</para>
+    /// </summary>
+    private static int EnclosingLoopClose(string body, int at)
+    {
+        var probe = at;
+
+        while (true)
+        {
+            var (blockOpen, blockClose) = InnermostBlock(body, probe);
+
+            if (blockClose >= body.Length - 1)
+            {
+                return -1;
+            }
+
+            if (IsLoopBlock(body, blockOpen))
+            {
+                return blockClose;
+            }
+
+            /* Step outward: the construct this await sits in may itself be inside a loop. */
+            probe = blockOpen;
+        }
+    }
+
+    /// <summary>
+    /// The positive control for the LOOP arm, through the same <see cref="EnclosingLoopClose"/> walk the
+    /// arm itself runs rather than a second copy of the rule.
+    ///
+    /// <para>The pair arm's control one method up cannot see this arm at all: it compares consecutive
+    /// await tokens, and a single await alone in a loop body forms no pair. So without this, the arm that
+    /// bounds per-iteration awaits had no fixture that fails when it is broken — and the shape it exists
+    /// to catch is the one a nearest-block rule cannot see.</para>
+    /// </summary>
+    [Fact]
+    public void TheLoopArm_SeesAnAwaitNestedInsideAConditionalInsideALoop()
+    {
+        static bool Flagged(string body, string clock)
+        {
+            var at = body.IndexOf("await ", StringComparison.Ordinal);
+
+            Assert.True(at > 0, "fixture has no await");
+
+            var loopClose = EnclosingLoopClose(body, at);
+
+            return loopClose >= 0
+                && !body[at..loopClose].Contains(clock + ".Restart();", StringComparison.Ordinal);
+        }
+
+        /* Directly in a loop body, unbounded: the shape a nearest-block rule DOES catch. */
+        Assert.True(Flagged(
+            """
+            {
+                foreach (var finding in findings)
+                {
+                    await DeliverAsync(finding, ct);
+                }
+            }
+            """,
+            "readClock"));
+
+        /* The same, bounded. */
+        Assert.False(Flagged(
+            """
+            {
+                foreach (var finding in findings)
+                {
+                    await DeliverAsync(finding, ct);
+                    readClock.Restart();
+                }
+            }
+            """,
+            "readClock"));
+
+        /* THE shape: nested one conditional deep inside the loop, unbounded, and the only await in the
+           body so no pair covers it. A walk that stopped at the nearest block reads the `if` here, calls
+           it non-loop, and returns clean. */
+        Assert.True(Flagged(
+            """
+            {
+                foreach (var entry in _activePgPoisonWaitAlert)
+                {
+                    if (entry.Value)
+                    {
+                        await NotifyPgResolutionAsync(serverKey, subject, ct);
+                    }
+                }
+            }
+            """,
+            "readClock"));
+
+        /* The same shape, bounded — so the control discriminates the missing restart rather than merely
+           reporting "an await inside a loop". */
+        Assert.False(Flagged(
+            """
+            {
+                foreach (var entry in _activePgPoisonWaitAlert)
+                {
+                    if (entry.Value)
+                    {
+                        await NotifyPgResolutionAsync(serverKey, subject, ct);
+                        readClock.Restart();
+                    }
+                }
+            }
+            """,
+            "readClock"));
+
+        /* The control that stops the walk flagging everything: a conditional with no loop above it runs
+           at most once per pass, so an unbounded await there is not this arm's business. */
+        Assert.False(Flagged(
+            """
+            {
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(resolution, ct);
+                }
+            }
+            """,
+            "readClock"));
+    }
+
+    /// <summary>
+    /// The innermost <c>{ … }</c> containing <paramref name="at"/>, as (open, close) indices.
+    /// </summary>
+    private static (int Open, int Close) InnermostBlock(string body, int at)
+    {
+        var depth = 0;
+        var open = -1;
+        for (var i = at - 1; i >= 0; i--)
+        {
+            if (body[i] == '}')
+            {
+                depth++;
+            }
+            else if (body[i] == '{')
+            {
+                if (depth == 0)
+                {
+                    open = i;
+                    break;
+                }
+
+                depth--;
+            }
+        }
+
+        Assert.True(open >= 0, "an await with no enclosing block");
+
+        depth = 0;
+        for (var i = at; i < body.Length; i++)
+        {
+            if (body[i] == '{')
+            {
+                depth++;
+            }
+            else if (body[i] == '}')
+            {
+                if (depth == 0)
+                {
+                    return (open, i);
+                }
+
+                depth--;
+            }
+        }
+
+        Assert.Fail("an await with no closing brace");
+        return (open, body.Length - 1);
+    }
+
+    /// <summary>
+    /// Whether the block opened at <paramref name="open"/> can execute more than once — read from the
+    /// controlling keyword immediately before it.
+    ///
+    /// <para>UNRECOGNISED counts as a loop. This is the one classification left in the pin, and it is
+    /// pointed so that being wrong costs a spare clock restart rather than a hidden defect: the previous
+    /// version of this file classified callees and its blind spot cost two review rounds.</para>
+    /// </summary>
+    private static bool IsLoopBlock(string body, int open)
+    {
+        var from = Math.Max(0, open - 200);
+        var head = body[from..open];
+        var keywords = Regex.Matches(
+                head,
+                @"\b(foreach|for|while|do|if|else|switch|try|catch|finally|using|lock)\b")
+            .Select(m => m.Groups[1].Value)
+            .ToList();
+
+        if (keywords.Count == 0)
+        {
+            return true;
+        }
+
+        return keywords[^1] is not ("if" or "else" or "switch" or "try" or "catch" or "finally"
+            or "using" or "lock");
+    }
+
+    private static void AssertScan(string fixture, int expectedSites, string? expectedViolation)
+    {
+        var violations = new List<string>();
+        var sites = ClassifyMeasurement(
+            fixture, CSharpSourceWalker.StripCommentsAndStrings(fixture), "fixture", violations);
+
+        Assert.Equal(expectedSites, sites);
+
+        if (expectedViolation is null)
+        {
+            Assert.Empty(violations);
+            return;
+        }
+
+        Assert.Single(violations);
+        Assert.Contains(expectedViolation, violations[0], StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -744,7 +1678,7 @@ public sealed class AlertReadFailureSurfaceTests
             .Where(n => n != "EqualityContract")
             .ToList();
 
-        Assert.Equal(6, readingMembers.Count);
+        Assert.Equal(7, readingMembers.Count);
 
         foreach (var member in readingMembers)
         {
@@ -779,18 +1713,40 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains("subtitle: \"since this service started", js, StringComparison.Ordinal);
         Assert.Contains("NOT the trailing 7 days", js, StringComparison.Ordinal);
 
-        foreach (var key in new[]
+        /* DERIVED from the tool's own payload, not listed. A hardcoded key list here was blind to the
+           field this pin exists to protect: #3099 added last_failure_elapsed_ms to the tool and to the
+           JS, and the guard whose stated purpose is "a field added to the tool and not to a descriptor is
+           silently dropped" would have passed with the descriptor row deleted. A list of six keys cannot
+           notice the seventh — the exact shape this file warns about one level up, reproduced inside it.
+
+           The chain is now complete and each link is pinned: the record is tied to the tool payload by
+           TheDarlingSurface_CarriesEveryFieldOfTheReading, and the tool payload is tied to the panel
+           here. So a field added to the record reaches the panel or something reds.
+
+           finding and note are excluded and named: they are composed prose rather than stat columns, and
+           the panel renders neither as a stat. Excluding them by NAME rather than by a shape rule is
+           deliberate — a rule like "skip the long ones" would silently start excluding a real column. */
+        var payloadFields = Regex.Matches(
+                ExtractAlertReadBlock(ReadSource(Path.Combine(
+                    "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"))),
+                @"^\s*(?<field>[a-z][a-z0-9_]*)\s*=\s*", RegexOptions.Multiline)
+            .Select(m => m.Groups["field"].Value)
+            .Where(f => f is not ("finding" or "note"))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        /* Both directions, so an extractor that stopped matching cannot report clean. */
+        Assert.Equal(7, payloadFields.Count);
+        Assert.Contains("last_failure_elapsed_ms", payloadFields);
+
+        foreach (var field in payloadFields)
         {
-            "alert_read_health.server_read_failures",
-            "alert_read_health.server_alert_passes",
-            "alert_read_health.instance_read_failures",
-            "alert_read_health.last_failure_read",
-            "alert_read_health.last_failure_at",
-            "alert_read_health.counting_since",
-        })
-        {
-            Assert.Contains(key, js, StringComparison.Ordinal);
+            Assert.Contains("alert_read_health." + field, js, StringComparison.Ordinal);
         }
+
+        /* And the control: the same Contains form finds a plausible-but-absent key nowhere, so its
+           silence above is a real absence rather than a matcher that matches anything. */
+        Assert.DoesNotContain("alert_read_health.last_failure_elapsed_seconds", js, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -856,6 +1812,110 @@ public sealed class AlertReadFailureSurfaceTests
         }
 
         return (counted, exempt);
+    }
+
+    /// <summary>
+    /// Checks every COUNTED catch block in one span against the measurement property, and returns how many
+    /// it found so the caller can assert the walk reached the population it thinks it did.
+    ///
+    /// <para>Blocks are found in STRIPPED source so prose and literals cannot register as one, and read
+    /// from the raw span at the same offsets — which
+    /// <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> guarantees line up because it preserves
+    /// length. A block that records no read failure is skipped rather than reported: that is the census's
+    /// question, and reporting it here would make a missing exemption look like a missing measurement.</para>
+    /// </summary>
+    private static int ClassifyMeasurement(
+        string raw, string stripped, string where, List<string> violations)
+    {
+        var sites = 0;
+
+        foreach (Match m in s_catch.Matches(stripped))
+        {
+            var open = stripped.IndexOf('{', m.Index);
+            if (open < 0)
+            {
+                continue;
+            }
+
+            var body = CSharpSourceWalker.BraceBalanced(stripped, open);
+            if (!body.Contains("RecordReadFailure(", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            sites++;
+            var rawBody = raw[open..(open + body.Length)];
+            var label = $"{where} @offset {open}";
+
+            /* Route 1: the third argument has to BE a measurement. A literal, a constant or a field would
+               not match, and this is the route that otherwise ships a correct-looking log line. */
+            var call = Regex.Match(rawBody, s_recordCall);
+            if (!call.Success)
+            {
+                violations.Add(
+                    $"{label}: records a read failure without an <identifier>.ElapsedMilliseconds measurement");
+                continue;
+            }
+
+            var clock = call.Groups["clock"].Value;
+            var declaration = $"var {clock} = Stopwatch.StartNew();";
+
+            /* Route 2: the log line is the surface this population's census actually reads, so a
+               measurement that reaches only the in-memory counter leaves the argument unavailable. */
+            if (!rawBody.Contains(ElapsedPlaceholder, StringComparison.Ordinal))
+            {
+                violations.Add(
+                    $"{label}: passes an elapsed to the counter but its log line does not render "
+                    + $"\"{ElapsedPlaceholder}\"");
+            }
+            else if (Regex.Matches(rawBody, Regex.Escape(clock) + @"\.ElapsedMilliseconds").Count < 2)
+            {
+                /* Route 3: rendering SOME elapsed is not rendering THIS one. */
+                violations.Add($"{label}: its log line renders an elapsed from a different clock than {clock}");
+            }
+
+            /* Route 4: a clock started inside the handler measures the handler. */
+            if (rawBody.Contains(declaration, StringComparison.Ordinal))
+            {
+                violations.Add(
+                    $"{label}: starts {clock} inside the catch block, so it can only ever measure zero");
+                continue;
+            }
+
+            /* Route 5: it must be THIS try's own clock. Requiring the declaration on the line immediately
+               above the try is what makes a clock shared between two reads in one method visible — that one
+               compiles, and reports the elapsed of the whole pass for whichever read fails second. */
+            var lineStart = raw.LastIndexOf('\n', m.Index) + 1;
+            var indent = raw[lineStart..m.Index];
+            if (indent.Trim().Length != 0)
+            {
+                violations.Add($"{label}: its catch does not begin a line, so this scan cannot find its try");
+                continue;
+            }
+
+            var sibling = new Regex(@"(?<decl>[^\r\n]*)\r?\n" + Regex.Escape(indent) + @"try[ \t]*\r?\n");
+            Match? nearest = null;
+            foreach (Match t in sibling.Matches(raw[..m.Index]))
+            {
+                nearest = t;
+            }
+
+            if (nearest is null)
+            {
+                violations.Add($"{label}: no sibling try found for this catch");
+                continue;
+            }
+
+            var above = nearest.Groups["decl"].Value.Trim();
+            if (!string.Equals(above, declaration, StringComparison.Ordinal))
+            {
+                violations.Add(
+                    $"{label}: {clock} is not started on the line immediately above this try (found "
+                    + $"\"{above}\"), so it may be timing more than this read");
+            }
+        }
+
+        return sites;
     }
 
     /// <summary>
