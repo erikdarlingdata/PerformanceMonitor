@@ -58,6 +58,10 @@ namespace Darling.Tests;
 /// <item><term>R6 — the fallback itself inverts</term><description><c>Subject ?? web</c> becoming a bare
 /// constant: already held by <c>DarlingWebOidcTests.Seat_EditorPrincipal_SubjectOrTheWebConstant</c>, and not
 /// duplicated here.</description></item>
+/// <item><term>R8 — the principal reaches the WRONG parameter</term><description>every argument around
+/// <c>updatedBy</c> is a string, so a positional swap with <c>description</c> compiles and stamps the
+/// description. Closed at the compiler by naming the parameter at each write site, and pinned by
+/// <see cref="StampsNamed"/> so the naming cannot quietly go away.</description></item>
 /// <item><term>R7 — the MCP asymmetry drifts</term><description>MCP keeps stamping <c>mcp</c> unconditionally
 /// BY DECISION (no sign-in flow, no subject to prefer), so
 /// <see cref="EveryMcpCustomViewWrite_StampsTheMcpConstant"/> pins it as chosen rather than leaving it as
@@ -174,7 +178,7 @@ public sealed class DarlingWebEditorAttributionTests
           + "exists to check, so every per-site assertion below it passes vacuously.");
 
         var offenders = sites
-            .Where(site => !SeatPrincipalRead.IsMatch(ArgumentsOf(code, site)))
+            .Where(site => !StampsNamed(ArgumentsOf(code, site), SeatPrincipalRead))
             .Select(site => $"line {LineOf(code, site)}: {Collapse(ArgumentsOf(code, site))}")
             .ToList();
 
@@ -371,7 +375,7 @@ public sealed class DarlingWebEditorAttributionTests
           + "create and the update, or the per-site loop below passes vacuously.");
 
         var offenders = sites
-            .Where(site => !McpPrincipalRead.IsMatch(ArgumentsOf(code, site)))
+            .Where(site => !StampsNamed(ArgumentsOf(code, site), McpPrincipalRead))
             .Select(site => $"line {LineOf(code, site)}: {Collapse(ArgumentsOf(code, site))}")
             .ToList();
 
@@ -384,6 +388,18 @@ public sealed class DarlingWebEditorAttributionTests
     }
 
     /* ── helpers ── */
+
+    /// <summary>
+    /// Whether a write's argument list stamps <c>updated_by</c> with <paramref name="principal"/> AND does it
+    /// through the NAMED parameter. The name is what closes the last route: every argument the store's writes
+    /// take around <c>updatedBy</c> is a string, so a positional swap with <c>description</c> compiles, stamps
+    /// the description into <c>updated_by</c>, and satisfies any check that only asks whether the principal
+    /// appears somewhere in the list. Naming it makes the swap a compile error and makes this pin able to see
+    /// the difference.
+    /// </summary>
+    private static bool StampsNamed(string arguments, Regex principal) =>
+        principal.IsMatch(arguments)
+        && Regex.IsMatch(arguments, @"updatedBy\s*:\s*[A-Za-z_]");
 
     private static DefaultHttpContext Carrying(DarlingWebSeat seat)
     {

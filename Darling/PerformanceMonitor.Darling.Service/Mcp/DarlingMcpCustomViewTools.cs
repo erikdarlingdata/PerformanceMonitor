@@ -139,7 +139,7 @@ public sealed class DarlingMcpCustomViewTools
             }
 
             var store = new CustomViewStore(postgres);
-            var result = await store.CreateAsync(name, description, definition, DarlingWebEndpoints.McpEditorPrincipal);
+            var result = await store.CreateAsync(name, description, definition, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
             return result switch
             {
                 CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
@@ -179,7 +179,7 @@ public sealed class DarlingMcpCustomViewTools
 
             var store = new CustomViewStore(postgres);
             var result = await store.UpdateAsync(
-                view_id, name, description, definition, version, DarlingWebEndpoints.McpEditorPrincipal);
+                view_id, name, description, definition, version, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
             return result switch
             {
                 CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),

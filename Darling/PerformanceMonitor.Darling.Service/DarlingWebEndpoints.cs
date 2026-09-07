@@ -342,7 +342,7 @@ public static class DarlingWebEndpoints
             {
                 var result = await store.CreateAsync(
                     request.Name, request.Description, request.DefinitionJson,
-                    DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
                 return result switch
                 {
                     CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
@@ -388,7 +388,7 @@ public static class DarlingWebEndpoints
             {
                 var result = await store.UpdateAsync(
                     id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
-                    DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
                 return result switch
                 {
                     CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
