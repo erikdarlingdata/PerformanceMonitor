@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -214,6 +215,45 @@ RETURNING command_id";
     {
         ArgumentNullException.ThrowIfNull(server);
         return JsonSerializer.Serialize(server, s_argsJsonOptions);
+    }
+
+    /// <summary>
+    /// The engine-aware version label for a <c>test_connect</c> result payload (#3145) — the ONE reader of
+    /// the probe's version facts, shared by both Add-server dialogs, which each formatted this themselves.
+    /// Lives beside <see cref="BuildTestConnectArgs"/> because the two are halves of the same contract: that
+    /// builds the request, this reads the reply.
+    ///
+    /// <para>The payload carries <c>engine</c> (a <see cref="CollectorTargetEngine"/> name),
+    /// <c>postgresMajorVersion</c> and <c>isAurora</c> alongside the SQL Server <c>majorVersion</c> — the
+    /// service emits all of them on every success. The dialogs read only <c>majorVersion</c> and so could
+    /// describe a PostgreSQL probe with the SQL Server vocabulary; that they degraded to no version rather
+    /// than to "SQL Server v0" was down to a hand-rolled <c>major == 0 ? null : major</c> at each call site,
+    /// which is the same 0-is-not-a-version rule now held centrally.</para>
+    ///
+    /// <para>An ABSENT or unparseable <c>engine</c> yields a null kind, which
+    /// <see cref="MonitoredEngineVersion.DescribeEngineVersion"/> reads as "no claim" and answers on the SQL Server arm —
+    /// so a reply from an older service that never sent the field keeps its exact present behaviour.</para>
+    /// </summary>
+    public static string ProbeVersionLabel(JsonElement probeResult)
+    {
+        var sqlMajor = probeResult.TryGetProperty("majorVersion", out var mv) && mv.ValueKind == JsonValueKind.Number
+            ? mv.GetInt32()
+            : 0;
+
+        var postgresMajor = probeResult.TryGetProperty("postgresMajorVersion", out var pg) && pg.ValueKind == JsonValueKind.Number
+            ? pg.GetInt32()
+            : 0;
+
+        var isAurora = probeResult.TryGetProperty("isAurora", out var aurora) && aurora.ValueKind == JsonValueKind.True;
+
+        var engineKind =
+            probeResult.TryGetProperty("engine", out var engineName)
+            && engineName.ValueKind == JsonValueKind.String
+            && Enum.TryParse<CollectorTargetEngine>(engineName.GetString(), ignoreCase: true, out var engine)
+                ? MonitoredEngineKind.For(engine, isAurora)
+                : null;
+
+        return MonitoredEngineVersion.DescribeEngineVersion(engineKind, sqlMajor, postgresMajor);
     }
 }
 
