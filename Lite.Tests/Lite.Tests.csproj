@@ -19,14 +19,19 @@
 
   <ItemGroup>
     <!-- #3134: LocalDataService.OpenWriteConnectionAsync bounds its write-lock wait so a WPF dispatcher
-         cannot freeze behind an archival. This host has no dispatcher, and DuckDbInitializer's lock is
-         process-wide - so a store test's acquisition queues behind every other class in the suite,
+         cannot freeze behind an archival. There is no dispatcher in this host, and the lock on
+         DuckDbInitializer is process-wide - so a store test waits behind every other class in the suite,
          including the test methods that take the exclusive lock deliberately and hold it for seconds
-         while they assert on timing. A dispatcher's budget expiring inside a neighbour's hold is a
-         failure with no user behind it, so this host states a budget orders of magnitude larger: the
-         acquisition waits the hold out. Short of forever on purpose - a wedged lock still fails, with
-         OpenWriteConnectionAsync's own message, rather than hanging the suite. The shipped app declares
-         nothing here and keeps LocalDataService.DefaultWriteLockBudget. -->
+         while they assert on timing. A budget sized for a dispatcher, expiring inside a hold taken by a
+         neighbour, is a failure with no user behind it; so this host states a budget orders of magnitude
+         larger and the acquisition waits the hold out. Short of forever on purpose - a wedged lock still
+         fails, with the same message, rather than hanging the suite. The shipped app declares nothing
+         here and keeps LocalDataService.DefaultWriteLockBudget.
+
+         This comment carries no apostrophe, deliberately. CrossAppGuardCiGateTests reads this file with
+         a regex that treats one as an attribute delimiter, so an unbalanced pair swallows the quoted
+         attribute values after it - including the linked cross-app Compile below, whose absence the
+         guard reports as a moved blind spot rather than as a comment. -->
     <RuntimeHostConfigurationOption Include="PerformanceMonitorLite.WriteLockBudgetSeconds" Value="120" />
   </ItemGroup>
 
