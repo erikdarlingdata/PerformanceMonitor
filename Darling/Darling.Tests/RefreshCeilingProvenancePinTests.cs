@@ -848,6 +848,31 @@ public sealed class RefreshCeilingProvenancePinTests
     }
 
     /// <summary>
+    /// The normalisation every pattern in this file is written against: <c>&lt;b&gt;</c> emphasis removed
+    /// and dash variants flattened to a plain hyphen, then runs of spaces and tabs collapsed to one. That
+    /// is #3077's review complaint met at the extractor rather than argued with — bolding or unbolding a
+    /// figure, and em versus en versus plain hyphen, are copy-edits that must not be able to break a pin.
+    ///
+    /// <para><b>One implementation because <see cref="DocProseFor"/> and <see cref="JoinedDocProse"/> feed
+    /// the SAME patterns.</b> Two copies could drift into normalising differently, and a pattern would then
+    /// match through one reader and not the other for a reason nothing in the file states. Sharing it makes
+    /// them equivalent by construction rather than by a claim in a summary.</para>
+    ///
+    /// <para><b>Line breaks are deliberately left alone.</b> Collapsing them would erase
+    /// <see cref="DocRunSeparator"/>, which is the only thing keeping two doc runs from combining into a
+    /// claim neither of them makes. <see cref="DocProseFor"/> is unaffected either way, because it has
+    /// already joined its own run to a single line before calling in.</para>
+    /// </summary>
+    private static string NormaliseDocProse(string prose) =>
+        Regex.Replace(
+            prose.Replace("<b>", string.Empty, StringComparison.Ordinal)
+                .Replace("</b>", string.Empty, StringComparison.Ordinal)
+                .Replace('—', '-')
+                .Replace('–', '-'),
+            "[ \t]+",
+            " ").Trim();
+
+    /// <summary>
     /// The doc-comment run immediately above <paramref name="declaration"/>, stripped of its <c>///</c>
     /// markers and collapsed to one line so a pattern can span the wrapping.
     ///
@@ -884,12 +909,7 @@ public sealed class RefreshCeilingProvenancePinTests
            #3077's review complaint met at the extractor rather than argued with. What a pattern still has
            to name is the handful of words that identify WHICH CLAIM a number belongs to, and that is not
            removable — see the class summary on why a claim-blind numeral bag cannot do this job. */
-        var prose = string.Join(" ", run)
-            .Replace("<b>", string.Empty, StringComparison.Ordinal)
-            .Replace("</b>", string.Empty, StringComparison.Ordinal)
-            .Replace('\u2014', '-')
-            .Replace('\u2013', '-');
-        prose = Regex.Replace(prose, @"\s+", " ").Trim();
+        var prose = NormaliseDocProse(string.Join(" ", run));
         Require(prose.StartsWith("<summary>", StringComparison.Ordinal),
             $"{ParseMiss}: the doc run above '{declaration}' does not begin at its <summary>, so the walk "
             + "reached the top of a truncated block");
@@ -1141,9 +1161,9 @@ public sealed class RefreshCeilingProvenancePinTests
     }
 
     /// <summary>
-    /// Every doc-comment run in the file, each joined to one line and normalised the way
-    /// <see cref="DocProseFor"/> normalises a single declaration's — so a phrase that wraps across
-    /// <c>///</c> lines is one string, and neither emphasis nor dash style can hide a match.
+    /// Every doc-comment run in the file, each joined to one line and put through
+    /// <see cref="NormaliseDocProse"/> — so a phrase that wraps across <c>///</c> lines is one string, and
+    /// neither emphasis nor dash style can hide a match.
     ///
     /// <para>Runs are held apart by <see cref="DocRunSeparator"/> rather than run together, so no two of
     /// them can manufacture a phrase that neither one contains.</para>
@@ -1174,12 +1194,7 @@ public sealed class RefreshCeilingProvenancePinTests
             runs.Add(string.Join(" ", current));
         }
 
-        var prose = string.Join(DocRunSeparator, runs)
-            .Replace("<b>", string.Empty, StringComparison.Ordinal)
-            .Replace("</b>", string.Empty, StringComparison.Ordinal)
-            .Replace('—', '-')
-            .Replace('–', '-');
-        return Regex.Replace(prose, "[ \t]+", " ").Trim();
+        return NormaliseDocProse(string.Join(DocRunSeparator, runs));
     }
 
     /// <summary>
