@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -146,7 +147,30 @@ public static class DarlingPgColumnStatsReader
        The run probe is a scalar subquery rather than a join, so a server whose bloat collector ran and
        stored NOTHING still reports its run - a join would drop exactly the row that distinguishes the
        size-floor arm from the no-evidence one. EXISTS rather than count(*) because only the zero test is
-       read, and it is 25x cheaper on this store. $1 server_id, $2 window start, $3 window end. */
+       read, and it is 25x cheaper on this store.
+
+       And it counts only runs that SUCCEEDED, which is not a detail: a bloat collector erroring on a
+       target still writes a collection_log row, so an unfiltered probe would say "it ran" while the
+       collector stored nothing - candidate_tables 0, visible 0 - and the classifier would answer
+       BelowSizeFloor, "nothing to fix". That is the exact false-innocence this whole issue closes,
+       reintroduced one level down in the EVIDENCE collector's own health. The status set is read from
+       EnumeratedCollectorDriver.FreshnessSuccessStatuses rather than retyped, so it is the same bar the
+       freshness reads and the self-alert evaluator apply, and a status added there propagates here.
+
+       $1 server_id, $2 window start, $3 window end. */
+    /// <summary>
+    /// <see cref="EnumeratedCollectorDriver.FreshnessSuccessStatuses"/> as a SQL <c>IN</c> list. Built from
+    /// the shared list rather than retyped so the bar for "this collector produced valid evidence" is the
+    /// one the freshness reads and the self-alert evaluator already use, and so a status added there reaches
+    /// this probe without anybody remembering to come here.
+    ///
+    /// <para>Literal-safe by construction: every element is a compile-time constant in this repo's own
+    /// source, never operator input.</para>
+    /// </summary>
+    private static readonly string EvidenceStatusList = string.Join(
+        ", ",
+        EnumeratedCollectorDriver.FreshnessSuccessStatuses.Select(status => "'" + status + "'"));
+
     public static readonly string CoverageEvidenceSql = @"
 SELECT
     (
@@ -157,6 +181,7 @@ SELECT
             AND   collector_name = 'pg_table_bloat_stats'
             AND   collection_time >= $2
             AND   collection_time <= $3
+            AND   status IN (" + EvidenceStatusList + @")
         )
     )                                                                   AS evidence_collector_ran,
     count(*) FILTER (WHERE latest.heap_pages >= " + PgColumnStatsCollector.MinimumRelPages + @")::int

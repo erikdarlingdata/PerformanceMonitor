@@ -297,6 +297,21 @@ public sealed class PgColumnStatsCoverageTests
         Assert.Contains("FROM collection_log", census, StringComparison.Ordinal);
         Assert.Contains("collector_name = 'pg_table_bloat_stats'", census, StringComparison.Ordinal);
         Assert.Contains("FROM pg_table_bloat_stats", census, StringComparison.Ordinal);
+
+        /* And the run probe counts only runs that SUCCEEDED. A bloat collector erroring on a target still
+           writes a collection_log row, so an unfiltered probe says "it ran" while the collector stored
+           nothing - candidate_tables 0, visible 0 - and the classifier answers BelowSizeFloor, "nothing to
+           fix". That is this issue's own false innocence, one level down in the evidence collector's health.
+
+           Asserted against the SHARED status list, not a retyped copy: the bar for "valid evidence" has to
+           be the one the freshness reads and the self-alert evaluator apply, and a status added there must
+           reach this probe. */
+        foreach (var status in EnumeratedCollectorDriver.FreshnessSuccessStatuses)
+        {
+            Assert.Contains("'" + status + "'", census, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("AND   status IN (", census, StringComparison.Ordinal);
     }
 
     /// <summary>R7: a populated result that covers part of the target is its own answer, not the clean one.</summary>
