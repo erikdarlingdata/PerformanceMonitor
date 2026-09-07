@@ -516,10 +516,9 @@ public sealed class CollectionSweepCommandTimeoutTests
         Assert.True(
             untokened.Count == 0,
             $"{untokened.Count} file(s) hold a binary COPY writer that does not hand Begin a bounded "
-            + "token, so its start phase "
-            + "runs on the connection's CommandTimeout — Npgsql exposes that read-only, offers no per-call "
-            + "overload, and defaults it to an undocumented 30 s. The start phase is the one a lock wait "
-            + $"stalls in: {string.Join(", ", untokened)}");
+            + "token, so its start phase runs on the connection's CommandTimeout — which Npgsql exposes "
+            + "read-only, offers no per-call overload for, and defaults to an undocumented 30 s. The start "
+            + $"phase is the one a lock wait stalls in: {string.Join(", ", untokened)}");
 
         Assert.True(
             rawToken.Count == 0,
