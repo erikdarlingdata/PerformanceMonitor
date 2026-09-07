@@ -398,7 +398,14 @@ public sealed class AlertReadFailureCounter
         /* The elapsed rides on the same sentence as the name because the two answer one question together:
            which read went blind, and whose deadline ended it. Stated as a measurement against "its own
            command deadline" rather than against a number, because the bound is the calling SKU's constant
-           and this shared formatter does not know which SKU it is rendering for. */
+           and this shared formatter does not know which SKU it is rendering for.
+
+           THREE readings, not two, and the third is here rather than only in the window note. Some entries'
+           awaited operation is not one bounded read — the shared engine sweep's is a whole alert pass — so a
+           sentence offering only "at the bound" and "well below it" would hand an operator a binary for a
+           figure that can legitimately be neither. Stated GENERICALLY rather than keyed on the read names it
+           applies to today: a list of names in a formatter is the shape this change spent its whole review
+           removing, and it would be wrong for the twenty-eighth site. */
         var which = string.IsNullOrWhiteSpace(reading.LastFailureRead)
             ? string.Empty
             : string.Format(
@@ -411,7 +418,10 @@ public sealed class AlertReadFailureCounter
                         ", which ran {0} ms before it failed. Where the alert pass sets a command "
                         + "deadline on its store reads, an elapsed at or about that bound means this "
                         + "process stopped waiting while the statement was still running on the store, "
-                        + "and one well below it means the store returned a fault",
+                        + "and one well below it means the store returned a fault. A figure well ABOVE "
+                        + "that bound means the failure was not a single bounded read at all — some "
+                        + "entries cover a whole alert pass rather than one command, so read the elapsed "
+                        + "against what the named read actually is",
                         reading.LastFailureElapsedMs.Value)
                     : string.Empty);
 

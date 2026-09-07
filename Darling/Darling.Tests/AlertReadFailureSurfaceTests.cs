@@ -308,6 +308,13 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains("10067 ms", finding, StringComparison.Ordinal);
         Assert.Contains("command deadline", finding, StringComparison.Ordinal);
 
+        /* All THREE readings, not two. A sentence offering only "at the bound" and "well below it" hands an
+           operator a binary for a figure that some entries can legitimately make neither — the shared
+           engine sweep's awaited operation is a whole alert pass. That caveat lived in the class doc and the
+           tool description and not in the text a per-failure reader sees. */
+        Assert.Contains("well ABOVE", finding, StringComparison.Ordinal);
+        Assert.Contains("not a single bounded read", finding, StringComparison.Ordinal);
+
         /* The control: the same Contains form finds a threshold nowhere, so its silence is a real absence
            and not a matcher that never matches. */
         Assert.DoesNotContain("10000 ms", finding, StringComparison.Ordinal);
