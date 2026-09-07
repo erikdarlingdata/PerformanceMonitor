@@ -58,8 +58,13 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class DarlingPgIndexBloatNanLivePostgresTests
 {
-    /// <summary>Distinctive so a stray row cannot be confused with another live class's seed data.</summary>
-    private const int ServerId = 993_121;
+    /// <summary>
+    /// NEGATIVE, which is the convention the live classes here follow and not decoration: this test's
+    /// teardown deletes from <c>servers</c> by id, and a real store assigns ids from a sequence, so a
+    /// positive sentinel is one collision away from removing an operator's own registry row. No sequence
+    /// ever reaches this one.
+    /// </summary>
+    private const int ServerId = -993_121;
 
     private const string ServerName = "pg-index-bloat-nan-probe";
 
