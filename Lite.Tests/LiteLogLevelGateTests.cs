@@ -365,25 +365,43 @@ public sealed class LiteLogLevelGateTests : IDisposable
     ///
     /// <para>Read out of stripped source, so this type's own discussion of conditional compilation — and
     /// <see cref="AppLogger"/>'s — is not itself read as conditional compilation.</para>
+    ///
+    /// <para><b>Two detectors, because asking "what legal spelling of this defect would a single one miss"
+    /// turns up two.</b> A directive may be written <c>#␠if</c> — whitespace between the <c>#</c> and the
+    /// name is legal C# and compiles — so the pattern allows it rather than requiring them adjacent. And
+    /// <c>[Conditional("DEBUG")]</c> reaches the same end with no directive at all: it removes every CALL
+    /// to the method in an assembly built without the symbol, so a logging entry point wearing it is
+    /// compiled out of Release exactly as a <c>#if</c> body is. Both were verified legal and both were
+    /// invisible to the adjacent-<c>#if</c> form this started as.</para>
+    ///
+    /// <para><b>What it still cannot see</b>, since a scan's blind spot is a property of the detector: it
+    /// reads <see cref="AppLogger"/> only, so a <c>[Conditional]</c> on some other type this one calls, or
+    /// a directive in <see cref="AppLoggerAdapter{T}"/>, is out of scope — the runtime sweeps are what
+    /// answer for the adapter. It also keys on the ATTRIBUTE name, so an alias would evade it.</para>
     /// </summary>
     [Fact]
     public void NoLoggingDecision_IsMadeByThePreprocessor()
     {
         /* Stripped, so the discussion of conditional compilation in this type's own remarks is not read as
-           conditional compilation. */
+           conditional compilation. The Conditional check needs the attribute's ARGUMENT gone too, which
+           stripping gives it: `Conditional(` followed by a blanked literal still matches on the name. */
         var code = CSharpSourceWalker.StripCommentsAndStrings(
             ReadRepoFile("Lite/Services/AppLogger.cs"));
 
-        var directives = Regex
-            .Matches(code, @"^[ \t]*#(if|elif|else|endif)\b", RegexOptions.Multiline)
-            .Select(m => m.Value.Trim())
+        var found = Regex
+            .Matches(code, @"^[ \t]*#[ \t]*(if|elif|else|endif)\b", RegexOptions.Multiline)
+            .Select(m => $"directive {m.Value.Trim()}")
+            .Concat(Regex
+                .Matches(code, @"\[\s*Conditional(Attribute)?\s*\(", RegexOptions.CultureInvariant)
+                .Select(_ => "[Conditional] attribute"))
             .ToList();
 
         Assert.True(
-            directives.Count == 0,
-            "AppLogger carries conditional compilation: " + string.Join(", ", directives)
-                + ". Verbosity has to be a runtime value — a preprocessor gate cannot be configured on the "
-                + "shipped Release build, and it makes every suppression pin in this file answer for one "
+            found.Count == 0,
+            "AppLogger gates a write at COMPILE time: " + string.Join(", ", found)
+                + ". Verbosity has to be a runtime value — a compile-time gate cannot be configured on the "
+                + "shipped Release build, so a level lowered onto it is a deletion rather than a "
+                + "suppression, and it makes the suppression pins in this file answer for one build "
                 + "configuration only (#3104).");
     }
 
