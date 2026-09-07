@@ -820,10 +820,11 @@ public class CrossAppGuardCiGateTests
     ///
     /// <para>A replacement that found different things rather than more things would read as an
     /// improvement while having moved the blind spot, so <see cref="ParsedProjectXmlPaths"/> stays as a
-    /// deliberately crude second opinion — attribute values, element text and a comment's quoted
-    /// contents, resolved against the project directory and anchored the same way. It is not the live
-    /// route and is not a good one: it over-reads (a path inside a comment counts) and under-reads
-    /// (anything needing evaluation disappears). Both are the safe direction for a lower bound, and
+    /// deliberately crude second opinion — attribute values, element text, and a comment's
+    /// double-quoted values and <c>&gt;</c>-to-<c>&lt;</c> spans, resolved against the project directory
+    /// and anchored the same way. It is not the live route and is not a good one: it over-reads (a path
+    /// inside a comment counts, quoted or not) and under-reads (anything needing evaluation
+    /// disappears). Both are the safe direction for a lower bound, and
     /// <b>both are held by <see cref="TheCrudeParse_SeesEveryLiteralValueHoweverItIsQuoted"/></b> rather
     /// than by this sentence — which is #3140: this paragraph and the one on
     /// <see cref="ParsedProjectXmlPaths"/> both asserted a direction of error that was false, an
@@ -2237,8 +2238,9 @@ public class CrossAppGuardCiGateTests
             .Select(m => m.Value);
 
     /// <summary>The cross-app paths a crude read of one project file finds: every attribute value, every
-    /// element's text, and anything quoted inside a comment, each resolved against the project directory
-    /// and anchored the same way the evaluated read is.
+    /// element's text, and — inside a comment — every double-quoted value and every
+    /// <c>&gt;</c>-to-<c>&lt;</c> span, each resolved against the project directory and anchored the same
+    /// way the evaluated read is.
     ///
     /// <para>Not the live route, and deliberately not a good one. It exists so the switch to MSBuild can
     /// be asserted rather than asserted-about: the evaluated set has to CONTAIN what this finds, or the
@@ -2293,7 +2295,10 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>Every literal value one MSBuild file's XML carries, before any of it is treated as a
-    /// path: each attribute's value, each element's text, and each comment's quoted contents.
+    /// path: each attribute's value, each element's text, and — inside each comment — every double-quoted
+    /// value and every <c>&gt;</c>-to-<c>&lt;</c> span. Quoted is not the whole of what a comment
+    /// contributes, which is what makes the commented-out ELEMENT-TEXT arm of
+    /// <see cref="TheCrudeParse_SeesEveryLiteralValueHoweverItIsQuoted"/> pass.
     ///
     /// <para><b>Attribute values come from the XML parser rather than from a delimiter guess</b>, so
     /// <c>Include='..\Darling\X.cs'</c> is read as readily as the double-quoted spelling, an apostrophe
