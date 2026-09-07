@@ -13,8 +13,8 @@
       },
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "4.0.102.1",
-        "contentHash": "vsf+/o+S/euH/wG7bO1cha+OWaHvjgvpDeGFO6l3Vcdio9GlSfXkZDD2BogMuAJ+/jDyqqSgqmYVolPKV9ie/A=="
+        "resolved": "4.0.102.3",
+        "contentHash": "hGysXQOtru5CQmROaDLQURs5HK3W385ClLodTKZcLnd6o64YDOwvBaQrjYlfU9BEVLv7sdDR/ZRaATjpdBJ5Xw=="
       },
       "HarfBuzzSharp": {
         "type": "Transitive",
@@ -691,9 +691,9 @@
       "performancemonitor.darling.service": {
         "type": "Project",
         "dependencies": {
-          "AWSSDK.PI": "[4.0.100.11, )",
-          "AWSSDK.RDS": "[4.0.104.4, )",
-          "BlackwellSystems.Gcf": "[0.2.1, )",
+          "AWSSDK.PI": "[4.0.100.12, )",
+          "AWSSDK.RDS": "[4.0.105.1, )",
+          "BlackwellSystems.Gcf": "[1.0.0, )",
           "Microsoft.Data.SqlClient": "[7.0.2, )",
           "Microsoft.Extensions.Hosting": "[10.0.11, )",
           "Microsoft.Extensions.Hosting.WindowsServices": "[10.0.11, )",
@@ -758,27 +758,27 @@
       },
       "AWSSDK.PI": {
         "type": "CentralTransitive",
-        "requested": "[4.0.100.11, )",
-        "resolved": "4.0.100.11",
-        "contentHash": "GWnX59Ik13CV6jJsCH25CiL60Uj2FxiMxntdBEpW6kdVOKdbl8Q00GxdaATw3Q/GtoxoFHOqGdcHiD24xlvFFQ==",
+        "requested": "[4.0.100.12, )",
+        "resolved": "4.0.100.12",
+        "contentHash": "iTBWsRWWZvW6kNd7KK74ob0Yb2hEJzLQYk08htKRRGVMxd99ZOhoXYlIa5dYuWtUeKL9G5vYUSawWvcX+uTz0A==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.1, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.3, 5.0.0)"
         }
       },
       "AWSSDK.RDS": {
         "type": "CentralTransitive",
-        "requested": "[4.0.104.4, )",
-        "resolved": "4.0.104.4",
-        "contentHash": "tAhUJwG6SnAFT0ZHL2n+z6c7EDmnpo5fPrZO4HZsBmVj4vV7k1/+j0zoe+wMLWKl8qRTk+gipUuz8LITk9rSyA==",
+        "requested": "[4.0.105.1, )",
+        "resolved": "4.0.105.1",
+        "contentHash": "xEjmmtz+3ZSGt/WuqHcG2G/LLFiDDMKde72xrclvU9ORp+jTC+54i3/K53QlfLv6IHmkqGocN6bJqkZG83DAxQ==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.1, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.3, 5.0.0)"
         }
       },
       "BlackwellSystems.Gcf": {
         "type": "CentralTransitive",
-        "requested": "[0.2.1, )",
-        "resolved": "0.2.1",
-        "contentHash": "reYZPIgRpPctAOEVOhaZguOT4eSxv4hKCiFjiTJOdZuZViPEaWghz3DyW3MGSbxuzBFSwnLjxkiSB2X9S+93VA=="
+        "requested": "[1.0.0, )",
+        "resolved": "1.0.0",
+        "contentHash": "5lPo/j4MuYLMA7K7czkI7RIs+KNgnN10QFTkVJHL7I7jCykxIz5jWAPXhPY5LABr7+0v9vuBIDVxIMUI9iNSxw=="
       },
       "CredentialManagement": {
         "type": "CentralTransitive",
