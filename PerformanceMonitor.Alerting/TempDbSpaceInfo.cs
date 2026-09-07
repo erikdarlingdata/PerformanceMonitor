@@ -42,7 +42,7 @@ public class TempDbSpaceInfo
     public double AllocatedMb => TotalReservedMb + UnallocatedMb;
 
     /// <summary>
-    /// The denominator <see cref="UsedPercent"/> divides by: the ceiling where there is one, the current
+    /// The denominator <see cref="ReservedPercent"/> divides by: the ceiling where there is one, the current
     /// allocation where there is not.
     ///
     /// <para><b>Why the ceiling and not the allocation (#2515).</b> Against the allocation the percentage
@@ -63,7 +63,34 @@ public class TempDbSpaceInfo
     /// </summary>
     public double CapacityMb => MaxSizeMb > 0 ? Math.Max(MaxSizeMb, AllocatedMb) : AllocatedMb;
 
-    public double UsedPercent => CapacityMb > 0
+    /// <summary>
+    /// <see cref="TotalReservedMb"/> as a share of <see cref="CapacityMb"/> — RESERVED space, which is what
+    /// the collector's numerator measures and therefore what the name says (#3144).
+    ///
+    /// <para><b>Reserved is the right basis for an exhaustion alarm, so the name moved rather than the
+    /// arithmetic.</b> A reserved page is committed to an allocation unit and cannot be handed to anything
+    /// else, so it is consumed capacity whether or not it currently holds a row. A sort or hash spill
+    /// reserves substantially more than it fills and reserves it FIRST, so a reserved-based percentage rises
+    /// while there is still time to act. A used-based one would rise later, which is the wrong direction for
+    /// an alert whose job is "tempdb is about to run out".</para>
+    ///
+    /// <para><b>And a true used figure is not cheaply available.</b>
+    /// <c>dm_db_file_space_usage</c> — the source of every other member here — exposes the reserved page
+    /// counts, <c>unallocated_extent_page_count</c> and the extent totals, and no used-pages column. The
+    /// nearest source is <c>dm_db_partition_stats.used_page_count</c> inside tempdb, which covers USER
+    /// OBJECTS only: internal objects (sorts, hashes, spools) and the version store do not appear there, and
+    /// on a busy server those are frequently the bulk of consumption. A used number would be both more
+    /// expensive to collect and incomplete in exactly the cases where it matters.</para>
+    ///
+    /// <para><b>The name is a LABEL, and it has to keep agreeing with the numerator.</b> This shape read
+    /// <c>UsedPercent</c> against a reserved numerator, and the alert body, the toast and the detail heading
+    /// all said "used" while <see cref="IAlertEngineSettings.TempDbSpaceThresholdPercent"/> — the one
+    /// surface an operator never reads — correctly said "reserved". Renaming the property alone would have
+    /// moved the disagreement rather than closed it, so every rendered label moved with it and
+    /// <c>TempDbReservedLabelProvenanceTests</c> derives the basis from the numerator behaviourally and
+    /// reds when a label and the numerator disagree in EITHER direction.</para>
+    /// </summary>
+    public double ReservedPercent => CapacityMb > 0
         ? TotalReservedMb / CapacityMb * 100
         : 0;
 }
