@@ -499,11 +499,12 @@ public sealed class RefreshCeilingProvenancePinTests
     /// gets re-decided rather than quietly widening — and it is what makes the scan non-vacuous, because a
     /// walk that read nothing fails that same assertion.</para>
     ///
-    /// <para><b>What this does NOT hold, said plainly rather than left looking covered.</b> It guards the
-    /// two PHRASINGS the rule names, not staleness itself: nothing in the code can know the live series, so
-    /// no assertion can recognise an open population claim in wording it has never seen, and a third
-    /// phrasing of the same claim passes this and still breaks the rule. What carries the rest is that the
-    /// claim is ABSENT rather than reworded — the band is described by
+    /// <para><b>What this does NOT hold, said plainly rather than left looking covered.</b> It guards two
+    /// SHAPES — a quantifier over a population of observations, and the relative-scope form — not staleness
+    /// itself. Nothing in the code can know the live series, so no assertion can recognise an open
+    /// population claim in a construction it has never seen; a claim built out of neither shape passes this
+    /// and still breaks the rule. What carries the rest is that the claim is ABSENT rather than reworded —
+    /// the band is described by
     /// <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/> and by what the level means, so there is no
     /// census for a later edit to keep current. The population that IS published carries its own assertion
     /// in <see cref="TheDerivedFiguresAreExactlyStateable_AndTheConstantIsThePopulationMaximum"/>.</para>
@@ -536,6 +537,11 @@ public sealed class RefreshCeilingProvenancePinTests
 
         Assert.ThrowsAny<Exception>(() => AssertNoOpenPopulationClaim(
             InjectDocLines(source, InsideSlotMember, "/// The readings so far are all inside it.")));
+
+        /* A THIRD wording of the same claim, and the reason the pattern matches a shape rather than the
+           phrases that were found: none of the three sites said it the same way. */
+        Assert.ThrowsAny<Exception>(() => AssertNoOpenPopulationClaim(
+            InjectDocLines(source, InsideSlotMember, "/// Zero exceptions on every sample since.")));
 
         /* And the anchor: reword the rule's own quotation and the allowance stops being granted. */
         var unanchored = source.Replace(
@@ -1023,11 +1029,29 @@ public sealed class RefreshCeilingProvenancePinTests
     private const string InsideSlotMember = "        InsideSlot,";
 
     /// <summary>
-    /// The universal-quantifier form: a claim over a series that gains a reading every hour the job runs,
-    /// carrying no scope at all.
+    /// The universal-quantifier form: a quantifier over a population of OBSERVATIONS, which is a series
+    /// that gains a member every hour this job runs.
+    ///
+    /// <para><b>The shape rather than the phrases that were found (#3133).</b> Three sites stated this
+    /// claim and no two of them said it the same way — "every reading", "every reading taken so far",
+    /// "every sample since". A pattern listing the phrasings found would be a frozen list beside a defect
+    /// that keeps rewording itself, so the quantifier and the population noun are matched
+    /// separately.</para>
+    ///
+    /// <para><b><c>run</c> is deliberately NOT a population noun here.</b> This file uses it for closed
+    /// censuses ("every run that day after the boundary"), for the exclusion rule ("every run that started
+    /// at or before the narrowing boundary") and for a statement about a SOURCE's completeness ("read as
+    /// every run since the boundary rather than sampled") — none of which is the defect, and the third of
+    /// which is the source-versus-reading distinction the rule paragraph itself draws. Including it would
+    /// make this guard red on correct prose, which is how a guard gets edited away.</para>
+    ///
+    /// <para>A CLOSED claim in this shape ("every reading up to <c>04:20Z</c>") also matches, and that is
+    /// intended rather than a false positive: a closed claim still needs an assertion, so it should arrive
+    /// here to acquire one.</para>
     /// </summary>
     private static readonly Regex UniversalOverAnOpenSeries =
-        new("every reading", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        new(@"\b(?:every|each|all)\s+(?:reading|readings|sample|samples|snapshot|snapshots)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
     /// The relative-scope form. It looks scoped and is not: a doc comment has no timestamp of its own for
@@ -1061,8 +1085,8 @@ public sealed class RefreshCeilingProvenancePinTests
 
         var universal = UniversalOverAnOpenSeries.Matches(prose).Count;
         Assert.True(universal == 0,
-            $"{universal} doc comment(s) in TimescaleSupport.cs claim something of \"every reading\", which "
-            + "closes no population: that series gains a reading every hour this job runs, so the claim is "
+            $"{universal} doc comment(s) in TimescaleSupport.cs quantify over a population of readings "
+            + "without closing it: that series gains a member every hour this job runs, so the claim is "
             + "false as soon as one reading falls outside it and nothing in the file can notice. Say what "
             + "the band IS - it is defined by its constant and needs no census. If a population claim is "
             + "genuinely wanted, CLOSE it (\"up to <hh:mmZ>\") and pin it here the way Verify pins the "
