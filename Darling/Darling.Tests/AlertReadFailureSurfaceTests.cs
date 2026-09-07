@@ -907,6 +907,7 @@ public sealed class AlertReadFailureSurfaceTests
         var violations = new List<string>();
         var blocks = 0;
         var pairs = 0;
+        var loopAwaits = 0;
 
         void Scan(string raw, string stripped, string where)
         {
@@ -956,17 +957,53 @@ public sealed class AlertReadFailureSurfaceTests
                    still line up with the raw source. */
                 var body = CSharpSourceWalker.BraceBalanced(stripped, tryOpen);
 
+                var restart = clock + ".Restart();";
                 var offsets = s_awaitToken.Matches(body).Select(a => a.Index).ToList();
                 for (var i = 0; i < offsets.Count - 1; i++)
                 {
                     pairs++;
-                    if (!body[offsets[i]..offsets[i + 1]]
-                            .Contains(clock + ".Restart();", StringComparison.Ordinal))
+                    if (!body[offsets[i]..offsets[i + 1]].Contains(restart, StringComparison.Ordinal))
                     {
                         violations.Add(
                             $"{where}: in the {readName} block, the awaits at offsets {offsets[i]} and "
                             + $"{offsets[i + 1]} have no {clock}.Restart() between them, so a fault in the "
                             + "later one records both");
+                    }
+                }
+
+                /* The LOOP arm. Everything above compares consecutive await TOKENS, and a token inside a
+                   loop body is many executions: iteration two starts with iteration one's time still on
+                   the clock. Two real sites hid there — a delivery loop in the PostgreSQL predictor group
+                   and the poison-wait Cleared loop, the latter behind the "a block's last await needs no
+                   boundary" rule, which is true of one execution and false of a loop.
+
+                   So an await whose innermost enclosing block is a LOOP must be followed by a restart
+                   before that block ends, whether or not another await follows it textually. An
+                   unrecognised controlling construct counts as a loop: this check fails toward demanding
+                   a boundary, because the cost of a spare restart is nothing and the cost of a missing one
+                   is a figure that sums two operations. */
+                foreach (var at in offsets)
+                {
+                    var (blockOpen, blockClose) = InnermostBlock(body, at);
+                    if (blockClose >= body.Length - 1)
+                    {
+                        /* The try body itself: entered once per pass with the clock started fresh above
+                           it, so nothing follows this execution. */
+                        continue;
+                    }
+
+                    if (!IsLoopBlock(body, blockOpen))
+                    {
+                        continue;
+                    }
+
+                    loopAwaits++;
+                    if (!body[at..blockClose].Contains(restart, StringComparison.Ordinal))
+                    {
+                        violations.Add(
+                            $"{where}: in the {readName} block, the await at offset {at} sits in a loop "
+                            + $"body with no {clock}.Restart() before the body ends, so a fault on one "
+                            + "iteration records the previous iterations too");
                     }
                 }
             }
@@ -993,9 +1030,12 @@ public sealed class AlertReadFailureSurfaceTests
 
         Assert.Equal(CountedSites, blocks);
 
-        /* The other direction. A scan that found no consecutive pairs would satisfy the loop above
-           vacuously, and these blocks demonstrably have them. */
+        /* The other direction, for both arms. A scan that found no consecutive pairs — or no awaits in
+           any loop body — would satisfy the loops above vacuously, and these blocks demonstrably have
+           both. The loop arm's floor is the load-bearing one: it is the arm that was missing, so a change
+           that stopped finding loop bodies would put the hole straight back.*/
         Assert.True(pairs >= 55, $"only {pairs} consecutive await pair(s) were examined");
+        Assert.True(loopAwaits >= 2, $"only {loopAwaits} await(s) in a loop body were examined");
     }
 
     /// <summary>
@@ -1083,6 +1123,82 @@ public sealed class AlertReadFailureSurfaceTests
 
         /* The control that stops the scan flagging everything: a single await is no pair at all. */
         Assert.Empty(Scan("var a = await GetXminHorizonAsync(id, ct);", "readClock"));
+    }
+
+    /// <summary>
+    /// The innermost <c>{ … }</c> containing <paramref name="at"/>, as (open, close) indices.
+    /// </summary>
+    private static (int Open, int Close) InnermostBlock(string body, int at)
+    {
+        var depth = 0;
+        var open = -1;
+        for (var i = at - 1; i >= 0; i--)
+        {
+            if (body[i] == '}')
+            {
+                depth++;
+            }
+            else if (body[i] == '{')
+            {
+                if (depth == 0)
+                {
+                    open = i;
+                    break;
+                }
+
+                depth--;
+            }
+        }
+
+        Assert.True(open >= 0, "an await with no enclosing block");
+
+        depth = 0;
+        for (var i = at; i < body.Length; i++)
+        {
+            if (body[i] == '{')
+            {
+                depth++;
+            }
+            else if (body[i] == '}')
+            {
+                if (depth == 0)
+                {
+                    return (open, i);
+                }
+
+                depth--;
+            }
+        }
+
+        Assert.Fail("an await with no closing brace");
+        return (open, body.Length - 1);
+    }
+
+    /// <summary>
+    /// Whether the block opened at <paramref name="open"/> can execute more than once — read from the
+    /// controlling keyword immediately before it.
+    ///
+    /// <para>UNRECOGNISED counts as a loop. This is the one classification left in the pin, and it is
+    /// pointed so that being wrong costs a spare clock restart rather than a hidden defect: the previous
+    /// version of this file classified callees and its blind spot cost two review rounds.</para>
+    /// </summary>
+    private static bool IsLoopBlock(string body, int open)
+    {
+        var from = Math.Max(0, open - 200);
+        var head = body[from..open];
+        var keywords = Regex.Matches(
+                head,
+                @"\b(foreach|for|while|do|if|else|switch|try|catch|finally|using|lock)\b")
+            .Select(m => m.Groups[1].Value)
+            .ToList();
+
+        if (keywords.Count == 0)
+        {
+            return true;
+        }
+
+        return keywords[^1] is not ("if" or "else" or "switch" or "try" or "catch" or "finally"
+            or "using" or "lock");
     }
 
     private static void AssertScan(string fixture, int expectedSites, string? expectedViolation)

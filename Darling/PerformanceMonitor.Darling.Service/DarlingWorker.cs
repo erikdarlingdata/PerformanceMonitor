@@ -3382,6 +3382,7 @@ public sealed class DarlingWorker : BackgroundService
                         finding.Severity,
                         finding.ShortMessage),
                     cancellationToken);
+                readClock.Restart();
             }
         }
         catch (OperationCanceledException)
@@ -4049,6 +4050,7 @@ public sealed class DarlingWorker : BackgroundService
                 _activePgPoisonWaitAlert[entry.Key] = false;
                 await NotifyPgResolutionAsync(serverKey, snapshot.ServerName, metricName, "Poison Waits Cleared",
                     $"{snapshot.ServerName}: {subject} accumulated wait back below threshold");
+                readClock.Restart();
             }
         }
         catch (OperationCanceledException)
