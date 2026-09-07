@@ -41,8 +41,39 @@ internal readonly record struct StoreWriteOutcome(int RowsWritten, bool Reattemp
 internal static class StoreWriteReattempt
 {
     /// <summary>
-    /// Runs <paramref name="write"/>; on a transport fault, calls <paramref name="onReattempt"/> with the
-    /// first attempt's exception and then runs <paramref name="rewrite"/> once.
+    /// Whether re-running the batch is SOUND — two independent questions ANDed, and both are required.
+    ///
+    /// <para><b>A transport fault</b> (<see cref="PostgresTransportFault.IsTransportFault"/>) means the
+    /// failure was the connection rather than a reply, so a second attempt can plausibly differ. A
+    /// <see cref="Npgsql.PostgresException"/> anywhere in the chain is the backend answering, and an
+    /// identical second attempt gets an identical answer.</para>
+    ///
+    /// <para><b>The COPY's start phase</b> (#3095's <see cref="StoreCopyPhase"/>) means the re-attempt is
+    /// exactly-once and delta-safe, and nothing else does. <see cref="StoreCopyPhase.Start"/> is raised by
+    /// <c>BeginBinaryImportAsync</c> itself, so the importer never returned: no row was started, hence a
+    /// <c>COPY ... FROM STDIN</c> cannot have committed, and <c>WritePayload</c> never ran, hence no
+    /// <c>CollectorDeltaCalculator</c> baseline moved. Both properties are forfeit the moment the row loop
+    /// begins — a fault under <see cref="StoreCopyPhase.Data"/> may have sent rows, may have had its
+    /// commit acknowledgment lost in flight, and has advanced every baseline the loop reached. Re-running
+    /// it would duplicate the batch into aggregates that cannot separate the copies, and would re-derive
+    /// each delta against an already-advanced baseline and commit a fabricated zero — which is worse than
+    /// the lost sample this exists to prevent, because a zero delta reads as a genuinely idle interval,
+    /// carries no error, and never self-corrects.</para>
+    ///
+    /// <para><see cref="StoreCopyPhase.Unknown"/> declines, and that is deliberate rather than incidental:
+    /// it is what an unstamped exception reads as, and it covers the dimension flush and transaction
+    /// commit that follow the COPY (#1767) — which genuinely can commit. Requiring
+    /// <see cref="StoreCopyPhase.Start"/> POSITIVELY means a missing stamp costs a sample instead of
+    /// authorising a duplicate.</para>
+    /// </summary>
+    internal static bool IsSafeToReattempt(Exception fault) =>
+        PostgresTransportFault.IsTransportFault(fault)
+        && CollectorFaultCopyPhase.For(fault) == StoreCopyPhase.Start;
+
+    /// <summary>
+    /// Runs <paramref name="write"/>; on a fault that <see cref="IsSafeToReattempt"/> accepts, calls
+    /// <paramref name="onReattempt"/> with the first attempt's exception and then runs
+    /// <paramref name="rewrite"/> once.
     ///
     /// <para>A failure on the SECOND attempt propagates. That is deliberate: the caller's fault arms record
     /// it as an ERROR exactly as they record a single failure today, so a store that is genuinely refusing
@@ -61,14 +92,14 @@ internal static class StoreWriteReattempt
             return new StoreWriteOutcome(await write(cancellationToken), Reattempted: false);
         }
         /* Ahead of the filter rather than relying on it to answer false. A cancellation must never be
-           reclassified as a transport fault, and an arm whose correctness rests on a predicate NOT matching
-           is one predicate edit away from re-attempting through a shutdown. */
+           reclassified as a re-attemptable fault, and an arm whose correctness rests on a predicate NOT
+           matching is one predicate edit away from re-attempting through a shutdown. */
         catch (OperationCanceledException)
         {
             throw;
         }
         catch (Exception firstAttempt) when (
-            !cancellationToken.IsCancellationRequested && PostgresTransportFault.IsTransportFault(firstAttempt))
+            !cancellationToken.IsCancellationRequested && IsSafeToReattempt(firstAttempt))
         {
             onReattempt(firstAttempt);
             return new StoreWriteOutcome(await rewrite(cancellationToken), Reattempted: true);

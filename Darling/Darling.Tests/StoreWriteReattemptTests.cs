@@ -35,9 +35,34 @@ public class StoreWriteReattemptTests
 {
     /* The shipped failure, constructed the way the repo's other pins construct it: an NpgsqlException
        wrapping the inner fault, because that is what Npgsql hands back and the outer type and message are
-       identical for a client deadline and a lost connection. */
+       identical for a client deadline and a lost connection.
+
+       Stamped START, because that is the only phase a re-attempt is sound in and therefore the only one
+       these policy tests can drive. The stamp is applied through the SHIPPED producer rather than by
+       writing Exception.Data directly, so the key these tests assert against is the key the runner
+       writes — a retyped string would prove only its own transcription. */
     private static NpgsqlException StreamFault(Exception? inner = null)
-        => new("Exception while reading from stream", inner ?? new IOException("connection reset"));
+        => Stamped(
+            new NpgsqlException("Exception while reading from stream", inner ?? new IOException("connection reset")),
+            StoreCopyPhase.Start);
+
+    private static T Stamped<T>(T fault, StoreCopyPhase phase) where T : Exception
+    {
+        CollectorFaultCopyPhase.Stamp(fault, phase);
+        return fault;
+    }
+
+    /* A transport fault from the COPY's DATA phase: rows may have been sent, a commit acknowledgment may
+       have been lost, and every delta baseline the row loop reached has advanced. */
+    private static NpgsqlException DataPhaseFault()
+        => Stamped(
+            new NpgsqlException("Exception while reading from stream", new TimeoutException()),
+            StoreCopyPhase.Data);
+
+    /* An UNSTAMPED transport fault — what the dimension flush and the transaction commit after the COPY
+       raise (#1767), both of which genuinely can commit. Reads as Unknown. */
+    private static NpgsqlException UnstampedFault()
+        => new("Exception while reading from stream", new IOException("connection reset"));
 
     /* A server REPLY. The public constructor takes (message, severity, invariantSeverity, sqlState). */
     private static PostgresException ServerReply(string sqlState)
@@ -147,7 +172,10 @@ public class StoreWriteReattemptTests
                 write: _ =>
                 {
                     attempts++;
-                    throw ServerReply(sqlState);
+                    /* Stamped START on purpose: the phase axis would ACCEPT this, so a decline here can
+                       only be the server-reply axis doing its job. Unstamped, the test would pass for the
+                       wrong reason. */
+                    throw Stamped(ServerReply(sqlState), StoreCopyPhase.Start);
                 },
                 rewrite: _ =>
                 {
@@ -175,7 +203,9 @@ public class StoreWriteReattemptTests
                 write: _ =>
                 {
                     attempts++;
-                    throw new NpgsqlException("Exception while reading from stream", ServerReply("57014"));
+                    throw Stamped(
+                        new NpgsqlException("Exception while reading from stream", ServerReply("57014")),
+                        StoreCopyPhase.Start);
                 },
                 rewrite: _ =>
                 {
@@ -197,7 +227,9 @@ public class StoreWriteReattemptTests
             StreamFault(new TimeoutException("client-side command deadline")),
             StreamFault(new IOException("connection to server lost")),
             StreamFault(new SocketException(104)),
-            new NpgsqlException("Exception while writing to stream"),
+            /* Stamped like the rest: this test is about the transport SHAPES the predicate accepts, and
+               leaving one unstamped would make it fail on the phase axis and look like a shape rejection. */
+            Stamped(new NpgsqlException("Exception while writing to stream"), StoreCopyPhase.Start),
         })
         {
             var reattempted = false;
@@ -215,6 +247,92 @@ public class StoreWriteReattemptTests
             Assert.True(reattempted, $"{fault.GetType().Name}/{fault.InnerException?.GetType().Name} must be re-attempted");
             Assert.True(outcome.Reattempted);
         }
+    }
+
+    // ── the phase gate: the only thing that makes a re-attempt sound ──
+
+    /// <summary>
+    /// A DATA-phase transport fault is never re-attempted, and this is the assertion the whole change
+    /// rests on. Past the COPY's start phase a fault may have sent rows and may have lost its commit
+    /// acknowledgment, and — the part no connection-level reasoning reaches — <c>WritePayload</c> has
+    /// already run for every row the loop touched, advancing each <c>CollectorDeltaCalculator</c>
+    /// baseline. A second pass would therefore re-derive every delta against its own new baseline and
+    /// commit a row of zeros. That is worse than the lost sample: a zero delta reads as a genuinely idle
+    /// interval, carries no error, and never self-corrects.
+    /// </summary>
+    [Fact]
+    public async Task ADataPhaseFaultIsNeverReattempted()
+    {
+        var attempts = 0;
+
+        await Assert.ThrowsAsync<NpgsqlException>(async () =>
+            await StoreWriteReattempt.RunAsync(
+                write: _ =>
+                {
+                    attempts++;
+                    throw DataPhaseFault();
+                },
+                rewrite: _ =>
+                {
+                    attempts++;
+                    return Task.FromResult(1);
+                },
+                onReattempt: _ => { },
+                CancellationToken.None));
+
+        Assert.Equal(1, attempts);
+    }
+
+    /// <summary>
+    /// An UNSTAMPED transport fault declines too. <c>Start</c> is required positively rather than
+    /// <c>Data</c> being excluded, so a fault carrying no phase — the dimension flush and the transaction
+    /// commit that follow the COPY (#1767), both of which can commit — costs a sample instead of
+    /// authorising a duplicate. A predicate written the other way round would re-attempt everything it
+    /// failed to recognise, which is the direction that costs.
+    /// </summary>
+    [Fact]
+    public async Task AnUnstampedFaultIsNeverReattempted()
+    {
+        var attempts = 0;
+
+        await Assert.ThrowsAsync<NpgsqlException>(async () =>
+            await StoreWriteReattempt.RunAsync(
+                write: _ =>
+                {
+                    attempts++;
+                    throw UnstampedFault();
+                },
+                rewrite: _ =>
+                {
+                    attempts++;
+                    return Task.FromResult(1);
+                },
+                onReattempt: _ => { },
+                CancellationToken.None));
+
+        Assert.Equal(1, attempts);
+    }
+
+    /// <summary>
+    /// The gate is the CONJUNCTION of two independent axes, so each one alone must decline. A start-phase
+    /// fault that is a server REPLY is not re-attempted, and a transport fault outside the start phase is
+    /// not either — neither axis can carry the decision by itself.
+    /// </summary>
+    [Fact]
+    public void IsSafeToReattemptRequiresBothAxes()
+    {
+        Assert.True(StoreWriteReattempt.IsSafeToReattempt(StreamFault()));
+
+        /* transport, wrong phase */
+        Assert.False(StoreWriteReattempt.IsSafeToReattempt(DataPhaseFault()));
+        Assert.False(StoreWriteReattempt.IsSafeToReattempt(UnstampedFault()));
+
+        /* right phase, but a server reply rather than transport */
+        Assert.False(StoreWriteReattempt.IsSafeToReattempt(
+            Stamped(ServerReply("57014"), StoreCopyPhase.Start)));
+        Assert.False(StoreWriteReattempt.IsSafeToReattempt(
+            Stamped(new NpgsqlException("Exception while reading from stream", ServerReply("53100")),
+                    StoreCopyPhase.Start)));
     }
 
     // ── cancellation ──

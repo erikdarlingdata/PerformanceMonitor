@@ -2444,11 +2444,17 @@ public sealed class DarlingCollectorRunner
             return 0;
         }
 
-        /* #3099: ONE re-attempt on a transport fault, and it is lossless because `rows` is still the
-           parameter this method was handed — the batch is in memory, the store is byte-identical (a failed
-           COPY commits nothing, and the diverting collectors' explicit transaction rolls back with it), and
-           the watermark has not moved. Without it a transport fault costs the whole cycle: collectors with
-           a WatermarkColumn re-read the same range next cycle and lose nothing, but the base default in
+        /* #3099: ONE re-attempt, gated on the COPY's START phase, and lossless because `rows` is still
+           the parameter this method was handed. The gate is what makes it lossless rather than merely
+           cheap: a start-phase fault sent no row, so a COPY ... FROM STDIN cannot have committed and the
+           store is byte-identical, and it ran no WritePayload, so no delta baseline moved. Both are
+           forfeit past that point — see CopyBatchOnceAsync, which stamps the phase and carries the
+           argument. StoreWriteReattempt.IsSafeToReattempt requires Start positively, so an unstamped
+           fault and a data-phase fault both decline and cost a sample rather than authorising a duplicate
+           or a fabricated zero.
+
+           What it recovers: a start-phase transport fault used to cost the whole cycle. Collectors with a
+           WatermarkColumn re-read the same range next cycle and lose nothing, but the base default in
            CollectorDefinitionBase is `WatermarkColumn => null` — those are cumulative-counter snapshots
            with no way to ask for that instant again, so the sample is simply gone.
 
@@ -2465,9 +2471,9 @@ public sealed class DarlingCollectorRunner
            is not tidiness. The caller's connection is shared across a fan-out's batches (#2819 has the
            Query Store plan and text fetches borrowing the same one), and a transport fault breaks it — so
            every batch after the first faulting one inherits a connection that cannot be used, and what it
-           throws then need not be a transport fault this arm would recognise. Deciding on the connection's
-           own STATE rather than on the shape of a later exception keeps those batches out of that
-           classification entirely. plan_correction is the collector that makes it matter: it enumerates on
+           throws then need not carry a phase stamp at all, and an unstamped fault declines. Deciding on the
+           connection's own STATE rather than on the shape or stamping of a later exception keeps those
+           batches out of that question entirely. plan_correction is the collector that makes it matter: it enumerates on
            every non-Azure target and declares no WatermarkColumn, so it both fans out and cannot re-read a
            sample it lost. The cost is that a faulted cycle's remaining batches hold two store connections
            at a time on that server rather than one, for the rest of the cycle. */
@@ -2568,28 +2574,19 @@ public sealed class DarlingCollectorRunner
     /// attempt's transaction was still in scope would re-enter with an aborted transaction on the
     /// connection and fail on 25P02 rather than on anything to do with the store.
     ///
-    /// <para><b>The re-attempt this feeds is at-least-once, not exactly-once, and the window is here.</b>
-    /// A transport fault raised BEFORE the commit acknowledgment is awaited leaves the store untouched, and
-    /// that is the ordinary case. A fault raised WHILE awaiting it — <c>CompleteAsync</c>'s CommandComplete,
-    /// or <c>CommitAsync</c>'s on the diverting path — can leave the server committed while the client sees
-    /// a retryable exception, and the re-attempt then lands the batch a second time. The copies are not
-    /// identical rows and nothing downstream can collapse them:
-    /// <see cref="ICollectorSchemaInfo.IncludesCollectionId"/> is true for every collector but running_jobs,
-    /// so <c>CollectionIdGenerator.Next()</c> stamps each row of each attempt with its own id.</para>
+    /// <para><b>The phase this method stamps is what makes a re-attempt sound, and only the start phase
+    /// is.</b> #3095's <c>StoreCopyPhase</c> transition sits inside the COPY block below, so
+    /// <c>Start</c> means strictly "the importer never came back": no row started, so a
+    /// <c>COPY ... FROM STDIN</c> cannot have committed, and <c>WritePayload</c> never ran, so no
+    /// <c>CollectorDeltaCalculator</c> baseline moved. <see cref="StoreWriteReattempt.IsSafeToReattempt"/>
+    /// requires that value positively.</para>
     ///
-    /// <para><b>The cost is a doubled hour, and it is accepted.</b> <c>collection_id</c> is in no continuous
-    /// aggregate's <c>GROUP BY</c> — it does not appear in TimescaleSupport at all — so both copies land in
-    /// the same bucket and 18 <c>sum()</c> views double it. The bucket is materialised and raw retention is
-    /// four days, so the wrong figure outlives the rows that explain it, and each daily rollup reads its
-    /// hourly view rather than raw, so it inherits the doubling. The trade is a one-round-trip window
-    /// against a sample lost on EVERY failed write, and the loss is the certainty.</para>
-    ///
-    /// <para><b>It has a signature.</b> A doubled batch doubles the bucket's <c>sample_count</c>, so an hour
-    /// at twice its neighbours' count is the tell — and it reads off the aggregate itself, with no raw rows
-    /// needed. That column exists on five of the eighteen: query_stats_hourly, procedure_stats_hourly,
-    /// query_stats_db_hourly, query_store_stats_hourly and query_store_stats_interval_hourly. It covers the
-    /// two null-watermark collectors the re-attempt is chiefly for; it is absent from every daily view, so
-    /// the anomaly is findable one tier above where it propagates.</para>
+    /// <para><b>Both properties are why the row loop below must never be re-run.</b> Past the transition a
+    /// fault may have sent rows and may have lost a commit acknowledgment in flight, and every baseline
+    /// the loop reached has advanced — so a second pass would re-derive each delta against its own new
+    /// baseline and write a zero. A zero delta reads as a genuinely idle interval, carries no error and
+    /// never self-corrects, which is strictly worse than the lost sample the re-attempt exists to prevent.
+    /// <c>WritePayload</c> is not a pure function of its row, and that is the reason.</para>
     /// </summary>
     private async Task<int> CopyBatchOnceAsync<TRow>(
         NpgsqlConnection pgConnection,
