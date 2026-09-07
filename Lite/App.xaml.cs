@@ -677,8 +677,8 @@ public partial class App : Application
     /// <summary>
     /// Records that settings.json is present but unparseable: to the log immediately (buffered until
     /// <c>AppLogger.Initialize</c>) and to <see cref="s_unreadableSettingsProblem"/> for the single dialog
-    /// shown once the main window is up. First caller wins, because both loaders read the same file and
-    /// would otherwise say the same thing twice.
+    /// shown once the main window is up. First caller wins, because all three loaders read the same file
+    /// and would otherwise say the same thing three times.
     ///
     /// <para>There is deliberately no counterpart for an ABSENT file. A first run has no settings.json,
     /// defaults are the correct answer, and a warning there would be pure noise — which is precisely why
@@ -701,7 +701,8 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Every settings.json key whose VALUE was the wrong shape, accumulated across both loaders and consumed
+    /// Every settings.json key whose VALUE was the wrong shape, accumulated across all three loaders and
+    /// consumed
     /// once by <see cref="ReportUnreadableSettingsToUser"/> (#2444).
     ///
     /// <para>Separate from <see cref="s_unreadableSettingsProblem"/> because they are different failures with
@@ -740,10 +741,10 @@ public partial class App : Application
             }
         }
 
-        /* Says "every other key this loader read", not "every other setting in the file": both loaders call
-           this and LoadDefaultTimeRange runs first, so a claim about the whole file would be written before
-           the alert settings had been read at all. The dialog CAN make the whole-file claim, because it is
-           shown once, after both loaders have run. */
+        /* Says "every other key this loader read", not "every other setting in the file": three loaders
+           call this — LoadLogMinimumLevel first, then LoadDefaultTimeRange, then LoadAlertSettings — so a
+           claim about the whole file would be written before the later ones had read anything. The dialog
+           CAN make the whole-file claim, because it is shown once, after all three have run. */
         AppLogger.Error("Settings",
             $"settings.json parsed, but {problems.Count} value(s) in it could not be read and are at their " +
             "defaults for this session. Only the keys named here fell back -- every other key this loader " +

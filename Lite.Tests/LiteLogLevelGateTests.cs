@@ -47,13 +47,30 @@ namespace PerformanceMonitorLite.Tests;
 /// is covered by <c>SettingsSampleTests</c> in both directions.</para>
 /// </summary>
 /// <remarks>
-/// The collection exists because these pins move <see cref="AppLogger"/>'s process-wide minimum, briefly
-/// as far as <see cref="LogLevel.None"/>, and a concurrently-running class whose service logs during that
-/// window loses the line — unrecoverably, since tag-filtering a buffer cannot bring back a line never
-/// enqueued. That is #1965, which <c>app-alert-statics</c> was created for. No other class makes runtime
-/// <c>AppLogger</c> calls today, and a collection name only serialises classes that SHARE it, so this
-/// serialises nothing yet: it is the named place for the next class touching this static to join, and it
-/// is worth stating that it protects nothing on its own rather than implying it already does.
+/// <para>The collection exists because these pins move <see cref="AppLogger"/>'s process-wide minimum,
+/// briefly as far as <see cref="LogLevel.None"/>, and a concurrently-running class whose service logs
+/// during that window loses the line — unrecoverably, since tag-filtering a buffer cannot bring back a
+/// line that was never enqueued. That is the #1965 shape, which <c>app-alert-statics</c> was created
+/// for.</para>
+///
+/// <para><b>The interaction is real and currently harmless, which are two separate facts.</b> Five other
+/// classes hand an <see cref="AppLoggerAdapter{T}"/> to a service that logs —
+/// <c>AnalysisNotificationTests</c>, <c>MuteRuleServiceTests</c>, <c>PagerDutyWebhookTests</c>,
+/// <c>RemainingEmptyReadsToolTests</c> and <c>WebhookCooldownSeedTests</c>, against 28 log sites across
+/// four services — and each sits in its own default collection, so they run in parallel with the sweeps
+/// here and their lines really can be dropped. Nothing fails, because this class is the only reader of
+/// the sink anywhere in the suite: no other test asserts on log output, so a dropped line changes no
+/// assertion. The condition that would make it bite is any of those five reading the log, and then they
+/// join <c>app-logger-statics</c>.</para>
+///
+/// <para><b>Why a separate name rather than joining <c>app-alert-statics</c>.</b> Its five members touch
+/// <c>App</c>'s alert-settings statics and make no <c>AppLogger</c> calls at all, so joining them would
+/// serialise this class against classes that cannot race with it while still not serialising the five
+/// that can. A collection name only serialises classes that SHARE it, so this one serialises nothing
+/// today — it is the named place for a class that reads the log to join, and saying so is the point.
+/// Re-sharding the suite's parallelism is deliberately not done here: it is a change to the scheduling of
+/// a suite whose store writes wait on a process-wide lock with a five-second budget, and this is a change
+/// about a log gate.</para>
 /// </remarks>
 [Collection("app-logger-statics")]
 public sealed class LiteLogLevelGateTests : IDisposable
