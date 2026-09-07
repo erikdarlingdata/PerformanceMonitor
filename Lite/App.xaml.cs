@@ -444,7 +444,8 @@ public partial class App : Application
             ConfigDirectory,
             new[] { "ignored_wait_types.json", "collection_schedule.json" });
 
-        // Load settings
+        // Load settings. The log level goes first so it governs every line the loaders below buffer.
+        LoadLogMinimumLevel();
         LoadDefaultTimeRange();
         LoadAlertSettings();
 
@@ -676,8 +677,8 @@ public partial class App : Application
     /// <summary>
     /// Records that settings.json is present but unparseable: to the log immediately (buffered until
     /// <c>AppLogger.Initialize</c>) and to <see cref="s_unreadableSettingsProblem"/> for the single dialog
-    /// shown once the main window is up. First caller wins, because both loaders read the same file and
-    /// would otherwise say the same thing twice.
+    /// shown once the main window is up. First caller wins, because all three loaders read the same file
+    /// and would otherwise say the same thing three times.
     ///
     /// <para>There is deliberately no counterpart for an ABSENT file. A first run has no settings.json,
     /// defaults are the correct answer, and a warning there would be pure noise — which is precisely why
@@ -700,7 +701,8 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Every settings.json key whose VALUE was the wrong shape, accumulated across both loaders and consumed
+    /// Every settings.json key whose VALUE was the wrong shape, accumulated across all three loaders and
+    /// consumed
     /// once by <see cref="ReportUnreadableSettingsToUser"/> (#2444).
     ///
     /// <para>Separate from <see cref="s_unreadableSettingsProblem"/> because they are different failures with
@@ -739,10 +741,10 @@ public partial class App : Application
             }
         }
 
-        /* Says "every other key this loader read", not "every other setting in the file": both loaders call
-           this and LoadDefaultTimeRange runs first, so a claim about the whole file would be written before
-           the alert settings had been read at all. The dialog CAN make the whole-file claim, because it is
-           shown once, after both loaders have run. */
+        /* Says "every other key this loader read", not "every other setting in the file": three loaders
+           call this — LoadLogMinimumLevel first, then LoadDefaultTimeRange, then LoadAlertSettings — so a
+           claim about the whole file would be written before the later ones had read anything. The dialog
+           CAN make the whole-file claim, because it is shown once, after all three have run. */
         AppLogger.Error("Settings",
             $"settings.json parsed, but {problems.Count} value(s) in it could not be read and are at their " +
             "defaults for this session. Only the keys named here fell back -- every other key this loader " +
@@ -857,6 +859,75 @@ public partial class App : Application
             AppLogger.Warn("Settings",
                 $"settings.json key 'default_time_range_hours' could not be read ({ex.Message}); the " +
                 $"default of {DefaultTimeRangeHours} hours is in use.");
+        }
+    }
+
+    /// <summary>
+    /// Applies the configured log verbosity (#3104). The FIRST settings loader and well before
+    /// <see cref="AppLogger.Initialize"/>, so the level governs every line the loaders after it buffer as
+    /// well as <c>Initialize</c>'s own — a level applied halfway through startup would leave whichever
+    /// lines happened to precede it, which is a verbosity decided by call order.
+    ///
+    /// <para>No UI: this is the knob that makes the per-database collection timing lines recoverable now
+    /// that they sit below the default, and its audience is someone reading a log to diagnose a collection
+    /// failure, not someone browsing Settings. An unrecognised token leaves the default in force and is
+    /// reported through the shared reporter, so a typo costs its own setting and is named at startup rather
+    /// than silently turning logging down.</para>
+    /// </summary>
+    private static void LoadLogMinimumLevel()
+    {
+        var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
+        if (settings.State == SettingsFileState.Unreadable)
+        {
+            /* Reported by LoadDefaultTimeRange rather than here, so one unreadable file produces one
+               report no matter how many loaders meet it. */
+            return;
+        }
+
+        if (settings.Text == null)
+        {
+            return;
+        }
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(settings.Text);
+            var read = new SettingsReader(doc.RootElement);
+
+            if (read.TryGetProperty("log_minimum_level", out var val))
+            {
+                var token = val.TextOrNull();
+
+                if (AppLogger.TryParseMinimumLevel(token, out var level))
+                {
+                    AppLogger.SetMinimumLevel(level);
+                }
+                else if (token != null)
+                {
+                    /* A string that is not one of the level names. TextOrNull has already reported a value
+                       that is not a string at all, so only the vocabulary is left to check here — and it
+                       goes through the shared reporter so it reaches the startup dialog beside any other
+                       key that fell back, rather than only the log. */
+                    ReportBadSettingValues(new[]
+                    {
+                        new SettingsValueProblem(
+                            "log_minimum_level",
+                            $"holds \"{token}\", which is not one of Trace, Debug, Information, Warning, "
+                                + $"Error, Critical or None; {AppLogger.DefaultMinimumLevel} is in use"),
+                    });
+                }
+            }
+
+            ReportBadSettingValues(read.Problems);
+        }
+        catch (Exception ex)
+        {
+            /* Every value read is shape-checked rather than caught, so nothing EXPECTED lands here. Kept
+               because an unexpected throw must not take startup down — and this runs before the logger
+               exists, so there is nowhere to record it other than the buffer Initialize will flush. */
+            AppLogger.Warn("Settings",
+                $"settings.json key 'log_minimum_level' could not be read ({ex.Message}); " +
+                $"{AppLogger.DefaultMinimumLevel} is in use.");
         }
     }
 

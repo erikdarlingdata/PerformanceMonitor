@@ -408,6 +408,10 @@ Most tools accept optional `server_name` and `hours_back` parameters. If only on
 
 Application logs are written to the `logs/` folder. Collection success/failure is also logged to the `collection_log` table in DuckDB.
 
+Verbosity is the `log_minimum_level` key in `settings.json` (no UI — see `Lite/config/settings.sample.json`), one of `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical` or `None`. It defaults to `Information` and is read at startup, so a change needs a restart.
+
+Set it to `Debug` when you need the per-database collection timing lines — `[server] collector [db] => N rows (sql:Nms, duckdb:Nms)`, one per database per collector per cycle. They are below the default because at that rate they bury the collection failures the log is usually opened for; the aggregate they decompose is in `collection_log`'s `duration_ms`, which is recorded at every level.
+
 Common issues:
 
 1. **No data after connecting** — Wait for the first collection cycle (1–5 minutes). Check logs for connection errors.
