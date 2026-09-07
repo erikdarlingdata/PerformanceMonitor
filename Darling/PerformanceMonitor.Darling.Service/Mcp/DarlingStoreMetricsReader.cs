@@ -20,7 +20,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// snapshot per object (one row per hypertable / dimension / the store itself, at each object's newest
 /// metric_time), and the daily series — the LAST sample of each object per day, which is what a
 /// growth/forecast question wants (the hourly grain exists so a single missed run costs nothing, not
-/// because anyone forecasts by the hour). Plus the one derivable number the issue called out: the
+/// because anyone forecasts by the hour) and what a MAXIMUM question cannot use: the day's largest
+/// reading is dropped rather than smoothed, so a peak that crossed a threshold is invisible at this
+/// grain (#3119). Plus the one derivable number the issue called out: the
 /// per-server daily ingest rate (whole-store daily growth divided by the enabled-server count), computed in
 /// <see cref="ComputeDailyGrowth"/> — pure, so it is unit-tested without a store.
 /// </summary>
@@ -48,7 +50,10 @@ ORDER BY object_kind, object_name, metric_time DESC";
 
     /// <summary>The daily series — the LAST sample of each object per day (DISTINCT ON over the day
     /// bucket, newest first within it), so each day contributes one settled point per object rather than
-    /// 24 near-duplicates. $1 window start (naive UTC).</summary>
+    /// 24 near-duplicates. A last snapshot and not a per-day maximum: the tiebreak takes the newest row
+    /// in the bucket, so the day's largest value is discarded unless it happens to be the last one, and
+    /// <c>get_store_metrics</c>' description says so where a caller reads it (#3119). $1 window start
+    /// (naive UTC).</summary>
     public const string StoreMetricsDailySql = @"
 SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
     object_kind,
