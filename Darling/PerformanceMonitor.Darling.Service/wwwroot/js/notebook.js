@@ -62,8 +62,11 @@ export async function renderNotebookEditor(main, id, templateKey) {
     mount(main, [
       notebookBackHead(id),
       el("div", { class: "strip empty" }, [
-        "Couldn't confirm your session, so the composer is read-only for now. Reload the page to edit; " +
-          "you can still open and export notebooks.",
+        session.probe_failed
+          ? "Couldn't confirm your session, so the composer is read-only for now. Reload the page to edit; " +
+            "you can still open and export notebooks."
+          : "Your account has read-only access, so the composer is read-only. You can still open and export " +
+            "notebooks.",
       ]),
     ]);
     return;

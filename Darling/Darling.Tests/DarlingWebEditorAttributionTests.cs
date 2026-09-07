@@ -58,6 +58,10 @@ namespace Darling.Tests;
 /// <item><term>R6 — the fallback itself inverts</term><description><c>Subject ?? web</c> becoming a bare
 /// constant: already held by <c>DarlingWebOidcTests.Seat_EditorPrincipal_SubjectOrTheWebConstant</c>, and not
 /// duplicated here.</description></item>
+/// <item><term>R9 — the newly reachable seat is told the wrong thing</term><description>an honest
+/// <c>can_edit: false</c> makes a UI path reachable that described a failed probe, so a read-only viewer is told
+/// to reload to edit. <see cref="EveryComposerRefusal_SeparatesAReadOnlySeatFromAFailedProbe"/> holds every
+/// discovered composer to telling the two apart.</description></item>
 /// <item><term>R8 — the principal reaches the WRONG parameter</term><description>every argument around
 /// <c>updatedBy</c> is a string, so a positional swap with <c>description</c> compiles and stamps the
 /// description. Closed at the compiler by naming the parameter at each write site, and pinned by
@@ -83,6 +87,8 @@ public sealed class DarlingWebEditorAttributionTests
     private const string McpToolsPath = "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomViewTools.cs";
     private const string LiveTestsPath = "Darling/Darling.Tests/DarlingCustomViewsLiveTests.cs";
     private const string ServiceProject = "Darling/PerformanceMonitor.Darling.Service";
+    private const string WebRoot = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js";
+    private const string SessionClientPath = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/views-api.js";
 
     /// <summary>A custom-view write on the store: the two method names that take an <c>updatedBy</c>.</summary>
     private static readonly Regex CustomViewWrite = new(@"\.(?:Create|Update)Async\s*\(", RegexOptions.Compiled);
@@ -304,7 +310,7 @@ public sealed class DarlingWebEditorAttributionTests
            though, preserving length and newlines, so an offset found in the raw source indexes the stripped
            stream identically. Anchor in the raw text, span the code: the pin then cannot match a route name
            that only appears in a comment, and cannot miss one because the walker hid it. */
-        var source = RepoFile.ReadRepoFileLf(EndpointsPath);
+        var source = RepoFile.ReadRepoFile(EndpointsPath);
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
         Assert.Equal(source.Length, code.Length);
 
@@ -337,7 +343,7 @@ public sealed class DarlingWebEditorAttributionTests
     [Fact]
     public void LiveRoundTripPrincipals_CanDiscriminateAHardcodedStamp()
     {
-        var source = RepoFile.ReadRepoFileLf(LiveTestsPath);
+        var source = RepoFile.ReadRepoFile(LiveTestsPath);
 
         var create = ConstantValue(source, "CreatePrincipal");
         var update = ConstantValue(source, "UpdatePrincipal");
@@ -345,6 +351,55 @@ public sealed class DarlingWebEditorAttributionTests
         Assert.NotEqual(DarlingWebEndpoints.WebEditorPrincipal, create);
         Assert.NotEqual(DarlingWebEndpoints.WebEditorPrincipal, update);
         Assert.NotEqual(create, update);
+    }
+
+    /* =====================================================================================================
+       R9 — the seat the honest answer newly makes reachable has to be told the truth.
+       ===================================================================================================== */
+
+    /// <summary>
+    /// Every composer that refuses on <c>!session.can_edit</c> distinguishes a READ-ONLY SEAT from a FAILED
+    /// PROBE, and the client's fail-closed default is what makes them distinguishable.
+    ///
+    /// <para>This is the consequence of <c>/api/session</c> answering honestly. Both situations deny editing
+    /// and both arrive as <c>can_edit: false</c>, so a single message has to be wrong for one of them — and the
+    /// wrong one is the viewer, who gets told to reload a page whose reload can never grant edit rights. The
+    /// server's answer never carries <c>probe_failed</c>; only the transport-failure default the client builds
+    /// for itself does, which is why the distinction is available client-side at all.</para>
+    ///
+    /// <para>The composers are DISCOVERED by their refusal gate rather than listed, so a third one added later
+    /// is held to the same rule. Files that read <c>can_edit</c> only to hide affordances are correctly outside
+    /// the population: hiding a button needs no words, so it has nothing to get wrong.</para>
+    /// </summary>
+    [Fact]
+    public void EveryComposerRefusal_SeparatesAReadOnlySeatFromAFailedProbe()
+    {
+        var api = RepoFile.ReadRepoFile(SessionClientPath);
+
+        Assert.Contains("probe_failed", api, StringComparison.Ordinal);
+
+        var composers = Directory
+            .EnumerateFiles(RepoFile.PathTo(WebRoot), "*.js", SearchOption.AllDirectories)
+            .Where(path => File.ReadAllText(path).Contains("if (!session.can_edit)", StringComparison.Ordinal))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(
+            composers.Count >= 2,
+            $"Discovered {composers.Count} composer(s) refusing on !session.can_edit under {WebRoot}; expected "
+          + "at least the dashboard and the notebook composer. Below the floor this pin checks nothing.");
+
+        var offenders = composers
+            .Where(path => !RefusalBranchesOnTheProbe(File.ReadAllText(path)))
+            .Select(path => Path.GetRelativePath(RepoFile.Root, path))
+            .ToList();
+
+        Assert.True(
+            offenders.Count == 0,
+            "These composers render ONE read-only notice for both a failed session probe and a read-only OIDC "
+          + "seat. The viewer is the one it is wrong for: they are correctly signed in, and the copy tells them "
+          + "to reload to edit, which their role will never allow. Branch the notice on session.probe_failed, "
+          + "which only the client's fail-closed default sets:\n  " + string.Join("\n  ", offenders));
     }
 
     /* =====================================================================================================
@@ -401,6 +456,21 @@ public sealed class DarlingWebEditorAttributionTests
         principal.IsMatch(arguments)
         && Regex.IsMatch(arguments, @"updatedBy\s*:\s*[A-Za-z_]");
 
+    /// <summary>Whether a composer's <c>!session.can_edit</c> refusal reads <c>probe_failed</c>, i.e. whether it
+    /// can say two different things. Scoped to the refusal block, not the file: a mention anywhere would be
+    /// satisfied by a comment about the flag beside a notice that still ignores it.</summary>
+    private static bool RefusalBranchesOnTheProbe(string source)
+    {
+        var gate = source.IndexOf("if (!session.can_edit)", StringComparison.Ordinal);
+        if (gate < 0)
+        {
+            return false;
+        }
+
+        var block = CSharpSourceWalker.BraceBalanced(source, source.IndexOf('{', gate));
+        return block.Contains("probe_failed", StringComparison.Ordinal);
+    }
+
     private static DefaultHttpContext Carrying(DarlingWebSeat seat)
     {
         var context = new DefaultHttpContext();
@@ -408,10 +478,18 @@ public sealed class DarlingWebEditorAttributionTests
         return context;
     }
 
-    /// <summary>The file's CODE, with comments and literal text blanked: a scan for a call cannot match prose
-    /// in a doc comment, and newlines survive so offenders report a real line number.</summary>
+    /// <summary>
+    /// The file's CODE, with comments and literal text blanked: a scan for a call cannot match prose in a doc
+    /// comment, and newlines survive so offenders report a real line number.
+    ///
+    /// <para>The RAW reader, not the LF-normalising one. Every anchor in this class sits on a single line, so
+    /// normalising would change nothing about what they match — and taking the LF reader would put this file in
+    /// a census whose membership means "this pin's anchors span a line break", claiming a property it does not
+    /// have. The checkout is CRLF and these reads are of CRLF text; line numbers come from counting <c>\n</c>,
+    /// which is one per line either way.</para>
+    /// </summary>
     private static string CodeOf(string relative) =>
-        CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFileLf(relative));
+        CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(relative));
 
     /// <summary>Offsets of every custom-view store write in a code stream.</summary>
     private static List<int> WriteSites(string code) =>
