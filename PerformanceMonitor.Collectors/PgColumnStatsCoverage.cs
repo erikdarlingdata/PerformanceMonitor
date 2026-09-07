@@ -140,18 +140,18 @@ public static class PgColumnStatsCoverage
     /// The arm that produced <paramref name="storedColumnRows"/>, the counts it was decided from, and the
     /// sentence for it.
     ///
-    /// <para>Order is load-bearing. <paramref name="evidenceRuns"/> is asked FIRST because every other arm
-    /// is an inference from counts that only mean something once the collector supplying them has run —
-    /// asking it later would let an absent evidence collector answer
+    /// <para>Order is load-bearing. <paramref name="evidenceCollectorRan"/> is asked FIRST because every
+    /// other arm is an inference from counts that only mean something once the collector supplying them has
+    /// run — asking it later would let an absent evidence collector answer
     /// <see cref="PgColumnStatsCoverageArm.BelowSizeFloor"/>, which is a confident all-clear built on no
     /// measurement. Then the floor, because a target with nothing to read cannot have a privilege problem
     /// worth reporting. Only then the two arms that need the visible count to tell apart.</para>
     /// </summary>
-    /// <param name="evidenceRuns">
-    /// <c>pg_table_bloat_stats</c> runs recorded for this server in the window. Zero means no evidence, and
-    /// it is deliberately a RUN count rather than a row count: a run that stored no rows is the measurement
-    /// that establishes <see cref="PgColumnStatsCoverageArm.BelowSizeFloor"/>, so collapsing the two would
-    /// throw away the only reading that distinguishes it from an absent collector.
+    /// <param name="evidenceCollectorRan">
+    /// Whether <c>pg_table_bloat_stats</c> RAN for this server in the evidence window. It is deliberately a
+    /// RUN rather than a row count: a run that stored no rows is the measurement that establishes
+    /// <see cref="PgColumnStatsCoverageArm.BelowSizeFloor"/>, so collapsing the two would throw away the
+    /// only reading that distinguishes it from an absent collector.
     /// </param>
     /// <param name="candidateTables">
     /// Distinct tables whose latest measurement in the window is at or above
@@ -163,12 +163,12 @@ public static class PgColumnStatsCoverage
     /// </param>
     /// <param name="storedColumnRows">Column statistic rows the read actually returned.</param>
     public static PgColumnStatsCoverageVerdict Classify(
-        int evidenceRuns,
+        bool evidenceCollectorRan,
         int candidateTables,
         int tablesWithVisibleStatistics,
         int storedColumnRows)
     {
-        if (evidenceRuns <= 0)
+        if (!evidenceCollectorRan)
         {
             return new PgColumnStatsCoverageVerdict(
                 PgColumnStatsCoverageArm.Undetermined,

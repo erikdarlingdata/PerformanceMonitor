@@ -106,14 +106,21 @@ public static class DarlingPgColumnStatsReader
     /// every column's <c>pg_stats</c> row readable by the monitoring login. The three inputs
     /// <see cref="PgColumnStatsCoverage.Classify"/> needs, and nothing else.
     /// </summary>
-    /// <param name="EvidenceRuns">
-    /// <c>pg_table_bloat_stats</c> runs logged for this server in the window — a RUN count, not a row count,
+    /// <param name="EvidenceCollectorRan">
+    /// Whether <c>pg_table_bloat_stats</c> RAN for this server in the evidence window — a run, not a row,
     /// and that distinction is the whole reason this field exists. A run that stored no rows is the
     /// measurement establishing that nothing on the target clears the floor; collapsing the two would make
     /// "measured, and everything is small" indistinguishable from "never measured here".
+    ///
+    /// <para>A boolean rather than a count because a count is what the decision costs, not what it needs:
+    /// nothing reads how MANY times it ran, and measured against the production store an
+    /// <c>EXISTS</c> probe answers in 6 ms where <c>count(*)</c> over the same predicate takes 152 —
+    /// <c>collection_log</c> has no index on (server_id, collector_name), so counting means a bitmap heap
+    /// scan that discarded 14,060 rows to keep 22. Proving ABSENCE is the worst case for a short-circuit and
+    /// it still measured 4.5 ms.</para>
     /// </param>
     public readonly record struct PgColumnStatsCoverageEvidence(
-        int EvidenceRuns,
+        bool EvidenceCollectorRan,
         int CandidateTables,
         int TablesWithVisibleStatistics);
 
@@ -136,19 +143,22 @@ public static class DarlingPgColumnStatsReader
        1,263 of 1,264 tables past the byte floor also clear the page floor, and the one that does not is a
        table this collector would genuinely skip.
 
-       The run count is a scalar subquery rather than a join, so a server whose bloat collector ran and
+       The run probe is a scalar subquery rather than a join, so a server whose bloat collector ran and
        stored NOTHING still reports its run - a join would drop exactly the row that distinguishes the
-       size-floor arm from the no-evidence one. $1 server_id, $2 window start, $3 window end. */
+       size-floor arm from the no-evidence one. EXISTS rather than count(*) because only the zero test is
+       read, and it is 25x cheaper on this store. $1 server_id, $2 window start, $3 window end. */
     public static readonly string CoverageEvidenceSql = @"
 SELECT
     (
-        SELECT count(*)
-        FROM collection_log
-        WHERE server_id = $1
-        AND   collector_name = 'pg_table_bloat_stats'
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-    )::int                                                              AS evidence_runs,
+        SELECT EXISTS (
+            SELECT 1
+            FROM collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'pg_table_bloat_stats'
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+        )
+    )                                                                   AS evidence_collector_ran,
     count(*) FILTER (WHERE latest.heap_pages >= " + PgColumnStatsCollector.MinimumRelPages + @")::int
                                                                         AS candidate_tables,
     count(*) FILTER (WHERE latest.heap_pages >= " + PgColumnStatsCollector.MinimumRelPages + @"
@@ -181,10 +191,10 @@ FROM (
         try
         {
             var evidence = await GetCoverageEvidenceAsync(
-                postgres, serverId, EvidenceStart(startUtc, endUtc), endUtc, cancellationToken);
+                postgres, serverId, EvidenceStart(endUtc), endUtc, cancellationToken);
 
             return PgColumnStatsCoverage.Classify(
-                evidence.EvidenceRuns,
+                evidence.EvidenceCollectorRan,
                 evidence.CandidateTables,
                 evidence.TablesWithVisibleStatistics,
                 storedColumnRows);
@@ -196,41 +206,39 @@ FROM (
     }
 
     /// <summary>
-    /// The shortest evidence lookback that can answer the coverage question, whatever window the CALLER
-    /// asked its data over.
+    /// The evidence lookback: a FIXED span ending where the caller's read ends, independent of how wide a
+    /// window the caller asked its data over.
     ///
-    /// <para><b>The read's own window is the wrong window for this, and using it would manufacture
-    /// <see cref="PgColumnStatsCoverageArm.Undetermined"/> on servers whose answer is known.</b> Whether the
-    /// monitoring login can read <c>pg_stats</c> is a CURRENT state of the target, not a property of the
-    /// interval somebody happened to select in the viewer. <c>pg_table_bloat_stats</c> collects hourly, so a
-    /// one-hour panel window straddles zero or one of its runs, and a zero would report "no evidence" for a
-    /// target measured 167 times in the past week. Same reasoning as
-    /// <c>CollectorRuntimePrecondition</c>, which consults the LATEST run rather than a window for exactly
-    /// this: a precondition is a state, and a window is a question about history.</para>
+    /// <para><b>The read's own window is the wrong window for this, in both directions.</b> A one-hour panel
+    /// window straddles zero or one run of the hourly evidence collector, so it would manufacture
+    /// <see cref="PgColumnStatsCoverageArm.Undetermined"/> for a target measured 167 times in the past week.
+    /// And a wide one is no better: the MCP tool defaults to 168 hours, where the census measured 242 ms
+    /// against 41 ms over a day — a diagnostic that runs on every call, empty or not, paying six times over
+    /// for history it does not use.</para>
     ///
-    /// <para>A day rather than no lower bound at all, because the store table is a hypertable and an
-    /// unbounded scan would read every chunk of a 90-day retention to answer a diagnostic. A day is the
-    /// SUBJECT collector's own cadence — <c>pg_column_stats</c> runs daily, so evidence older than its last
-    /// run could describe a grant that has since changed, and evidence newer than a day is guaranteed to
-    /// exist wherever the hourly collector is running at all.</para>
+    /// <para><b>Because it is not a question about history.</b> Whether the monitoring login can read
+    /// <c>pg_stats</c>, and whether anything on the target clears the size floor, are CURRENT states — and
+    /// <c>CollectorRuntimePrecondition</c> settled this shape already: it consults the LATEST run rather than
+    /// a window, on the reasoning that a precondition somebody has since satisfied must not keep being
+    /// reported. Averaging a month of candidate counts would answer a question nobody asked and cost more to
+    /// do it.</para>
+    ///
+    /// <para>A day rather than the latest row alone, because the store table is a hypertable and the count
+    /// is over DISTINCT tables — so it needs a span, and a day both bounds the chunks scanned and is the
+    /// SUBJECT collector's own cadence: <c>pg_column_stats</c> runs daily, so this is the evidence
+    /// contemporary with the run being explained, and it is guaranteed to exist wherever the hourly
+    /// collector is running at all.</para>
     ///
     /// <para>Anchored on <paramref name="endUtc"/>, so an <c>as_of</c> read gets the evidence contemporary
     /// with the data it is explaining rather than today's.</para>
     /// </summary>
-    internal static DateTime EvidenceStart(DateTime startUtc, DateTime endUtc)
-    {
-        var floor = endUtc.AddHours(-MinimumEvidenceHours);
-
-        /* The WIDER of the two. A caller asking about a month gets a month - narrowing to a day there would
-           throw away measurements of tables the read's own rows come from. */
-        return startUtc < floor ? startUtc : floor;
-    }
+    internal static DateTime EvidenceStart(DateTime endUtc) => endUtc.AddHours(-EvidenceHours);
 
     /// <summary>
-    /// How far back <see cref="EvidenceStart"/> looks when the caller's window is shorter. Named so the
-    /// relationship to the subject collector's cadence is assertable rather than a number in a call.
+    /// How far back <see cref="EvidenceStart"/> looks. Named so the relationship to the subject collector's
+    /// cadence is assertable rather than a number in a call.
     /// </summary>
-    internal const int MinimumEvidenceHours = 24;
+    internal const int EvidenceHours = 24;
 
     /// <summary>The raw evidence, for callers that want the counts rather than the sentence.</summary>
     public static async Task<PgColumnStatsCoverageEvidence> GetCoverageEvidenceAsync(
@@ -253,11 +261,11 @@ FROM (
 
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return new PgColumnStatsCoverageEvidence(0, 0, 0);
+            return new PgColumnStatsCoverageEvidence(false, 0, 0);
         }
 
         return new PgColumnStatsCoverageEvidence(
-            EvidenceRuns: reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+            EvidenceCollectorRan: !reader.IsDBNull(0) && reader.GetBoolean(0),
             CandidateTables: reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
             TablesWithVisibleStatistics: reader.IsDBNull(2) ? 0 : reader.GetInt32(2));
     }

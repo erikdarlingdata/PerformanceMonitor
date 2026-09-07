@@ -74,23 +74,24 @@ public sealed class PgColumnStatsCoverageTests
     private static readonly (string Name, PgColumnStatsCoverageVerdict Verdict, PgColumnStatsCoverageArm Expected)[] s_cases =
     {
         ("evidence collector never ran, nothing stored",
-            PgColumnStatsCoverage.Classify(0, 0, 0, 0), PgColumnStatsCoverageArm.Undetermined),
+            PgColumnStatsCoverage.Classify(evidenceCollectorRan: false, 0, 0, 0),
+            PgColumnStatsCoverageArm.Undetermined),
         ("evidence collector never ran, rows stored anyway",
-            PgColumnStatsCoverage.Classify(0, 361, 0, 1_000), PgColumnStatsCoverageArm.Undetermined),
+            PgColumnStatsCoverage.Classify(false, 361, 0, 1_000), PgColumnStatsCoverageArm.Undetermined),
         ("evidence read itself failed",
             PgColumnStatsCoverage.EvidenceUnreadable(0), PgColumnStatsCoverageArm.Undetermined),
         ("measured, and nothing clears the floor",
-            PgColumnStatsCoverage.Classify(168, 0, 0, 0), PgColumnStatsCoverageArm.BelowSizeFloor),
+            PgColumnStatsCoverage.Classify(true, 0, 0, 0), PgColumnStatsCoverageArm.BelowSizeFloor),
         ("361 candidates, none readable - the fleet's answer",
-            PgColumnStatsCoverage.Classify(167, 361, 0, 0), PgColumnStatsCoverageArm.StatisticsNotVisible),
+            PgColumnStatsCoverage.Classify(true, 361, 0, 0), PgColumnStatsCoverageArm.StatisticsNotVisible),
         ("one candidate, not readable",
-            PgColumnStatsCoverage.Classify(1, 1, 0, 0), PgColumnStatsCoverageArm.StatisticsNotVisible),
+            PgColumnStatsCoverage.Classify(true, 1, 0, 0), PgColumnStatsCoverageArm.StatisticsNotVisible),
         ("candidates readable and nothing stored",
-            PgColumnStatsCoverage.Classify(167, 361, 361, 0), PgColumnStatsCoverageArm.CollectionFault),
+            PgColumnStatsCoverage.Classify(true, 361, 361, 0), PgColumnStatsCoverageArm.CollectionFault),
         ("stored, covering some of the candidates",
-            PgColumnStatsCoverage.Classify(167, 361, 12, 5_000), PgColumnStatsCoverageArm.PartialVisibility),
+            PgColumnStatsCoverage.Classify(true, 361, 12, 5_000), PgColumnStatsCoverageArm.PartialVisibility),
         ("stored, covering all of them",
-            PgColumnStatsCoverage.Classify(167, 361, 361, 5_000), PgColumnStatsCoverageArm.FullyMeasured),
+            PgColumnStatsCoverage.Classify(true, 361, 361, 5_000), PgColumnStatsCoverageArm.FullyMeasured),
     };
 
     /// <summary>R1: no outcome may arrive without an arm, and every arm must be reachable.</summary>
@@ -154,12 +155,12 @@ public sealed class PgColumnStatsCoverageTests
     {
         var probes = new[]
         {
-            PgColumnStatsCoverage.Classify(0, 424_242, 31_337, 90_210),
-            PgColumnStatsCoverage.Classify(8_675_309, 0, 0, 0),
-            PgColumnStatsCoverage.Classify(8_675_309, 424_242, 0, 0),
-            PgColumnStatsCoverage.Classify(8_675_309, 424_242, 31_337, 0),
-            PgColumnStatsCoverage.Classify(8_675_309, 424_242, 31_337, 90_210),
-            PgColumnStatsCoverage.Classify(8_675_309, 424_242, 424_242, 90_210),
+            PgColumnStatsCoverage.Classify(false, 424_242, 31_337, 90_210),
+            PgColumnStatsCoverage.Classify(true, 0, 0, 0),
+            PgColumnStatsCoverage.Classify(true, 424_242, 0, 0),
+            PgColumnStatsCoverage.Classify(true, 424_242, 31_337, 0),
+            PgColumnStatsCoverage.Classify(true, 424_242, 31_337, 90_210),
+            PgColumnStatsCoverage.Classify(true, 424_242, 424_242, 90_210),
             PgColumnStatsCoverage.EvidenceUnreadable(90_210),
         };
 
@@ -208,7 +209,7 @@ public sealed class PgColumnStatsCoverageTests
     [Fact]
     public void AReadableTableWithNothingStoredIsAFaultAndSaysSo()
     {
-        var fault = PgColumnStatsCoverage.Classify(167, 361, 1, 0);
+        var fault = PgColumnStatsCoverage.Classify(true, 361, 1, 0);
 
         Assert.Equal(PgColumnStatsCoverageArm.CollectionFault, fault.Arm);
         Assert.Contains("COLLECTION FAULT", fault.Cause, StringComparison.Ordinal);
@@ -226,8 +227,8 @@ public sealed class PgColumnStatsCoverageTests
     [Fact]
     public void NoEvidenceIsNotTheSameAsNothingAboveTheFloor()
     {
-        var measured = PgColumnStatsCoverage.Classify(168, 0, 0, 0);
-        var unmeasured = PgColumnStatsCoverage.Classify(0, 0, 0, 0);
+        var measured = PgColumnStatsCoverage.Classify(true, 0, 0, 0);
+        var unmeasured = PgColumnStatsCoverage.Classify(false, 0, 0, 0);
 
         Assert.Equal(PgColumnStatsCoverageArm.BelowSizeFloor, measured.Arm);
         Assert.Equal(PgColumnStatsCoverageArm.Undetermined, unmeasured.Arm);
@@ -245,43 +246,34 @@ public sealed class PgColumnStatsCoverageTests
     }
 
     /// <summary>
-    /// R5's other half: the evidence lookback must not be the caller's window, or a short panel window
-    /// MANUFACTURES <see cref="PgColumnStatsCoverageArm.Undetermined"/> on a server whose answer is known.
+    /// R5's other half: the evidence lookback is a FIXED span ending where the read ends, not the caller's
+    /// window — which would be wrong in both directions.
     ///
-    /// <para>The evidence collector is hourly and the subject collector is daily, so a one-hour viewer
-    /// window straddles zero or one evidence run — and reporting "no evidence" for a target measured 167
-    /// times in the past week is the failing-toward-a-confident-nothing direction. A wider caller window is
-    /// honoured as-is; only the floor is imposed.</para>
+    /// <para>Too narrow manufactures <see cref="PgColumnStatsCoverageArm.Undetermined"/>: the evidence
+    /// collector is hourly, so a one-hour panel window straddles zero or one of its runs and would report
+    /// "no evidence" for a target measured 167 times in the past week. Too wide just costs — the MCP tool
+    /// defaults to 168 hours, where the census measured 242 ms against 41 ms over a day, on a diagnostic
+    /// that runs on every call. And it is not a question about history at all: <c>CollectorRuntimePrecondition</c>
+    /// consults the LATEST run for exactly this reason.</para>
     /// </summary>
     [Fact]
-    public void TheEvidenceLookbackIsFlooredRatherThanTakenFromTheCallersWindow()
+    public void TheEvidenceLookbackIsFixedRatherThanTakenFromTheCallersWindow()
     {
         var end = new DateTime(2026, 9, 7, 20, 0, 0, DateTimeKind.Utc);
-        var floorHours = DarlingPgColumnStatsReader.MinimumEvidenceHours;
+        var hours = DarlingPgColumnStatsReader.EvidenceHours;
 
-        /* A one-hour read still looks back the floor. */
-        Assert.Equal(
-            end.AddHours(-floorHours),
-            DarlingPgColumnStatsReader.EvidenceStart(end.AddHours(-1), end));
-
-        /* A month-long read is NOT narrowed to the floor - the rows it returned come from that month, and
-           narrowing would report coverage over a population the data does not come from. */
-        Assert.Equal(
-            end.AddDays(-30),
-            DarlingPgColumnStatsReader.EvidenceStart(end.AddDays(-30), end));
+        Assert.Equal(end.AddHours(-hours), DarlingPgColumnStatsReader.EvidenceStart(end));
 
         /* Anchored on the END, so an as_of read gets evidence contemporary with the data it explains
            rather than today's. */
         var earlier = end.AddDays(-10);
-        Assert.Equal(
-            earlier.AddHours(-floorHours),
-            DarlingPgColumnStatsReader.EvidenceStart(earlier.AddHours(-1), earlier));
+        Assert.Equal(earlier.AddHours(-hours), DarlingPgColumnStatsReader.EvidenceStart(earlier));
 
-        /* And the floor is at least the SUBJECT collector's cadence: pg_column_stats runs daily, so
-           evidence over a shorter span than one of its own cycles cannot describe the run being explained. */
+        /* At least the SUBJECT collector's cadence: pg_column_stats runs daily, so evidence over a shorter
+           span than one of its own cycles cannot describe the run being explained. */
         Assert.True(
-            floorHours >= 24,
-            $"the evidence floor is {floorHours}h, shorter than pg_column_stats' own daily cadence");
+            hours >= 24,
+            $"the evidence lookback is {hours}h, shorter than pg_column_stats' own daily cadence");
 
         /* AND THE VERDICT READ ACTUALLY USES IT. Everything above tests a pure function; deleting the one
            call that applies it left every assertion here green, which is the seam this whole issue is a
@@ -290,15 +282,29 @@ public sealed class PgColumnStatsCoverageTests
             "Darling/PerformanceMonitor.Darling.Storage/DarlingPgColumnStatsReader.cs",
             "GetCoverageVerdictAsync"));
 
-        Assert.Contains("EvidenceStart(startUtc, endUtc)", verdictRead, StringComparison.Ordinal);
+        Assert.Contains("EvidenceStart(endUtc)", verdictRead, StringComparison.Ordinal);
+
+        /* And the read must not quietly go back to the caller's start: the parameter still exists, for the
+           ROW read, so a one-character edit reinstates the defect this closes. */
+        Assert.DoesNotContain("EvidenceStart(startUtc", verdictRead, StringComparison.Ordinal);
+
+        /* And the census asks BOTH questions from BOTH sources. The run probe reads collection_log for the
+           evidence collector's name; the counts read its stored rows. A census that dropped the log half
+           could only ever answer "it ran", which erases the whole Undetermined arm - and it would do so
+           silently, because both remaining counts would still be zero. */
+        var census = DarlingPgColumnStatsReader.CoverageEvidenceSql;
+
+        Assert.Contains("FROM collection_log", census, StringComparison.Ordinal);
+        Assert.Contains("collector_name = 'pg_table_bloat_stats'", census, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_table_bloat_stats", census, StringComparison.Ordinal);
     }
 
     /// <summary>R7: a populated result that covers part of the target is its own answer, not the clean one.</summary>
     [Fact]
     public void PartialCoverageIsItsOwnArm()
     {
-        var partial = PgColumnStatsCoverage.Classify(167, 20, 4, 900);
-        var whole = PgColumnStatsCoverage.Classify(167, 20, 20, 900);
+        var partial = PgColumnStatsCoverage.Classify(true, 20, 4, 900);
+        var whole = PgColumnStatsCoverage.Classify(true, 20, 20, 900);
 
         Assert.Equal(PgColumnStatsCoverageArm.PartialVisibility, partial.Arm);
         Assert.Equal(PgColumnStatsCoverageArm.FullyMeasured, whole.Arm);
