@@ -76,9 +76,8 @@ namespace Darling.Tests;
 /// <para><b>And the SCOPING rule, held file-wide rather than only where it is stated (#3133).</b>
 /// <see cref="Verify"/> requires the ceiling paragraph's own enumeration to carry a CLOSED scope;
 /// <see cref="NoOpenPopulationClaim_SurvivesOutsideTheSentenceThatRejectsIt"/> requires the rest of the
-/// file not to break the same rule. Two copies of one universal described the routine refresh band with
-/// the sentence rejecting them sitting between them, so where the rule is stated is not where it needs
-/// enforcing.</para>
+/// file not to break the same rule. A rule stated in one paragraph binds nothing in the paragraphs a
+/// reader meets thousands of lines away, so where it is stated is not where it needs enforcing.</para>
 /// </summary>
 public sealed class RefreshCeilingProvenancePinTests
 {
@@ -484,14 +483,14 @@ public sealed class RefreshCeilingProvenancePinTests
     /// <summary>
     /// The scoping rule <see cref="Verify"/> enforces for the ceiling's own paragraph, applied to the whole
     /// file (#3133). A scope has to CLOSE a population: <c>every reading</c> closes nothing, and
-    /// <c>the readings so far</c> is relative to a reading time a doc comment does not have. Both forms
-    /// described the routine refresh band in this file while the sentence rejecting them sat in it too.
+    /// <c>the readings so far</c> is relative to a reading time a doc comment does not have. The rule is
+    /// stated in one paragraph of this file and breakable in every other one.
     ///
-    /// <para><b>Matched against JOINED doc prose, which is why this is a test and not a grep.</b> One of the
-    /// two sites wrapped as "the one every / reading taken so far falls in", so a line-oriented search for
-    /// the phrase found the other one and returned a confident count that was short by one. Runs are joined
-    /// before any pattern runs, the same normalisation <see cref="DocProseFor"/> applies to a single
-    /// declaration.</para>
+    /// <para><b>Matched against JOINED doc prose, which is why this is a test and not a grep.</b> A claim of
+    /// this shape wraps across <c>///</c> lines as readily as it fits on one — "the one every / reading
+    /// taken so far falls in" exists on no single line — so a line-oriented search returns a confident
+    /// count short by however many wrapped. Runs are joined before any pattern runs, the same normalisation
+    /// <see cref="DocProseFor"/> applies to a single declaration.</para>
     ///
     /// <para><b>The one permitted occurrence is ANCHORED to the sentence that rejects it, not exempted by
     /// location.</b> Exempting the doc run the rule lives in would let a fresh universal be added to that
@@ -520,8 +519,8 @@ public sealed class RefreshCeilingProvenancePinTests
     /// required to fail on it — a bundled mutation reports that something fired, not which clause did.
     ///
     /// <para>The first case goes back in WRAPPED across two <c>///</c> lines, so it proves the joining is
-    /// load-bearing rather than tidy: unjoined, that mutation is invisible, which is how the original pair
-    /// came to be counted as one.</para>
+    /// load-bearing rather than tidy: unjoined, that mutation is invisible, and a guard that cannot see a
+    /// wrapped claim reports a clean file for a broken one.</para>
     /// </summary>
     [Fact]
     public void TheOpenPopulationGuard_ReportsEachForbiddenShape()
@@ -538,8 +537,8 @@ public sealed class RefreshCeilingProvenancePinTests
         Assert.ThrowsAny<Exception>(() => AssertNoOpenPopulationClaim(
             InjectDocLines(source, InsideSlotMember, "/// The readings so far are all inside it.")));
 
-        /* A THIRD wording of the same claim, and the reason the pattern matches a shape rather than the
-           phrases that were found: none of the three sites said it the same way. */
+        /* A THIRD wording of the same claim, and the reason the pattern matches a shape rather than a list
+           of phrasings: this claim has as many wordings as it has sites. */
         Assert.ThrowsAny<Exception>(() => AssertNoOpenPopulationClaim(
             InjectDocLines(source, InsideSlotMember, "/// Zero exceptions on every sample since.")));
 
@@ -1023,20 +1022,19 @@ public sealed class RefreshCeilingProvenancePinTests
 
     /* ─────────────────────────────── the scoping rule, file-wide ─────────────────────────────── */
 
-    /// <summary>The enum member whose summary carried one of the two universals, and the coordinate
-    /// <see cref="TheOpenPopulationGuard_ReportsEachForbiddenShape"/> injects at. Its own declaration line,
-    /// indentation included, so the injected lines land in that member's doc run.</summary>
+    /// <summary>The member <see cref="TheOpenPopulationGuard_ReportsEachForbiddenShape"/> injects at, named
+    /// by its own declaration line with the indentation included, so the injected lines land inside that
+    /// member's doc run.</summary>
     private const string InsideSlotMember = "        InsideSlot,";
 
     /// <summary>
     /// The universal-quantifier form: a quantifier over a population of OBSERVATIONS, which is a series
     /// that gains a member every hour this job runs.
     ///
-    /// <para><b>The shape rather than the phrases that were found (#3133).</b> Three sites stated this
-    /// claim and no two of them said it the same way — "every reading", "every reading taken so far",
-    /// "every sample since". A pattern listing the phrasings found would be a frozen list beside a defect
-    /// that keeps rewording itself, so the quantifier and the population noun are matched
-    /// separately.</para>
+    /// <para><b>The SHAPE rather than a list of phrasings (#3133).</b> One claim has as many wordings as
+    /// it has sites — "every reading", "every reading taken so far", "every sample since" all say it — so a
+    /// pattern enumerating wordings is a frozen list against a defect that rewords itself freely. The
+    /// quantifier and the population noun are matched separately instead.</para>
     ///
     /// <para><b><c>run</c> is deliberately NOT a population noun here.</b> This file uses it for closed
     /// censuses ("every run that day after the boundary"), for the exclusion rule ("every run that started
