@@ -57,13 +57,13 @@ namespace Darling.Tests;
 /// <see cref="TheQuotedFloorIsTheOneTheShippedQueriesFilterOn"/>.</item>
 /// </list>
 ///
-/// <para><b>Which cause actually applies, measured.</b> The privilege filter, on the whole fleet. Read-only
-/// against a live store on 2026-09-07: <c>estimate_unavailable</c> was TRUE on 331,357 of 331,357
-/// <c>pg_table_bloat_stats</c> rows in every era, and independently the collector's own width arithmetic
-/// bottomed out at its empty-input residue on 59,981 of 59,981 rows in 48 hours — two readings that fail
-/// differently and agree. The floor is demonstrably NOT the explanation: 1,263 of 1,264 distinct tables past
-/// the byte floor also clear the page floor, on all 49 targets that report, and the busiest holds 361 of
-/// them, which is the figure the collector's own comment cites.</para>
+/// <para><b>Which cause actually applies, measured.</b> The privilege filter, on the whole fleet. One
+/// read-only pass against a live store at 2026-09-07 21:37 UTC: <c>estimate_unavailable</c> TRUE on
+/// 332,611 of 332,611 <c>pg_table_bloat_stats</c> rows in every era, and independently that collector's own
+/// width arithmetic at its empty-input residue on 60,202 of 60,202 rows in 48 hours — two readings that
+/// fail differently and agree. The floor is demonstrably NOT the explanation: 1,263 of 1,264 distinct
+/// tables past the byte floor also clear the page floor, on all 49 targets that report, and the busiest
+/// holds 361 of them, which is the figure the collector's own comment cites.</para>
 /// </summary>
 public sealed class PgColumnStatsCoverageTests
 {

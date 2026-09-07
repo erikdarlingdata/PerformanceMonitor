@@ -86,10 +86,11 @@ public readonly record struct PgColumnStatsCoverageVerdict(
 ///
 /// <para><b>The defect this closes.</b> <see cref="PgColumnStatsCollector"/> documents two legitimate ways
 /// to return nothing — the size floor and <c>pg_stats</c>' privilege filter — and distinguishes them in its
-/// documentation and not in its output. Measured on a 50-target Aurora fleet: 553 SUCCESS runs since the
-/// store was built, zero rows stored, ever, and a NULL note on 99 of the last 100 runs. The reads then
-/// recited BOTH causes in one message and selected neither, which is prose about the mechanism rather than a
-/// diagnosis of it — an operator could not tell which thing to go and do.</para>
+/// documentation and not in its output. Read read-only against a 50-target Aurora store on 2026-09-07:
+/// 553 SUCCESS runs since that store was built, ONE distinct status, zero rows stored ever, 299 ms at its
+/// slowest, and a NULL note on 99 of the last 100 runs. The reads then recited BOTH causes in one message
+/// and selected neither, which is prose about the mechanism rather than a diagnosis of it — an operator
+/// could not tell which thing to go and do.</para>
 ///
 /// <para><b>Where the evidence comes from, and why it is not a new probe.</b> Both counts are already in the
 /// store, collected by <c>pg_table_bloat_stats</c>: it measures every table at or above 1 MB and carries
@@ -104,10 +105,11 @@ public readonly record struct PgColumnStatsCoverageVerdict(
 /// <see cref="PgColumnStatsCoverageArm.CollectionFault"/> rests on — a readable table plus a stored nothing
 /// is a fault, with no privilege explanation available. The other direction is weaker: the flag is also set
 /// by a <c>name</c>-typed column and by <c>reltuples &lt; 0</c>, so a table with no confirmed-readable
-/// statistics is not by itself proof of a denied grant. Measured against the fleet those arms are
-/// negligible — 2 of 59,981 rows carried <c>reltuples &lt; 0</c> and 47,739 had been analyzed at some point
-/// — so <see cref="PgColumnStatsCoverageArm.StatisticsNotVisible"/> names the privilege filter as the cause
-/// and says "confirmed readable" rather than claiming a certainty the flag cannot carry.</para>
+/// statistics is not by itself proof of a denied grant. Against that same store on 2026-09-07 those arms
+/// were negligible — 2 of 60,202 rows in 48 hours carried <c>reltuples &lt; 0</c>, and 47,960 had been
+/// analyzed at some point, so the statistics exist on the targets — so
+/// <see cref="PgColumnStatsCoverageArm.StatisticsNotVisible"/> names the privilege filter as the cause and
+/// says "confirmed readable" rather than claiming a certainty the flag cannot carry.</para>
 ///
 /// <para><b>Pure policy, no clock and no I/O.</b> The caller reads the counts and passes them in, the same
 /// discipline as <c>RollingCountAlertGate</c> — which is what lets the arm selection be asserted without a
