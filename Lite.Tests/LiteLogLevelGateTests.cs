@@ -62,11 +62,18 @@ public sealed class LiteLogLevelGateTests : IDisposable
     };
 
     /// <summary>
-    /// The POSITIVE CONTROL's template, taken from the same callback so it shares every condition with the
-    /// timing line except the one under test. Its job is to fail when the resolution machinery below has
-    /// stopped working: without it, "the timing line is not admitted" is equally consistent with a scan
-    /// that matched nothing useful and a gate that admits nothing at all — an empty read that cannot be
-    /// told from a real absence, which is the shape of the defect this file exists for.
+    /// The POSITIVE CONTROL's template. Its job is to fail when the resolution machinery below has stopped
+    /// working: without it, "the timing line is not admitted" is equally consistent with a scan that
+    /// matched nothing useful and a gate that admits nothing at all — an empty read that cannot be told
+    /// from a real absence, which is the shape of the defect this file exists for.
+    ///
+    /// <para><b>Two sites in that file carry this template</b> — the Azure SQL DB per-database loop and the
+    /// fan-out completion callback the timing line is emitted from — so the one NEAREST the matched timing
+    /// site is the one taken, rather than the first met walking the file. Both resolve to
+    /// <c>LogWarning</c> today, so the choice changes no result now; it is what makes the control share the
+    /// timing line's surroundings, which is the property that makes it a control rather than another
+    /// arbitrary warning. Selecting the first would silently attach it to a different branch the moment
+    /// either site moved.</para>
     /// </summary>
     private const string ControlMarker = "hit its per-database collection bound";
 
@@ -318,21 +325,25 @@ public sealed class LiteLogLevelGateTests : IDisposable
                 + "configuration only (#3104).");
     }
 
-    /// <summary>One timing emit site: the call, the level it maps to, and the template it emits.</summary>
-    private readonly record struct Site(string Method, LogLevel Level, string Template);
+    /// <summary>
+    /// One emit site: the call, the level it maps to, the template it emits, and where in the file it sits.
+    /// The offset is carried only to pick the control nearest a timing site.
+    /// </summary>
+    private readonly record struct Site(string Method, LogLevel Level, string Template, int Offset);
 
     /// <summary>
-    /// Every per-cycle timing emit site in the run path, plus the control site, resolved out of the real
-    /// source. The emitting call sits ahead of the literal and the literal is its first argument, so the
-    /// LAST call ahead of it is the one. Read out of the comment-and-literal-stripped text so a
-    /// <c>.LogInformation(</c> named in a comment above the site cannot be mistaken for the site's own call.
+    /// Every per-cycle timing emit site in the run path, plus the control site nearest the first of them,
+    /// resolved out of the real source. The emitting call sits ahead of the literal and the literal is its
+    /// first argument, so the LAST call ahead of it is the one. Read out of the comment-and-literal-stripped
+    /// text so a <c>.LogInformation(</c> named in a comment above the site cannot be mistaken for the site's
+    /// own call.
     /// </summary>
     private static List<Site> TimingSites(out Site? control)
     {
         var source = ReadRepoFile(EmitFile);
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
         var sites = new List<Site>();
-        control = null;
+        var controls = new List<Site>();
 
         foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(source))
         {
@@ -346,17 +357,18 @@ public sealed class LiteLogLevelGateTests : IDisposable
 
             var call = LogCall.Matches(code[..start]).LastOrDefault();
             var method = call is null ? "(no log call found)" : call.Groups[1].Value;
-            var site = new Site(method, LevelOf(method), body.Trim());
+            var site = new Site(method, LevelOf(method), body.Trim(), start);
 
-            if (isTiming)
-            {
-                sites.Add(site);
-            }
-            else
-            {
-                control ??= site;
-            }
+            (isTiming ? sites : controls).Add(site);
         }
+
+        /* Nearest the timing site, so the control shares its surroundings. With no timing site there is
+           nothing to be near, and the floor assertion is what should fail there rather than this. */
+        var ranked = sites.Count > 0
+            ? controls.OrderBy(c => Math.Abs(c.Offset - sites[0].Offset)).ToList()
+            : controls;
+
+        control = ranked.Count > 0 ? ranked[0] : null;
 
         return sites;
     }
