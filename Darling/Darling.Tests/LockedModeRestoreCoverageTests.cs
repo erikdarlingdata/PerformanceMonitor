@@ -295,9 +295,15 @@ public sealed class LockedModeRestoreCoverageTests
     /// <summary>
     /// The coverage check reports an injected gap, in all three of its arms.
     ///
-    /// <para>Removing the restore of a project nothing references must uncover it; removing the restore of a
-    /// project that others hang off must uncover THEM; and pinning the SDK must uncover the one the SDK float
-    /// is what excuses. Without the third, the exemption could be unconditional and read as derived.</para>
+    /// <para>Deleting a restore must uncover the project it names; deleting one that others hang off must
+    /// uncover THEM; and pinning the SDK must uncover the one the SDK float is what excuses. Without the
+    /// third, an unconditional exemption would read as a derived one.</para>
+    ///
+    /// <para><b>The deletions are derived rather than named.</b> Naming a restore line means spelling
+    /// another SKU's path inside this project's source, which is a cross-app reference that the filter
+    /// gating this suite cannot reach — the exact class of gap this file is about, reintroduced in the file
+    /// that is about it. Every restore line is tried instead, so the arms rest on a property of the
+    /// workflow and cannot go stale when a line moves or is renamed.</para>
     /// </summary>
     [Fact]
     public void TheCoverageCheck_ReportsAnInjectedGap()
@@ -307,32 +313,46 @@ public sealed class LockedModeRestoreCoverageTests
 
         Assert.Empty(UncoveredLockFiles(real, globalJson));
 
-        /* The direct arm: Lite.Tests is covered only by its own restore line. */
-        var withoutLiteTests = real.Replace(
-            "          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode\n",
-            string.Empty,
-            StringComparison.Ordinal);
-        Assert.NotEqual(real, withoutLiteTests);
-        Assert.Contains("Lite.Tests", UncoveredLockFiles(withoutLiteTests, globalJson));
+        var namedByARestore = new SortedSet<string>(
+            RestoreLines(real).Select(line => RestoreTarget(line)).Select(target => target[..target.LastIndexOf('/')]),
+            StringComparer.Ordinal);
 
-        /* The closure arm: Dashboard.Tests is the only restore that reaches deprecated/Dashboard, and it
-           reaches it only by reference. */
-        var withoutDashboardTests = real.Replace(
-            "          dotnet restore deprecated/Dashboard.Tests/Dashboard.Tests.csproj --locked-mode\n",
-            string.Empty,
-            StringComparison.Ordinal);
-        Assert.NotEqual(real, withoutDashboardTests);
-        Assert.Contains("deprecated/Dashboard", UncoveredLockFiles(withoutDashboardTests, globalJson));
+        var directArm = new SortedSet<string>(StringComparer.Ordinal);
+        var closureArm = new SortedSet<string>(StringComparer.Ordinal);
 
-        /* The exemption arm: with the SDK pinned exactly, deprecated/Installer stops being excusable and the
-           requirement reports it — which is the state a decision to keep that lock file has to reach. */
+        foreach (var line in real.Split('\n').Where(IsRestoreInvocation))
+        {
+            var without = real.Replace(line + "\n", string.Empty, StringComparison.Ordinal);
+            Assert.NotEqual(real, without);
+
+            foreach (var uncovered in UncoveredLockFiles(without, globalJson))
+            {
+                /* A directory the deleted line NAMED is the direct arm; one it only reached through a
+                   ProjectReference is the closure arm. The two are separated by what the workflow spells,
+                   so neither is a list. */
+                _ = namedByARestore.Contains(uncovered) ? directArm.Add(uncovered) : closureArm.Add(uncovered);
+            }
+        }
+
+        Assert.NotEmpty(directArm);
+
+        Assert.True(
+            closureArm.Count > 0,
+            "no restore line's removal uncovers a lock file it reaches only through a ProjectReference, so "
+            + "the closure walk in this check is not load-bearing and could be returning the directories it "
+            + "was handed");
+
+        /* The exemption arm: with the SDK pinned exactly, the SDK-coupled lock file stops being excusable
+           and the requirement reports it — which is the state a decision to keep that lock file has to
+           reach. */
         var pinnedSdk = globalJson.Replace(
             "\"rollForward\": \"latestPatch\"",
             "\"rollForward\": \"disable\"",
             StringComparison.Ordinal);
+
         Assert.NotEqual(globalJson, pinnedSdk);
         Assert.Empty(SdkCoupledLockFiles(pinnedSdk));
-        Assert.Contains("deprecated/Installer", UncoveredLockFiles(real, pinnedSdk));
+        Assert.Equal(s_sdkCoupledLockFiles, UncoveredLockFiles(real, pinnedSdk).ToArray());
     }
 
     /// <summary>
