@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -298,13 +299,23 @@ public sealed class DarlingMcpPgServerStateTools
             var timed = row.CheckpointsTimed ?? 0;
             var requested = row.CheckpointsRequested ?? 0;
 
-            /* #2653: 17 removed buffers_backend / buffers_backend_fsync from pg_stat_bgwriter with no
-               successor there, so the collector writes NULL for them and the fact now lives in pg_stat_io.
-               Without the registry's major this read cannot tell that structural absence from a measurement
-               that did not happen, and its note explained a column that will never have a value here. */
-            var postgresMajor = await DarlingEngineCapability.PostgresMajorVersionAsync(
+            /* Both registry facts in ONE read, because this payload has two kinds of structurally
+               absent column and neither is distinguishable from an unmeasured one without asking.
+
+               VERSION (#2653): 17 removed buffers_backend / buffers_backend_fsync from
+               pg_stat_bgwriter with no successor there, so the collector writes NULL and the fact
+               lives in pg_stat_io.
+
+               FLAVOUR (#3156): Aurora does not implement pg_stat_wal at all - pg_stat_get_wal()
+               raises 0A000 there - so every wal_* column is NULL on an Aurora target.
+
+               Two reads would let one axis be answered from this server's row and the other from a
+               stale copy, which is the hazard PostgresTargetFactsSql is a single statement for. Same
+               discipline on both axes: a registry making no claim produces no claim here. */
+            var (postgresMajor, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(
                 postgres, resolved.ServerId);
             var backendCountersRemoved = postgresMajor >= BuffersBackendRemovedInMajor;
+            var walAbsentOnAurora = MonitoredEngineKind.IsAurora(engineKind);
 
             return JsonSerializer.Serialize(new
             {
@@ -341,6 +352,17 @@ public sealed class DarlingMcpPgServerStateTools
                 wal_buffers_full = row.WalBuffersFull,
                 wal_write_time_ms = row.WalWriteTimeMs,
                 wal_sync_time_ms = row.WalSyncTimeMs,
+                /* The flavour sibling of buffers_backend_availability, named for the same reason: without
+                   it a permanently absent column and an idle server both render as NULL. Absent from the
+                   payload unless the registry actually says Aurora, so a target whose kind is unknown gets
+                   no claim rather than a guessed one. */
+                wal_availability = walAbsentOnAurora
+                    ? "not_collected: Aurora does not implement pg_stat_wal, so the CLUSTER-WIDE WAL "
+                      + "volume and timing are not available on this server - pg_stat_get_wal() raises "
+                      + "0A000 there. Per-statement WAL volume is collected from pg_stat_statements and "
+                      + "read by get_pg_top_queries, and the checkpointer and background-writer counters "
+                      + "beside these are collected normally."
+                    : null,
                 counter_reset = row.ResetDuringWindow,
                 note = "Requested checkpoints mean max_wal_size filled before the scheduled interval, so a "
                      + "high requested share means write volume is forcing them. "
@@ -351,8 +373,15 @@ public sealed class DarlingMcpPgServerStateTools
                            + "server by pg_stat_io, which get_pg_io_stats reads. "
                          : "buffers_backend is a write a QUERY had to perform itself for want of a clean "
                            + "buffer. ")
-                     + "wal_fpi counts full-page images, which is why WAL volume spikes just after each "
-                     + "checkpoint."
+                     + (walAbsentOnAurora
+                         ? "The wal_* columns are NULL because Aurora does not implement pg_stat_wal, not "
+                           + "because no WAL was written: Aurora replaced the WAL layer with its own "
+                           + "distributed storage. The cluster-wide total is unavailable here, but "
+                           + "per-statement WAL volume is collected and get_pg_top_queries reads it, so "
+                           + "which statement is generating WAL is still answerable. The checkpointer and "
+                           + "background-writer figures above are unaffected."
+                         : "wal_fpi counts full-page images, which is why WAL volume spikes just after "
+                           + "each checkpoint.")
                      + (row.ResetDuringWindow
                          ? " The counters were RESET inside this window, so these figures cover only the "
                            + "time since the reset."
