@@ -687,7 +687,7 @@ public static class AlertContextBuilders
         var context = new AlertContext();
         context.Details.Add(new AlertDetailItem
         {
-            Heading = $"tempdb — {tempDb.UsedPercent:F0}% Used",
+            Heading = $"tempdb — {tempDb.ReservedPercent:F0}% Reserved",
             Fields = new()
             {
                 ("Total Reserved", $"{tempDb.TotalReservedMb:F0} MB"),
