@@ -288,6 +288,16 @@ public sealed class PgColumnStatsCoverageTests
             hours >= 24,
             $"the evidence lookback is {hours}h, shorter than pg_column_stats' own daily cadence");
 
+        /* And the LABEL the census prints describes the span the query actually used. The two are one
+           figure by construction, but "by construction" is what a retyped literal quietly ends - and this
+           label is the only thing telling a reader that the candidate count and the row count span
+           different intervals, which is what makes EvidenceStale intelligible rather than a contradiction.
+           A label saying 168h over a 24h query would misexplain every stale verdict on the surface. */
+        Assert.Contains(
+            hours.ToString(CultureInfo.InvariantCulture) + "h",
+            PgColumnStatsCoverage.EvidenceHoursDescription,
+            StringComparison.Ordinal);
+
         /* AND THE VERDICT READ ACTUALLY USES IT. Everything above tests a pure function; deleting the one
            call that applies it left every assertion here green, which is the seam this whole issue is a
            third instance of - a correct mechanism nothing reaches. */
