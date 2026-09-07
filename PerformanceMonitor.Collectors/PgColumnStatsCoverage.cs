@@ -54,6 +54,20 @@ public enum PgColumnStatsCoverageArm
 
     /// <summary>Statistics were stored, and they cover every table that clears the floor.</summary>
     FullyMeasured,
+
+    /// <summary>
+    /// Statistics were stored, and the evidence says nothing on the target clears the floor — so the two
+    /// describe different populations and neither the floor arm nor a coverage ratio can be claimed.
+    ///
+    /// <para>Reachable because the two counts are measured over DIFFERENT spans: the evidence is a fixed
+    /// <see cref="PgColumnStatsCoverage.EvidenceHoursDescription"/> lookback, while the row count is over
+    /// whatever window the caller read. A table that has since shrunk below the floor, been truncated or
+    /// been dropped leaves rows behind with no candidate to match them. Without this arm that combination
+    /// took <see cref="BelowSizeFloor"/> and printed "nothing to fix" beside a non-empty result set, which
+    /// is the self-contradiction this whole class exists to prevent, arriving through the window mismatch
+    /// rather than through the privilege filter.</para>
+    /// </summary>
+    EvidenceStale,
 }
 
 /// <summary>
@@ -137,6 +151,28 @@ public static class PgColumnStatsCoverage
     public const string NotMeasured = "not measured";
 
     /// <summary>
+    /// How far back the evidence counts are measured, and the single definition of it — the store reader
+    /// applies this rather than holding its own copy, because the figure appears in operator-facing text
+    /// and a second definition is how the label stops describing the query.
+    ///
+    /// <para>A day because it is the SUBJECT collector's own cadence: <c>pg_column_stats</c> runs daily, so
+    /// this is the evidence contemporary with the run being explained. It is deliberately NOT the caller's
+    /// window — see the store reader's <c>EvidenceStart</c> for why, and
+    /// <see cref="PgColumnStatsCoverageArm.EvidenceStale"/> for what happens when the two spans disagree.</para>
+    /// </summary>
+    public const int EvidenceHours = 24;
+
+    /// <summary>
+    /// How the census labels the span its two counts are measured over, derived from
+    /// <see cref="EvidenceHours"/> rather than retyped. Spelled out beside the figures because the row count
+    /// is measured over a DIFFERENT span — the caller's own window — and a reader drawing a ratio from them
+    /// has to know that first. <see cref="PgColumnStatsCoverageArm.EvidenceStale"/> is what happens when
+    /// they disagree, and this label is why it is not a surprise when they do.
+    /// </summary>
+    public static readonly string EvidenceHoursDescription =
+        "measured over the last " + EvidenceHours.ToString(CultureInfo.InvariantCulture) + "h";
+
+    /// <summary>
     /// The arm that produced <paramref name="storedColumnRows"/>, the counts it was decided from, and the
     /// sentence for it.
     ///
@@ -185,6 +221,23 @@ public static class PgColumnStatsCoverage
 
         if (candidateTables <= 0)
         {
+            /* The ROW COUNT is asked before the floor verdict is claimed, because the two figures are
+               measured over different spans and can therefore disagree. Rows in hand say tables DID clear
+               the floor when they were collected, whatever the evidence says about now - so "nothing is
+               large enough" is a statement the data sitting beside it contradicts. */
+            if (storedColumnRows > 0)
+            {
+                return new PgColumnStatsCoverageVerdict(
+                    PgColumnStatsCoverageArm.EvidenceStale,
+                    census,
+                    "CAUSE: cannot be attributed - the evidence and the rows describe different "
+                    + "populations. Statistics were stored, so tables DID clear the floor when they were "
+                    + "collected, yet no table clears it in the evidence window. The two are measured over "
+                    + "different spans, so a table that has since shrunk below the floor, been truncated or "
+                    + "been dropped produces exactly this. Read the rows as describing tables that may no "
+                    + "longer qualify, and do not read this as full coverage or as an absence of problems.");
+            }
+
             return new PgColumnStatsCoverageVerdict(
                 PgColumnStatsCoverageArm.BelowSizeFloor,
                 census,
@@ -221,9 +274,9 @@ public static class PgColumnStatsCoverage
             return new PgColumnStatsCoverageVerdict(
                 PgColumnStatsCoverageArm.PartialVisibility,
                 census,
-                "PARTIAL COVERAGE, not a clean bill of health. Fewer tables are represented here than clear "
-                + "the floor, and the rest have column statistics this monitoring login cannot read - so "
-                + "their columns are ABSENT from the ranking rather than unremarkable in it. "
+                "PARTIAL COVERAGE, not a clean bill of health. Fewer tables have statistics confirmed "
+                + "readable by this monitoring login than clear the floor, so the columns of the rest are "
+                + "ABSENT from the ranking rather than unremarkable in it. "
                 + PrivilegeRemedy);
         }
 
@@ -262,9 +315,11 @@ public static class PgColumnStatsCoverage
     /// render one reading two ways.</para>
     /// </summary>
     private static string Census(int? candidateTables, int? tablesWithVisibleStatistics, int storedColumnRows) =>
-        "Tables at or above the " + Figure(PgColumnStatsCollector.MinimumRelPages) + " page floor: "
-        + Figure(candidateTables) + ". Of those, with column statistics this monitoring login can read: "
-        + Figure(tablesWithVisibleStatistics) + ". Column statistic rows returned: "
+        "Tables at or above the " + Figure(PgColumnStatsCollector.MinimumRelPages) + " page floor ("
+        + EvidenceHoursDescription + "): " + Figure(candidateTables)
+        + ". Of those, with column statistics this monitoring login can read: "
+        + Figure(tablesWithVisibleStatistics)
+        + ". Column statistic rows returned (over the window you asked for): "
         + Figure(storedColumnRows) + ".";
 
     private static string Figure(long? value) =>

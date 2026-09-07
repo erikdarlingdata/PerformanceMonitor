@@ -92,6 +92,8 @@ public sealed class PgColumnStatsCoverageTests
             PgColumnStatsCoverage.Classify(true, 361, 12, 5_000), PgColumnStatsCoverageArm.PartialVisibility),
         ("stored, covering all of them",
             PgColumnStatsCoverage.Classify(true, 361, 361, 5_000), PgColumnStatsCoverageArm.FullyMeasured),
+        ("stored, but the evidence says nothing clears the floor",
+            PgColumnStatsCoverage.Classify(true, 0, 0, 5_000), PgColumnStatsCoverageArm.EvidenceStale),
     };
 
     /// <summary>R1: no outcome may arrive without an arm, and every arm must be reachable.</summary>
@@ -161,6 +163,7 @@ public sealed class PgColumnStatsCoverageTests
             PgColumnStatsCoverage.Classify(true, 424_242, 31_337, 0),
             PgColumnStatsCoverage.Classify(true, 424_242, 31_337, 90_210),
             PgColumnStatsCoverage.Classify(true, 424_242, 424_242, 90_210),
+            PgColumnStatsCoverage.Classify(true, 0, 0, 90_210),
             PgColumnStatsCoverage.EvidenceUnreadable(90_210),
         };
 
@@ -236,9 +239,19 @@ public sealed class PgColumnStatsCoverageTests
 
         /* A measured zero prints as a figure; an unmeasured one prints as a WORD. Rendering both as 0 is
            how "we looked and everything is small" became indistinguishable from "we never looked". */
-        Assert.Contains("floor: 0.", measured.Census, StringComparison.Ordinal);
+        var floorLabel = "floor (" + PgColumnStatsCoverage.EvidenceHoursDescription + "): ";
+
+        Assert.Contains(floorLabel + "0.", measured.Census, StringComparison.Ordinal);
         Assert.DoesNotContain(PgColumnStatsCoverage.NotMeasured, measured.Census, StringComparison.Ordinal);
-        Assert.Contains("floor: " + PgColumnStatsCoverage.NotMeasured, unmeasured.Census, StringComparison.Ordinal);
+        Assert.Contains(
+            floorLabel + PgColumnStatsCoverage.NotMeasured, unmeasured.Census, StringComparison.Ordinal);
+
+        /* And the census SAYS the two figures are measured over different spans, because that is what makes
+           EvidenceStale intelligible rather than a contradiction. A reader drawing a ratio from a
+           24h candidate count and a 168h row count has to be told before doing it, not after. */
+        Assert.Contains(
+            PgColumnStatsCoverage.EvidenceHoursDescription, measured.Census, StringComparison.Ordinal);
+        Assert.Contains("over the window you asked for", measured.Census, StringComparison.Ordinal);
 
         /* And the Undetermined arm must not smuggle a verdict in. */
         Assert.DoesNotContain("CAUSE:", unmeasured.Cause, StringComparison.Ordinal);
@@ -260,7 +273,7 @@ public sealed class PgColumnStatsCoverageTests
     public void TheEvidenceLookbackIsFixedRatherThanTakenFromTheCallersWindow()
     {
         var end = new DateTime(2026, 9, 7, 20, 0, 0, DateTimeKind.Utc);
-        var hours = DarlingPgColumnStatsReader.EvidenceHours;
+        var hours = PgColumnStatsCoverage.EvidenceHours;
 
         Assert.Equal(end.AddHours(-hours), DarlingPgColumnStatsReader.EvidenceStart(end));
 
@@ -371,6 +384,71 @@ public sealed class PgColumnStatsCoverageTests
         Assert.True(
             precondition < coverage,
             "the coverage verdict is computed ahead of the precondition that outranks it");
+    }
+
+    /// <summary>
+    /// The invariant, swept over the whole input space: <b>the verdict never contradicts the row set printed
+    /// beside it.</b>
+    ///
+    /// <para>This is the check that would have caught the defect review found, and the arm-by-arm cases
+    /// above would not have. They enumerate ARMS; this enumerates INPUT REGIONS. The two counts are measured
+    /// over different spans — a fixed <see cref="PgColumnStatsCoverage.EvidenceHours"/> lookback for the
+    /// evidence, the caller's own window for the rows — so <c>candidateTables == 0</c> alongside
+    /// <c>storedColumnRows &gt; 0</c> is reachable, and it took the size-floor arm: "no table is large
+    /// enough … nothing to fix", printed next to real statistics. Reading the branches finds a wrong
+    /// assertion; only enumerating the regions finds a missing one.</para>
+    ///
+    /// <para>Two directions, because the contradiction has two: a non-empty result must never be told
+    /// nothing was collectable, and an empty one must never be told coverage is whole or partial — partial
+    /// coverage of nothing is not a thing an operator can act on.</para>
+    /// </summary>
+    [Fact]
+    public void NoVerdictContradictsTheRowSetPrintedBesideIt()
+    {
+        var seen = new HashSet<PgColumnStatsCoverageArm>();
+        var regions = 0;
+
+        foreach (var ran in new[] { false, true })
+        foreach (var candidates in new[] { 0, 1, 12, 361 })
+        foreach (var visible in new[] { 0, 1, 12, 361 })
+        foreach (var stored in new[] { 0, 1, 5_000 })
+        {
+            /* visible can never exceed candidates - the census counts a SUBSET - so those combinations are
+               not reachable and asserting over them would guard arithmetic the query cannot produce. */
+            if (visible > candidates) continue;
+
+            regions++;
+            var verdict = PgColumnStatsCoverage.Classify(ran, candidates, visible, stored);
+            seen.Add(verdict.Arm);
+
+            var inputs = $"ran={ran} candidates={candidates} visible={visible} stored={stored} "
+                + $"-> {verdict.Arm}";
+
+            Assert.False(string.IsNullOrWhiteSpace(verdict.Cause), "unclassified region: " + inputs);
+
+            if (stored > 0)
+            {
+                Assert.NotEqual(PgColumnStatsCoverageArm.BelowSizeFloor, verdict.Arm);
+                Assert.DoesNotContain("nothing to fix", verdict.Cause, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("nothing to collect", verdict.Cause, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("nothing was stored", verdict.Cause, StringComparison.OrdinalIgnoreCase);
+            }
+            else
+            {
+                Assert.NotEqual(PgColumnStatsCoverageArm.FullyMeasured, verdict.Arm);
+                Assert.NotEqual(PgColumnStatsCoverageArm.PartialVisibility, verdict.Arm);
+                Assert.DoesNotContain("FULL COVERAGE", verdict.Cause, StringComparison.Ordinal);
+                Assert.DoesNotContain("PARTIAL COVERAGE", verdict.Cause, StringComparison.Ordinal);
+            }
+        }
+
+        /* The sweep is only worth its assertions if it actually reaches everything. Both halves: enough
+           regions to be a sweep rather than a handful, and every arm visited - an arm the grid cannot
+           reach is an arm this invariant says nothing about. */
+        Assert.True(regions >= 60, $"the sweep covered only {regions} region(s)");
+        Assert.Equal(
+            Enum.GetValues<PgColumnStatsCoverageArm>().OrderBy(a => a).ToArray(),
+            seen.OrderBy(a => a).ToArray());
     }
 
     /// <summary>R7: a populated result that covers part of the target is its own answer, not the clean one.</summary>

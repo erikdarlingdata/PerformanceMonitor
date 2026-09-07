@@ -266,13 +266,11 @@ FROM (
     /// <para>Anchored on <paramref name="endUtc"/>, so an <c>as_of</c> read gets the evidence contemporary
     /// with the data it is explaining rather than today's.</para>
     /// </summary>
-    internal static DateTime EvidenceStart(DateTime endUtc) => endUtc.AddHours(-EvidenceHours);
-
-    /// <summary>
-    /// How far back <see cref="EvidenceStart"/> looks. Named so the relationship to the subject collector's
-    /// cadence is assertable rather than a number in a call.
-    /// </summary>
-    internal const int EvidenceHours = 24;
+    /// <para>The span itself lives on <see cref="PgColumnStatsCoverage.EvidenceHours"/>, not here: it
+    /// appears in the census an operator reads, so the label and the query have to be the same figure and a
+    /// copy in this file is how they stop being.</para>
+    internal static DateTime EvidenceStart(DateTime endUtc) =>
+        endUtc.AddHours(-PgColumnStatsCoverage.EvidenceHours);
 
     /// <summary>The raw evidence, for callers that want the counts rather than the sentence.</summary>
     public static async Task<PgColumnStatsCoverageEvidence> GetCoverageEvidenceAsync(
