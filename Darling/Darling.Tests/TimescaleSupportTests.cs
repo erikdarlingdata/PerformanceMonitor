@@ -2528,6 +2528,77 @@ LIMIT 1", connection))
     }
 
     /// <summary>
+    /// The reason <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/> rejects the lower alternative its
+    /// doc comment names: slot less one <see cref="TimescaleSupport.CompressionPhaseGuardMinutes"/> band
+    /// sits BELOW <see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>, where the
+    /// chosen line sits above it (#3107).
+    ///
+    /// <para><b>What the rejection claims is a difference in VERDICT, and it is asserted in the two halves
+    /// that difference actually has.</b> The line is a compile-time constant, so the classifier cannot be
+    /// re-run against the alternative and nothing here pretends to: what is checked is the RULE
+    /// (<see cref="TimescaleSupport.ClassifyRefreshSlotHeadroom"/> warns at or past its line and not one
+    /// second below it) and the INEQUALITY (the recorded ceiling is at or past the alternative, and below
+    /// the chosen line). Together those two say the ceiling warns under the alternative and does not under
+    /// the chosen line, which is the whole of the difference.</para>
+    ///
+    /// <para><b>An ordering, deliberately, and not a share of the readings.</b> How large a fraction of any
+    /// quoted population a threshold would fire on moves as that population grows while the threshold and
+    /// the decision behind it stand still, so it cannot be pinned in a way that goes red only on a defect.
+    /// The ordering against the recorded ceiling moves only when one of the two constants moves, and then
+    /// the decision genuinely does have to be re-taken.</para>
+    ///
+    /// <para>The lead-time leg cuts the OTHER way and is asserted in that direction, because a reader
+    /// checking the rejection is owed the fact that it does not help: the lower line leaves MORE room
+    /// between itself and the slot, so it warns earlier rather than later.</para>
+    /// </summary>
+    [Fact]
+    public void TheRejectedWatchLineAlternative_SitsBelowTheRecordedCeiling_WhileTheChosenLineSitsAbove()
+    {
+        /* Derived as the prose derives it, then held to the literal too — a re-derivation-only assertion
+           agrees with any derivation, including one frozen at 480. */
+        var alternative =
+            TimescaleSupport.RefreshPhaseSlotSeconds - (TimescaleSupport.CompressionPhaseGuardMinutes * 60);
+        Assert.Equal(480, alternative);
+        Assert.True(
+            alternative < TimescaleSupport.RefreshSlotWarningSeconds,
+            "the alternative is no longer the LOWER of the two lines, so the paragraph rejecting it as too "
+            + "low is about something else now");
+
+        /* THE REJECTION, as the verdicts it produces. The figure the compression grid is sized against is
+           routine under the chosen line and a warning under the alternative: a line that warns on the load
+           the grid is built to absorb is the crying-wolf failure the five-sixths choice exists to avoid. */
+        var ceiling = TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(ceiling));
+        Assert.True(
+            ceiling >= alternative,
+            $"the {alternative} s alternative no longer sits below the {ceiling} s recorded ceiling, so the "
+            + "doc comment's sole stated reason for rejecting it is false — re-take the five-sixths decision "
+            + "(#3044, #3107) rather than editing this assertion");
+        Assert.True(
+            ceiling < TimescaleSupport.RefreshSlotWarningSeconds,
+            $"the chosen {TimescaleSupport.RefreshSlotWarningSeconds} s line no longer sits above the "
+            + $"{ceiling} s recorded ceiling, so it rejects the alternative on a property it has itself "
+            + "stopped having");
+
+        /* The rule the two inequalities above are read through: at or past the line warns, one second
+           below it does not. Without this the ordering would be arithmetic with no stated consequence. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshSlotWarningSeconds));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshSlotWarningSeconds - 1));
+
+        /* And the lead time each line leaves, as the two figures rather than as the inequality between them
+           — which is the same inequality asserted above and would add nothing on its own. The lower line
+           leaves the larger margin, so lead time argues FOR it and cannot be part of its rejection. */
+        Assert.Equal(420, TimescaleSupport.RefreshPhaseSlotSeconds - alternative);
+        Assert.Equal(150, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
+    }
+
+    /// <summary>
     /// The reading carries the derived answers, so a caller cannot log the seconds and drop the verdict — and
     /// the headroom goes NEGATIVE past the wall rather than clamping, because how far through the wall a run
     /// went is what sizes the re-derivation.
