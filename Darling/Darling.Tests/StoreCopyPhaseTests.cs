@@ -549,7 +549,8 @@ public class StoreCopyPhaseTests
         /* The control: those phrases are real and they are what this fault no longer receives. Without
            this half the assertions above would pass against any string that happened not to say them. */
         var targetRead = DarlingWorker.PostgresTimeoutExplanation(
-            "pg_index_bloat", "appdb", elapsedMs: 30_000, serverCancelled: false);
+            "pg_index_bloat", "appdb", elapsedMs: 30_000,
+            origin: new CollectorFaultCancelOrigin(PostgresCancelSource.OurCommandDeadline, null));
 
         Assert.Contains("shrinking the work", targetRead, StringComparison.Ordinal);
         Assert.Contains("cancelled the read", targetRead, StringComparison.Ordinal);

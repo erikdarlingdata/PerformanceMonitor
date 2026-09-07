@@ -34,6 +34,16 @@ public class PostgresFaultOutcomeTests
     /* A collector that does NOT opt into the lock-timeout yield, so 55P03 stays an error for it. */
     private const string PlainCollector = "pg_wait_stats";
 
+    /* The two origins whose sentences the pins in this class read. Constructed rather than classified,
+       because these pins ask what a given origin RENDERS - what a given fault classifies AS is
+       PostgresCancelOriginTests' question, and running the classifier here would make a rendering pin fail
+       for a classification reason. */
+    private static readonly CollectorFaultCancelOrigin OurDeadline =
+        new(PostgresCancelSource.OurCommandDeadline, null);
+
+    private static readonly CollectorFaultCancelOrigin TargetDeadline =
+        new(PostgresCancelSource.TargetStatementTimeout, "canceling statement due to statement timeout");
+
     [Fact]
     public void PermissionDeniedIsRecordedAsPermissionsAndNamesTheRoleThatFixesIt()
     {
@@ -240,7 +250,7 @@ public class PostgresFaultOutcomeTests
     public void TheTimeoutExplanationNamesTheCollectorTheDatabaseAndTheMeasuredElapsedTime()
     {
         var explanation = DarlingWorker.PostgresTimeoutExplanation(
-            "pg_index_bloat", "appdb", elapsedMs: 300_142, serverCancelled: false);
+            "pg_index_bloat", "appdb", elapsedMs: 300_142, origin: OurDeadline);
 
         Assert.Contains("pg_index_bloat", explanation, StringComparison.Ordinal);
         Assert.Contains("appdb", explanation, StringComparison.Ordinal);
@@ -252,17 +262,22 @@ public class PostgresFaultOutcomeTests
     }
 
     /// <summary>
-    /// Two deadlines both classify as <see cref="CollectorTargetFault.CommandTimeout"/> and they are
-    /// fixed in different places — SQLSTATE 57014 is the TARGET's <c>statement_timeout</c>, the other is
-    /// ours. A single sentence covering both would send an operator to the wrong knob half the time.
+    /// The deadlines all classify as <see cref="CollectorTargetFault.CommandTimeout"/> and they are fixed
+    /// in different places, so each origin renders its own sentence. A single sentence covering them would
+    /// send an operator to the wrong knob.
+    ///
+    /// <para>This pins the RENDERING given an origin. Which origin a fault actually has is
+    /// <see cref="CollectorFaultCancelOrigin"/>'s answer and is pinned in
+    /// <see cref="PostgresCancelOriginTests"/> — the two are separate claims, and #3118 was a defect in the
+    /// second while the first was already correct.</para>
     /// </summary>
     [Fact]
     public void TheTimeoutExplanationDistinguishesTheServersDeadlineFromOurs()
     {
         var client = DarlingWorker.PostgresTimeoutExplanation(
-            "pg_index_bloat", "appdb", elapsedMs: 300_000, serverCancelled: false);
+            "pg_index_bloat", "appdb", elapsedMs: 300_000, origin: OurDeadline);
         var server = DarlingWorker.PostgresTimeoutExplanation(
-            "pg_index_bloat", "appdb", elapsedMs: 300_000, serverCancelled: true);
+            "pg_index_bloat", "appdb", elapsedMs: 300_000, origin: TargetDeadline);
 
         Assert.Contains("CLIENT-SIDE", client, StringComparison.Ordinal);
         Assert.DoesNotContain("57014", client, StringComparison.Ordinal);
@@ -288,7 +303,7 @@ public class PostgresFaultOutcomeTests
     public void TheTimeoutExplanationDegradesWhenTheDatabaseIsUnknown()
     {
         var explanation = DarlingWorker.PostgresTimeoutExplanation(
-            "pg_index_bloat", connectedDatabase: null, elapsedMs: 1, serverCancelled: false);
+            "pg_index_bloat", connectedDatabase: null, elapsedMs: 1, origin: OurDeadline);
 
         Assert.Contains("the connected database", explanation, StringComparison.Ordinal);
         Assert.DoesNotContain("''", explanation, StringComparison.Ordinal);
