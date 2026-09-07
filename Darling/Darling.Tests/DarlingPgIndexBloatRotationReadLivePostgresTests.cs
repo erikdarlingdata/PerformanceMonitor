@@ -34,11 +34,15 @@ namespace Darling.Tests;
 ///
 /// <para><b>The three cases, and why each is separately load-bearing.</b> An index measured in an earlier
 /// cycle and labelled in a later one must come back MEASURED, with the measurement's own timestamp. An
-/// index measured in the latest cycle must come back with THAT measurement, not an older one — the fix must
+/// index with TWO measurements and a label between them must come back with the NEWER one — the fix has to
 /// prefer measurements without preferring stale ones. And an index the window never measured at all must
-/// still come back, carrying its reason, because dropping it would read as an index that does not exist.
-/// A fix that satisfied only the first would be a read that always shows the oldest measurement it can
-/// find.</para>
+/// still come back carrying its reason, because dropping it would read as an index that does not exist.</para>
+///
+/// <para><b>The second case is here because the first version of this test could not see it.</b> With one
+/// measurement per index, ranking measurements oldest-first and newest-first select the same row, so a
+/// mutation that ordered them <c>ASC</c> — handing back a 30-hour-old density while a 6-hour-old one sat in
+/// the same window — passed. Two measurements on one index is the smallest fixture that discriminates the
+/// claim actually being made.</para>
 ///
 /// <para>Rows are SEEDED rather than collected. The property under test belongs to the read, and seeding
 /// is what lets two cycles a day apart exist inside one test — <c>PgIndexBloatBudgetLivePostgresTests</c>
@@ -76,9 +80,16 @@ public sealed class DarlingPgIndexBloatRotationReadLivePostgresTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            /* Two cycles a day apart, both inside the window read below. Truncated to seconds because the
-               store column is `timestamp` and the assertion compares the value back out. */
+            /* THREE cycles inside the window read below. Truncated to seconds because the store column is
+               `timestamp` and the assertions compare the values back out.
+
+               Three rather than two, and that is not padding: with a single measurement per index, ranking
+               measurements OLDEST-first and newest-first pick the same row, so a two-cycle fixture cannot
+               tell "prefer a measurement" from "prefer the oldest measurement" — measured, and the second
+               of those passed a two-cycle version of this test. measured_twice below is the case that
+               separates them. */
             var older = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddHours(-30));
+            var middle = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddHours(-18));
             var newer = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddHours(-6));
 
             /* rotated_past: MEASURED in the older cycle, then only labelled in the newer one. This is the
@@ -89,12 +100,16 @@ public sealed class DarlingPgIndexBloatRotationReadLivePostgresTests
                 1_000_000_000L, treeLevel: null, density: null, fragmentation: null,
                 skippedReason: "above the rotation cursor: this pass has already advanced past this position");
 
-            /* measured_last: labelled in the older cycle, MEASURED in the newer one. The fix must prefer a
-               measurement over a label without preferring an OLD measurement over a new one. */
-            await SeedAsync(connection, ct, older, "measured_last", "measured_last_ix",
+            /* measured_twice: MEASURED in the oldest cycle, labelled in the middle one, MEASURED again in
+               the newest. The fix must prefer a measurement over a label WITHOUT preferring an old
+               measurement over a new one, and only a second measurement can tell those apart. The two
+               densities are far apart so the assertion names which cycle the read chose. */
+            await SeedAsync(connection, ct, older, "measured_twice", "measured_twice_ix",
+                800_000_000L, treeLevel: 3, density: 40.0, fragmentation: 55.0, skippedReason: null);
+            await SeedAsync(connection, ct, middle, "measured_twice", "measured_twice_ix",
                 800_000_000L, treeLevel: null, density: null, fragmentation: null,
                 skippedReason: "not measured this cycle (work budget): pgstatindex reads every page");
-            await SeedAsync(connection, ct, newer, "measured_last", "measured_last_ix",
+            await SeedAsync(connection, ct, newer, "measured_twice", "measured_twice_ix",
                 800_000_000L, treeLevel: 3, density: 55.0, fragmentation: 40.0, skippedReason: null);
 
             /* never_measured: labelled in both. It must still come back, with its reason. */
@@ -111,10 +126,10 @@ public sealed class DarlingPgIndexBloatRotationReadLivePostgresTests
                 postgres, ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddHours(-48)),
                 DarlingMcpTestData.Naive(DateTime.UtcNow.AddHours(1)), ReadLimit, ct);
 
-            /* Accounting first: three indexes stored across two cycles, three rows read. Six rows collapsing
-               to anything but three would mean the distinct key stopped identifying an index. */
+            /* Accounting first: three indexes stored across three cycles, three rows read. Seven stored rows
+               collapsing to anything but three would mean the distinct key stopped identifying an index. */
             Assert.Equal(
-                new[] { "measured_last", "never_measured", "rotated_past" },
+                new[] { "measured_twice", "never_measured", "rotated_past" },
                 rows.Select(r => r.TableName).OrderBy(n => n, StringComparer.Ordinal).ToArray());
 
             // ── the row the read used to lose ────────────────────────────────────────────────────────
@@ -135,11 +150,16 @@ public sealed class DarlingPgIndexBloatRotationReadLivePostgresTests
             Assert.Equal(older, rotated.MeasuredAt);
 
             // ── and not by preferring whatever measurement is oldest ─────────────────────────────────
-            var latest = rows.Single(r => r.TableName == "measured_last");
+            /* This index has TWO measurements and a label between them. Ranking measurements ahead of
+               labels is necessary but not sufficient: ordering them oldest-first also satisfies every
+               assertion above, and would hand back a density from 30 hours ago while a 6-hour-old one sat
+               in the same window. 40.0 here means exactly that mistake. */
+            var latest = rows.Single(r => r.TableName == "measured_twice");
 
             Assert.Null(latest.SkippedReason);
             Assert.Equal(55.0, latest.AvgLeafDensity);
             Assert.Equal(newer, latest.MeasuredAt);
+            Assert.Equal(newer, latest.CaptureTime);
 
             // ── never measured in the window: still present, still reasoned, no invented age ─────────
             var never = rows.Single(r => r.TableName == "never_measured");
