@@ -128,12 +128,14 @@ public sealed class PostgresCancelOriginTests
     /// Every other wording <c>57014</c> can carry is UNPROVEN, and the sentence quotes what the server said
     /// rather than guessing which side it came from.
     ///
-    /// <para>The four cases are the live ones, not hypotheticals. PostgreSQL translates its own messages
-    /// under <c>lc_messages</c>, which is why <c>pg_plan_capture_readiness</c> carries a
-    /// <c>message_locale</c> facet at all — so the German catalogue's wording is a real target's wording. A
-    /// recovery conflict on a standby and PG17's <c>transaction_timeout</c> are both server-side and both
-    /// 57014, and neither is the knob the target sentence names. And an error with no message text at all
-    /// leaves nothing to read.</para>
+    /// <para>What each case is, stated rather than implied — the claim is about the ALLOW-LIST's reach, so
+    /// these are wordings it must reject, and none of them is offered as an attested pairing of that exact
+    /// string with this exact SQLSTATE. The translated one is the live hazard: PostgreSQL translates its own
+    /// messages under <c>lc_messages</c>, which is why <c>pg_plan_capture_readiness</c> carries a
+    /// <c>message_locale</c> facet at all, so a non-English target's cancel really does read like this. The
+    /// two near-miss English wordings name a reason that is not the statement timeout, which is the property
+    /// under test whatever code a server pairs them with. And an error carrying no message text leaves
+    /// nothing to read at all.</para>
     ///
     /// <para>Asserted both ways round: unproven means it receives NEITHER confident sentence. Checking only
     /// that it misses the server arm would be satisfied by a fix that routed the whole population to the

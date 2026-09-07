@@ -71,9 +71,10 @@ internal readonly record struct CollectorFaultCancelOrigin(PostgresCancelSource 
     /// rather than retyping it and proving only its own transcription.</summary>
     internal const string QueryCanceled = "57014";
 
-    /// <summary>The fragment of PostgreSQL's <c>statement_timeout</c> message that no other 57014 wording
-    /// carries — <c>lock timeout</c>, <c>transaction timeout</c>, <c>user request</c> and
-    /// <c>conflict with recovery</c> all miss it. Named for the same reason as the code above.</summary>
+    /// <summary>The fragment of <c>canceling statement due to statement timeout</c> that identifies the
+    /// knob. A fragment rather than the whole message, so a version appending detail still matches — and
+    /// narrow enough that a wording naming anything ELSE as the reason misses it, the observed
+    /// <c>due to user request</c> included. Named for the same reason as the code above.</summary>
     internal const string StatementTimeoutWording = "statement timeout";
 
     /// <summary>
