@@ -214,7 +214,7 @@ public class StoreCopyPhaseTests
 
         /* Exactly one transition, and it is to Data. Two would mean a second, unreviewed opinion about
            which phase is in force. */
-        Assert.Equal(1, Regex.Matches(runner, @"copyPhase\s*=\s*StoreCopyPhase\.Data;").Count);
+        Assert.Single(Regex.Matches(runner, @"copyPhase\s*=\s*StoreCopyPhase\.Data;"));
 
         /* And exactly one assignment of Start — the declaration itself, which this pattern matches as a
            substring of `var copyPhase = ...`. SYMMETRIC with the Data count above, and it closes the one
@@ -234,7 +234,7 @@ public class StoreCopyPhaseTests
            literal form. Low probability — a formatter normalises it and this repo's style is consistent —
            but the cost of closing it is four characters, and a pin that a reformat can slip past is not a
            pin. */
-        Assert.Equal(1, Regex.Matches(runner, @"copyPhase\s*=\s*StoreCopyPhase\.Start;").Count);
+        Assert.Single(Regex.Matches(runner, @"copyPhase\s*=\s*StoreCopyPhase\.Start;"));
 
         /* The fault arm stamps whatever phase was live and rethrows BARE — no wrapping, so the type,
            message, stack and inner chain reaching the handlers upstream are unchanged. */
@@ -270,8 +270,8 @@ public class StoreCopyPhaseTests
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 
         /* Composed once, from the helper, inside the general arm. */
-        Assert.Equal(1, Regex.Matches(
-            worker, @"var message = CollectorFaultCopyPhase\.Describe\(ex\);").Count);
+        Assert.Single(Regex.Matches(
+            worker, @"var message = CollectorFaultCopyPhase\.Describe\(ex\);"));
 
         /* The app log line takes it. */
         Assert.Matches(
@@ -280,9 +280,9 @@ public class StoreCopyPhaseTests
             worker);
 
         /* And so does the collection_log row this arm writes — exactly one such row. */
-        Assert.Equal(1, Regex.Matches(
+        Assert.Single(Regex.Matches(
             worker,
-            @"collectorName, ""ERROR"", 0, runClock\.ElapsedMilliseconds, 0, message, fanout: null").Count);
+            @"collectorName, ""ERROR"", 0, runClock\.ElapsedMilliseconds, 0, message, fanout: null"));
 
         /* Neither reverts to the bare message. These are the two expressions this arm carried before, and
            they are what a revert would restore — a revert that compiles, runs, and reports both phases
@@ -292,12 +292,12 @@ public class StoreCopyPhaseTests
            Several arms in this method pass a bare `ex.Message` legitimately — the XE-capture-down warning
            logs one and its SESSION_MISSING row stores one — so a bare substring would fail on a
            neighbour and read as a defect here. */
-        Assert.Equal(0, Regex.Matches(
+        Assert.Empty(Regex.Matches(
             worker,
-            @"=> ERROR: \{Message\}"",\s*\n\s*server\.Config\.DisplayName, collectorName, ex\.Message\);").Count);
-        Assert.Equal(0, Regex.Matches(
+            @"=> ERROR: \{Message\}"",\s*\n\s*server\.Config\.DisplayName, collectorName, ex\.Message\);"));
+        Assert.Empty(Regex.Matches(
             worker,
-            @"collectorName, ""ERROR"", 0, runClock\.ElapsedMilliseconds, 0, ex\.Message, fanout: null").Count);
+            @"collectorName, ""ERROR"", 0, runClock\.ElapsedMilliseconds, 0, ex\.Message, fanout: null"));
     }
 
     /// <summary>
@@ -579,8 +579,8 @@ public class StoreCopyPhaseTests
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 
         /* Exactly one exclusion, so a second arm cannot grow its own opinion about the same question. */
-        Assert.Equal(1, Regex.Matches(
-            worker, @"&& !CollectorFaultCopyPhase\.IsProvenStoreWrite\(ex\)").Count);
+        Assert.Single(Regex.Matches(
+            worker, @"&& !CollectorFaultCopyPhase\.IsProvenStoreWrite\(ex\)"));
 
         /* A filter term of the engine-gated arm, above the Classify call, and reached before the arm's
            body — the window admits the intervening comment and would not admit a term moved after the
