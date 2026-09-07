@@ -1651,7 +1651,7 @@ WITH NO DATA";
     ///
     /// <para><b>15 minutes over four slots is the configuration that was measured</b>, not a round number: the
     /// production store's <c>query_store_stats</c> job family was moved to :00/:15/:30/:45 and the first full
-    /// staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on every sample since —
+    /// staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on it —
     /// a cycle that STRADDLES the narrowing boundary
     /// (<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>), so its four figures record what the
     /// stagger did to lock waits and are not samples of the narrowed regime's cost.
@@ -1949,8 +1949,8 @@ WITH NO DATA";
     /// </summary>
     public enum RefreshSlotHeadroom
     {
-        /// <summary>Under <see cref="RefreshSlotWarningSeconds"/> — the routine band, and the one every
-        /// reading taken so far falls in. Not worth a line above Debug.</summary>
+        /// <summary>Under <see cref="RefreshSlotWarningSeconds"/> — the routine band, and therefore inside
+        /// the slot the refresh has to fit in. Not worth a line above Debug.</summary>
         InsideSlot,
 
         /// <summary>At or past <see cref="RefreshSlotWarningSeconds"/> but still inside
@@ -4289,12 +4289,12 @@ AND   js.last_run_status = 'Success'";
     /// A line derived from the slot, keyed on the view, naming the actual remedy, is the form that stays
     /// correct when either of those numbers moves.</para>
     ///
-    /// <para><b>Levels.</b> The routine band is Debug — every reading taken so far is in it, and an hourly
-    /// Information line about a healthy job is how a signal gets buried (the discipline
-    /// <see cref="LogCompressionActivity"/> already states). Approaching the slot is a Warning: still true,
-    /// still time to act. At or past the slot it is an Error, because a documented precondition of the shipped
-    /// compression grid is now FALSE — the highest level a log line has, and still not an alert, because the
-    /// action it calls for is re-deriving #3035's grid rather than anything an operator does tonight.</para>
+    /// <para><b>Levels.</b> The routine band is Debug — an hourly Information line about a healthy job is
+    /// how a signal gets buried (the discipline <see cref="LogCompressionActivity"/> already states).
+    /// Approaching the slot is a Warning: still true, still time to act. At or past the slot it is an Error,
+    /// because a documented precondition of the shipped compression grid is now FALSE — the highest level a
+    /// log line has, and still not an alert, because the action it calls for is re-deriving #3035's grid
+    /// rather than anything an operator does tonight.</para>
     /// </summary>
     public static void LogHeaviestRefreshSlotHeadroom(HeaviestRefreshSlotReading? reading, ILogger? logger)
     {
