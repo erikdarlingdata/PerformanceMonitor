@@ -907,6 +907,15 @@ public sealed class AlertReadFailureSurfaceTests
     /// <para>A block's LAST await needs no boundary after it: nothing follows that could inflate the
     /// figure. The count of pairs is asserted in both directions, so a walk that silently stopped
     /// reaching cannot report clean.</para>
+    ///
+    /// <para><b>The loop arm asks about every enclosing block, not the nearest one.</b> An await nested in
+    /// an <c>if</c> inside a <c>foreach</c> executes once per iteration exactly as a direct child of the
+    /// loop body does, so the walk steps outward until it finds a loop or reaches the try body. Consulting
+    /// only the nearest block classifies such an await non-loop and skips it — and when that await is also
+    /// the block's last, the consecutive-pair arm does not cover it either, so a missing restart there
+    /// would pass this pin silently. Two of the five loop-body awaits in these blocks have that exact
+    /// shape (the per-subject cooldown seed reads), which is why the floor below is set above what the
+    /// nearest-block rule can reach.</para>
     /// </summary>
     [Fact]
     public void EveryCountedBlock_GivesTheFailingOperationTheClockToItself()
@@ -991,21 +1000,14 @@ public sealed class AlertReadFailureSurfaceTests
                    is a figure that sums two operations. */
                 foreach (var at in offsets)
                 {
-                    var (blockOpen, blockClose) = InnermostBlock(body, at);
-                    if (blockClose >= body.Length - 1)
-                    {
-                        /* The try body itself: entered once per pass with the clock started fresh above
-                           it, so nothing follows this execution. */
-                        continue;
-                    }
-
-                    if (!IsLoopBlock(body, blockOpen))
+                    var loopClose = EnclosingLoopClose(body, at);
+                    if (loopClose < 0)
                     {
                         continue;
                     }
 
                     loopAwaits++;
-                    if (!body[at..blockClose].Contains(restart, StringComparison.Ordinal))
+                    if (!body[at..loopClose].Contains(restart, StringComparison.Ordinal))
                     {
                         violations.Add(
                             $"{where}: in the {readName} block, the await at offset {at} sits in a loop "
@@ -1042,7 +1044,12 @@ public sealed class AlertReadFailureSurfaceTests
            both. The loop arm's floor is the load-bearing one: it is the arm that was missing, so a change
            that stopped finding loop bodies would put the hole straight back.*/
         Assert.True(pairs >= 55, $"only {pairs} consecutive await pair(s) were examined");
-        Assert.True(loopAwaits >= 2, $"only {loopAwaits} await(s) in a loop body were examined");
+        /* Five awaits in these blocks sit inside a loop body; the arm reports one more than that, because
+           an unrecognised controlling construct counts as a loop and one `else if` chain in AlertEngine
+           reads that way. The floor is the five, and it is set there deliberately: a rule that consulted
+           only an await's NEAREST enclosing block reaches just three of them, so a floor of five cannot be
+           satisfied by a walk that stopped stepping outward. */
+        Assert.True(loopAwaits >= 5, $"only {loopAwaits} await(s) in a loop body were examined");
     }
 
     /// <summary>
@@ -1130,6 +1137,140 @@ public sealed class AlertReadFailureSurfaceTests
 
         /* The control that stops the scan flagging everything: a single await is no pair at all. */
         Assert.Empty(Scan("var a = await GetXminHorizonAsync(id, ct);", "readClock"));
+    }
+
+    /// <summary>
+    /// The close index of the innermost LOOP block enclosing <paramref name="at"/>, or -1 when no loop
+    /// encloses it.
+    ///
+    /// <para>Asked of every enclosing block out to the try body, innermost first — not just the nearest
+    /// one. An await nested in an <c>if</c> inside a <c>foreach</c> executes once per iteration exactly as
+    /// a direct child of the loop body does, but its nearest enclosing block is the <c>if</c>, which is not
+    /// a loop. A rule that consulted only that block would classify such an await non-loop and skip it;
+    /// and when the await is also its block's LAST, the consecutive-await arm does not cover it either, so
+    /// a missing restart there would pass the scan silently.</para>
+    ///
+    /// <para>The try body itself terminates the walk: it is entered once per pass with the clock started
+    /// fresh above it, so nothing follows that execution to inflate the figure.</para>
+    /// </summary>
+    private static int EnclosingLoopClose(string body, int at)
+    {
+        var probe = at;
+
+        while (true)
+        {
+            var (blockOpen, blockClose) = InnermostBlock(body, probe);
+
+            if (blockClose >= body.Length - 1)
+            {
+                return -1;
+            }
+
+            if (IsLoopBlock(body, blockOpen))
+            {
+                return blockClose;
+            }
+
+            /* Step outward: the construct this await sits in may itself be inside a loop. */
+            probe = blockOpen;
+        }
+    }
+
+    /// <summary>
+    /// The positive control for the LOOP arm, through the same <see cref="EnclosingLoopClose"/> walk the
+    /// arm itself runs rather than a second copy of the rule.
+    ///
+    /// <para>The pair arm's control one method up cannot see this arm at all: it compares consecutive
+    /// await tokens, and a single await alone in a loop body forms no pair. So without this, the arm that
+    /// bounds per-iteration awaits had no fixture that fails when it is broken — and the shape it exists
+    /// to catch is the one a nearest-block rule cannot see.</para>
+    /// </summary>
+    [Fact]
+    public void TheLoopArm_SeesAnAwaitNestedInsideAConditionalInsideALoop()
+    {
+        static bool Flagged(string body, string clock)
+        {
+            var at = body.IndexOf("await ", StringComparison.Ordinal);
+
+            Assert.True(at > 0, "fixture has no await");
+
+            var loopClose = EnclosingLoopClose(body, at);
+
+            return loopClose >= 0
+                && !body[at..loopClose].Contains(clock + ".Restart();", StringComparison.Ordinal);
+        }
+
+        /* Directly in a loop body, unbounded: the shape a nearest-block rule DOES catch. */
+        Assert.True(Flagged(
+            """
+            {
+                foreach (var finding in findings)
+                {
+                    await DeliverAsync(finding, ct);
+                }
+            }
+            """,
+            "readClock"));
+
+        /* The same, bounded. */
+        Assert.False(Flagged(
+            """
+            {
+                foreach (var finding in findings)
+                {
+                    await DeliverAsync(finding, ct);
+                    readClock.Restart();
+                }
+            }
+            """,
+            "readClock"));
+
+        /* THE shape: nested one conditional deep inside the loop, unbounded, and the only await in the
+           body so no pair covers it. A walk that stopped at the nearest block reads the `if` here, calls
+           it non-loop, and returns clean. */
+        Assert.True(Flagged(
+            """
+            {
+                foreach (var entry in _activePgPoisonWaitAlert)
+                {
+                    if (entry.Value)
+                    {
+                        await NotifyPgResolutionAsync(serverKey, subject, ct);
+                    }
+                }
+            }
+            """,
+            "readClock"));
+
+        /* The same shape, bounded — so the control discriminates the missing restart rather than merely
+           reporting "an await inside a loop". */
+        Assert.False(Flagged(
+            """
+            {
+                foreach (var entry in _activePgPoisonWaitAlert)
+                {
+                    if (entry.Value)
+                    {
+                        await NotifyPgResolutionAsync(serverKey, subject, ct);
+                        readClock.Restart();
+                    }
+                }
+            }
+            """,
+            "readClock"));
+
+        /* The control that stops the walk flagging everything: a conditional with no loop above it runs
+           at most once per pass, so an unbounded await there is not this arm's business. */
+        Assert.False(Flagged(
+            """
+            {
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(resolution, ct);
+                }
+            }
+            """,
+            "readClock"));
     }
 
     /// <summary>
