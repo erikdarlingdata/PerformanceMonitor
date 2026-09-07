@@ -11,9 +11,11 @@
  * read catalog, and the view CRUD, plus a PURE client-side definition validator that mirrors the server's
  * ValidateDefinition (so a bad import/compose is caught before the round-trip — the backend re-validates as the
  * authority). The session ({can_edit}) and catalog are immutable per page-load, so they are fetched ONCE and
- * cached as promises; every caller shares the one in-flight request. Editing is available to any authenticated seat, so
- * can_edit is true for any request past the host auth gate; it only goes false if the session probe itself failed (fail-closed), and the UI hides every edit
- * affordance (render + export stay open to all).
+ * cached as promises; every caller shares the one in-flight request. can_edit is the SERVER's answer about this
+ * request's seat: true for the shared token and an OIDC admin, false for an OIDC viewer. It is also false when the
+ * probe itself failed (fail-closed) — two different situations that want different words, so that case alone carries
+ * probe_failed and callers rendering a notice branch on it. Either way the UI hides every edit affordance (render +
+ * export stay open to all).
  */
 
 import { apiGet, apiSend } from "./util.js";
@@ -21,11 +23,20 @@ import { apiGet, apiSend } from "./util.js";
 let _sessionPromise = null;
 let _catalogPromise = null;
 
-/** The session capability probe — resolves to {can_edit} (false on any transport failure: fail-closed UI). */
+/**
+ * The session capability probe — resolves to the server's {can_edit} for this request's seat, or to
+ * {can_edit: false, probe_failed: true} on any transport failure (fail-closed UI).
+ *
+ * probe_failed is what separates "we could not ask" from "you are a read-only seat". Both deny editing, and the
+ * server's own answer never carries the flag, so a caller that renders a notice can tell a transient failure worth
+ * reloading from a role that reloading will not change.
+ */
 export function getSession() {
   if (!_sessionPromise) {
     _sessionPromise = apiGet("/api/session").then((r) =>
-      r.kind === "data" && r.data && typeof r.data.can_edit === "boolean" ? r.data : { can_edit: false }
+      r.kind === "data" && r.data && typeof r.data.can_edit === "boolean"
+        ? r.data
+        : { can_edit: false, probe_failed: true }
     );
   }
   return _sessionPromise;
