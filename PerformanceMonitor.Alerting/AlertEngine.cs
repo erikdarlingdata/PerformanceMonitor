@@ -901,8 +901,8 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var triggered = await _readAdapter.GetPoisonWaitDeltasAsync(key, _settings.PoisonWaitThresholdMs, ct);
-            readClock.Restart(); /* :278 */
+            var triggered = await _readAdapter.GetPoisonWaitDeltasAsync(key, _settings.PoisonWaitThresholdMs, ct); /* :278 */
+            readClock.Restart();
 
             if (triggered.Count > 0)
             {
@@ -1072,8 +1072,8 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);
-            readClock.Restart();           /* :418 */
+            var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);           /* :418 */
+            readClock.Restart();
 
             if (tempDb != null && tempDb.ReservedPercent >= _settings.TempDbSpaceThresholdPercent) /* :420 */
             {
@@ -1142,8 +1142,8 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);
-            readClock.Restart();      /* :480 */
+            var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);      /* :480 */
+            readClock.Restart();
             var breached = AlertContextBuilders.GetBreachedVolumes(volumes, _settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb); /* :481 */
             conditionPresent = breached.Count > 0;                                  /* :487 — feeds the sweep result */
 
@@ -1418,8 +1418,8 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct);
-            readClock.Restart(); /* :562 */
+            var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct); /* :562 */
+            readClock.Restart();
 
             /* #1812: a stale latest snapshot is NO evidence, in either direction. Firing on it re-alerts
                a historical run every cooldown forever (the per-run cooldown key deliberately expires each
