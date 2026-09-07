@@ -46,8 +46,15 @@ namespace PerformanceMonitor.Collectors;
 /// <c>pg_statistic</c> underneath is permission-denied outright. That is why Datadog ships a
 /// <c>SECURITY DEFINER</c> helper. Row-level security empties the view too, via the third conjunct of the
 /// same filter. This slice deliberately does NOT install a helper: it collects what the granted role can
-/// see, and records the shortfall so the read can say which of the two is in force rather than reporting an
-/// absence of statistics as an absence of problems.</para>
+/// see.</para>
+///
+/// <para><b>Which of the two is in force is answered by the read, from
+/// <see cref="PgColumnStatsCoverage"/>.</b> The zero row count itself carries nothing that separates them —
+/// the query completes in under 300 ms and returns an empty result either way, with no error to classify —
+/// so the arm is selected at read time from <c>pg_table_bloat_stats</c>' per-table measurements, which
+/// already carry both the page count that decides the floor and the <c>pg_stats</c> visibility this filter
+/// governs. #3154: for 553 runs across 50 targets this collector reported SUCCESS with a NULL note and
+/// stored nothing, and no read could say which arm produced it.</para>
 ///
 /// <para>Per-database, because <c>pg_stats</c> describes the connected database only.</para>
 /// </summary>
@@ -82,21 +89,29 @@ public sealed class PgColumnStatsCollector : PostgresCollectorDefinitionBase<PgC
         float? TopValueFrequency,
         int? CommonValueCount);
 
-    /* Restricted to tables above a size floor. Statistics on a 40-page table cannot produce a misestimate
-       anyone will ever notice - the planner is choosing between two cheap paths - so collecting every column
-       of every tiny table would multiply the row count by the long tail of the schema for no finding. 128
-       pages is 1 MB at the default block size.
+    /// <summary>
+    /// Tables at or above this catalog page count are read. Statistics on a 40-page table cannot produce a
+    /// misestimate anyone will ever notice — the planner is choosing between two cheap paths — so collecting
+    /// every column of every tiny table would multiply the row count by the long tail of the schema for no
+    /// finding. 128 pages is 1 MB at the default block size.
+    ///
+    /// <para>Named rather than inlined because it is the number an operator gets TOLD about: the read that
+    /// reports "nothing on this server reaches N pages" has to quote the figure the shipped query filters on,
+    /// and a retyped copy in the message is how that stops being true (#3154). Interpolated into
+    /// <c>QueryText</c> for the same reason, matching <c>PgTableBloatStatsCollector.MinimumHeapBytes</c>.</para>
+    /// </summary>
+    public const long MinimumRelPages = 128;
 
-       most_common_freqs[1] rather than the whole array: the first element IS the skew signal, and storing
+    /* most_common_freqs[1] rather than the whole array: the first element IS the skew signal, and storing
        the array would be storing a distribution nobody reads to more depth than its head.
 
        cardinality(most_common_vals) reads only the LENGTH of that array and never its contents, which is the
        one thing worth knowing about it - how many values dominate - without copying any of them.
 
        pg_stats is a view over pg_statistic filtered by has_column_privilege, so this returns only what the
-       monitoring role may read. That is a feature of the view rather than something to work around here;
-       the shortfall is reported by the read instead. */
-    private const string QueryText = @"
+       monitoring role may read. That is a feature of the view rather than something to work around here; the
+       shortfall it causes is classified by the read, from PgColumnStatsCoverage. */
+    internal static readonly string QueryText = @"
 SELECT
     current_database()::text                AS database_name,
     s.schemaname::text                      AS schema_name,
@@ -118,7 +133,7 @@ JOIN pg_catalog.pg_namespace AS n
  AND n.nspname = s.schemaname
 WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema')
 AND   c.relkind IN ('r', 'm', 'p')
-AND   c.relpages >= 128
+AND   c.relpages >= " + MinimumRelPages + @"
 ORDER BY c.relpages DESC, s.schemaname, s.tablename, s.attname
 /* Bounded (#2617's lesson applied before it bites). This is a catalog read rather than a page scan, so
    it is nowhere near as costly as pg_index_bloat was - but it was still unbounded, and row count here is
