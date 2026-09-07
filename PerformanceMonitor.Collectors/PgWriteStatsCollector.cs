@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -54,6 +54,16 @@ namespace PerformanceMonitor.Collectors;
 /// translating for a reader is a documentation job rather than a reason to freeze a deprecated vocabulary
 /// into a schema.</para>
 ///
+/// <para><b>The FLAVOUR surface is a second axis, and it bites the same way.</b> Aurora does not implement
+/// <c>pg_stat_wal</c>: reading it raises <c>0A000</c>, because Aurora replaced the WAL layer with its own
+/// distributed storage. Because the three views are CROSS JOINed, naming <c>pg_stat_wal</c> puts the
+/// checkpointer and bgwriter columns behind the same error even though Aurora supplies them, so on Aurora
+/// the WAL columns are typed NULLs and the join is dropped - exactly what the version branches do for a
+/// column a major removed.
+/// The gate is deliberately NOT narrowed: two thirds of this payload is collectable on Aurora, so
+/// <see cref="AppliesTo"/> must keep passing and <see cref="CollectorEngineCapability"/> must keep
+/// reporting no gap.</para>
+///
 /// <para>Runs on standbys deliberately. <c>pg_stat_checkpointer</c>'s <c>restartpoints_*</c> columns exist
 /// precisely to describe a replica, and a standby that cannot keep up with restartpoints is exactly the
 /// thing nobody is watching.</para>
@@ -100,9 +110,16 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
         double? WalSyncTimeMs,
         DateTime? WalStatsReset);
 
-    /* Three joinless scalar subqueries rather than a CROSS JOIN of three views. Each view is a guaranteed
-       single row, so the result is one row either way, but a subquery per column keeps every version branch
-       local to the column it affects instead of forcing the whole FROM clause to be version-shaped.
+    /* The CHECKPOINTER columns are joinless scalar subqueries; pg_stat_bgwriter and pg_stat_wal are
+       CROSS JOINed below as b and w. Each of the three views is a guaranteed single row, so the result
+       is one row whichever shape is used, but a subquery per column keeps a branch local to the column
+       it affects instead of letting it shape the FROM clause.
+
+       That difference is load-bearing rather than stylistic, and the two JOINED views are the proof: a
+       source named in FROM cannot be branched away one column at a time, so an engine that rejects it
+       fails the whole row and takes the other views' columns down with it. pg_stat_wal on Aurora is
+       exactly that case, which is what the isAurora branch below is for - it removes the view from FROM
+       rather than only NULLing the columns read from it.
 
        stats_reset is timestamptz on all three; AT TIME ZONE 'UTC' rather than ::timestamp, because the cast
        renders in the SESSION's TimeZone and the store contract is naive UTC. Same rule as pg_stat_io.
@@ -110,7 +127,7 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
        All three views are kept as separate stats_reset columns. They CAN be reset independently
        (pg_stat_reset_shared takes a target), and a read that differenced across a reset it could not see
        would report a negative interval as a huge positive one. */
-    private static string BuildQueryText(int postgresMajorVersion)
+    private static string BuildQueryText(int postgresMajorVersion, bool isAurora)
     {
         var hasCheckpointer = postgresMajorVersion >= 17;
         var has18 = postgresMajorVersion >= 18;
@@ -154,13 +171,45 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
         var buffersBackend = hasCheckpointer ? "NULL::bigint" : "(SELECT buffers_backend FROM pg_catalog.pg_stat_bgwriter)";
         var buffersBackendFsync = hasCheckpointer ? "NULL::bigint" : "(SELECT buffers_backend_fsync FROM pg_catalog.pg_stat_bgwriter)";
 
-        /* ---- WAL: 18 removed the four timing/count columns. This is the branch that would take the whole
-               collection down with 42703 on an 18 target if it were selected unconditionally, which is the
-               specific hazard #2544 was reopened to describe. ---- */
-        var walWrite = has18 ? "NULL::bigint" : "w.wal_write";
-        var walSync = has18 ? "NULL::bigint" : "w.wal_sync";
-        var walWriteTime = has18 ? "NULL::double precision" : "w.wal_write_time";
-        var walSyncTime = has18 ? "NULL::double precision" : "w.wal_sync_time";
+        /* ---- WAL: two independent reasons a column here is not selectable, and either one takes the
+               WHOLE row down rather than one column, because pg_stat_wal is CROSS JOINed and not read
+               per column.
+
+               18 removed the four timing/count columns, which raises 42703 on an 18 target - the hazard
+               #2544 was reopened to describe.
+
+               Aurora does not implement pg_stat_wal at all, and reading it raises 0A000: "Function
+               pg_stat_get_wal() is currently not supported for Aurora". Aurora replaced the WAL layer
+               with its own distributed storage, so this is a permanent FLAVOUR gap and not a version
+               floor an upgrade moves - which is why it branches on IsAurora, the one PostgreSQL fact
+               nothing an operator does can change.
+
+               Naming the view costs more than the WAL columns themselves, because the CROSS JOIN puts
+               every other column in this payload behind the same error: one 0A000 and the checkpointer
+               and bgwriter figures go with it, and Aurora supplies those. Hence a typed NULL plus a FROM
+               clause that does not name the view, and never a gate that stops the collector - AppliesTo
+               has to keep passing on Aurora, or the same two thirds of the payload are lost a second way
+               and CollectorEngineCapability reports a permanent gap for a collector that does run. ---- */
+        var walRecords = isAurora ? "NULL::bigint" : "w.wal_records";
+        var walFpi = isAurora ? "NULL::bigint" : "w.wal_fpi";
+        var walBuffersFull = isAurora ? "NULL::bigint" : "w.wal_buffers_full";
+        var walWrite = isAurora || has18 ? "NULL::bigint" : "w.wal_write";
+        var walSync = isAurora || has18 ? "NULL::bigint" : "w.wal_sync";
+        var walWriteTime = isAurora || has18 ? "NULL::double precision" : "w.wal_write_time";
+        var walSyncTime = isAurora || has18 ? "NULL::double precision" : "w.wal_sync_time";
+        var walStatsReset = isAurora ? "NULL::timestamp" : "(w.stats_reset AT TIME ZONE 'UTC')";
+
+        /* wal_bytes is NUMERIC, not bigint - it is allowed to exceed 2^63 over a long uptime, which is
+           exactly why upstream chose numeric. Cast to a bounded numeric so the store's column type is
+           decidable, and carried through C# as decimal rather than long for the same reason. */
+        var walBytes = isAurora ? "NULL::numeric(38,0)" : "w.wal_bytes::numeric(38,0)";
+
+        /* Naming the view in FROM is itself the 0A000, so the join has to go rather than just its
+           columns. The two-line literal keeps the repository's CRLF instead of hardcoding a newline. */
+        var fromClause = isAurora
+            ? "FROM pg_catalog.pg_stat_bgwriter AS b"
+            : @"FROM pg_catalog.pg_stat_bgwriter AS b
+CROSS JOIN pg_catalog.pg_stat_wal AS w";
 
         return $@"
 SELECT
@@ -181,20 +230,16 @@ SELECT
     {buffersBackend}                        AS buffers_backend,
     {buffersBackendFsync}                   AS buffers_backend_fsync,
     (b.stats_reset AT TIME ZONE 'UTC')      AS bgwriter_stats_reset,
-    w.wal_records                           AS wal_records,
-    w.wal_fpi                               AS wal_fpi,
-    /* wal_bytes is NUMERIC, not bigint - it is allowed to exceed 2^63 over a long uptime, which is exactly
-       why upstream chose numeric. Cast to a bounded numeric so the store's column type is decidable, and
-       carried through C# as decimal rather than long for the same reason. */
-    w.wal_bytes::numeric(38,0)              AS wal_bytes,
-    w.wal_buffers_full                      AS wal_buffers_full,
+    {walRecords}                            AS wal_records,
+    {walFpi}                                AS wal_fpi,
+    {walBytes}                              AS wal_bytes,
+    {walBuffersFull}                        AS wal_buffers_full,
     {walWrite}                              AS wal_write,
     {walSync}                               AS wal_sync,
     {walWriteTime}                          AS wal_write_time_ms,
     {walSyncTime}                           AS wal_sync_time_ms,
-    (w.stats_reset AT TIME ZONE 'UTC')      AS wal_stats_reset
-FROM pg_catalog.pg_stat_bgwriter AS b
-CROSS JOIN pg_catalog.pg_stat_wal AS w";
+    {walStatsReset}                         AS wal_stats_reset
+{fromClause}";
     }
 
     public override string Name => "pg_write_stats";
@@ -204,11 +249,16 @@ CROSS JOIN pg_catalog.pg_stat_wal AS w";
     /// <summary>
     /// <c>pg_stat_wal</c> is PostgreSQL 14+, which is the binding floor — <c>pg_stat_bgwriter</c> long
     /// predates it. Standbys included: <c>restartpoints_*</c> exists to describe exactly that case.
+    /// <para>The floor binds the STOCK path only, since the Aurora path never names <c>pg_stat_wal</c>. It is
+    /// left applying to both anyway: every Aurora major in the field is far above 14, and widening a gate
+    /// would change what <see cref="CollectorEngineCapability"/> derives for a reason unrelated to the
+    /// 0A000 this branch exists for. What matters is the direction it must NOT move - narrowing it to
+    /// exclude Aurora would discard the checkpointer and bgwriter columns that Aurora does supply.</para>
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => target.PostgresMajorVersion >= 14;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
-        => new(BuildQueryText(context.Target.PostgresMajorVersion));
+        => new(BuildQueryText(context.Target.PostgresMajorVersion, context.Target.IsAurora));
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
