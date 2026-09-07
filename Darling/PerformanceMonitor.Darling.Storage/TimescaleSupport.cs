@@ -1921,9 +1921,16 @@ WITH NO DATA";
     /// time: the remaining sixth is 150 s here, while the walk that carries this job through the hour advances
     /// by its own runtime each cycle (see the finish-to-start note on
     /// <see cref="SetCompressionSchedulePhaseSql"/>), so the warning lands while the job still finishes inside
-    /// its slot and the grid's stated precondition is still TRUE. A tempting alternative — slot less one
-    /// <see cref="CompressionPhaseGuardMinutes"/> band, 480 s — was rejected on those same readings: it would
-    /// have fired on three of the five.</para>
+    /// its slot and the grid's stated precondition is still TRUE. The alternative that tempts here is the
+    /// slot less one <see cref="CompressionPhaseGuardMinutes"/> band, 480 s, and it sits BELOW
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>: it would warn on the very run the
+    /// compression grid is sized against, and that ORDERING is the whole of its rejection. It is stated as
+    /// an ordering rather than as a share of the readings because a share is not stable: the same 480 s line
+    /// covers a different fraction of every population it is held against, and the populations here grow,
+    /// while its position against the recorded ceiling moves only when one of those two constants does and
+    /// is pinned on that relationship rather than on either figure. Lead time does NOT rule the lower line
+    /// out and is not offered as if it did: a line further below the slot warns EARLIER, so the comparison
+    /// against the ceiling has to carry the decision on its own.</para>
     ///
     /// <para><b>This line sits ABOVE <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>, and that is
     /// what makes a crossing mean something.</b> 750 s is <b>26% above</b> the largest run the narrowed
