@@ -127,6 +127,82 @@ public sealed class WriteLockBudgetTests
     }
 
     /// <summary>
+    /// The resolver is TOTAL: every input returns a budget, none throws.
+    ///
+    /// <para>This is the one arm that discriminates a THIRD outcome from the two the change is argued on.
+    /// A budget either lets the wait succeed or fails it loudly — unless resolution itself throws, and it
+    /// can: <c>NumberStyles.Float</c> admits exponents and .NET parses the invariant <c>Infinity</c>
+    /// symbol whatever the style, so <c>"1e300"</c> and <c>"Infinity"</c> arrive as positive doubles that
+    /// overflow <see cref="TimeSpan.FromSeconds"/>. Out of a static initializer that is a
+    /// <see cref="TypeInitializationException"/> on the first store call anywhere in the process, which
+    /// is strictly worse than the timeout it replaces. Positivity alone does not reach it — it bounds the
+    /// other end.</para>
+    ///
+    /// <para>Asserted over inputs rather than by construction, and the band is read off
+    /// <c>MaxWriteLockBudget</c> rather than restated, so a ceiling that moves moves the bar with it.</para>
+    /// </summary>
+    [Fact]
+    public void TheResolverIsTotalAndAlwaysReturnsAUsableBudget()
+    {
+        var hostile = new object?[]
+        {
+            null, "", "   ", "later", "0", "-0", "-30", "1,5", "NaN", "Infinity", "-Infinity",
+            "1e300", "-1e300", "1E+15", "  120  ", "+120", ".5",
+            TimeSpan.MaxValue.TotalSeconds.ToString("R", CultureInfo.InvariantCulture),
+            double.MaxValue.ToString("R", CultureInfo.InvariantCulture),
+            double.Epsilon.ToString("R", CultureInfo.InvariantCulture),
+            120, 120d, TimeSpan.FromSeconds(120), new object(),
+        };
+
+        var broke = new List<string>();
+        foreach (var input in hostile)
+        {
+            var name = input is null ? "<null>" : $"{input.GetType().Name} \"{input}\"";
+            try
+            {
+                var resolved = LocalDataService.ResolveWriteLockBudget(input);
+                if (resolved <= TimeSpan.Zero || resolved > LocalDataService.MaxWriteLockBudget)
+                {
+                    broke.Add($"{name} -> {resolved}");
+                }
+            }
+            catch (Exception ex)
+            {
+                broke.Add($"{name} -> {ex.GetType().Name}");
+            }
+        }
+
+        Assert.True(
+            broke.Count == 0,
+            "resolving the write-lock budget must never throw and must never leave " +
+            $"(TimeSpan.Zero, {LocalDataService.MaxWriteLockBudget}]: " + string.Join("; ", broke));
+    }
+
+    /// <summary>
+    /// The ceiling is inclusive and anything past it resolves the default, derived from the constant so
+    /// neither figure is written down twice.
+    ///
+    /// <para>The bound is deliberately NOT <see cref="TimeSpan"/>'s representable range, which reaches
+    /// about 29,000 years and would accept a budget that makes a wedged lock hang for the life of the
+    /// process — the silent outcome, where the whole point of a number is the loud one.</para>
+    /// </summary>
+    [Fact]
+    public void TheCeilingIsAcceptedAndAnythingPastItResolvesTheDefault()
+    {
+        var ceiling = LocalDataService.MaxWriteLockBudget;
+
+        Assert.Equal(ceiling, Resolve(ceiling.TotalSeconds));
+        Assert.Equal(LocalDataService.DefaultWriteLockBudget, Resolve(ceiling.TotalSeconds * 2));
+        Assert.Equal(LocalDataService.DefaultWriteLockBudget, Resolve(TimeSpan.MaxValue.TotalSeconds));
+
+        /* And this host is inside the band, so the pin above is not passing on a ceiling nothing meets. */
+        Assert.InRange(LocalDataService.WriteLockBudget, TimeSpan.FromTicks(1), ceiling);
+
+        static TimeSpan Resolve(double seconds) =>
+            LocalDataService.ResolveWriteLockBudget(seconds.ToString("R", CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
     /// The parse reads the project file's spelling, not the machine's. A build agent or a workstation with a
     /// comma-decimal locale must resolve the same budget as this one, and the only way to tell an invariant
     /// parse from an ambient one is to make the ambient culture disagree.

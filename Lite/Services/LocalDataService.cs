@@ -68,6 +68,20 @@ public partial class LocalDataService
     internal const string WriteLockBudgetConfigKey = "PerformanceMonitorLite.WriteLockBudgetSeconds";
 
     /// <summary>
+    /// The largest budget a host can state. A wait that outlives the process or the job containing it
+    /// cannot produce <see cref="OpenWriteConnectionAsync"/>'s timeout at all — something else kills the
+    /// run first — so beyond this a declared budget is indistinguishable from no timeout, and being short
+    /// of forever is the whole reason there is a number here. It is also what keeps the resolver total:
+    /// <c>NumberStyles.Float</c> admits exponents, and .NET parses the invariant <c>Infinity</c> symbol
+    /// whatever the style, so <c>1e300</c> and <c>Infinity</c> both reach
+    /// <see cref="TimeSpan.FromSeconds"/> as positive doubles that overflow it. Out of a static
+    /// initializer that throw is a <see cref="TypeInitializationException"/> on the first store call in
+    /// the process — worse than the timeout it would be replacing, and a third outcome besides "the wait
+    /// succeeded" and "fail loudly".
+    /// </summary>
+    internal static readonly TimeSpan MaxWriteLockBudget = TimeSpan.FromHours(1);
+
+    /// <summary>
     /// How long <see cref="OpenWriteConnectionAsync"/> waits for the write lock in THIS host.
     ///
     /// <para><b>The wait belongs to the host, because the thing it protects does.</b>
@@ -93,22 +107,38 @@ public partial class LocalDataService
         ResolveWriteLockBudget(AppContext.GetData(WriteLockBudgetConfigKey));
 
     /// <summary>
-    /// The seconds a host declared, as a budget. Absent, unparseable and non-positive all resolve
+    /// The seconds a host declared, as a budget. Absent, unparseable, non-positive, above
+    /// <see cref="MaxWriteLockBudget"/>, and small enough to round away all resolve
     /// <see cref="DefaultWriteLockBudget"/>: the failure worth guarding against is a host quietly losing
-    /// its dispatcher protection, not a host quietly gaining a longer wait.
+    /// its dispatcher protection, not a host quietly gaining a longer wait. TOTAL — every input returns a
+    /// budget in <c>(TimeSpan.Zero, MaxWriteLockBudget]</c> and none throws, which matters because this
+    /// runs in a static initializer, where an exception takes the whole type down rather than one call.
     ///
     /// <para>Takes the raw value rather than reading the key itself, so the parse can be exercised without
     /// a second host. MSBuild types it as a JSON number in <c>runtimeconfig.json</c> and the host hands it
     /// back as a string, which is why it is parsed rather than cast — and parsed against the invariant
     /// culture, because a project file is not written in the machine's locale.</para>
+    ///
+    /// <para>The upper bound is not <see cref="TimeSpan"/>'s representable range, which reaches roughly
+    /// 29,000 years: a budget that large parses, converts and then makes a wedged lock hang for the life
+    /// of the process, turning a loud failure into a silent one. The bound has to mean something for the
+    /// refusal to be worth having.</para>
     /// </summary>
     internal static TimeSpan ResolveWriteLockBudget(object? configured)
     {
         if (configured is string declared &&
             double.TryParse(declared, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) &&
-            seconds > 0)
+            seconds > 0 &&
+            seconds <= MaxWriteLockBudget.TotalSeconds)
         {
-            return TimeSpan.FromSeconds(seconds);
+            /* The BUDGET is what gets checked, not the number that produced it. A positive double under
+               the ceiling can still round to TimeSpan.Zero - double.Epsilon does - and a zero timeout is
+               TryEnterWriteLock giving up without waiting, which is a budget in name only. */
+            var budget = TimeSpan.FromSeconds(seconds);
+            if (budget > TimeSpan.Zero)
+            {
+                return budget;
+            }
         }
 
         return DefaultWriteLockBudget;
