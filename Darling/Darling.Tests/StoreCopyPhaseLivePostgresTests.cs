@@ -61,7 +61,12 @@ public class StoreCopyPhaseLivePostgresTests
     [Fact]
     public async Task AFaultOutOfBeginBinaryImportCarriesStart_OnTheRealPath()
     {
-        var fault = await CopyFaultAsync(new PhaseProbeDefinition());
+        await using var dataSource = NpgsqlDataSource.Create(UnreachableStore);
+        /* Deliberately NOT opened: that is what makes the real BeginBinaryImportAsync refuse before it
+           reaches a socket, which is a start-phase fault and needs no store. */
+        await using var connection = new NpgsqlConnection(UnreachableStore);
+
+        var fault = await CopyFaultAsync(new PhaseProbeDefinition(), dataSource, connection);
 
         Assert.False(
             fault is PhaseProbeReachedTheRowLoopException,
@@ -112,77 +117,64 @@ public class StoreCopyPhaseLivePostgresTests
     /// Drives the SHIPPED private COPY body and returns the fault it raised. Reflection because the method
     /// is private and <c>InternalsVisibleTo</c> does not reach private members; a rename breaks this
     /// loudly, which is the correct failure for a test whose whole subject is that method.
+    ///
+    /// <para><b>Takes its connection and data source rather than owning them, and has no <c>finally</c>.</b>
+    /// Every caller holds both under <c>await using</c>, so disposal is the language's job. That is not
+    /// stylistic: a <c>DisposeAsync</c> in a <c>finally</c> can throw and REPLACE the body's exception,
+    /// which on this helper is the entire result being measured — and it is the same hazard
+    /// <c>LiveCleanupConversionRatchetTests</c> exists to stamp out. <c>LiveStoreCleanup</c> is not the
+    /// remedy here because there is nothing to clean: the COPY always faults, so no attempt commits a row.
+    /// </para>
     /// </summary>
     private static async Task<Exception> CopyFaultAsync(
         PhaseProbeDefinition definition,
-        NpgsqlDataSource? dataSource = null,
-        NpgsqlConnection? connection = null,
+        NpgsqlDataSource dataSource,
+        NpgsqlConnection connection,
         CancellationToken cancellationToken = default)
     {
-        var ownsDataSource = dataSource is null;
-        dataSource ??= NpgsqlDataSource.Create(UnreachableStore);
-        var ownsConnection = connection is null;
-        /* Deliberately NOT opened in the default case - see the test's remarks. */
-        connection ??= new NpgsqlConnection(UnreachableStore);
+        var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
+        var method = typeof(DarlingCollectorRunner)
+            .GetMethod("CopyBatchOnceAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(method);
+
+        var server = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "phase-probe", Host = "phase-probe-host" },
+            ConnectionString = "Server=phase-probe-host",
+            Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+            StorageName = "phase-probe-host",
+            ServerId = -3099,
+            EngineEdition = 3,
+        };
+
+        var context = new CollectorContext
+        {
+            ServerId = server.ServerId,
+            ServerName = server.StorageName,
+            CollectionTime = DateTime.UtcNow,
+            Deltas = new CollectorDeltaCalculator(),
+            Target = server.Target,
+        };
+
+        var task = (Task)method!.MakeGenericMethod(typeof(int)).Invoke(
+            runner,
+            new object?[]
+            {
+                connection, definition, new List<int> { 1 }, server,
+                DateTime.UtcNow, context, cancellationToken,
+            })!;
 
         try
         {
-            var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
-            var method = typeof(DarlingCollectorRunner)
-                .GetMethod("CopyBatchOnceAsync", BindingFlags.NonPublic | BindingFlags.Instance);
-            Assert.NotNull(method);
-
-            var server = new ServerRuntime
-            {
-                Config = new MonitoredServer { Name = "phase-probe", Host = "phase-probe-host" },
-                ConnectionString = "Server=phase-probe-host",
-                Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
-                StorageName = "phase-probe-host",
-                ServerId = -3099,
-                EngineEdition = 3,
-            };
-
-            var context = new CollectorContext
-            {
-                ServerId = server.ServerId,
-                ServerName = server.StorageName,
-                CollectionTime = DateTime.UtcNow,
-                Deltas = new CollectorDeltaCalculator(),
-                Target = server.Target,
-            };
-
-            var task = (Task)method!.MakeGenericMethod(typeof(int)).Invoke(
-                runner,
-                new object?[]
-                {
-                    connection, definition, new List<int> { 1 }, server,
-                    DateTime.UtcNow, context, cancellationToken,
-                })!;
-
-            try
-            {
-                await task;
-            }
-            catch (Exception ex)
-            {
-                return ex;
-            }
-
-            Assert.Fail("the COPY body was expected to fault");
-            throw new InvalidOperationException("unreachable");
+            await task;
         }
-        finally
+        catch (Exception ex)
         {
-            if (ownsConnection)
-            {
-                await connection.DisposeAsync();
-            }
-
-            if (ownsDataSource)
-            {
-                await dataSource.DisposeAsync();
-            }
+            return ex;
         }
+
+        Assert.Fail("the COPY body was expected to fault");
+        throw new InvalidOperationException("unreachable");
     }
 
     private sealed class PhaseProbeReachedTheRowLoopException : Exception
