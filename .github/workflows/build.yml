@@ -651,11 +651,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Only do the expensive TimescaleDB work when Darling code changed — or when THIS workflow
-      # changed, so a change to the gate itself is exercised by the gate (this is what makes the PR
-      # that introduces this job validate itself end-to-end). Doc-only Darling edits don't trigger
-      # it. Skipped entirely on release: the dev push that produced the release commit already ran
-      # it, so the filter step doesn't run and every step below no-ops.
+      # Only do the expensive TimescaleDB work when code Darling compiles changed — or when the gate
+      # itself changed, so a change to the gate is exercised by the gate (this is what makes the PR
+      # that edits it validate itself end-to-end). Doc-only Darling edits don't trigger it. Skipped
+      # entirely on release: the dev push that produced the release commit already ran it, so the
+      # filter step doesn't run and every step below no-ops.
       - name: Detect changed paths
         id: filter
         if: github.event_name != 'release'
@@ -664,35 +664,49 @@ jobs:
           # On push, compare against the previous commit on this branch (mirrors the build job);
           # on pull_request, an empty base makes the action diff against the PR base branch.
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
-          # `Darling/**/!(*.md)` instead of a `Darling/**` include plus a `!Darling/**/*.md`
-          # exclude: dorny v4 treats each pattern as an independent predicate under the
-          # default quantifier, so the old bare negation was itself a match-all-non-Darling-md
-          # rule — this job ran the full TimescaleDB suite on every PR, including md-only
-          # ones (run 30218459544: "Filter darling = true, Matching files: CHANGELOG.md").
-          filters: |
-            darling:
-              - 'Darling/**/!(*.md)'
-              - '.github/workflows/build.yml'
-              # Same reason as the build job's darling filter: the #1888 cluster-sizing
-              # guard parses nightly.yml, so an edit to it has to reach the suite.
-              - '.github/workflows/nightly.yml'
+          # Emit the matched file list so the gate-decision step below can NAME what it matched, or
+          # name what it did not match, instead of asserting a reason the decision came out as it did.
+          list-files: shell
+          # ONE gate, shared with the Darling Linux build job below through dorny's `filters: <path>`
+          # form, rather than a list of paths per job: the shared libraries Darling compiles against
+          # are one dependency fact, and this job's own copy of it was empty while its sibling's was
+          # not (#3116). What is in the gate, and why each entry is there, lives in that file.
+          filters: .github/darling-paths-filter.yml
 
-      # This job's gate was already correct for documentation — a docs-only change leaves
-      # 'darling' false and every step below no-ops. What it lacked was SAYING so: a job
-      # that reports success having quietly run nothing looks identical to one that tested
-      # everything. Costs one step; buys a log you can point at when asking "did this
-      # actually get tested?".
+      # A job that reports success having quietly run nothing looks identical to one that tested
+      # everything. Costs one step; buys a log you can point at when asking "did this actually get
+      # tested?" — so what it prints has to be the answer to that question.
+      #
+      # It reports the DECISION and the files the decision was made from: which changed files are in
+      # the gate, or how many changed files are in it and what they were. Never a cause. A hard-coded
+      # cause is a second, unverified claim riding on a true one, and it reads as authoritative
+      # precisely because the surrounding gate is right — the skip notice named "documentation-only"
+      # as the only explanation for a false gate, and on #3114 (two files, a PostgreSQL collector and
+      # its test) both halves of that were false.
       - name: Report the Darling PG gate decision
         shell: bash
+        env:
+          DARLING: ${{ steps.filter.outputs.darling }}
+          DARLING_COUNT: ${{ steps.filter.outputs.darling_count }}
+          DARLING_FILES: ${{ steps.filter.outputs.darling_files }}
+          ALL_COUNT: ${{ steps.filter.outputs.all_count }}
+          ALL_FILES: ${{ steps.filter.outputs.all_files }}
         run: |
           set -euo pipefail
 
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "::notice title=Darling PG tests skipped::Release event - the dev push that produced this commit already ran them."
-          elif [ "${{ steps.filter.outputs.darling }}" = "true" ]; then
-            echo "::notice title=Darling PG tests running::Darling code (or this workflow) changed."
+            exit 0
+          fi
+
+          if [ "${DARLING:-}" = "true" ]; then
+            echo "::notice title=Darling PG tests running::${DARLING_COUNT:-0} of ${ALL_COUNT:-0} changed files are in the Darling gate (.github/darling-paths-filter.yml)."
+            echo "Changed files in the gate:"
+            for f in ${DARLING_FILES}; do echo "  - ${f}"; done
           else
-            echo "::notice title=Darling PG tests skipped::No Darling code changed - documentation-only Darling edits do not trigger the TimescaleDB suite."
+            echo "::notice title=Darling PG tests skipped::None of the ${ALL_COUNT:-0} changed files are in the Darling gate (.github/darling-paths-filter.yml), so the TimescaleDB suite did not run on this commit."
+            echo "Changed files, none of them in the gate:"
+            for f in ${ALL_FILES}; do echo "  - ${f}"; done
           fi
 
       - name: Setup .NET 10.0
@@ -850,24 +864,38 @@ jobs:
         uses: dorny/paths-filter@v4
         with:
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
-          filters: |
-            darling:
-              - 'Darling/**/!(*.md)'
-              - 'PerformanceMonitor.Common/**'
-              - 'PerformanceMonitor.Collectors/**'
-              - 'PerformanceMonitor.Analysis/**'
-              - '.github/workflows/build.yml'
+          list-files: shell
+          # The same gate the darling-pg job above reads. The list of shared libraries that reaches
+          # Darling belongs to both jobs, and holding it twice is how the copies came to differ: the
+          # copy here named three of the seven, missing PerformanceMonitor.Alerting and
+          # PerformanceMonitor.PlanAnalysis, which the service this job publishes references directly.
+          filters: .github/darling-paths-filter.yml
 
+      # Reports the decision and the files behind it, for the same reason the PG job's notice does.
       - name: Report the Linux gate decision
         shell: bash
+        env:
+          DARLING: ${{ steps.filter.outputs.darling }}
+          DARLING_COUNT: ${{ steps.filter.outputs.darling_count }}
+          DARLING_FILES: ${{ steps.filter.outputs.darling_files }}
+          ALL_COUNT: ${{ steps.filter.outputs.all_count }}
+          ALL_FILES: ${{ steps.filter.outputs.all_files }}
         run: |
           set -euo pipefail
+
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "::notice title=Darling Linux publishing::Release event - packaging the versioned linux tar.gz and pushing the ghcr image."
-          elif [ "${{ steps.filter.outputs.darling }}" = "true" ]; then
-            echo "::notice title=Darling Linux build running::Darling/service code (or this workflow) changed."
+            exit 0
+          fi
+
+          if [ "${DARLING:-}" = "true" ]; then
+            echo "::notice title=Darling Linux build running::${DARLING_COUNT:-0} of ${ALL_COUNT:-0} changed files are in the Darling gate (.github/darling-paths-filter.yml)."
+            echo "Changed files in the gate:"
+            for f in ${DARLING_FILES}; do echo "  - ${f}"; done
           else
-            echo "::notice title=Darling Linux build skipped::No Darling/service code changed."
+            echo "::notice title=Darling Linux build skipped::None of the ${ALL_COUNT:-0} changed files are in the Darling gate (.github/darling-paths-filter.yml), so the linux-x64 publish and the image build did not run on this commit."
+            echo "Changed files, none of them in the gate:"
+            for f in ${ALL_FILES}; do echo "  - ${f}"; done
           fi
 
       - name: Setup .NET 10.0
