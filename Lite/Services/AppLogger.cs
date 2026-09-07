@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -18,9 +20,40 @@ namespace PerformanceMonitorLite.Services;
 /// Simple file-based application logger. Writes to logs/ directory with daily rotation.
 /// Thread-safe with buffered writes. Files older than <see cref="RetentionDays"/> are swept at
 /// <see cref="Initialize"/> so the log directory never grows without bound.
+///
+/// <para><b>This type owns the whole app's level gate.</b> <see cref="IsEnabled"/> is the one decision
+/// point, and <see cref="AppLoggerAdapter{T}"/> defers to it so a component logging through
+/// <c>ILogger&lt;T&gt;</c> and a component calling the static methods here get the same answer. Lite has
+/// no logger factory — every <c>ILogger&lt;T&gt;</c> in the app is a directly-constructed
+/// <see cref="AppLoggerAdapter{T}"/> — so there is no <c>LoggerFilterOptions</c> anywhere in the path and
+/// nothing upstream of this to filter on (#3104).
+/// </para>
 /// </summary>
 public static class AppLogger
 {
+    /// <summary>
+    /// The level a line must reach to be written, absent a configured one.
+    ///
+    /// <para><see cref="LogLevel.Information"/> is the level a default .NET logging factory filters at, and
+    /// the level Darling's service is gated at (#3102), so both SKUs answer "does this line appear on a
+    /// default install" the same way and a level chosen on one reads the same on the other.</para>
+    /// </summary>
+    internal const LogLevel DefaultMinimumLevel = LogLevel.Information;
+
+    /// <summary>
+    /// The level in force, read on every call so it can be raised at startup from settings.json and
+    /// lowered again without a restart.
+    ///
+    /// <para><b>Runtime rather than conditional compilation, which is the decision this field records.</b>
+    /// A <c>#if DEBUG</c> around a write is a gate no operator can reach: the shipped artifact is Release,
+    /// so the level it selects is the only level that install will ever have, and raising it needs a
+    /// rebuild rather than a setting. It also makes the app's own tests unable to speak for the artifact —
+    /// a suppression test compiled Release and one compiled Debug get opposite answers about the same
+    /// source, so a green suite proves nothing about what ships. One runtime value has one answer in every
+    /// configuration.</para>
+    /// </summary>
+    private static volatile LogLevel s_minimumLevel = DefaultMinimumLevel;
+
     /// <summary>
     /// How long a rotated <c>lite_yyyyMMdd.log</c> is kept. "Daily rotation" only ever meant a NEW
     /// file per day — nothing deleted the old ones, so the directory grew for the life of the install
@@ -39,6 +72,27 @@ public static class AppLogger
     {
         s_flushTimer = new Timer(_ => Flush(), null, Timeout.Infinite, Timeout.Infinite);
     }
+
+    /// <summary>The level currently in force. A line below it is not written.</summary>
+    public static LogLevel MinimumLevel => s_minimumLevel;
+
+    /// <summary>
+    /// Raises or lowers the level. Called from startup once settings.json has been read, and safe to call
+    /// at any time — the next call to <see cref="IsEnabled"/> sees it.
+    /// </summary>
+    public static void SetMinimumLevel(LogLevel level) => s_minimumLevel = level;
+
+    /// <summary>
+    /// Whether a line at <paramref name="level"/> would be written. The gate for both this type's static
+    /// methods and <see cref="AppLoggerAdapter{T}"/>, so the level an operator sets is the level every
+    /// component in the app is held to.
+    ///
+    /// <para><see cref="LogLevel.None"/> is never enabled. It is the "log nothing" sentinel rather than a
+    /// severity, so ordering it against the minimum — where it compares highest of all — would make it the
+    /// one level nothing can suppress.</para>
+    /// </summary>
+    public static bool IsEnabled(LogLevel level) =>
+        level != LogLevel.None && level >= s_minimumLevel;
 
     public static void Initialize(string logDirectory)
     {
@@ -84,16 +138,24 @@ public static class AppLogger
 
     public static void Info(string source, string message)
     {
+        if (!IsEnabled(LogLevel.Information)) return;
+
         Log("INFO", source, message);
     }
 
     public static void Warn(string source, string message)
     {
+        if (!IsEnabled(LogLevel.Warning)) return;
+
         Log("WARN", source, message);
     }
 
     public static void Error(string source, string message, Exception? ex = null)
     {
+        /* Gated once here rather than inside Log, so an exception's stack and its whole inner chain are
+           admitted or dropped together — a half-written error is harder to read than none. */
+        if (!IsEnabled(LogLevel.Error)) return;
+
         if (ex != null)
         {
             Log("ERROR", source, $"{message} | {ex.GetType().Name}: {ex.Message}");
@@ -130,15 +192,35 @@ public static class AppLogger
 
     public static void Debug(string source, string message)
     {
-#if DEBUG
+        if (!IsEnabled(LogLevel.Debug)) return;
+
         Log("DEBUG", source, message);
-#endif
     }
 
     private static void Log(string level, string source, string message)
     {
         var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level,-5}] [{source}] {message}";
         s_buffer.Enqueue(line);
+    }
+
+    /// <summary>
+    /// Removes and returns everything buffered but not yet written, so a test can observe whether a call
+    /// was ADMITTED by the gate.
+    ///
+    /// <para>The seam exists because <see cref="Initialize"/> is not usable from a test: it repoints the
+    /// whole process's logging at the caller's directory and starts a timer against it, which is the
+    /// constraint <c>AppLoggerRetentionTests</c> documents for the same reason. Nothing in the app calls
+    /// this — <see cref="Flush"/> owns the buffer in production and drains it to the file.</para>
+    /// </summary>
+    internal static List<string> DrainBufferedLines()
+    {
+        var lines = new List<string>();
+        while (s_buffer.TryDequeue(out var line))
+        {
+            lines.Add(line);
+        }
+
+        return lines;
     }
 
     public static void Flush()

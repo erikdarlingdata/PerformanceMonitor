@@ -703,10 +703,16 @@ public partial class RemoteCollectorService
 
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, hiding a single busy database's burst behind
-                           quiet siblings. Quiet databases (0 rows) stay silent. */
+                           quiet siblings. Quiet databases (0 rows) stay silent.
+
+                           At Debug, matching Darling's twin timing lines (#3102) and this file's own
+                           per-collector summary: it is per-database-per-cycle accounting of a run that
+                           SUCCEEDED, so there is no error beside it that it could be decomposing, and it
+                           crowds out the collection failures the log is opened for. The sample is not lost
+                           — raise log_minimum_level to Debug and every one of them is back, unchanged. */
                         if (batchCount > 0)
                         {
-                            _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, duckdb:{DuckMs}ms)",
+                            _logger?.LogDebug("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, duckdb:{DuckMs}ms)",
                                 server.DisplayName, definition.Name, item, batchCount, itemSqlMs, itemStorageMs);
                         }
 

@@ -447,6 +447,7 @@ public partial class App : Application
         // Load settings
         LoadDefaultTimeRange();
         LoadAlertSettings();
+        LoadLogMinimumLevel();
 
         // Wire the shared-UI time conversion hook before any chart/crosshair can
         // render. The lambda reads CurrentDisplayMode at call time, so later
@@ -857,6 +858,72 @@ public partial class App : Application
             AppLogger.Warn("Settings",
                 $"settings.json key 'default_time_range_hours' could not be read ({ex.Message}); the " +
                 $"default of {DefaultTimeRangeHours} hours is in use.");
+        }
+    }
+
+    /// <summary>
+    /// Applies the configured log verbosity (#3104). Runs BEFORE <see cref="AppLogger.Initialize"/> so the
+    /// level is in force for the first line written, including <c>Initialize</c>'s own.
+    ///
+    /// <para>No UI: this is the knob that makes the per-cycle collector timing lines recoverable after they
+    /// were gated below the default, and its audience is someone reading a log to diagnose a collection
+    /// failure, not someone browsing Settings. An unrecognised token leaves the default in force and is
+    /// reported through the shared reporter, so a typo costs its own setting and is named at startup rather
+    /// than silently turning logging down.</para>
+    /// </summary>
+    private static void LoadLogMinimumLevel()
+    {
+        var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
+        if (settings.State == SettingsFileState.Unreadable)
+        {
+            /* The unreadable file is already reported by LoadDefaultTimeRange, which runs first. */
+            return;
+        }
+
+        if (settings.Text == null)
+        {
+            return;
+        }
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(settings.Text);
+            var read = new SettingsReader(doc.RootElement);
+
+            if (read.TryGetProperty("log_minimum_level", out var val))
+            {
+                var token = val.TextOrNull();
+
+                if (Enum.TryParse<Microsoft.Extensions.Logging.LogLevel>(token, ignoreCase: true, out var level))
+                {
+                    AppLogger.SetMinimumLevel(level);
+                }
+                else if (token != null)
+                {
+                    /* A string that is not one of the level names. TextOrNull has already reported a value
+                       that is not a string at all, so only the vocabulary is left to check here — and it
+                       goes through the shared reporter so it reaches the startup dialog beside any other
+                       key that fell back, rather than only the log. */
+                    ReportBadSettingValues(new[]
+                    {
+                        new SettingsValueProblem(
+                            "log_minimum_level",
+                            $"holds \"{token}\", which is not one of Trace, Debug, Information, Warning, "
+                                + $"Error, Critical or None; {AppLogger.DefaultMinimumLevel} is in use"),
+                    });
+                }
+            }
+
+            ReportBadSettingValues(read.Problems);
+        }
+        catch (Exception ex)
+        {
+            /* Every value read is shape-checked rather than caught, so nothing EXPECTED lands here. Kept
+               because an unexpected throw must not take startup down — and this runs before the logger
+               exists, so there is nowhere to record it other than the buffer Initialize will flush. */
+            AppLogger.Warn("Settings",
+                $"settings.json key 'log_minimum_level' could not be read ({ex.Message}); " +
+                $"{AppLogger.DefaultMinimumLevel} is in use.");
         }
     }
 
