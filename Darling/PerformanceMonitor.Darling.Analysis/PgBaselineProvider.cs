@@ -146,6 +146,18 @@ public class PgBaselineProvider
     /// cancelled; a <see cref="TimeoutException"/> anywhere in the chain is Npgsql's own deadline. Everything
     /// else stays "failed", because labelling a genuine connection fault a timeout is the same defect aimed
     /// the other way.</para>
+    ///
+    /// <para><b>Three call sites cite that as "the house discipline", so its SCOPE belongs here: it is
+    /// about what a failure MEANS, not about every question one can be asked.</b> This predicate's question
+    /// is whether the statement ran out of time, and structure answers it — every producer of <c>57014</c>
+    /// ran out of time, so the code is sufficient and the transport's prose is worse than useless. WHOSE
+    /// clock ran out is a different question and structure cannot answer it at all: PostgreSQL raises
+    /// <c>57014</c> for the target's <c>statement_timeout</c>, for <c>pg_cancel_backend()</c> and for the
+    /// CancelRequest Npgsql sends on its own deadline, so the code is shared and the message is the only
+    /// field that differs. <c>CollectorFaultCancelOrigin</c> in the service reads it for exactly that, and
+    /// treats every wording it does not recognise as unproven. Reading text where structure suffices is the
+    /// defect this discipline names; refusing to read it where structure is provably silent is the same
+    /// defect wearing the rule as a costume (#3118).</para>
     /// </summary>
     internal static bool IsCommandTimeout(Exception ex) =>
         ex is PostgresException { SqlState: "57014" }
