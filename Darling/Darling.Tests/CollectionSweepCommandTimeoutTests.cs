@@ -470,8 +470,12 @@ public sealed class CollectionSweepCommandTimeoutTests
         var bounded = 0;
 
         var copyAnyForm = new Regex(@"BeginBinaryImport(?:Async)?\s*\(", RegexOptions.CultureInvariant);
-        var boundedToken = new Regex(@"BeginBinaryImport(?:Async)?\s*\([^;]*startDeadline\.Token", RegexOptions.CultureInvariant);
-        var inheritedToken = new Regex(@"BeginBinaryImport(?:Async)?\s*\([^;]*(?<![A-Za-z0-9_])cancellationToken\s*\)", RegexOptions.CultureInvariant);
+        var boundedToken = new Regex(
+            @"BeginBinaryImport(?:Async)?\s*\([^;]*startDeadline\.Token",
+            RegexOptions.CultureInvariant);
+        var inheritedToken = new Regex(
+            @"BeginBinaryImport(?:Async)?\s*\([^;]*(?<![A-Za-z0-9_])cancellationToken\s*\)",
+            RegexOptions.CultureInvariant);
 
         /* The helper called with NO second argument. The optional deadline parameter exists so a test can
            construct one that has already elapsed; a production site passing its own value would decouple

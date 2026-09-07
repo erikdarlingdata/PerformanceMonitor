@@ -45,7 +45,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// that shape would be bounded and invisible — a stall reported as an orderly stop. A
 /// <see cref="TimeoutException"/> is the shape a client-side deadline already has here
 /// (<see cref="PostgresTransportFault.IsTransportFault"/> reads it as a transport fault), it is not an
-/// <see cref="NpgsqlException"/> so it does not reach <c>DarlingWorker</c>'s PostgreSQL-target timeout arm
+/// <see cref="Npgsql.NpgsqlException"/> so it does not reach <c>DarlingWorker</c>'s PostgreSQL-target timeout arm
 /// and its read-specific remedy, and it carries no SQLSTATE so it does not reach the
 /// <c>PostgresException</c> arm either. It lands in the general arm, which renders the stamped phase into
 /// both the app log and the <c>collection_log</c> row.</para>
