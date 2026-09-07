@@ -329,9 +329,25 @@ jobs:
       # (#1694) that subset runs in ~1 minute, so the split — and the narrower lite_analysis path
       # gate that let non-analysis Lite changes skip it — stopped earning its second test-host
       # spin-up and its filter-drift risk.
+      # L3134 TEMPORARY INSTRUMENTATION - reverted before merge. Issue #3134 needs two figures:
+      # the suite's per-test intervals under the normal parallel run, and its wall clock when the
+      # classes are fully serialised. Both TRX files are uploaded for offline analysis.
       - name: Run Lite tests
         if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build
+        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -trx TestResults/L3134-lite-parallel.trx
+
+      - name: L3134 measurement - Lite suite fully serialised
+        if: (steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true') && always()
+        continue-on-error: true
+        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -parallel none -trx TestResults/L3134-lite-serial.trx
+
+      - name: L3134 measurement - upload TRX
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: L3134-lite-trx
+          path: TestResults/L3134-lite-*.trx
+          if-no-files-found: warn
 
       - name: Run Installer tests
         if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
