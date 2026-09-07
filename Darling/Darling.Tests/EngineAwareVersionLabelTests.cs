@@ -78,7 +78,14 @@ namespace Darling.Tests;
 /// as the retired Full edition; it holds a THIRD copy of the version table
 /// (<c>Installer.Core/Models/ServerInfo.cs</c>) which has already drifted to a different fallback
 /// (<c>"SQL Server (version N)"</c>) and is not reached by any shipped surface.</para>
+///
+/// <para><b>Why the whole class joins the live-postgres collection</b> when only one test needs a store: the
+/// collection SERIALISES against the shared one, and a sibling in it (<c>MonitoredEngineKindStoreTests</c>)
+/// DROPs a registry column and re-migrates. Running unserialised, this class's <c>MigrateAsync</c> and its
+/// registry inserts could interleave with that, which is a flake whose cause would read as a defect in the
+/// label. The pure tests here pay a little ordering for it.</para>
 /// </summary>
+[Collection("live-postgres")]
 public sealed class EngineAwareVersionLabelTests
 {
     /* ───────────────────────── the label itself ───────────────────────── */
