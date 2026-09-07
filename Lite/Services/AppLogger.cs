@@ -46,11 +46,11 @@ public static class AppLogger
     ///
     /// <para><b>Runtime rather than conditional compilation, which is the decision this field records.</b>
     /// A <c>#if DEBUG</c> around a write is a gate no operator can reach: the shipped artifact is Release,
-    /// so the level it selects is the only level that install will ever have, and raising it needs a
-    /// rebuild rather than a setting. It also makes the app's own tests unable to speak for the artifact —
-    /// a suppression test compiled Release and one compiled Debug get opposite answers about the same
-    /// source, so a green suite proves nothing about what ships. One runtime value has one answer in every
-    /// configuration.</para>
+    /// so the level that directive selects is the only level an install will ever have, and changing it
+    /// needs a rebuild rather than a setting — which makes a level lowered onto such a write a deletion
+    /// rather than a suppression. It also splits the app's own tests from the artifact: the same source
+    /// writes the line under one configuration and not the other, so what a suite observed depends on how
+    /// it was built. One runtime value has one answer in every configuration.</para>
     /// </summary>
     private static volatile LogLevel s_minimumLevel = DefaultMinimumLevel;
 

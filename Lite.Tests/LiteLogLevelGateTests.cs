@@ -279,16 +279,23 @@ public sealed class LiteLogLevelGateTests : IDisposable
             .ToList();
 
     /// <summary>
-    /// <para>No logging decision in <see cref="AppLogger"/> is made by the preprocessor. This is a SOURCE
-    /// pin because no runtime assertion can be: a test is compiled in one configuration and can only ever
-    /// observe that one, so a <c>#if DEBUG</c> around a write is invisible to every other pin in this file
-    /// while making all of them configuration-dependent — green under Release, and speaking for nothing but
-    /// Release, which is not the configuration a developer runs locally.</para>
+    /// <para>No logging decision in <see cref="AppLogger"/> is made by the preprocessor. Conditional
+    /// compilation selects a verbosity at BUILD time, so the shipped Release artifact has exactly one and
+    /// no setting can reach it: a level lowered onto a compiled-out write is silenced permanently rather
+    /// than by default, which is the difference between suppressing a diagnostic and deleting it.</para>
     ///
-    /// <para>It is also the difference between suppressing a line and deleting it. Conditional compilation
-    /// selects a verbosity at build time, so the shipped Release artifact has exactly one and no setting can
-    /// change it; a level lowered onto a compiled-out write is silenced permanently rather than by
-    /// default.</para>
+    /// <para><b>What this adds over the sweep above, measured rather than assumed.</b> A <c>#if DEBUG</c>
+    /// around <c>Debug</c>'s write does fail
+    /// <see cref="EveryStaticEntryPoint_HonoursTheMinimum_AndTheAdapterAgrees"/> — but a DIFFERENT
+    /// assertion in each configuration, because the two configurations disagree about what the sink does: a
+    /// Debug build fails at minimum <c>Information</c> (it wrote when the gate said no) and a Release build
+    /// fails at minimum <c>Trace</c> (it wrote nothing when the gate said yes). So the sweep reports a level
+    /// table that does not match, and which mismatch you are shown depends on how you built; this names the
+    /// cause, identically in both. The sweep also only covers the four entry points and seven minima it
+    /// enumerates, so a directive around any other decision here is invisible to it and visible to this.</para>
+    ///
+    /// <para>Read out of stripped source, so this type's own discussion of conditional compilation — and
+    /// <see cref="AppLogger"/>'s — is not itself read as conditional compilation.</para>
     /// </summary>
     [Fact]
     public void NoLoggingDecision_IsMadeByThePreprocessor()
