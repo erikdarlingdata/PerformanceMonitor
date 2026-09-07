@@ -541,6 +541,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 if (IsFresh(replicaTimeUtc))
                 {
                     await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken);
+                    agReadClock.Restart();
                 }
 
                 var (databaseTimeUtc, databases) =

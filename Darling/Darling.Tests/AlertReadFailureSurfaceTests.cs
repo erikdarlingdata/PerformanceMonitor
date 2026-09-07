@@ -733,82 +733,64 @@ public sealed class AlertReadFailureSurfaceTests
     }
 
     /// <summary>
-    /// Awaited callees inside a counted block, split by whether they are a STORE READ. Explicit and total:
-    /// an awaited call this table does not classify fails the pin rather than being assumed either way.
+    /// The <c>await</c> keyword, and nothing about what is being awaited.
     ///
-    /// <para><b>Why a table and not a prefix rule.</b> The first pass at this used a
-    /// <c>Get|Read|Has</c> prefix and silently under-counted — it missed
-    /// <c>LoadEdgeTriggerWatermarkAsync</c> and <c>LoadFailedJobWatermarkAsync</c>, which are two of the
-    /// three reads in the watermark-seed block, and reported that block as having none. A prefix guess
-    /// returns a confident partial answer with no error, which is the failure mode a scanning guard must
-    /// not have. A rename or a new read therefore reds here until someone classifies it, and the reason
-    /// each name is on the side it is on is visible in the two sets.</para>
+    /// <para><b>Why the callee is deliberately not parsed.</b> The first version of this pin matched
+    /// <c>await</c> followed by a dotted qualifier and a callee name, then classified the callee as a
+    /// store read or not from two explicit tables. The pattern could not match
+    /// <c>await x!.Method(…)</c> — the null-forgiving operator is not in a dotted-identifier qualifier —
+    /// so five awaits in <c>EvaluateCompressionJobHealthAsync</c> were invisible to it, three of them
+    /// applies sitting between reads. The pin reported clean over 84 awaits when there were 89, and the
+    /// missing five were exactly the defect. A pattern shaped like the expected answer returns a
+    /// confident partial count and no error.</para>
+    ///
+    /// <para>So the property was changed to one that needs no callee at all: a clock boundary between
+    /// EVERY pair of consecutive awaits. Finding a bare <c>await</c> token cannot be partial the way a
+    /// qualifier pattern can, and there is no classification left to get wrong.</para>
+    ///
+    /// <para><c>await using</c> is excluded, narrowly: its await is the scope's <c>DisposeAsync</c> at
+    /// block exit rather than an operation at that point in the text, so requiring a boundary between it
+    /// and the call on the same line would require something both impossible and meaningless. The cost is
+    /// stated rather than hidden — a fault in that disposal reports the last operation's elapsed plus the
+    /// disposal's.</para>
     /// </summary>
-    private static readonly HashSet<string> s_awaitedStoreReads = new(StringComparer.Ordinal)
-    {
-        "LoadEdgeTriggerWatermarkAsync", "LoadFailedJobWatermarkAsync",
-        "GetRecentBlockedProcessReportsAsync", "GetCurrentBlockingWaitAsync", "GetRecentDeadlocksAsync",
-        "GetPoisonWaitDeltasAsync", "GetLongRunningQueriesAsync", "GetTempDbSpaceAsync",
-        "GetVolumeFreeSpaceAsync", "GetPvsPressureAsync", "GetDatabaseFileGrowthAsync",
-        "GetAnomalousJobsAsync", "GetDatabaseStatesAsync", "GetForcePlanFailuresAsync",
-        "ReadCollectionSignalsAsync", "ReadMissingCaptureSessionsAsync", "ReadLatestAgentStatusAsync",
-        "HasAgentEverBeenSeenRunningAsync", "ReadLatestAgReplicaStatesAsync",
-        "ReadLatestAgDatabaseReplicaStatesAsync", "GetCostRegressionsAsync", "ReadLatestCpuAsync",
-        "GetWraparoundRiskAsync", "GetXminHorizonAsync", "GetReplicationSlotRiskAsync",
-        "GetLastAlertTimeAsync", "GetLatestAsync", "GetDeadlocksAsync",
-        "GetPgBlockingChainsDedupedByRootAsync", "GetCurrentLongRunningSessionsAsync",
-        "GetPoisonWaitPressureAsync", "ReadCompressionActivityAsync", "ReadHeaviestRefreshRuntimeAsync",
-        "ReadStuckCompressionJobsAsync", "ReadJobCadenceReadingsAsync", "ReadRetentionHoldReadingsAsync",
-    };
+    private static readonly Regex s_awaitToken = new(
+        @"\bawait\b(?!\s+using\b)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// Awaited calls in a counted block that are NOT store reads: the appliers, the deliveries, the state
-    /// writes, and the two whole-pass dispatches. They need no clock of their own — a fault in one of them
-    /// is not the population this measurement is for, and restarting the clock before a delivery would
-    /// report the delivery's elapsed under a field named for a read.
-    /// </summary>
-    private static readonly HashSet<string> s_awaitedNonReads = new(StringComparer.Ordinal)
-    {
-        "ApplyCollectionStoppedAsync", "ApplyCaptureDownAsync", "ApplyAgentNotRunningAsync",
-        "ApplyAgReplicaHealthAsync", "ApplyAgDatabaseHealthAsync", "FireAsync", "NotifyResolutionAsync",
-        "ObserveOccurrencesAsync", "ClearOccurrencesAsync", "SaveEdgeTriggerWatermarkAsync",
-        "DeliverAsync", "NotifyPgResolutionAsync", "EvaluateServerAsync", "EvaluatePostgresAlertsAsync",
-    };
-
-    private static readonly Regex s_awaitedCall = new(
-        @"await\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*(?<callee>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    /// <summary>
-    /// The figure a counted block records is ONE bounded operation's, not the whole block's.
+    /// The figure a counted block records is ONE awaited operation's, not the whole block's.
     ///
-    /// <para><b>The defect this closes, which the pin above could not see.</b> Every check in
+    /// <para><b>The defect this closes, which the sibling pin could not see.</b> Every check in
     /// <see cref="EveryCountedAlertingRead_MeasuresHowLongItRanBeforeItFailed"/> is satisfied by a single
     /// clock started at the top of the block — and a block that performs several awaited operations then
     /// reports the SUM of everything that ran. The PostgreSQL predictor group reads four store tables and
     /// the store background-job group five, each bounded separately, so an ordinary client-side cutoff of
-    /// the last one would record well ABOVE the per-read deadline. That is a value the whole
-    /// at-the-bound-versus-below-it argument has no bucket for, and it would have shipped reading
-    /// perfectly plausibly.</para>
+    /// the last one would record well ABOVE the per-read deadline: a value the whole
+    /// at-the-bound-versus-below-it argument has no bucket for. It would have shipped reading perfectly
+    /// plausibly.</para>
     ///
-    /// <para><b>The property.</b> Between an awaited store read and the next awaited operation in the same
-    /// block there is a clock restart — so whatever faults, the elapsed is that operation's. Expressed as a
-    /// substring between two offsets rather than by parsing statements, which is what lets it catch the
-    /// shape that started this: three reads awaited inside ONE argument list, where no restart can sit
-    /// between them at all. Those three are now hoisted into locals for exactly that reason.</para>
+    /// <para><b>The property.</b> Between any two consecutive awaits in a counted block there is a clock
+    /// restart, so whatever faults, the elapsed is that operation's. Expressed as a substring between two
+    /// offsets rather than by parsing statements, which is what lets it catch the shape that started this:
+    /// reads awaited inside ONE argument list, where no restart can sit between them at all. Those are
+    /// hoisted into locals for exactly that reason, and this pin is what says none are left.</para>
     ///
-    /// <para>A read that is the block's LAST await needs no restart — nothing follows it that could
-    /// inflate the figure, and a restart there would be dead code. The shared-engine-sweep block has no
-    /// store read at all: it wraps a whole alert pass, its figure is the pass's, and its read name says
-    /// so. Both are asserted rather than skipped, so neither becomes a hiding place.</para>
+    /// <para><b>Every await, not every read</b> — see <see cref="s_awaitToken"/>. An apply or a delivery
+    /// between two reads inflates the later read's figure exactly as another read would, and it can push
+    /// the total BELOW the bound rather than above it, which misreads a client cutoff as a store fault.
+    /// Restricting the rule to reads required classifying callees, and the classifier was the part that
+    /// was wrong.</para>
+    ///
+    /// <para>A block's LAST await needs no boundary after it: nothing follows that could inflate the
+    /// figure. The count of pairs is asserted in both directions, so a walk that silently stopped
+    /// reaching cannot report clean.</para>
     /// </summary>
     [Fact]
-    public void EveryCountedBlock_GivesTheFailingReadTheClockToItself()
+    public void EveryCountedBlock_GivesTheFailingOperationTheClockToItself()
     {
         var violations = new List<string>();
         var blocks = 0;
-        var readsNeedingARestart = 0;
-        var blocksWithNoRead = new List<string>();
+        var pairs = 0;
 
         void Scan(string raw, string stripped, string where)
         {
@@ -831,7 +813,7 @@ public sealed class AlertReadFailureSurfaceTests
                 var call = Regex.Match(rawBody, s_recordCall);
                 if (!call.Success)
                 {
-                    /* The sibling pin owns this case and names it; reporting it twice would make one
+                    /* The sibling pin owns that case and names it; reporting it twice would make one
                        defect look like two. */
                     continue;
                 }
@@ -853,45 +835,22 @@ public sealed class AlertReadFailureSurfaceTests
                 var tryOpen = stripped.IndexOf('{', nearest!.Index + nearest.Length - 1);
                 Assert.True(tryOpen > 0, $"{where}: the {readName} block's try has no body");
 
-                /* STRIPPED, so an `await` written in prose cannot register as an operation and a
-                   `Restart()` mentioned in a comment cannot satisfy the property. Length is preserved, so
-                   the offsets still line up with the raw source. */
+                /* STRIPPED, so an await written in prose cannot register as an operation and a Restart()
+                   mentioned in a comment cannot satisfy the property. Length is preserved, so the offsets
+                   still line up with the raw source. */
                 var body = CSharpSourceWalker.BraceBalanced(stripped, tryOpen);
 
-                var awaits = s_awaitedCall.Matches(body)
-                    .Select(a => (a.Index, Callee: a.Groups["callee"].Value))
-                    .ToList();
-
-                foreach (var (_, callee) in awaits)
+                var offsets = s_awaitToken.Matches(body).Select(a => a.Index).ToList();
+                for (var i = 0; i < offsets.Count - 1; i++)
                 {
-                    Assert.True(
-                        s_awaitedStoreReads.Contains(callee) || s_awaitedNonReads.Contains(callee),
-                        $"{where}: the {readName} block awaits {callee}, which is in neither "
-                        + "s_awaitedStoreReads nor s_awaitedNonReads. Classify it — a prefix guess is what "
-                        + "under-counted this population once already.");
-                }
-
-                if (!awaits.Any(a => s_awaitedStoreReads.Contains(a.Callee)))
-                {
-                    blocksWithNoRead.Add(readName);
-                    continue;
-                }
-
-                for (var i = 0; i < awaits.Count - 1; i++)
-                {
-                    if (!s_awaitedStoreReads.Contains(awaits[i].Callee))
-                    {
-                        continue;
-                    }
-
-                    readsNeedingARestart++;
-                    var gap = body[awaits[i].Index..awaits[i + 1].Index];
-                    if (!gap.Contains(clock + ".Restart();", StringComparison.Ordinal))
+                    pairs++;
+                    if (!body[offsets[i]..offsets[i + 1]]
+                            .Contains(clock + ".Restart();", StringComparison.Ordinal))
                     {
                         violations.Add(
-                            $"{where}: in the {readName} block, {awaits[i].Callee} is followed by "
-                            + $"{awaits[i + 1].Callee} with no {clock}.Restart() between them, so a fault "
-                            + "in the later one records both");
+                            $"{where}: in the {readName} block, the awaits at offsets {offsets[i]} and "
+                            + $"{offsets[i + 1]} have no {clock}.Restart() between them, so a fault in the "
+                            + "later one records both");
                     }
                 }
             }
@@ -918,74 +877,75 @@ public sealed class AlertReadFailureSurfaceTests
 
         Assert.Equal(CountedSites, blocks);
 
-        /* Both directions on the walk, so a scan that stopped reaching cannot report clean: there are
-           reads to bracket, and the one read-free block is the one that is supposed to be read-free. */
-        Assert.True(readsNeedingARestart >= 25, $"only {readsNeedingARestart} read(s) needed a restart");
-        Assert.Equal(new[] { "shared engine sweep" }, blocksWithNoRead);
+        /* The other direction. A scan that found no consecutive pairs would satisfy the loop above
+           vacuously, and these blocks demonstrably have them. */
+        Assert.True(pairs >= 55, $"only {pairs} consecutive await pair(s) were examined");
     }
 
     /// <summary>
-    /// The positive control for the scan above. Two fixtures that must red and one that must pass, through
-    /// the same substring property — including the shape that started this, where two reads sit inside one
-    /// argument list with nowhere to put a restart.
+    /// The positive control for the scan above, through the same substring property — including the two
+    /// shapes that each cost a review round: an apply between two reads, and two awaits inside one
+    /// argument list where no inserted line can go.
     /// </summary>
     [Fact]
-    public void TheRestartScanner_RedsOnTwoReadsSharingOneClock()
+    public void TheRestartScanner_RedsWhenAnyTwoAwaitsShareOneClock()
     {
-        static (List<string> Violations, int Reads) Scan(string body, string clock)
+        static List<int> Scan(string body, string clock)
         {
-            var violations = new List<string>();
-            var awaits = s_awaitedCall.Matches(body)
-                .Select(a => (a.Index, Callee: a.Groups["callee"].Value))
-                .ToList();
-            var reads = 0;
+            var offsets = s_awaitToken.Matches(body).Select(a => a.Index).ToList();
+            var bad = new List<int>();
 
-            for (var i = 0; i < awaits.Count - 1; i++)
+            for (var i = 0; i < offsets.Count - 1; i++)
             {
-                if (!s_awaitedStoreReads.Contains(awaits[i].Callee))
-                {
-                    continue;
-                }
-
-                reads++;
-                if (!body[awaits[i].Index..awaits[i + 1].Index]
+                if (!body[offsets[i]..offsets[i + 1]]
                         .Contains(clock + ".Restart();", StringComparison.Ordinal))
                 {
-                    violations.Add(awaits[i].Callee);
+                    bad.Add(i);
                 }
             }
 
-            return (violations, reads);
+            return bad;
         }
 
-        /* Bracketed: each read gets the clock to itself. */
-        var (ok, okReads) = Scan(
+        /* Bracketed: every operation gets the clock to itself. */
+        Assert.Empty(Scan(
             """
             var a = await GetXminHorizonAsync(id, ct);
+            readClock.Restart();
+            await ApplyAsync(a);
             readClock.Restart();
             var b = await GetWraparoundRiskAsync(id, ct);
             readClock.Restart();
             await DeliverAsync(a, b);
             """,
-            "readClock");
-        Assert.Equal(2, okReads);
-        Assert.Empty(ok);
+            "readClock"));
 
-        /* One clock across two reads — the class the review found. */
-        var (bad, badReads) = Scan(
+        /* Two reads under one clock — the first class the review found. */
+        Assert.Equal(new[] { 0 }, Scan(
             """
             var a = await GetXminHorizonAsync(id, ct);
             var b = await GetWraparoundRiskAsync(id, ct);
             readClock.Restart();
             await DeliverAsync(a, b);
             """,
-            "readClock");
-        Assert.Equal(2, badReads);
-        Assert.Equal(new[] { "GetXminHorizonAsync" }, bad);
+            "readClock"));
 
-        /* And the shape that cannot be fixed by inserting a line: two reads awaited inside ONE argument
-           list. The scan sees it for the same reason — no restart between the two offsets. */
-        var (argList, argReads) = Scan(
+        /* An APPLY between two reads, with the null-forgiving spelling the old pattern could not see.
+           This is the arm that would have passed before: the apply was invisible, so the two reads
+           looked adjacent and their single restart looked sufficient. */
+        Assert.Equal(new[] { 1 }, Scan(
+            """
+            var a = await ReadStuckCompressionJobsAsync(c, log, ct);
+            readClock.Restart();
+            await _selfAlerts!.EvaluateCompressionJobsAsync(a, ct);
+            var b = await ReadJobCadenceReadingsAsync(c, log, ct);
+            readClock.Restart();
+            await _selfAlerts!.EvaluateStoreJobCadenceAsync(b, ct);
+            """,
+            "readClock"));
+
+        /* And the shape no inserted line can fix: two awaits inside one argument list. */
+        Assert.Equal(new[] { 0 }, Scan(
             """
             var findings = Evaluate(
                 await GetWraparoundRiskAsync(id, ct),
@@ -993,20 +953,20 @@ public sealed class AlertReadFailureSurfaceTests
             readClock.Restart();
             await DeliverAsync(findings);
             """,
-            "readClock");
-        Assert.Equal(2, argReads);
-        Assert.Equal(new[] { "GetWraparoundRiskAsync" }, argList);
+            "readClock"));
 
-        /* A delivery does not need a clock of its own, so a block of nothing but deliveries reds nowhere —
-           the control that stops the scan flagging everything and passing by accident. */
-        var (deliveries, deliveryReads) = Scan(
+        /* `await using` is not an operation at that point in the text, so it is not half of a pair —
+           otherwise every block that opens a connection that way would red on something unfixable. */
+        Assert.Empty(Scan(
             """
-            await FireAsync(outcome);
-            await NotifyResolutionAsync(resolution);
+            await using var connection = await OpenConnectionAsync(ct);
+            readClock.Restart();
+            await ReadCompressionActivityAsync(connection, log, ct);
             """,
-            "readClock");
-        Assert.Equal(0, deliveryReads);
-        Assert.Empty(deliveries);
+            "readClock"));
+
+        /* The control that stops the scan flagging everything: a single await is no pair at all. */
+        Assert.Empty(Scan("var a = await GetXminHorizonAsync(id, ct);", "readClock"));
     }
 
     private static void AssertScan(string fixture, int expectedSites, string? expectedViolation)

@@ -3225,6 +3225,7 @@ public sealed class DarlingWorker : BackgroundService
                 Suppressed: false);
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);
+            sweepReadClock.Restart();
 
             /* PostgreSQL predictors ride alongside rather than inside the shared engine — see
                IPostgresAlertReadAdapter for why the read contract is separate. Gated on the probed engine,
@@ -3478,6 +3479,7 @@ public sealed class DarlingWorker : BackgroundService
                         Severity: null,
                         ShortMessage: $"Total CPU at {reading.CpuPercent:F0}% (threshold: {alertSettings.CpuThresholdPercent}%)"),
                     cancellationToken);
+                readClock.Restart();
             }
             else if (wasActive)
             {
@@ -3564,6 +3566,7 @@ public sealed class DarlingWorker : BackgroundService
                    process even if the write is lost, same posture as every other watermark save
                    in this codebase. */
                 await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, decision.Watermark);
+                readClock.Restart();
             }
 
             var wasActive = _activePgDeadlockAlert.TryGetValue(key, out var activeBefore) && activeBefore;
@@ -3597,6 +3600,7 @@ public sealed class DarlingWorker : BackgroundService
                         Severity: null,
                         ShortMessage: $"{count} deadlock(s) in the last hour"),
                     cancellationToken);
+                            readClock.Restart();
             }
             else if (!decision.Active && wasActive)
             {
@@ -3678,6 +3682,7 @@ public sealed class DarlingWorker : BackgroundService
             if (decision.Watermark != watermark)
             {
                 await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, decision.Watermark);
+                readClock.Restart();
             }
 
             var wasActive = _activePgBlockingAlert.TryGetValue(key, out var activeBefore) && activeBefore;
@@ -3711,6 +3716,7 @@ public sealed class DarlingWorker : BackgroundService
                         Severity: null,
                         ShortMessage: $"{count} blocking session(s)"),
                     cancellationToken);
+                            readClock.Restart();
             }
             else if (!decision.Active && wasActive)
             {
@@ -3830,6 +3836,7 @@ public sealed class DarlingWorker : BackgroundService
                         ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m — {worst.CommandTag ?? "(unknown)"}"
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
                     cancellationToken);
+                            readClock.Restart();
             }
             else if (wasActive)
             {
@@ -4017,6 +4024,7 @@ public sealed class DarlingWorker : BackgroundService
                         finding.Severity,
                         finding.ShortMessage),
                     cancellationToken);
+                                readClock.Restart();
             }
 
             /* The Cleared edge, per subject: previously active, no longer over the bar. Late by up to one
@@ -4380,6 +4388,7 @@ LIMIT 1";
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            readClock.Restart();
 
             /* #1778: report what compression is DOING before deciding whether anything is stuck. The field
                could see hours-long compressions only in hindsight, by their effect on disk; this puts a
@@ -4413,6 +4422,7 @@ LIMIT 1";
                 stuckJobs,
                 jobId => TimescaleSupport.TryRearmJobAsync(connection, jobId, _logger, cancellationToken),
                 cancellationToken);
+            readClock.Restart();
 
             /* #2136: the Store Job Over Cadence check rides the same connection and hourly cadence — a
                background job whose last successful run reached the warning share of its own schedule
@@ -4423,6 +4433,7 @@ LIMIT 1";
                 connection, _logger, cancellationToken);
             readClock.Restart();
             await _selfAlerts!.EvaluateStoreJobCadenceAsync(cadenceReadings, cancellationToken);
+            readClock.Restart();
 
             /* #2813: the Retention Held check rides the same connection and hourly cadence. A retention
                policy the #1680/#1877 coverage gate has paused reports total_failures = 0 and a plausible
@@ -4432,6 +4443,7 @@ LIMIT 1";
                alone, which is the normal state of every freshly created policy. Same isolation posture. */
             var retentionHolds = await TimescaleSupport.ReadRetentionHoldReadingsAsync(
                 connection, _logger, cancellationToken);
+            readClock.Restart();
             await _selfAlerts!.EvaluateRetentionHoldsAsync(retentionHolds, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

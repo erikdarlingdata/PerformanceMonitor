@@ -902,7 +902,7 @@ public sealed class AlertEngine
         try
         {
             var triggered = await _readAdapter.GetPoisonWaitDeltasAsync(key, _settings.PoisonWaitThresholdMs, ct); /* :278 */
-            readClock.Restart();
+        readClock.Restart();
 
             if (triggered.Count > 0)
             {
@@ -942,6 +942,7 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.PoisonWaitThresholdMs,
                         Muted: isMuted, Severity: poisonContext?.SeverityOverride,
                         ShortMessage: $"{worst.WaitType} avg {worst.AvgMsPerWait:F0}ms/wait"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait) /* :323 */
@@ -999,6 +1000,7 @@ public sealed class AlertEngine
                displayed top N keeps its total instead of restarting. */
             var lrqOccurrences = await ObserveOccurrencesAsync(
                 key, LongRunningQueryWatermarkMetric, AlertContextBuilders.LongRunningQueryIncidents(serverName, longRunning), now);
+            readClock.Restart();
             if (longRunning.Count > 0)
             {
                 _activeLongRunningQueryAlert[key] = true;                           /* :350 */
@@ -1033,12 +1035,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LongRunningQueryThresholdMinutes,
                         Muted: isMuted, Severity: lrqContext?.SeverityOverride,
                         ShortMessage: $"Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeLongRunningQueryAlert.TryGetValue(key, out var wasLongRunning) && wasLongRunning) /* :395 */
             {
                 _activeLongRunningQueryAlert[key] = false;
                 await ClearOccurrencesAsync(key, LongRunningQueryWatermarkMetric);                          /* :397 */
+                readClock.Restart();
                 if (!suppressed)                                                    /* :398 */
                 {
                     await NotifyResolutionAsync(new AlertResolution(
@@ -1073,7 +1077,7 @@ public sealed class AlertEngine
         try
         {
             var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);           /* :418 */
-            readClock.Restart();
+        readClock.Restart();
 
             if (tempDb != null && tempDb.ReservedPercent >= _settings.TempDbSpaceThresholdPercent) /* :420 */
             {
@@ -1097,6 +1101,7 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.TempDbSpaceThresholdPercent,
                         Muted: isMuted, Severity: tempDbContext?.SeverityOverride,
                         ShortMessage: $"tempdb {tempDb.ReservedPercent:F0}% reserved"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb) /* :456 */
@@ -1143,7 +1148,7 @@ public sealed class AlertEngine
         try
         {
             var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);      /* :480 */
-            readClock.Restart();
+        readClock.Restart();
             var breached = AlertContextBuilders.GetBreachedVolumes(volumes, _settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb); /* :481 */
             conditionPresent = breached.Count > 0;                                  /* :487 — feeds the sweep result */
 
@@ -1153,6 +1158,7 @@ public sealed class AlertEngine
                displayed top N keeps its total instead of restarting. */
             var lowDiskOccurrences = await ObserveOccurrencesAsync(
                 key, VolumeFreeSpaceWatermarkMetric, AlertContextBuilders.VolumeFreeSpaceIncidents(serverName, breached), now);
+            readClock.Restart();
             if (breached.Count > 0)
             {
                 var worst = breached[0];                                            /* :489 */
@@ -1188,12 +1194,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LowDiskThresholdPercent,
                         Muted: isMuted, Severity: lowDiskContext?.SeverityOverride,
                         ShortMessage: $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeLowDiskAlert.TryGetValue(key, out var wasLowDisk) && wasLowDisk) /* :538 */
             {
                 _activeLowDiskAlert[key] = false;
                 await ClearOccurrencesAsync(key, VolumeFreeSpaceWatermarkMetric);                                   /* :540 */
+                readClock.Restart();
                 _lastAlertedLowDiskPercent.TryRemove(key, out _);                   /* :541 */
                 if (!suppressed)                                                    /* :542 */
                 {
@@ -1250,6 +1258,7 @@ public sealed class AlertEngine
                displayed top N keeps its total instead of restarting. */
             var pvsOccurrences = await ObserveOccurrencesAsync(
                 key, PvsWatermarkMetric, AlertContextBuilders.PvsPressureIncidents(serverName, breached), now);
+            readClock.Restart();
             if (breached.Count > 0)
             {
                 var worst = breached[0];
@@ -1277,12 +1286,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.PvsThresholdPercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activePvsAlert.TryGetValue(key, out var wasPvs) && wasPvs)
             {
                 _activePvsAlert[key] = false;
                 await ClearOccurrencesAsync(key, PvsWatermarkMetric);
+                readClock.Restart();
                 _lastAlertedPvsPercent.TryRemove(key, out _);
                 if (!suppressed)
                 {
@@ -1346,6 +1357,7 @@ public sealed class AlertEngine
             var fileGrowthOccurrences = await ObserveOccurrencesAsync(
                 key, FileGrowthWatermarkMetric,
                 AlertContextBuilders.FileGrowthIncidents(serverName, breached), now);
+            readClock.Restart();
 
             if (breached.Count > 0)
             {
@@ -1378,12 +1390,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.FileGrowthVolumePercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: headline), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeFileGrowthAlert.TryGetValue(key, out var wasGrowing) && wasGrowing)
             {
                 _activeFileGrowthAlert[key] = false;
                 await ClearOccurrencesAsync(key, FileGrowthWatermarkMetric);
+                readClock.Restart();
 
                 if (!suppressed)
                 {
@@ -1419,7 +1433,7 @@ public sealed class AlertEngine
         try
         {
             var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct); /* :562 */
-            readClock.Restart();
+        readClock.Restart();
 
             /* #1812: a stale latest snapshot is NO evidence, in either direction. Firing on it re-alerts
                a historical run every cooldown forever (the per-run cooldown key deliberately expires each
@@ -1450,6 +1464,7 @@ public sealed class AlertEngine
                displayed top N keeps its total instead of restarting. */
             var jobOccurrences = await ObserveOccurrencesAsync(
                 key, AnomalousJobWatermarkMetric, AlertContextBuilders.AnomalousJobIncidents(serverName, anomalousJobs), now);
+            readClock.Restart();
             if (anomalousJobs.Count > 0)
             {
                 _activeLongRunningJobAlert[key] = true;                             /* :577 */
@@ -1476,12 +1491,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LongRunningJobMultiplier * 100,
                         Muted: isMuted, Severity: jobContext?.SeverityOverride,
                         ShortMessage: $"{worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeLongRunningJobAlert.TryGetValue(key, out var wasJob) && wasJob) /* :616 */
             {
                 _activeLongRunningJobAlert[key] = false;
                 await ClearOccurrencesAsync(key, AnomalousJobWatermarkMetric);                            /* :618 */
+                readClock.Restart();
                 if (!suppressed)                                                    /* :619 */
                 {
                     await NotifyResolutionAsync(new AlertResolution(
