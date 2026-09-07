@@ -3600,7 +3600,7 @@ public sealed class DarlingWorker : BackgroundService
                         Severity: null,
                         ShortMessage: $"{count} deadlock(s) in the last hour"),
                     cancellationToken);
-                            readClock.Restart();
+                readClock.Restart();
             }
             else if (!decision.Active && wasActive)
             {
@@ -3716,7 +3716,7 @@ public sealed class DarlingWorker : BackgroundService
                         Severity: null,
                         ShortMessage: $"{count} blocking session(s)"),
                     cancellationToken);
-                            readClock.Restart();
+                readClock.Restart();
             }
             else if (!decision.Active && wasActive)
             {
@@ -3836,7 +3836,7 @@ public sealed class DarlingWorker : BackgroundService
                         ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m — {worst.CommandTag ?? "(unknown)"}"
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
                     cancellationToken);
-                            readClock.Restart();
+                readClock.Restart();
             }
             else if (wasActive)
             {
@@ -4024,7 +4024,7 @@ public sealed class DarlingWorker : BackgroundService
                         finding.Severity,
                         finding.ShortMessage),
                     cancellationToken);
-                                readClock.Restart();
+                readClock.Restart();
             }
 
             /* The Cleared edge, per subject: previously active, no longer over the bar. Late by up to one
@@ -4452,6 +4452,22 @@ LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* WHAT THIS SITE'S ELAPSED CAN AND CANNOT CLAIM, stated because the shared finding sentence
+               frames every entry against the alert pass's own command deadline and this one does not fit
+               that frame.
+
+               Each TimescaleSupport.Read*Async above catches `Exception ex when (ex is not
+               OperationCanceledException)` internally, logs at Debug and returns an empty result, and so
+               do the _selfAlerts Evaluate* wrappers. So a timeout on one of the reads this entry is NAMED
+               for never reaches here — it is swallowed one level down. What reaches here is the connection
+               open, a cancellation, or a genuine bug. And those reads run on
+               TimescaleSupport.JobCatalogReadTimeoutSeconds (30 s), not
+               DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds (10 s), so even when one did surface
+               the 10 s bound would be the wrong thing to compare it to.
+
+               The measurement stays, because a figure for the operation that actually faulted is still
+               worth having and the clock boundaries above make it one operation's. What does not stay is
+               any claim that it discriminates a client cutoff from a store fault at this site. */
             _logger.LogError("Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);

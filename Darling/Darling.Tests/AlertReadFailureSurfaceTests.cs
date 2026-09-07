@@ -14,6 +14,8 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using Xunit;
@@ -173,6 +175,128 @@ public sealed class AlertReadFailureSurfaceTests
 
         /* Buckets do not bleed. */
         Assert.Equal(41, counter.ReadFor("101").LastFailureElapsedMs);
+    }
+
+    /// <summary>
+    /// The newest failure's stamp, name and elapsed always describe ONE failure, under concurrency.
+    ///
+    /// <para><b>Why the single-threaded pin above is not enough.</b>
+    /// <see cref="TheElapsedIsCarriedVerbatim_AndSharesTheStampsCurrencyTest"/> asserts the trio cannot
+    /// disagree, and it would pass just as happily over three independent fields — which can be observed
+    /// part-applied. Two failures landing in the same bucket concurrently could leave a reader with one
+    /// failure's elapsed beside the other's name, and that is not a stale reading, it is a confident
+    /// classification of the wrong read. The fleet bucket makes it reachable rather than theoretical:
+    /// several call sites record with a null key, so they all share it.</para>
+    ///
+    /// <para>The pairs are chosen so a blend is DETECTABLE — each read name has exactly one legal elapsed,
+    /// and the two sets are disjoint — because a test that recorded the same elapsed from every thread
+    /// could not fail no matter how torn the write was.</para>
+    /// </summary>
+    [Fact]
+    public void TheNewestFailuresFactsAreNeverABlendOfTwo()
+    {
+        const string Key = "500";
+
+        /* One legal elapsed per read name, disjoint across writers, so a blend is DETECTABLE. A test that
+           recorded the same elapsed from every thread could not fail no matter how torn the write was. */
+        var pairs = new (string Read, long ElapsedMs)[]
+        {
+            ("forced-plan failures", 10_067),
+            ("collection-health self-alert", 41),
+            ("capture-down self-alert", 10_004),
+            ("database state", 7),
+        };
+        var legal = pairs.ToDictionary(p => p.Read, p => p.ElapsedMs, StringComparer.Ordinal);
+
+        var counter = new AlertReadFailureCounter();
+        var blends = new List<string>();
+        var observations = 0;
+        var stop = false;
+
+        /* Half the writers on a per-server key, so ReadFor can observe the whole trio and the elapsed can
+           be checked against the name it must belong to; half on the null key, because the fleet bucket is
+           the one several production sites share and is where a collision is most likely. */
+        var writers = pairs
+            .Select(pair => Task.Run(() =>
+            {
+                while (!Volatile.Read(ref stop))
+                {
+                    counter.RecordReadFailure(Key, pair.Read, pair.ElapsedMs);
+                    counter.RecordReadFailure(null, pair.Read, pair.ElapsedMs);
+                }
+            }))
+            .ToArray();
+
+        var reader = Task.Run(() =>
+        {
+            while (!Volatile.Read(ref stop))
+            {
+                var reading = counter.ReadFor(Key);
+                if (reading.LastFailureRead is null)
+                {
+                    continue;
+                }
+
+                Interlocked.Increment(ref observations);
+
+                if (!legal.TryGetValue(reading.LastFailureRead, out var expected))
+                {
+                    lock (blends)
+                    {
+                        blends.Add($"unknown read name '{reading.LastFailureRead}'");
+                    }
+                }
+                else if (reading.LastFailureElapsedMs != expected)
+                {
+                    lock (blends)
+                    {
+                        blends.Add(
+                            $"'{reading.LastFailureRead}' paired with {reading.LastFailureElapsedMs} ms, "
+                            + $"which belongs to another failure (its own is {expected} ms)");
+                    }
+                }
+                else if (reading.LastFailureAtUtc is null)
+                {
+                    lock (blends)
+                    {
+                        blends.Add($"'{reading.LastFailureRead}' with an elapsed and no stamp");
+                    }
+                }
+            }
+        });
+
+        Thread.Sleep(250);
+        Volatile.Write(ref stop, true);
+        Task.WaitAll(writers.Append(reader).ToArray());
+
+        Assert.True(
+            Volatile.Read(ref observations) > 0,
+            "the reader observed nothing, so its silence proves nothing");
+
+        lock (blends)
+        {
+            Assert.True(
+                blends.Count == 0,
+                $"{blends.Count} blended reading(s) over {observations} observations: "
+                + string.Join(" | ", blends.Take(5)));
+        }
+
+        /* And the settled trio is one writer's, not a mixture — asserted after the writers stop so this
+           half is about the VALUE rather than about timing. */
+        var settled = counter.ReadFor(Key);
+        Assert.NotNull(settled.LastFailureRead);
+        Assert.Equal(legal[settled.LastFailureRead!], settled.LastFailureElapsedMs);
+        Assert.NotNull(settled.LastFailureAtUtc);
+
+        /* The fleet bucket reaches no per-server reading by design, so its trio is checked through the
+           instance read, which carries the stamp and the name. The elapsed is not on that surface — stated
+           because it bounds what this half proves. */
+        var (instanceFailures, instanceStamp, instanceRead) = counter.ReadInstance();
+        Assert.True(instanceFailures > 0);
+        Assert.NotNull(instanceStamp);
+        Assert.True(
+            legal.ContainsKey(instanceRead!),
+            $"the instance-wide newest read name is '{instanceRead}', which no writer recorded");
     }
 
     [Fact]

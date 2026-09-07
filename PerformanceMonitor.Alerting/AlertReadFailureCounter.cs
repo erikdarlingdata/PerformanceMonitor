@@ -59,6 +59,13 @@ namespace PerformanceMonitor.Alerting;
 /// by nature and its read name says so; and an <c>await using</c> scope's disposal at block exit has no
 /// boundary of its own, so a fault there reports the last operation's elapsed plus the disposal's.</para>
 ///
+/// <para><b>And one entry the client-versus-server reading does not apply to at all.</b> The store
+/// background-job health entry names five reads that each swallow their own faults one level down and run
+/// on a 30-second budget rather than the alert pass's ten, so a timeout on any of them never reaches the
+/// block this measurement is scoped to and the ten-second bound would be the wrong comparison if it did.
+/// Its figure is a real duration for whatever actually faulted — the connection open, most likely — and
+/// nothing more. The site says so where it records.</para>
+///
 /// <para><b>The discriminating reading is Darling's, and the gap is named rather than papered over.</b>
 /// Everything above needs the read to HAVE a deadline for the elapsed to say who ended it. Darling's alert
 /// pass sets one on every store read; Lite's <c>LiteAlertReadAdapter</c> reads the local store through
@@ -92,9 +99,12 @@ namespace PerformanceMonitor.Alerting;
 ///
 /// <para><b>Thread-safety.</b> Many alert passes run concurrently across servers. Counters are
 /// <see cref="Interlocked"/> longs; the per-server map is a <see cref="ConcurrentDictionary{TKey,TValue}"/>
-/// of boxed holders so an increment never replaces an entry. <see cref="ReadFor"/> takes each number
-/// with a volatile read and makes no claim that the fields it returns are one atomic instant — a total
-/// and a per-server count sampled a microsecond apart is not a defect this surface can be misread on.</para>
+/// of boxed holders so an increment never replaces an entry. The newest failure's stamp, name and elapsed
+/// are one immutable value exchanged as a reference, so those three ARE atomic together — that one is
+/// load-bearing, because the elapsed is only meaningful as the elapsed of the read the other two name, and
+/// a blend of two failures would be a wrong classification rather than a stale one. The COUNTS carry no
+/// such guarantee and need none: a total and a per-server count sampled a microsecond apart is not a defect
+/// this surface can be misread on.</para>
 /// </summary>
 public sealed class AlertReadFailureCounter
 {
@@ -110,13 +120,28 @@ public sealed class AlertReadFailureCounter
     /// </summary>
     public static AlertReadFailureCounter Shared { get; } = new AlertReadFailureCounter();
 
+    /// <summary>
+    /// The newest failure's three facts, held as ONE immutable value so a reader cannot see a mixture.
+    ///
+    /// <para><b>Why not three fields.</b> Three independent writes — even three interlocked ones — can be
+    /// observed part-applied: two failures landing in the same bucket concurrently can leave a reader with
+    /// one failure's elapsed beside another's read name and stamp. That is not academic here. Several call
+    /// sites record with a null key, so they all share the fleet bucket, and the surface's whole claim is
+    /// that the stamp, the name and the elapsed describe ONE event — the elapsed says whose deadline ended
+    /// <em>that</em> read. A torn trio would make the classification wrong rather than merely stale, and it
+    /// would satisfy a single-threaded test perfectly; <c>TheNewestFailuresFactsAreNeverABlendOfTwo</c>
+    /// is the one that fails on it, and it does fail when the trio is published in two steps.</para>
+    ///
+    /// <para>Exchanged as a reference, so the trio moves atomically and every reader sees some failure's
+    /// consistent facts, never a blend of two.</para>
+    /// </summary>
+    private sealed record LastFailure(long Ticks, string Read, long ElapsedMs);
+
     private sealed class ServerCounts
     {
         public long ReadFailures;
         public long Passes;
-        public long LastFailureTicks;
-        public string? LastFailureRead;
-        public long LastFailureElapsedMs;
+        public LastFailure? Newest;
     }
 
     private readonly ConcurrentDictionary<string, ServerCounts> _byServer =
@@ -128,8 +153,10 @@ public sealed class AlertReadFailureCounter
     private readonly ServerCounts _fleet = new ServerCounts();
 
     private long _instanceReadFailures;
-    private long _instanceLastFailureTicks;
-    private string? _instanceLastFailureRead;
+
+    /* Same trio, same reason, one level up: the instance-wide stamp and name are exchanged together so a
+       reader cannot pair one failure's time with another's name. */
+    private LastFailure? _instanceNewest;
 
     private readonly Func<DateTime> _utcNow;
 
@@ -195,20 +222,20 @@ public sealed class AlertReadFailureCounter
         var nowTicks = _utcNow().Ticks;
         var elapsed = elapsedMilliseconds < 0 ? 0 : elapsedMilliseconds;
 
+        /* ONE value carrying all three facts, so a concurrent second failure in the same bucket cannot
+           leave a reader with this failure's elapsed beside that one's name. Published in a single
+           exchange for the same reason. */
+        var newest = new LastFailure(nowTicks, name, elapsed);
+
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? _fleet : Bucket(serverKey!);
         Interlocked.Increment(ref bucket.ReadFailures);
-        Interlocked.Exchange(ref bucket.LastFailureTicks, nowTicks);
-        bucket.LastFailureRead = name;
-        Interlocked.Exchange(ref bucket.LastFailureElapsedMs, elapsed);
+        Interlocked.Exchange(ref bucket.Newest, newest);
 
-        /* The instance side stays a COUNT plus a stamp plus a name. It deliberately does not carry the
-           elapsed: nothing renders ReadInstance today, so an instance-wide elapsed would be a measurement
-           with no reader, which is the defect one level down from the one #3013 closed. The elapsed reaches
-           an operator two ways — per-server through Reading, and for every recorded site including the
-           fleet-scoped ones through the log line the call site writes. */
+        /* The instance side carries the same trio. Its ELAPSED reaches no surface today — nothing renders
+           ReadInstance — so it is not on the tuple that method returns; the value is shared rather than
+           recomputed because a second construction is a second chance to disagree. */
         Interlocked.Increment(ref _instanceReadFailures);
-        Interlocked.Exchange(ref _instanceLastFailureTicks, nowTicks);
-        _instanceLastFailureRead = name;
+        Interlocked.Exchange(ref _instanceNewest, newest);
     }
 
     /// <summary>
@@ -265,9 +292,11 @@ public sealed class AlertReadFailureCounter
     /// reads set no command deadline at all, so on Lite this is a plain duration rather than a
     /// client-versus-server test.</para>
     ///
-    /// <para>Null exactly when <paramref name="LastFailureAtUtc"/> is null, from the same test, so the pair
-    /// cannot disagree: a reading either has a newest failure with both a stamp and an elapsed, or has
-    /// neither. One nonzero measurement beside a null stamp would be a duration belonging to no event.</para>
+    /// <para>Null exactly when <paramref name="LastFailureAtUtc"/> is null, and from the same value rather
+    /// than from a matching test, so the pair cannot disagree even under concurrent failures: a reading
+    /// either has a newest failure with a stamp, a name and an elapsed that all describe it, or has none of
+    /// the three. One measurement beside a null stamp would be a duration belonging to no event, and one
+    /// beside ANOTHER failure's name would be worse — a confident classification of the wrong read.</para>
     /// </param>
     /// <param name="CountingSinceUtc">When counting began — see <see cref="CountingSince"/>.</param>
     public sealed record Reading(
@@ -294,19 +323,24 @@ public sealed class AlertReadFailureCounter
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? null : Lookup(serverKey!);
         var serverFailures = bucket is null ? 0L : Interlocked.Read(ref bucket.ReadFailures);
         var serverPasses = bucket is null ? 0L : Interlocked.Read(ref bucket.Passes);
-        var lastTicks = bucket is null ? 0L : Interlocked.Read(ref bucket.LastFailureTicks);
-        var lastElapsed = bucket is null ? 0L : Interlocked.Read(ref bucket.LastFailureElapsedMs);
+
+        /* ONE read of the trio, so the stamp, the name and the elapsed on the returned reading always
+           describe the same failure. Taking them from three fields could pair one failure's elapsed with
+           another's name, which would make the client-versus-server classification wrong rather than
+           merely stale — and would pass every single-threaded test. */
+        var newest = bucket is null ? null : Volatile.Read(ref bucket.Newest);
 
         return new Reading(
             serverFailures,
             serverPasses,
             Interlocked.Read(ref _instanceReadFailures),
-            lastTicks == 0 ? null : new DateTime(lastTicks, DateTimeKind.Utc),
-            bucket?.LastFailureRead,
-            /* The same currency test as the stamp above, so the two cannot disagree: an elapsed with no
-               stamp beside it would be a duration belonging to no event, and a zero elapsed is a real
-               reading (a read that faulted immediately) rather than an absence. */
-            lastTicks == 0 ? null : lastElapsed,
+            newest is null ? null : new DateTime(newest.Ticks, DateTimeKind.Utc),
+            newest?.Read,
+            /* Null exactly when the stamp above is null, from the same value rather than from a matching
+               test, so the two cannot disagree even in principle: an elapsed with no stamp beside it would
+               be a duration belonging to no event. A zero elapsed is a real reading — a read that faulted
+               immediately — rather than an absence, which is why the absence is carried by the null. */
+            newest?.ElapsedMs,
             CountingSince);
     }
 
@@ -316,11 +350,11 @@ public sealed class AlertReadFailureCounter
     /// <summary>The instance-wide figures, for a caller with no server in hand.</summary>
     public (long ReadFailures, DateTime? LastFailureAtUtc, string? LastFailureRead) ReadInstance()
     {
-        var lastTicks = Interlocked.Read(ref _instanceLastFailureTicks);
+        var newest = Volatile.Read(ref _instanceNewest);
         return (
             Interlocked.Read(ref _instanceReadFailures),
-            lastTicks == 0 ? null : new DateTime(lastTicks, DateTimeKind.Utc),
-            _instanceLastFailureRead);
+            newest is null ? null : new DateTime(newest.Ticks, DateTimeKind.Utc),
+            newest?.Read);
     }
 
     /// <summary>Every server key that has recorded a pass or a failure — for a fleet-level reader.</summary>
@@ -442,8 +476,12 @@ public sealed class AlertReadFailureCounter
         + "no SQLSTATE, exactly like a dropped connection. A figure well ABOVE that bound is a third reading: "
         + "the failure was not a single bounded read. Each site restarts its clock between every pair of "
         + "consecutive awaits so that is rare, and the one entry where it is expected is the shared engine "
-        + "sweep, whose awaited operation is a whole alert pass rather than one command. Read it that way "
-        + "on the Darling service, whose "
+        + "sweep, whose awaited operation is a whole alert pass rather than one command. One further "
+        + "entry the client-versus-server reading does not apply to at all: the store background-job "
+        + "health reads each swallow their own faults one level down and run on a 30-second budget "
+        + "rather than the alert pass's ten, so that entry's figure is a real duration for whatever "
+        + "faulted and not evidence about who ended it. Read the rest that way on the Darling service, "
+        + "whose "
         + "alert pass sets an explicit command deadline. On Lite the alerting reads hit the local store with "
         + "no command deadline of their own, so the figure there is a plain duration - it says a read became "
         + "slow, and nothing about who ended it. Either way it is null exactly when last_failure_at is null, "

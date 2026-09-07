@@ -902,7 +902,7 @@ public sealed class AlertEngine
         try
         {
             var triggered = await _readAdapter.GetPoisonWaitDeltasAsync(key, _settings.PoisonWaitThresholdMs, ct); /* :278 */
-        readClock.Restart();
+            readClock.Restart();
 
             if (triggered.Count > 0)
             {
@@ -1077,7 +1077,7 @@ public sealed class AlertEngine
         try
         {
             var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);           /* :418 */
-        readClock.Restart();
+            readClock.Restart();
 
             if (tempDb != null && tempDb.ReservedPercent >= _settings.TempDbSpaceThresholdPercent) /* :420 */
             {
@@ -1148,7 +1148,7 @@ public sealed class AlertEngine
         try
         {
             var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);      /* :480 */
-        readClock.Restart();
+            readClock.Restart();
             var breached = AlertContextBuilders.GetBreachedVolumes(volumes, _settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb); /* :481 */
             conditionPresent = breached.Count > 0;                                  /* :487 — feeds the sweep result */
 
@@ -1433,7 +1433,7 @@ public sealed class AlertEngine
         try
         {
             var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct); /* :562 */
-        readClock.Restart();
+            readClock.Restart();
 
             /* #1812: a stale latest snapshot is NO evidence, in either direction. Firing on it re-alerts
                a historical run every cooldown forever (the per-run cooldown key deliberately expires each
