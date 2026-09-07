@@ -6070,11 +6070,14 @@ LIMIT 1";
     /// <summary>
     /// The sentence a PostgreSQL command timeout gets instead of the transport's seven words (#2997).
     ///
-    /// <para><b>Why this is not folded into <see cref="PostgresFaultOutcome"/>.</b> That method takes a
-    /// <see cref="PostgresException"/>, and a client-side deadline never produces one: Npgsql surfaces it
-    /// as an <c>NpgsqlException</c> wrapping a <c>TimeoutException</c>, with no SQLSTATE to switch on. So
-    /// the classification it needed could not be reached through a SQLSTATE map however wide that map
-    /// grew — the gap was the parameter type, not the code list.</para>
+    /// <para><b>Why this is not folded into <see cref="PostgresFaultOutcome"/>.</b> Two reasons, and
+    /// neither is that a client-side deadline cannot produce a <see cref="PostgresException"/> — it can,
+    /// when the server's <c>57014</c> response beats the tearing stream. The first is the PARAMETER TYPE:
+    /// that method takes a <see cref="PostgresException"/>, and the shape a client-side deadline
+    /// normally arrives in is an <c>NpgsqlException</c> wrapping a <c>TimeoutException</c> with no
+    /// SQLSTATE at all, so it cannot be reached through a SQLSTATE map however wide that map grew. The
+    /// second is that the answer is not a function of the code: the split below turns on the message
+    /// text, which a switch over SQLSTATE cannot express whatever it is handed.</para>
     ///
     /// <para><b>The status stays ERROR.</b> The store has five and none of them means "ran out of time";
     /// PERMISSIONS is the non-fatal-degradation bucket and would wrongly exclude this from the error
