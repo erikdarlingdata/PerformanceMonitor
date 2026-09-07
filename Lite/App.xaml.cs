@@ -444,10 +444,10 @@ public partial class App : Application
             ConfigDirectory,
             new[] { "ignored_wait_types.json", "collection_schedule.json" });
 
-        // Load settings
+        // Load settings. The log level goes first so it governs every line the loaders below buffer.
+        LoadLogMinimumLevel();
         LoadDefaultTimeRange();
         LoadAlertSettings();
-        LoadLogMinimumLevel();
 
         // Wire the shared-UI time conversion hook before any chart/crosshair can
         // render. The lambda reads CurrentDisplayMode at call time, so later
@@ -862,11 +862,13 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Applies the configured log verbosity (#3104). Runs BEFORE <see cref="AppLogger.Initialize"/> so the
-    /// level is in force for the first line written, including <c>Initialize</c>'s own.
+    /// Applies the configured log verbosity (#3104). The FIRST settings loader and well before
+    /// <see cref="AppLogger.Initialize"/>, so the level governs every line the loaders after it buffer as
+    /// well as <c>Initialize</c>'s own — a level applied halfway through startup would leave whichever
+    /// lines happened to precede it, which is a verbosity decided by call order.
     ///
-    /// <para>No UI: this is the knob that makes the per-cycle collector timing lines recoverable after they
-    /// were gated below the default, and its audience is someone reading a log to diagnose a collection
+    /// <para>No UI: this is the knob that makes the per-database collection timing lines recoverable now
+    /// that they sit below the default, and its audience is someone reading a log to diagnose a collection
     /// failure, not someone browsing Settings. An unrecognised token leaves the default in force and is
     /// reported through the shared reporter, so a typo costs its own setting and is named at startup rather
     /// than silently turning logging down.</para>
@@ -876,7 +878,8 @@ public partial class App : Application
         var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
         if (settings.State == SettingsFileState.Unreadable)
         {
-            /* The unreadable file is already reported by LoadDefaultTimeRange, which runs first. */
+            /* Reported by LoadDefaultTimeRange rather than here, so one unreadable file produces one
+               report no matter how many loaders meet it. */
             return;
         }
 
