@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -589,13 +589,15 @@ public class CollectorHealthRow
     /// <see cref="DeniedSinceLastSuccess"/> is one: both SKUs' tools compose it from the one shared
     /// formatter instead of each writing the branch out, so the two cannot answer differently.
     ///
-    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term. Zero output with
-    /// a current denial is a collector that could not read; zero output alone is one that read and found
-    /// nothing. The predicate is READ here and still not banded — <c>HealthStatus</c> does not call this,
-    /// and this returns display text.</para>
+    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term and
+    /// <see cref="NoteCount"/> the fourth. Zero output with a current denial is a collector that could not
+    /// read; zero output whose runs recorded a note is one that already said why, and the finding defers to
+    /// <see cref="LastNote"/> rather than asserting the event-collector reading over it (#3160); zero output
+    /// with neither is the event collector at rest. Both predicates are READ here and still not banded —
+    /// <c>HealthStatus</c> does not call this, and this returns display text.</para>
     /// </summary>
     public string? OutputFinding =>
-        CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess)
+        CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount)
             is { Length: > 0 } finding
             ? finding
             : null;

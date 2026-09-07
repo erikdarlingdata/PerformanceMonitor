@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -34,7 +34,11 @@ namespace Lite.Tests;
 public sealed class CollectionOutputBesideCostTests
 {
     /* #3010's own Lite fixture counts, so this row is the same shape its sibling suite already pins. */
-    private static CollectorHealthRow Row(long rowsStored, long runsWithRows, bool denialIsNewest) => new()
+    private static CollectorHealthRow Row(
+        long rowsStored,
+        long runsWithRows,
+        bool denialIsNewest,
+        long noteCount = 0) => new()
     {
         CollectorName = "deadlocks",
         TotalRuns = 79_333,
@@ -51,6 +55,12 @@ public sealed class CollectionOutputBesideCostTests
         AvgDurationMs = 620.9,
         P95DurationMs = 1_400,
         MaxDurationMs = 9_100,
+        /* note_count is COUNT(error_message) over SUCCESS runs and last_note is the newest of
+           them, ordered notes-first, so a positive count always has a note to point at. Kept
+           consistent here rather than set independently, because a row with a count and no note
+           is a state the read cannot produce. */
+        NoteCount = noteCount,
+        LastNote = noteCount > 0 ? "enumeration yielded 0 items - nothing to collect this cycle" : null,
     };
 
     /// <summary>
@@ -82,6 +92,95 @@ public sealed class CollectionOutputBesideCostTests
         /* Same spend, same output, opposite readings - the third term is the entire difference. */
         Assert.Equal(correctlyEmpty.RowsStored, blind.RowsStored);
         Assert.NotEqual(correctlyEmpty.DeniedSinceLastSuccess, blind.DeniedSinceLastSuccess);
+    }
+
+    /// <summary>
+    /// A DELIBERATE zero and a BROKEN zero must be distinguishable, and the fourth term is what does it
+    /// (#3160). Both rows here are the same collector with the same spend and the same zero output; the ONLY
+    /// input that differs is how many runs recorded a note about what they found.
+    ///
+    /// <para><b>Same collector on both rows on purpose.</b> The mechanism is keyed on the row's counts and
+    /// never on the collector's NAME. A name list is what #2511 exists to refuse, because it goes stale in
+    /// the direction that makes it pass: the next periodic collector to break gets the event-collector
+    /// sentence until somebody remembers to add it. Driving both readings out of one name is the assertion
+    /// that no name list is consulted.</para>
+    ///
+    /// <para>The measured subject was <c>query_store</c>, which is not an event collector and stored zero
+    /// rows on 11,728 consecutive runs on a read-replica fleet, every one carrying an empty-enumeration
+    /// note. It got the event-collector sentence anyway — the right conclusion from a rationale that does
+    /// not hold, and the same sentence a <c>query_store</c> that had genuinely stopped would have got.</para>
+    /// </summary>
+    [Fact]
+    public void TheNotedZero_DefersToTheNote_AndTheUnnotedZeroKeepsTheCategoryReading()
+    {
+        var noted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: 79_333);
+        var unnoted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: 0);
+
+        Assert.NotNull(noted.OutputFinding);
+        Assert.NotNull(unnoted.OutputFinding);
+
+        /* The NOTED row must not assert the category. Both halves are named, because "needs no action" is
+           the clause that reads as reassurance over a collector that has actually stopped. */
+        Assert.DoesNotContain("correct resting state", noted.OutputFinding, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs no action", noted.OutputFinding, StringComparison.Ordinal);
+
+        /* It defers instead: how many runs said something, and where to read what they said. */
+        Assert.Contains("last_note", noted.OutputFinding, StringComparison.Ordinal);
+        Assert.Contains("note_count", noted.OutputFinding, StringComparison.Ordinal);
+
+        /* The UNNOTED row is the positive control for the two DoesNotContain assertions above - the same
+           tokens over a row that demonstrably carries them, so a check passing by matching nothing cannot
+           hide in the pair. */
+        Assert.Contains("correct resting state", unnoted.OutputFinding, StringComparison.Ordinal);
+        Assert.Contains("needs no action", unnoted.OutputFinding, StringComparison.Ordinal);
+
+        /* And that reading now states the precondition it rests on instead of asserting a category. */
+        Assert.Contains("No run recorded a note", unnoted.OutputFinding, StringComparison.Ordinal);
+
+        /* Neither is the denial reading, and both still report the spend and the zero. */
+        foreach (var finding in new[] { noted.OutputFinding, unnoted.OutputFinding })
+        {
+            Assert.DoesNotContain("grant", finding, StringComparison.Ordinal);
+            Assert.Contains("Stored 0 rows", finding, StringComparison.Ordinal);
+        }
+
+        /* Same spend, same output, one differing term - the shape this suite already uses for the third. */
+        Assert.Equal(noted.RowsStored, unnoted.RowsStored);
+        Assert.Equal(noted.TotalRuns, unnoted.TotalRuns);
+        Assert.NotEqual(noted.NoteCount, unnoted.NoteCount);
+    }
+
+    /// <summary>
+    /// The finding's signature read off the TYPE rather than asserted over a hand-written list, so a FIFTH
+    /// parameter reports itself here instead of passing unnoticed — the discipline
+    /// <see cref="TheBandingSignature_TakesNoOutputAndNoDenialCurrency"/> applies to the band, one method
+    /// over.
+    ///
+    /// <para><b>The load-bearing half is that none of it is a string.</b> The note's prose has exactly one
+    /// home, <see cref="CollectorHealthClassifier.FormatCollectionNote"/>. A finding that took the note TEXT
+    /// would be a second copy of a sentence whose whole value is being accurate about one server's answer,
+    /// and the copy that drifts is never the one being read. Taking the COUNT and pointing at the field is
+    /// what keeps that single copy, so the absence of a string parameter is the property, not an
+    /// accident.</para>
+    /// </summary>
+    [Fact]
+    public void TheFindingSignature_TakesTheNoteCount_AndNoNoteText()
+    {
+        var parameters = typeof(CollectorHealthClassifier)
+            .GetMethod(
+                nameof(CollectorHealthClassifier.FormatOutputFinding),
+                BindingFlags.Public | BindingFlags.Static)!
+            .GetParameters();
+
+        /* The precondition, named so a signature change reports itself rather than turning the assertions
+           below into a vacuous pass over a list that no longer means what this test thinks. */
+        Assert.Equal(4, parameters.Length);
+
+        Assert.Equal(
+            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount" },
+            parameters.Select(p => p.Name!).ToArray());
+
+        Assert.DoesNotContain(parameters, p => p.ParameterType == typeof(string));
     }
 
     /// <summary>
