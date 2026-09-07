@@ -15,6 +15,8 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Xml;
+using System.Xml.Linq;
 using Xunit;
 
 namespace Lite.Tests;
@@ -818,10 +820,15 @@ public class CrossAppGuardCiGateTests
     ///
     /// <para>A replacement that found different things rather than more things would read as an
     /// improvement while having moved the blind spot, so <see cref="ParsedProjectXmlPaths"/> stays as a
-    /// deliberately crude second opinion — quoted attribute values and element text, resolved against the
-    /// project directory and anchored the same way. It is not the live route and is not a good one: it
-    /// over-reads (a path inside a comment counts) and under-reads (anything needing evaluation
-    /// disappears). Both are the safe direction for a lower bound.</para>
+    /// deliberately crude second opinion — attribute values, element text and a comment's quoted
+    /// contents, resolved against the project directory and anchored the same way. It is not the live
+    /// route and is not a good one: it over-reads (a path inside a comment counts) and under-reads
+    /// (anything needing evaluation disappears). Both are the safe direction for a lower bound, and
+    /// <b>both are held by <see cref="TheCrudeParse_SeesEveryLiteralValueHoweverItIsQuoted"/></b> rather
+    /// than by this sentence — which is #3140: this paragraph and the one on
+    /// <see cref="ParsedProjectXmlPaths"/> both asserted a direction of error that was false, an
+    /// apostrophe in a comment having silently deleted whole ItemGroups from the crude answer, and
+    /// nothing anywhere checked either claim.</para>
     ///
     /// <para><b>Superset of nothing is free</b>, which is the way this pin passes while measuring nothing
     /// at all. So the crude side is floored twice: run against the arm's OWN trees it must find something
@@ -875,8 +882,27 @@ public class CrossAppGuardCiGateTests
 
             if (floor is not null)
             {
-                Assert.Contains(floor, parsedCross);
-                Assert.Contains(floor, evaluated);
+                /* Which SIDE lost the floor is the whole diagnosis, and a bare Assert.Contains names
+                   neither: these two sat adjacent and message-less, so #3138 read a crude-parse failure
+                   here as an evaluated-side regression and spent an hour on a workflow file that was
+                   byte-identical to dev. The crude side is asserted first because it is the PRECONDITION
+                   — if the second opinion cannot see the floor, the comparison below is measuring
+                   nothing — but it now says so. */
+                Assert.True(
+                    parsedCross.Contains(floor),
+                    $"the CRUDE parse of {project} did not find {floor}, so the SECOND OPINION is broken " +
+                    "rather than the evaluated read, and the superset comparison below is measuring " +
+                    $"nothing. Nothing about {nameof(Evaluate)} is implicated. Look at " +
+                    $"{nameof(ParsedProjectXmlPaths)}: #3140 was an apostrophe in a comment swallowing " +
+                    "the markup after it. Parsed cross-app: " +
+                    $"[{string.Join(", ", parsedCross)}]");
+
+                Assert.True(
+                    evaluated.Contains(floor),
+                    $"the EVALUATED read of {project} does not report {floor}, which the crude parse of " +
+                    "the same XML does see. This is the defect this guard exists to catch: the live " +
+                    "population has lost a cross-app project item that is spelled literally in the " +
+                    $"project file. Evaluated: [{string.Join(", ", evaluated.OrderBy(path => path, StringComparer.Ordinal))}]");
             }
 
             var missed = parsedCross.Except(evaluated, StringComparer.Ordinal).ToList();
@@ -889,6 +915,193 @@ public class CrossAppGuardCiGateTests
                 "human: decide whether that path is a read worth covering" +
                 $". Evaluated: [{string.Join(", ", evaluated.OrderBy(p => p, StringComparer.Ordinal))}]");
         }
+    }
+
+    /// <summary>
+    /// The crude second opinion sees every literal the project XML spells, however that literal is
+    /// quoted and whatever prose sits above it — which is what its own doc claimed, twice, while being
+    /// false (#3140).
+    ///
+    /// <para><b>The property.</b> Every path the XML names LITERALLY — as an attribute value, as element
+    /// text, or inside a comment — is in <see cref="ParsedProjectXmlPaths"/>' answer, and the only paths
+    /// missing from it are ones MSBuild has to evaluate before they are a path at all. A floor whose gaps
+    /// depend on where an apostrophe landed is not a floor, and
+    /// <see cref="TheEvaluatedSet_ContainsEverythingAParseOfTheSameXmlFinds"/> compares the live
+    /// population against it.</para>
+    ///
+    /// <para><b>Derived from how that property can BECOME false, rather than from reading the code.</b>
+    /// A literal goes missing exactly one way: something in the text is taken for a delimiter and the
+    /// span it opens swallows the literal. Enumerating what can be taken for one gives the arms below —
+    /// each on its OWN document with its OWN file name, so a broken arm reds by name rather than hiding
+    /// behind a sibling that still passes.</para>
+    ///
+    /// <para><b>Two arms are the live defect, measured rather than supposed.</b> An apostrophe in one
+    /// comment paired with an apostrophe in the NEXT comment and deleted everything between them: on
+    /// <c>dev</c> that hid the whole <c>None</c> item carrying <c>Fixtures\SystemHealth\*.xml</c> out of
+    /// <c>Lite.Tests</c>' own project, and four <c>None</c> items — about two kilobytes of markup — out of
+    /// <c>Darling.Tests</c>'. <b>Parity was never the invariant, position relative to the item was</b>,
+    /// which is why an EVEN count and an ODD count are both here: the two-apostrophe arm loses its item,
+    /// and the file that lost the most carries an even six. A guard that counted apostrophes would have
+    /// called the worse of the two clean.</para>
+    ///
+    /// <para><b>Prose in element TEXT was never the vector, and pinning that is the point.</b> The
+    /// <c>&gt;</c>-to-<c>&lt;</c> arm of that regex consumed <c>&gt;Erik's tool&lt;</c> before the
+    /// apostrophe arm could open on it, so only a comment — which that arm cannot enter — could start a
+    /// bogus span. The element-text arm below passed before the fix as well as after it. It stays because
+    /// it is the difference between this diagnosis and the nearest plausible wrong one, and because a
+    /// fix that stripped apostrophes wholesale would break it.</para>
+    ///
+    /// <para><b>Three arms nothing here could ever see</b> are a single-quoted attribute value, an
+    /// entity-encoded separator and a CDATA body. The first is why the apostrophe arm was not simply
+    /// deleted: MSBuild accepts <c>Include='…'</c>, so deleting it trades this defect for a quieter one
+    /// of the same shape. The other two are literal paths a text scan has no way to spell.</para>
+    ///
+    /// <para><b>Both documented directions are held here rather than described.</b> A path inside a
+    /// comment still counts, in the quoted spelling and the element-text one; a value carrying
+    /// <c>$(</c> still falls out. Each negative arm is paired with a literal in the SAME document
+    /// asserted present, so an absence cannot be the absence of a read. The one residual miss — a
+    /// SINGLE-quoted attribute inside a comment — is asserted that way beside a double-quoted sibling in
+    /// the same comment, so the stated limitation is a measurement and not a hope.</para>
+    /// </summary>
+    [Fact]
+    public void TheCrudeParse_SeesEveryLiteralValueHoweverItIsQuoted()
+    {
+        /* Nothing here touches the disk. The crude read resolves and anchors by path arithmetic alone, so
+           a rooted repository that does not exist measures exactly what a real one does - and a fixture
+           that cannot be half-written is one fewer way for this to pass while measuring nothing. */
+        var repo = Path.Combine(Path.GetTempPath(), "crossapp-crude-" + Guid.NewGuid().ToString("n"));
+        var projectDir = Path.Combine(repo, LiteTestsDir);
+
+        SortedSet<string> Found(string body) => new(
+            ParsedProjectXmlPaths(
+                repo,
+                projectDir,
+                "<Project Sdk=\"Microsoft.NET.Sdk\">" + body + "</Project>",
+                DarlingTrees),
+            StringComparer.Ordinal);
+
+        void Sees(string route, string leaf, string body)
+        {
+            var found = Found(body);
+            Assert.True(
+                found.Contains($"{DarlingTestsDir}/{leaf}"),
+                $"the crude parse cannot see a literal it must ({route}): {leaf} is spelled in the XML " +
+                $"and is not in the answer. Found: [{string.Join(", ", found)}]");
+        }
+
+        void DoesNotSee(string route, string leaf, string present, string body)
+        {
+            var found = Found(body);
+
+            /* The positive half first, in the same document: an absence measured against an empty answer
+               is a pin that cannot fail. */
+            Assert.True(
+                found.Contains($"{DarlingTestsDir}/{present}"),
+                $"the document for '{route}' answered without {present}, which it spells literally, so " +
+                $"the absence asserted next is the absence of a READ. Found: [{string.Join(", ", found)}]");
+
+            Assert.DoesNotContain($"{DarlingTestsDir}/{leaf}", found);
+        }
+
+        /* THE LIVE DEFECT. An apostrophe in one comment, another in the next, the item between them - and
+           an EVEN count, which is the shape a parity check calls clean. */
+        Sees(
+            "an apostrophe in one comment paired with one in the next, EVEN count",
+            "EvenApostropheCount.cs",
+            @"<!-- Darling.Tests' fixtures -->
+              <ItemGroup>
+                <Compile Include=""..\Darling\Darling.Tests\EvenApostropheCount.cs"" />
+              </ItemGroup>
+              <!-- Lite's copy -->");
+
+        /* The same defect at an ODD count, so neither parity is mistaken for the invariant. */
+        Sees(
+            "the same pairing at an ODD count",
+            "OddApostropheCount.cs",
+            @"<!-- Darling.Tests' fixtures -->
+              <ItemGroup>
+                <Compile Include=""..\Darling\Darling.Tests\OddApostropheCount.cs"" />
+              </ItemGroup>
+              <!-- Lite's copy, and Darling's -->");
+
+        /* Prose in element text, which the old read survived - so a fix that went after apostrophes
+           rather than after the grammar reds here. */
+        Sees(
+            "an apostrophe in element text",
+            "AfterProse.cs",
+            @"<PropertyGroup><Notice>Erik's tool</Notice></PropertyGroup>
+              <ItemGroup>
+                <Compile Include=""..\Darling\Darling.Tests\AfterProse.cs"" />
+              </ItemGroup>
+              <PropertyGroup><Notice>Lite's copy</Notice></PropertyGroup>");
+
+        /* MSBuild accepts this spelling, so deleting the apostrophe arm was not the fix. */
+        Sees(
+            "a single-quoted attribute value",
+            "SingleQuoted.cs",
+            @"<ItemGroup><Compile Include='..\Darling\Darling.Tests\SingleQuoted.cs' /></ItemGroup>");
+
+        /* Four apostrophes inside one double-quoted value: the ordinary spelling of a Condition, and the
+           reason a check on balanced quoting would fire on files that are correct. */
+        Sees(
+            "apostrophes inside a double-quoted Condition",
+            "AfterCondition.cs",
+            @"<ItemGroup Condition=""'$(Configuration)' != ''"">
+                <Compile Include=""..\Darling\Darling.Tests\AfterCondition.cs"" />
+              </ItemGroup>");
+
+        /* A literal path a text scan reads as nonsense and MSBuild reads as a path. */
+        Sees(
+            "an entity-encoded separator",
+            "EntityEncoded.cs",
+            @"<ItemGroup>
+                <Compile Include=""..&#x5C;Darling&#x5C;Darling.Tests&#x5C;EntityEncoded.cs"" />
+              </ItemGroup>");
+
+        Sees(
+            "a CDATA body",
+            "Cdata.cs",
+            @"<ItemGroup><None><![CDATA[..\Darling\Darling.Tests\Cdata.cs]]></None></ItemGroup>");
+
+        /* The documented OVER-read, both spellings. A commented-out cross-app path counts, which is the
+           position ImportElements takes for the same reason: a construct arriving unnoticed. */
+        Sees(
+            "a commented-out item, quoted",
+            "CommentedOut.cs",
+            @"<!-- <Compile Include=""..\Darling\Darling.Tests\CommentedOut.cs"" /> -->");
+
+        Sees(
+            "a commented-out item, element text",
+            "CommentedText.cs",
+            @"<!-- <None>..\Darling\Darling.Tests\CommentedText.cs</None> -->");
+
+        /* The documented UNDER-read: a value carrying $( is not a path and falls out. */
+        DoesNotSee(
+            "a value needing evaluation",
+            "NeedsEvaluation.cs",
+            "Literal.cs",
+            @"<PropertyGroup><Reach>..\Darling\Darling.Tests</Reach></PropertyGroup>
+              <ItemGroup>
+                <Compile Include=""$(Reach)\NeedsEvaluation.cs"" />
+                <Compile Include=""..\Darling\Darling.Tests\Literal.cs"" />
+              </ItemGroup>");
+
+        /* The one residual miss, stated in the doc and measured here: inside a comment there is no markup
+           to parse, and dropping the apostrophe arm is what makes prose harmless. */
+        DoesNotSee(
+            "a single-quoted attribute inside a comment",
+            "CommentedSingle.cs",
+            "CommentedDouble.cs",
+            @"<!-- <Compile Include=""..\Darling\Darling.Tests\CommentedDouble.cs"" />
+                   <Compile Include='..\Darling\Darling.Tests\CommentedSingle.cs' /> -->");
+
+        /* And a project that does not parse fails LOUDLY. A catch here would answer SHORT, which is the
+           defect this whole test is about one layer down: an under-read nobody is told about. The
+           document below spells a cross-app path and must still return none of it. */
+        Assert.Throws<XmlException>(() =>
+        {
+            _ = Found(@"<ItemGroup><Compile Include=""..\Darling\Darling.Tests\Unclosed.cs"" />");
+        });
     }
 
     /// <summary>
@@ -2017,30 +2230,43 @@ public class CrossAppGuardCiGateTests
         Regex.Matches(xml, "<Import\\s[^>]*/?>", RegexOptions.None)
             .Select(m => m.Value);
 
-    /// <summary>The cross-app paths a crude TEXT scan of one project file finds: every quoted attribute
-    /// value and every element's text, resolved against the project directory and anchored the same way
-    /// the evaluated read is.
+    /// <summary>The cross-app paths a crude read of one project file finds: every attribute value, every
+    /// element's text, and anything quoted inside a comment, each resolved against the project directory
+    /// and anchored the same way the evaluated read is.
     ///
     /// <para>Not the live route, and deliberately not a good one. It exists so the switch to MSBuild can
     /// be asserted rather than asserted-about: the evaluated set has to CONTAIN what this finds, or the
     /// replacement has moved the blind spot rather than closed it.</para>
     ///
-    /// <para>Crude in both directions, and both are the safe direction for a lower bound. It over-reads —
-    /// a path inside a comment, or behind a <c>Condition</c> that never holds, counts — and it under-reads
-    /// anything needing evaluation, since a value carrying <c>$(</c> resolves to no real path and falls
-    /// out. A lower bound that is sometimes too low is a floor; one that is ever too high is an
-    /// oracle.</para></summary>
+    /// <para><b>Crude means UNEVALUATED, not mis-parsed</b>, which is #3140. This read was a regex
+    /// alternation over the raw text, and its single-quote arm treated an apostrophe ANYWHERE — in a
+    /// comment, in prose — as an attribute delimiter: it paired with the next apostrophe and every
+    /// literal between them went missing. So it under-read arbitrary literals, which is exactly what the
+    /// two paragraphs claiming it only under-reads what needs evaluation had ruled out, and it was doing
+    /// so live — hiding one <c>None</c> item in this project and four in <c>Darling.Tests</c>' at the
+    /// moment it was found. The quoting grammar is <c>XDocument</c>'s problem now, because a regex that
+    /// gets XML quoting right is most of an XML parser and the rest of that parser is what
+    /// <see cref="Evaluate"/> exists to avoid writing.</para>
+    ///
+    /// <para><b>Parity of apostrophes was never the invariant; position relative to the paths was.</b> A
+    /// check on the count would have called the worse of those two files clean — <c>Darling.Tests</c>'
+    /// project carries an EVEN six apostrophes and still lost two kilobytes of markup, four
+    /// <c>None</c> items inside it, because what decides the damage is whether a real <c>Include</c> sits
+    /// between a bogus pair rather than how many apostrophes the file has.</para>
+    ///
+    /// <para>Crude in both directions still, and both are the safe direction for a lower bound. It
+    /// over-reads — a path inside a comment, or behind a <c>Condition</c> that never holds, counts — and
+    /// it under-reads anything needing evaluation, since a value carrying <c>$(</c> resolves to no real
+    /// path and falls out. A lower bound that is sometimes too low is a floor; one that is ever too high
+    /// is an oracle. <b>Both directions are now HELD</b> by
+    /// <see cref="TheCrudeParse_SeesEveryLiteralValueHoweverItIsQuoted"/> rather than asserted here:
+    /// #3140 was an unenforced claim before it was a false one, and the claim being false for two years
+    /// with every gate green is what an unenforced claim buys.</para></summary>
     private static IEnumerable<string> ParsedProjectXmlPaths(
         string repo, string projectDir, string xml, SkuTrees other)
     {
-        foreach (Match match in Regex.Matches(
-            xml, "\"(?<dq>[^\"]*)\"|'(?<sq>[^']*)'|>(?<text>[^<>]*)<"))
+        foreach (var raw in LiteralXmlValues(xml))
         {
-            var raw =
-                match.Groups["dq"].Success ? match.Groups["dq"].Value
-                : match.Groups["sq"].Success ? match.Groups["sq"].Value
-                : match.Groups["text"].Value.Trim();
-
             if (raw.Length == 0)
             {
                 continue;
@@ -2057,6 +2283,78 @@ public class CrossAppGuardCiGateTests
             {
                 yield return rooted;
             }
+        }
+    }
+
+    /// <summary>Every literal value one MSBuild file's XML carries, before any of it is treated as a
+    /// path: each attribute's value, each element's text, and each comment's quoted contents.
+    ///
+    /// <para><b>Attribute values come from the XML parser rather than from a delimiter guess</b>, so
+    /// <c>Include='..\Darling\X.cs'</c> is read as readily as the double-quoted spelling, an apostrophe
+    /// in <c>Condition="'$(X)' == 'y'"</c> is part of a value rather than the start of one, and
+    /// <c>&amp;#x5C;</c> arrives decoded — which is what MSBuild itself sees. A malformed project throws
+    /// <see cref="XmlException"/> and is deliberately NOT caught: a fallback here would answer short
+    /// rather than loudly, which is the defect #3140 was, one layer down.</para>
+    ///
+    /// <para><b>A comment is scanned as text, on purpose.</b> A path inside a comment counting is the
+    /// over-read this read's whole doc rests on and the position
+    /// <see cref="ImportElements"/> takes for the same reason — a commented-out construct is a construct
+    /// arriving unnoticed — so a reader that skipped comments would be narrowing a documented guarantee
+    /// while claiming to fix a bug. Inside a comment there is no markup to parse, only the text of the
+    /// markup somebody removed, so a double-quoted value and a <c>&gt;</c>-to-<c>&lt;</c> span are the
+    /// whole of what is available. The one thing that scan cannot see is a SINGLE-quoted attribute inside
+    /// a comment: dropping the apostrophe arm is what makes prose harmless, and a commented-out
+    /// single-quoted <c>Include</c> is the price. That is a miss confined to commented-out markup and
+    /// stated rather than discovered.</para></summary>
+    private static IEnumerable<string> LiteralXmlValues(string xml)
+    {
+        var document = XDocument.Parse(xml);
+
+        foreach (var node in document.DescendantNodes())
+        {
+            switch (node)
+            {
+                case XElement element:
+                    foreach (var attribute in element.Attributes())
+                    {
+                        yield return attribute.Value;
+                    }
+
+                    break;
+
+                /* XCData derives from XText, so a path delivered as CDATA arrives here too. */
+                case XText text:
+                    yield return text.Value.Trim();
+                    break;
+
+                case XComment comment:
+                    foreach (var value in CommentedOutValues(comment.Value))
+                    {
+                        yield return value;
+                    }
+
+                    break;
+
+                default:
+                    break;
+            }
+        }
+    }
+
+    /* The crude scan, kept for comment bodies alone and with the apostrophe arm that was #3140 removed:
+       inside a comment an apostrophe is prose, and the two arms that remain cannot be opened by one. */
+    private static readonly Regex CommentedOutValue =
+        new("\"(?<quoted>[^\"]*)\"|>(?<text>[^<>]*)<", RegexOptions.None);
+
+    /// <summary>The values a comment's text spells, for the over-read that makes a commented-out path
+    /// count.</summary>
+    private static IEnumerable<string> CommentedOutValues(string comment)
+    {
+        foreach (Match match in CommentedOutValue.Matches(comment))
+        {
+            yield return match.Groups["quoted"].Success
+                ? match.Groups["quoted"].Value
+                : match.Groups["text"].Value.Trim();
         }
     }
 
