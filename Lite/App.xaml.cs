@@ -897,7 +897,7 @@ public partial class App : Application
             {
                 var token = val.TextOrNull();
 
-                if (Enum.TryParse<Microsoft.Extensions.Logging.LogLevel>(token, ignoreCase: true, out var level))
+                if (AppLogger.TryParseMinimumLevel(token, out var level))
                 {
                     AppLogger.SetMinimumLevel(level);
                 }

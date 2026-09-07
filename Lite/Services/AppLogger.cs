@@ -94,6 +94,46 @@ public static class AppLogger
     public static bool IsEnabled(LogLevel level) =>
         level != LogLevel.None && level >= s_minimumLevel;
 
+    /// <summary>
+    /// A settings.json token as a level. False — with <paramref name="level"/> left at
+    /// <see cref="DefaultMinimumLevel"/> — for anything that is not one of the seven NAMES, so a caller
+    /// that ignores the result still gets a usable level rather than whatever the token decoded to.
+    ///
+    /// <para><b>Names only, and both checks below reject something the other accepts.</b>
+    /// <c>Enum.TryParse</c> succeeds on a NUMBER, which goes wrong two ways: an undefined one
+    /// (<c>"999"</c>) becomes a minimum no real level can reach, so every line including
+    /// <see cref="LogLevel.Error"/> is dropped and nothing is reported — a verbosity setting silencing
+    /// the log completely is the opposite of what it is for — and a defined one (<c>"3"</c>) is accepted
+    /// vocabulary this setting has never documented. The letter check turns both into a reported token.
+    /// <c>Enum.IsDefined</c> then holds the invariant independently of how the token was spelled, so a
+    /// future spelling the letter check lets through cannot become an out-of-range minimum.</para>
+    /// </summary>
+    public static bool TryParseMinimumLevel(string? token, out LogLevel level)
+    {
+        level = DefaultMinimumLevel;
+
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return false;
+        }
+
+        foreach (var c in token)
+        {
+            if (!char.IsAsciiLetter(c))
+            {
+                return false;
+            }
+        }
+
+        if (!Enum.TryParse(token, ignoreCase: true, out LogLevel parsed) || !Enum.IsDefined(parsed))
+        {
+            return false;
+        }
+
+        level = parsed;
+        return true;
+    }
+
     public static void Initialize(string logDirectory)
     {
         s_logDirectory = logDirectory;

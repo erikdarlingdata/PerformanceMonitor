@@ -41,9 +41,21 @@ namespace PerformanceMonitorLite.Tests;
 /// admission decision, not a rate. The source scan reads one file and identifies the timing line by the
 /// placeholders in its message template, so a future timing line spelled with different placeholders is
 /// outside its net; the floor assertion is what keeps a net that has stopped matching from reading as a
-/// clean pass. Nothing here exercises <c>App.LoadLogMinimumLevel</c>'s settings read — that runs inside
-/// WPF startup, and its key is covered by <c>SettingsSampleTests</c> in both directions.</para>
+/// clean pass. <c>App.LoadLogMinimumLevel</c>'s file read is not exercised — that runs inside WPF startup
+/// — so what is pinned of it is the part that decides: the token vocabulary, through the same
+/// <see cref="AppLogger.TryParseMinimumLevel"/> the loader calls. The key's presence in the shipped sample
+/// is covered by <c>SettingsSampleTests</c> in both directions.</para>
 /// </summary>
+/// <remarks>
+/// The collection exists because these pins move <see cref="AppLogger"/>'s process-wide minimum, briefly
+/// as far as <see cref="LogLevel.None"/>, and a concurrently-running class whose service logs during that
+/// window loses the line — unrecoverably, since tag-filtering a buffer cannot bring back a line never
+/// enqueued. That is #1965, which <c>app-alert-statics</c> was created for. No other class makes runtime
+/// <c>AppLogger</c> calls today, and a collection name only serialises classes that SHARE it, so this
+/// serialises nothing yet: it is the named place for the next class touching this static to join, and it
+/// is worth stating that it protects nothing on its own rather than implying it already does.
+/// </remarks>
+[Collection("app-logger-statics")]
 public sealed class LiteLogLevelGateTests : IDisposable
 {
     /// <summary>The file the per-database collection timing line is emitted from.</summary>
@@ -323,6 +335,48 @@ public sealed class LiteLogLevelGateTests : IDisposable
                 + ". Verbosity has to be a runtime value — a preprocessor gate cannot be configured on the "
                 + "shipped Release build, and it makes every suppression pin in this file answer for one "
                 + "configuration only (#3104).");
+    }
+
+    /// <summary>
+    /// <para>The accepted vocabulary is exactly the seven names the sample documents — because the
+    /// rejected half is what decides whether a typo costs one setting or the whole log.</para>
+    ///
+    /// <para><c>Enum.TryParse</c> alone accepts a NUMBER, and an undefined one is the dangerous case:
+    /// <c>"999"</c> parses to <c>(LogLevel)999</c>, which no real level can reach, so every line
+    /// including <see cref="LogLevel.Error"/> is dropped — logging off entirely, from a setting whose
+    /// stated contract is that a bad value costs itself and is named at startup. Asserted as the pair that
+    /// matters: the token is rejected AND the level handed back is the default, since a caller reading the
+    /// level without the bool is how the silent version happens.</para>
+    /// </summary>
+    [Fact]
+    public void TheSettingsVocabulary_TakesTheDocumentedNamesAndNothingElse()
+    {
+        foreach (var (token, expected) in new (string?, LogLevel)[]
+        {
+            ("Trace", LogLevel.Trace),
+            ("Debug", LogLevel.Debug),
+            ("information", LogLevel.Information),
+            ("WARNING", LogLevel.Warning),
+            ("Error", LogLevel.Error),
+            ("Critical", LogLevel.Critical),
+            ("None", LogLevel.None),
+        })
+        {
+            Assert.True(AppLogger.TryParseMinimumLevel(token, out var got), $"'{token}' was rejected");
+            Assert.Equal(expected, got);
+        }
+
+        /* "3" and "6" are DEFINED levels spelled as numbers: undocumented vocabulary rather than a hazard,
+           rejected so the accepted set is the set the failure message names. "999" and "-1" are the ones
+           that would silence everything. */
+        foreach (var token in new string?[] { "999", "-1", "42", "3", "6", "banana", "Debug ", "", "  ", null })
+        {
+            Assert.False(
+                AppLogger.TryParseMinimumLevel(token, out var got),
+                $"'{token}' was accepted as a log level");
+
+            Assert.Equal(AppLogger.DefaultMinimumLevel, got);
+        }
     }
 
     /// <summary>
