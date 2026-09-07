@@ -284,9 +284,27 @@ public sealed class PgColumnStatsCoverageTests
 
         Assert.Contains("EvidenceStart(endUtc)", verdictRead, StringComparison.Ordinal);
 
-        /* And the read must not quietly go back to the caller's start: the parameter still exists, for the
-           ROW read, so a one-character edit reinstates the defect this closes. */
-        Assert.DoesNotContain("EvidenceStart(startUtc", verdictRead, StringComparison.Ordinal);
+        /* And it does not ACCEPT a window start it would then ignore. The signature is the guard here, not
+           the body: a parameter passed and dropped is worse than an absent one, because the caller believes
+           its window was honoured and neither the compiler nor the answer says otherwise. Scoped to the
+           declaration rather than the body, so the ROW read's own startUtc - which it does use - is out of
+           scope by construction. */
+        var verdictSignature = MemberSignature(
+            "Darling/PerformanceMonitor.Darling.Storage/DarlingPgColumnStatsReader.cs",
+            "GetCoverageVerdictAsync");
+
+        Assert.DoesNotContain("startUtc", verdictSignature, StringComparison.Ordinal);
+        Assert.Contains("DateTime endUtc", verdictSignature, StringComparison.Ordinal);
+
+        /* The raw-counts reader is the opposite case and stays that way: it takes both ends BECAUSE it
+           uses both, and it is what a caller wanting its own span reaches for. Asserting it keeps the
+           narrowing above from being read as "windows are not a thing here". */
+        var evidenceSignature = MemberSignature(
+            "Darling/PerformanceMonitor.Darling.Storage/DarlingPgColumnStatsReader.cs",
+            "GetCoverageEvidenceAsync");
+
+        Assert.Contains("DateTime startUtc", evidenceSignature, StringComparison.Ordinal);
+        Assert.Contains("DateTime endUtc", evidenceSignature, StringComparison.Ordinal);
 
         /* And the census asks BOTH questions from BOTH sources. The run probe reads collection_log for the
            evidence collector's name; the counts read its stored rows. A census that dropped the log half
@@ -312,6 +330,47 @@ public sealed class PgColumnStatsCoverageTests
         }
 
         Assert.Contains("AND   status IN (", census, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The three miss answers are asked in <c>CollectorRuntimePrecondition</c>'s documented order —
+    /// capability, then precondition, then this read's own miss — and the coverage evidence is not queried
+    /// before the branch that might not need it.
+    ///
+    /// <para>The cost is the visible half: the query used to run ahead of both precedence checks, so a
+    /// server that cannot have this surface at all, or whose collector recorded a denial, paid for evidence
+    /// the <c>??</c> chain then discarded — and those are the callers least able to afford a round trip.
+    /// The half worth guarding is the other one: computing the LAST of three ranked answers FIRST is how
+    /// somebody later reorders the chain and does not notice they have changed which one wins. A source
+    /// order assertion is the only thing that notices, because every ordering compiles and every ordering
+    /// returns a plausible answer.</para>
+    /// </summary>
+    [Fact]
+    public void TheMissAnswersAreAskedInTheirDocumentedPrecedenceOrder()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(MemberBody(
+            "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgIndexTools.cs",
+            "GetPgColumnStats"));
+
+        var branch = code.IndexOf("rows.Count == 0", StringComparison.Ordinal);
+        var capability = code.IndexOf("NotCollectedStatusAsync", StringComparison.Ordinal);
+        var precondition = code.IndexOf("DarlingRuntimePrecondition.StatusAsync", StringComparison.Ordinal);
+        var coverage = code.IndexOf("GetCoverageVerdictAsync", StringComparison.Ordinal);
+
+        Assert.True(branch > 0, "the empty-result branch is gone");
+        Assert.True(capability > 0, "the capability answer is gone");
+        Assert.True(precondition > 0, "the precondition answer is gone");
+        Assert.True(coverage > 0, "the coverage answer is gone");
+
+        Assert.True(
+            branch < coverage,
+            "the coverage evidence is queried BEFORE the branch that decides whether anything needs it");
+        Assert.True(
+            capability < precondition,
+            "a precondition is answered ahead of a permanent engine gap, which #2511 closed");
+        Assert.True(
+            precondition < coverage,
+            "the coverage verdict is computed ahead of the precondition that outranks it");
     }
 
     /// <summary>R7: a populated result that covers part of the target is its own answer, not the clean one.</summary>
@@ -558,6 +617,28 @@ public sealed class PgColumnStatsCoverageTests
                 yield return at;
             }
         }
+    }
+
+    /// <summary>
+    /// One member's SIGNATURE — the declaration up to the brace or arrow that begins its body, comments and
+    /// literals blanked. Separate from <see cref="MemberBody"/> because a claim about what a method ACCEPTS
+    /// cannot be made against its body: the body is where an ignored parameter is conspicuously absent.
+    /// </summary>
+    private static string MemberSignature(string relativePath, string member)
+    {
+        var stripped = CSharpSourceWalker.StripCommentsAndStrings(ReadSource(relativePath));
+        var declarations = Declarations(stripped, member).ToList();
+
+        Assert.Equal(1, declarations.Count);
+
+        var at = declarations[0];
+        var open = stripped.IndexOf('{', at);
+        var arrow = stripped.IndexOf("=>", at, StringComparison.Ordinal);
+        var stops = new[] { open, arrow }.Where(i => i > at).ToArray();
+
+        Assert.NotEmpty(stops);
+
+        return stripped[at..stops.Min()];
     }
 
     private static string ReadSource(string relative)

@@ -436,11 +436,14 @@ public sealed partial class ViewerDataService
     /// nothing clears the collector's page floor, the monitoring login cannot see pg_stats, coverage is
     /// partial, or neither legitimate cause applies and it is a fault. The same classifier
     /// <c>get_pg_column_stats</c> calls, over the same evidence, so the panel and the tool cannot give one
-    /// operator two answers.</summary>
+    /// operator two answers.
+    /// <para>Takes the window END only, mirroring the reader: coverage is a CURRENT state of the target, so
+    /// there is no start to honour and no start is accepted. A parameter passed and ignored would let the
+    /// panel look as though its own window governed this answer.</para></summary>
     public Task<PgColumnStatsCoverageVerdict> GetPgColumnStatsCoverageAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int storedColumnRows, CancellationToken cancellationToken = default) =>
+        int serverId, DateTime endUtc, int storedColumnRows, CancellationToken cancellationToken = default) =>
         DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
-            _dataSource, serverId, startUtc, endUtc, storedColumnRows, cancellationToken);
+            _dataSource, serverId, endUtc, storedColumnRows, cancellationToken);
 
     /// <summary>Replication tab - connected standbys and how far behind each got (#2544). Returns the latest
     /// sample AND the window's worst, because a replica that drifts hundreds of MB behind and recovers reads

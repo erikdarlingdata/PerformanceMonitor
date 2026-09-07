@@ -1009,7 +1009,7 @@ public partial class ViewerServerTab
            the same question differently is how a defect gets fixed in one surface and left in the other,
            and the arm selection is the whole content of the answer here - so neither surface authors it. */
         var coverage = await _dataService.GetPgColumnStatsCoverageAsync(
-            _server.ServerId, startUtc, endUtc, rows.Count);
+            _server.ServerId, endUtc, rows.Count);
 
         PgColumnStatsNote.Text = rows.Count == 0
             ? "No column statistics were collected. That is NOT the same as clean statistics. "

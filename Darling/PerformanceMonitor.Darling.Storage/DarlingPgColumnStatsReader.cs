@@ -206,9 +206,18 @@ FROM (
     /// wording rather than throwing, the same rule <c>DarlingRuntimePrecondition</c> follows: this runs to
     /// EXPLAIN a result the caller already has, and turning that into a read error would replace an
     /// under-described answer with no answer.</para>
+    ///
+    /// <para><b>No window START, deliberately, and the signature says so by not having one.</b> The evidence
+    /// span is <see cref="EvidenceStart"/> to <paramref name="endUtc"/> whatever the caller read its rows
+    /// over — see that method for why. An accepted-but-ignored <c>startUtc</c> is worse than an absent one:
+    /// the caller passes a window, reasonably believes it is honoured, and neither the compiler nor the
+    /// answer tells them otherwise. Callers that want the raw counts over a span of their own choosing have
+    /// <see cref="GetCoverageEvidenceAsync"/>, which takes both ends and uses both.</para>
     /// </summary>
+    /// <param name="endUtc">The instant the caller's read ENDS at, which the evidence window is anchored
+    /// on so an <c>as_of</c> read is explained by contemporary evidence rather than by today's.</param>
     public static async Task<PgColumnStatsCoverageVerdict> GetCoverageVerdictAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int storedColumnRows,
+        NpgsqlDataSource postgres, int serverId, DateTime endUtc, int storedColumnRows,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);

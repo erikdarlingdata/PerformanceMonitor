@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -164,25 +165,44 @@ public sealed class DarlingMcpPgIndexTools
             /* Asked on BOTH paths, not just the empty one (#3154). A returned row set that covers a
                fraction of the tables above the floor is the same defect as an unexplained empty, one
                degree weaker: the ranking looks complete and is not. */
-            var coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, rows.Count);
+            PgColumnStatsCoverageVerdict coverage;
 
             if (rows.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats")
-                    ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats")
-                    /* The arm, not a list of the arms. This message used to recite the size floor AND the
-                       privilege filter and select neither, which is prose about the mechanism rather than a
-                       diagnosis of it - measured on a 50-target fleet where the answer was the privilege
-                       filter on every one of them and no read said so. */
-                    ?? McpHelpers.Status(
-                        "empty",
-                        $"No column statistics for {resolved.ServerName} in the last {hours_back} hour(s). "
-                        + "This collector runs DAILY, so a window shorter than a day can be empty on a "
-                        + "perfectly healthy server - widen it before concluding anything. " + coverage.Message);
+                /* CAPABILITY, then PRECONDITION, then this read's own miss - the order
+                   CollectorRuntimePrecondition documents, and the three are asked in it rather than
+                   composed with ?? over three already-computed values. The coverage query used to run
+                   ahead of both, so a server that cannot have this surface at all, or whose collector
+                   recorded a denial, paid for evidence the ?? chain then threw away - and those are the
+                   callers least able to afford a round trip. Worse than the cost: computing the LAST
+                   answer first is how somebody later reorders the chain and does not notice they have
+                   changed which of the three wins. */
+                var capability = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats");
+
+                if (capability != null) return capability;
+
+                var precondition = await DarlingRuntimePrecondition.StatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats");
+
+                if (precondition != null) return precondition;
+
+                coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
+                    postgres, resolved.ServerId, windowEnd, rows.Count);
+
+                /* The arm, not a list of the arms. This message used to recite the size floor AND the
+                   privilege filter and select neither, which is prose about the mechanism rather than a
+                   diagnosis of it - measured on a 50-target fleet where the answer was the privilege
+                   filter on every one of them and no read said so. */
+                return McpHelpers.Status(
+                    "empty",
+                    $"No column statistics for {resolved.ServerName} in the last {hours_back} hour(s). "
+                    + "This collector runs DAILY, so a window shorter than a day can be empty on a "
+                    + "perfectly healthy server - widen it before concluding anything. " + coverage.Message);
             }
+
+            coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
+                postgres, resolved.ServerId, windowEnd, rows.Count);
 
             var columns = rows.Select(r => new
             {
