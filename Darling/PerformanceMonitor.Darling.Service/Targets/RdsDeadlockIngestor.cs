@@ -183,37 +183,60 @@ public sealed class RdsDeadlockIngestor
         var writer = new PgCollectorRowWriter();
         var written = 0;
 
-        using (var importer = await connection.BeginBinaryImportAsync(
-            PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
+        /* Which COPY phase a fault came out of, on the same terms as
+           DarlingCollectorRunner.CopyBatchOnceAsync — see CollectorFaultCopyPhase, which is the authority
+           for what each value means and what it authorises.
+
+           Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
+           mean strictly "the importer never came back". A fault anywhere past that line may have sent rows,
+           so it must read as Data even where it happens to have sent none. */
+        var copyPhase = StoreCopyPhase.Start;
+
+        try
         {
-            /* #2874: the COPY's own deadline, on NpgsqlBinaryImporter.Timeout — a TimeSpan on a different type
-               from the rest of the regime, invisible to a command-shaped regex, and inherited from the
-               connection's CommandTimeout (30 s) when left unset. Same constant, same regime, and the same
-               narrows-not-closes caveat about the Begin phase as DarlingCollectorRunner.WriteBatchAsync. */
-            importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
-
-            writer.Importer = importer;
-
-            foreach (var row in rows)
+            using (var importer = await connection.BeginBinaryImportAsync(
+                PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
             {
-                await importer.StartRowAsync(cancellationToken);
+                copyPhase = StoreCopyPhase.Data;
 
-                if (definition.IncludesCollectionId)
+                /* #2874: the COPY's own deadline, on NpgsqlBinaryImporter.Timeout — a TimeSpan on a different type
+                   from the rest of the regime, invisible to a command-shaped regex, and inherited from the
+                   connection's CommandTimeout (30 s) when left unset. Same constant, same regime, and the same
+                   narrows-not-closes caveat about the Begin phase as DarlingCollectorRunner.WriteBatchAsync. */
+                importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
+
+                writer.Importer = importer;
+
+                foreach (var row in rows)
                 {
-                    writer.Value(CollectionIdGenerator.Next());
+                    await importer.StartRowAsync(cancellationToken);
+
+                    if (definition.IncludesCollectionId)
+                    {
+                        writer.Value(CollectionIdGenerator.Next());
+                    }
+
+                    writer.Value(collectionTime)
+                          .Value(serverId)
+                          .Value(storageName);
+
+                    writer.BeginPayload();
+                    definition.WritePayload(row, writer, NullContext(serverId, storageName, collectionTime));
+                    writer.EndPayload(definition.PayloadColumns.Count);
+                    written++;
                 }
 
-                writer.Value(collectionTime)
-                      .Value(serverId)
-                      .Value(storageName);
-
-                writer.BeginPayload();
-                definition.WritePayload(row, writer, NullContext(serverId, storageName, collectionTime));
-                writer.EndPayload(definition.PayloadColumns.Count);
-                written++;
+                await importer.CompleteAsync(cancellationToken);
             }
-
-            await importer.CompleteAsync(cancellationToken);
+        }
+        /* Stamped, then rethrown bare, for CopyBatchOnceAsync's reason: the fault keeps its own type,
+           message and inner chain, so every classification arm upstream sees exactly what it sees without
+           this. OperationCanceledException is excluded because a stopping token says the service is shutting
+           down, not which protocol exchange was in flight. */
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            CollectorFaultCopyPhase.Stamp(ex, copyPhase);
+            throw;
         }
 
         _logger?.LogInformation(

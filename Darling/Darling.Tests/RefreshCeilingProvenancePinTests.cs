@@ -89,6 +89,9 @@ public sealed class RefreshCeilingProvenancePinTests
     private const string CompressionMinutesDeclaration =
         "public static readonly IReadOnlyList<int> CompressionPhaseMinutes";
 
+    private const string WarningLineDeclaration =
+        "public const int RefreshSlotWarningSeconds";
+
     private static int Ceiling => TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
 
     private static int Slot => TimescaleSupport.RefreshPhaseSlotSeconds;
@@ -101,10 +104,12 @@ public sealed class RefreshCeilingProvenancePinTests
     /// The pinned sentences, and the ONLY place a pattern is written down — <see cref="Verify"/> looks them up
     /// by name, so the sweep and the assertions cannot end up testing different regexes.
     ///
-    /// <para>Two members carry figures derived from the ceiling: the constant itself, and
-    /// <see cref="TimescaleSupport.CompressionPhaseMinutes"/>, whose exclude-whole reasoning quotes it in
-    /// MINUTES. Each pattern names the doc run it is read out of, so none of them can match a similar
-    /// sentence elsewhere in a four-thousand-line file.</para>
+    /// <para>The runs pinned here are the ones stating figures derived from the ceiling or from the grid
+    /// step it is sized against, wherever they live. Which run a pin reads is carried in its own
+    /// <c>Declaration</c> and its pattern names words from that run, so none of them can match a similar
+    /// sentence elsewhere in a four-thousand-line file. That set is deliberately NOT enumerated here:
+    /// <see cref="Pins"/> is the enumeration, a prose copy of it would be a frozen list beside a growing
+    /// one, and this file exists to stop exactly that.</para>
     ///
     /// <para><b>ASCII-only patterns on purpose, and the reason is <see cref="DocProseFor"/> rather than
     /// anything in the patterns themselves.</b> It normalises <c>—</c> and <c>–</c> to <c>-</c>
@@ -217,6 +222,25 @@ public sealed class RefreshCeilingProvenancePinTests
             "the minutes left on the table",
             CompressionMinutesDeclaration,
             @"The other ([0-9]+) minutes of the slot are past the refresh",
+            true);
+
+        /* The watch line's REJECTED alternative. The figure is derived arithmetic - the slot less one guard
+           band - so it is pinned to that arithmetic here, and the PATTERN spans the ordering words the
+           prose rejects it on, so a rejection restated as a tally of readings is a parse miss rather than
+           a silent pass. Whether that ordering still HOLDS is asserted against the constants and the
+           shipped classifier in TimescaleSupportTests, where it is reachable: Verify is a fail-fast chain
+           and a constant moved far enough to flip the ordering trips an earlier clause first, so a copy of
+           the comparison here would be a pin that cannot fail.
+
+           An ordering rather than a share of the readings, and that is the pin's whole point (#3107). A
+           share of a population is not a stable reason for a threshold: it changes as the population grows
+           without the threshold or the decision changing at all, so a pin on it would go red for a reason
+           that is not a defect - and a pin on it going GREEN says nothing about whether the decision still
+           holds. The ordering has neither property. */
+        yield return (
+            "the rejected alternative watch line",
+            WarningLineDeclaration,
+            @"<see cref=""CompressionPhaseGuardMinutes""/> band, ([0-9]+) s, and it sits BELOW <see cref=""HeaviestHourlyRefreshObservedCeilingSeconds""/>",
             true);
 
         yield return (
@@ -609,6 +633,16 @@ public sealed class RefreshCeilingProvenancePinTests
             $"stated population size {deferred[0]} against {population.Length} listed");
         Require(deferred[1] == min, $"stated low {deferred[1]} s against {min} s listed");
         Require(deferred[2] == max, $"stated high {deferred[2]} s against {max} s listed");
+
+        /* THE REJECTED ALTERNATIVE watch line, held to the arithmetic the prose derives it as. Slot less one
+           guard band, in seconds, so a moved grid step moves it and the sentence cannot keep quoting a
+           figure the grid no longer produces. */
+        var alternative = Read("the rejected alternative watch line");
+        var derivedAlternative = Slot - TimescaleSupport.CompressionPhaseGuardMinutes * 60;
+        Require(alternative[0] == derivedAlternative,
+            $"the rejected alternative is stated as {alternative[0]} s against {derivedAlternative} s derived "
+            + $"from the {Slot} s slot less one {TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard "
+            + "band");
 
         /* And nothing in the pin list went unused: a pattern that is never asserted against reads, from the
            list, exactly like one that is. */

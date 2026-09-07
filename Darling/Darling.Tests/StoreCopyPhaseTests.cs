@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -313,5 +316,283 @@ public class StoreCopyPhaseTests
 
         Assert.Contains("The unbounded start phase is tracked on #3095.", runner, StringComparison.Ordinal);
         Assert.DoesNotContain("Tracked as a residual on #2874.", runner, StringComparison.Ordinal);
+    }
+
+    /* ══ #3111: the axis covers EVERY store COPY, and one consumer routes on that ══════════════════════ */
+
+    /// <summary>
+    /// Every binary COPY the service performs stamps the phase — DISCOVERED, not listed (#3111).
+    ///
+    /// <para><b>Why a scan rather than three more file names.</b> The axis landed on
+    /// <c>DarlingCollectorRunner</c> alone while three structurally identical COPYs carried the same
+    /// residual untouched, and a pin naming the four would have exactly that failure mode one COPY later:
+    /// a fifth site would be absent from the list, absent from the axis, and absent from anything that
+    /// reds. So the population is derived from the source — every file whose CODE calls
+    /// <c>BeginBinaryImportAsync</c> — and the file list below is compared against what the scan found
+    /// rather than trusted as its input.</para>
+    ///
+    /// <para><b>The set equality is load-bearing for something specific, and it runs BOTH ways.</b>
+    /// <see cref="CollectorFaultCopyPhase.IsProvenStoreWrite"/> reads "carries a phase" as "is a store
+    /// write", and that is a biconditional: every COPY must stamp, and only a COPY may stamp. A new COPY
+    /// site enlarges the population the predicate speaks for; a stamping site OUTSIDE a COPY breaks its
+    /// premise outright and hands a target read the store-write label. Both are asserted, against the
+    /// discovered sets rather than against a list — see the two set assertions, which is where the second
+    /// direction lives, because the per-file loop can only speak about files it visited.</para>
+    ///
+    /// <para><b>What the stamping detector can and cannot see, stated rather than implied.</b> It matches a
+    /// QUALIFIED <c>CollectorFaultCopyPhase.Stamp(</c> in stripped code. Two things are therefore out of its
+    /// reach, and only one of them is closed here. A <c>using static</c> on the axis would make
+    /// <c>Stamp(</c> legal unqualified: that route is swept for and asserted empty, so the scan reports the
+    /// blind spot instead of reading clean past it. An unqualified call from INSIDE
+    /// <c>CollectorFaultCopyPhase.cs</c> itself is not covered and is deliberately out of scope — that file
+    /// is the axis's own definition rather than a fault path, and it holds the declaration the whole
+    /// pattern is named for, so it cannot be distinguished from a call by a text scan. Reflection is not
+    /// covered either, and nothing in this repository reaches an internal static that way.</para>
+    ///
+    /// <para>Read STRIPPED: this family names <c>BeginBinaryImportAsync</c> and both phase values
+    /// repeatedly in prose, and <see cref="CollectorFaultCopyPhase"/> and <see cref="StoreWriteReattempt"/>
+    /// discuss the call without making it. Read raw, those two would be swept as COPY sites and the
+    /// structural assertions below would fail against files that perform no COPY at all.</para>
+    /// </summary>
+    [Fact]
+    public void EveryStoreCopyInTheServiceStampsTheCopyPhase()
+    {
+        var serviceDirectory = Path.Combine(
+            Root, "Darling", "PerformanceMonitor.Darling.Service");
+
+        var sources = Directory
+            .EnumerateFiles(serviceDirectory, "*.cs", SearchOption.AllDirectories)
+            .Where(f =>
+                !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
+                !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .ToList();
+
+        /* The floor that stops every assertion below passing on an empty sweep — a wrong directory returns
+           no files, and no files satisfy "every COPY site is instrumented" perfectly. */
+        Assert.True(
+            sources.Count >= 100,
+            $"the sweep found only {sources.Count} .cs files under {serviceDirectory} — it is not reading "
+            + "the service project, so nothing below is asserting anything about the COPY sites");
+
+        var copySites = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        var stampSites = new SortedSet<string>(StringComparer.Ordinal);
+        var aliasedAxis = new SortedSet<string>(StringComparer.Ordinal);
+
+        foreach (var file in sources)
+        {
+            var code = CSharpSourceWalker.StripCommentsAndStrings(
+                File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal));
+
+            if (code.Contains("BeginBinaryImportAsync(", StringComparison.Ordinal))
+            {
+                copySites.Add(Path.GetFileName(file), code);
+            }
+
+            if (code.Contains("CollectorFaultCopyPhase.Stamp(", StringComparison.Ordinal))
+            {
+                stampSites.Add(Path.GetFileName(file));
+            }
+
+            /* The one route the qualified-call test above cannot see: a `using static` on the axis makes
+               `Stamp(` legal unqualified, and the fault it stamps would be indistinguishable from a COPY's.
+               Collected here so the scan reports its own blind spot rather than reading clean past it. */
+            if (Regex.IsMatch(code, @"using\s+static\s+[\w.]*\bCollectorFaultCopyPhase\s*;"))
+            {
+                aliasedAxis.Add(Path.GetFileName(file));
+            }
+        }
+
+        Assert.Equal(
+            new[]
+            {
+                "DarlingCollectorRunner.cs",
+                "RdsCpuIngestor.cs",
+                "RdsDeadlockIngestor.cs",
+                "RdsPlanIngestor.cs",
+            },
+            copySites.Keys.ToArray());
+
+        /* THE CONVERSE, and the half the per-file loop below structurally cannot reach: no file OUTSIDE
+           that set stamps a phase at all.
+
+           `IsProvenStoreWrite` reads "carries a phase" as "is a store write", and its soundness is a
+           BICONDITIONAL — every COPY stamps, AND only a COPY stamps. The loop below establishes the first
+           by visiting the discovered files; nothing in it can say anything about a file it never visited.
+           Add `CollectorFaultCopyPhase.Stamp(` to any target-read path and that fault carries a phase, so
+           `IsProvenStoreWrite` answers true, so DarlingWorker's PostgreSQL-target arm excludes it — and a
+           genuine target read loses the sentence that correctly describes it and is reported as a store
+           write. That is the confident-wrong direction that predicate's own remarks argue is the expensive
+           one, arrived at from the other side.
+
+           Equality rather than a subset, in one statement rather than two: a COPY site that stopped
+           stamping is also a defect, and the per-file assertions below already name it precisely. */
+        Assert.Equal(copySites.Keys.ToArray(), stampSites.ToArray());
+
+        /* And the scan's own blind spot, asserted empty rather than assumed so. */
+        Assert.True(
+            aliasedAxis.Count == 0,
+            "these files carry `using static ... CollectorFaultCopyPhase`, which lets Stamp( be called "
+            + "unqualified and makes the stamping-site scan above blind to it: "
+            + string.Join(", ", aliasedAxis)
+            + ". Either drop the using or widen the detector — an unqualified stamp on a target-read path "
+            + "is exactly what IsProvenStoreWrite cannot survive.");
+
+        /* Every assertion below carries the FILE NAME in its message. A bare Assert.Matches inside a
+           foreach over a discovered population reports which pattern failed and not which member failed
+           it, which on a four-file sweep is the difference between a diagnosis and a re-run. */
+        foreach (var (name, code) in copySites)
+        {
+            /* Start is the value in force before the COPY is opened. The comment region between the two is
+               whitespace in stripped text, so `\s*` spans it exactly — rather than a character budget a
+               longer comment would silently outgrow. */
+            Assert.True(
+                Regex.IsMatch(code, @"var copyPhase\s*=\s*StoreCopyPhase\.Start;\s*try\s*\{\s*using \(var importer"),
+                $"{name}: Start must be the phase in force before the COPY is opened, declared immediately "
+                + "ahead of the try that guards it");
+
+            /* The transition sits between Begin and the first row. Bounded so it would not admit one moved
+               below the row loop. */
+            Assert.True(
+                Regex.IsMatch(code, @"BeginBinaryImportAsync\([\s\S]{0,200}?\{\s*copyPhase\s*=\s*StoreCopyPhase\.Data;"),
+                $"{name}: the transition to Data must sit inside the importer block and before the first "
+                + "row, or a fault that had already sent rows would report the phase a re-attempt trusts");
+
+            /* Exactly one of each, symmetric, for TheCopyWriteStampsTheStartPhaseUntilBeginReturns' reason:
+               a bare `copyPhase = StoreCopyPhase.Start;` below the row loop passes every positional
+               assertion here while making a fault that had already sent rows read as re-attemptable. */
+            Assert.True(
+                Regex.Matches(code, @"copyPhase\s*=\s*StoreCopyPhase\.Start;").Count == 1,
+                $"{name}: exactly one assignment of Start — the declaration — is allowed; a second one "
+                + "anywhere below the row loop is the mutation every other assertion here is blind to");
+            Assert.True(
+                Regex.Matches(code, @"copyPhase\s*=\s*StoreCopyPhase\.Data;").Count == 1,
+                $"{name}: exactly one transition to Data is allowed; two would be a second, unreviewed "
+                + "opinion about which phase is in force");
+
+            /* The fault arm stamps whatever phase was live and rethrows BARE, so the type, message and
+               inner chain reaching every classification arm upstream are unchanged. */
+            Assert.True(
+                Regex.IsMatch(
+                    code,
+                    @"catch \(Exception ex\) when \(ex is not OperationCanceledException\)\s*\{\s*"
+                    + @"CollectorFaultCopyPhase\.Stamp\(ex, copyPhase\);\s*throw;\s*\}"),
+                $"{name}: the COPY needs the stamp-and-rethrow-bare arm, excluding cancellation — a "
+                + "stopping token says the service is shutting down, not which exchange was in flight");
+
+            /* And no site hard-stamps Start. It can only arise from the variable's initial state, which is
+               what makes "Start means the importer never came back" a property of the control flow rather
+               than of somebody's judgement at a catch site. */
+            Assert.DoesNotContain(
+                "CollectorFaultCopyPhase.Stamp(ex, StoreCopyPhase.Start)", code, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A proven store write is EXACTLY a fault carrying a phase, and the predicate declines in the
+    /// direction that costs least (#3111).
+    ///
+    /// <para>The <see cref="StoreCopyPhase.Unknown"/> case is the one that matters and it is an
+    /// under-claim on purpose: the dimension flush and the transaction commit after the COPY (#1767) are
+    /// genuine store writes that carry no stamp, and they read false here. The predicate therefore
+    /// separates a population it is CERTAIN about from everything else — which is the direction that leaves
+    /// an unproven store write with a vaguer message rather than handing a target-read remedy to something
+    /// that never touched the target.</para>
+    /// </summary>
+    [Fact]
+    public void AProvenStoreWriteIsExactlyAFaultCarryingACopyPhase()
+    {
+        Assert.True(CollectorFaultCopyPhase.IsProvenStoreWrite(StartFault()));
+        Assert.True(CollectorFaultCopyPhase.IsProvenStoreWrite(DataFault()));
+
+        /* Unstamped: the post-COPY flush and commit, and every target read. */
+        Assert.False(CollectorFaultCopyPhase.IsProvenStoreWrite(
+            new NpgsqlException(SharedMessage, new TimeoutException())));
+        Assert.False(CollectorFaultCopyPhase.IsProvenStoreWrite(new InvalidOperationException()));
+        Assert.False(CollectorFaultCopyPhase.IsProvenStoreWrite(null));
+
+        /* A payload of the wrong type is not a phase, so it cannot buy the routing decision either. */
+        var wrongType = new InvalidOperationException(SharedMessage);
+        wrongType.Data[CollectorFaultCopyPhase.DataKey] = "Start";
+        Assert.False(CollectorFaultCopyPhase.IsProvenStoreWrite(wrongType));
+    }
+
+    /// <summary>
+    /// The two sentences a PostgreSQL-target <c>CommandTimeout</c> can now receive are DIFFERENT, and the
+    /// store-write one carries none of the target-read remedy (#3111).
+    ///
+    /// <para><b>The defect this asserts against.</b> A store write is Npgsql whatever the monitored
+    /// target's engine is, so a COPY timeout on a PostgreSQL target satisfied every term of the
+    /// target-timeout arm's filter and received its client-side sentence — whose remedy is
+    /// read-specific: <c>Npgsql cancelled the read mid-stream ... shrinking the work is the right one</c>.
+    /// Shrinking a read is not the remedy for a COPY blocked on a store-side lock, and an operator acts on
+    /// a confident instruction.</para>
+    ///
+    /// <para>Both halves are asserted, because only the pair is evidence. That the store-write message
+    /// omits the read remedy proves nothing on its own — an empty string would satisfy it — so the
+    /// target-read sentence is asserted to CONTAIN the phrases the other must not, which is what
+    /// establishes that the two populations genuinely diverge rather than that one of them is missing.</para>
+    /// </summary>
+    [Fact]
+    public void AStoreWriteTimeoutIsDescribedAsAStoreWriteAndCarriesNoTargetReadRemedy()
+    {
+        var storeWrite = CollectorFaultCopyPhase.Describe(StartFault());
+
+        /* Which SIDE failed, first — the thing an operator needs before the rest is actionable. */
+        Assert.Contains("store-write", storeWrite, StringComparison.Ordinal);
+        Assert.Contains("no rows sent", storeWrite, StringComparison.Ordinal);
+
+        /* And none of the target-read remedy. */
+        Assert.DoesNotContain("shrinking the work", storeWrite, StringComparison.Ordinal);
+        Assert.DoesNotContain("cancelled the read", storeWrite, StringComparison.Ordinal);
+
+        /* The control: those phrases are real and they are what this fault no longer receives. Without
+           this half the assertions above would pass against any string that happened not to say them. */
+        var targetRead = DarlingWorker.PostgresTimeoutExplanation(
+            "pg_index_bloat", "appdb", elapsedMs: 30_000, serverCancelled: false);
+
+        Assert.Contains("shrinking the work", targetRead, StringComparison.Ordinal);
+        Assert.Contains("cancelled the read", targetRead, StringComparison.Ordinal);
+        Assert.DoesNotContain("store-write", targetRead, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The routing itself, pinned in source: the exclusion is a term of the arm's FILTER, not a branch
+    /// inside it (#3111).
+    ///
+    /// <para>No pure test can reach this — it is a <c>when</c> clause on one <c>catch</c> in a sweep body
+    /// that needs a runtime, a store and a live collector — and the distinction it pins is invisible to a
+    /// test that could. Inside the arm, a store write would already have been claimed by it: the fault
+    /// would not reach the general arm below, so it would get neither the phase named in its
+    /// <c>collection_log</c> row nor the reprobe decision that arm makes. Excluding it in the filter is
+    /// what makes the fall-through happen, and "the general arm handles it" is the whole design.</para>
+    ///
+    /// <para>The ordering assertion is separate and cheap: the exclusion has to sit ABOVE the
+    /// <c>Classify</c> call, so the arm answers "is this even a target read" before it spends a
+    /// classification on it.</para>
+    /// </summary>
+    [Fact]
+    public void TheTargetTimeoutArmExcludesAProvenStoreWriteInItsFilter()
+    {
+        var worker = ReadRepoFileLf(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+
+        /* Exactly one exclusion, so a second arm cannot grow its own opinion about the same question. */
+        Assert.Equal(1, Regex.Matches(
+            worker, @"&& !CollectorFaultCopyPhase\.IsProvenStoreWrite\(ex\)").Count);
+
+        /* A filter term of the engine-gated arm, above the Classify call, and reached before the arm's
+           body — the window admits the intervening comment and would not admit a term moved after the
+           classification or a check moved inside the braces. */
+        Assert.Matches(
+            new Regex(@"Target\.Engine == CollectorTargetEngine\.PostgreSql[\s\S]{0,4000}?"
+                      + @"&& !CollectorFaultCopyPhase\.IsProvenStoreWrite\(ex\)[\s\S]{0,200}?"
+                      + @"&& PostgresTargetProvider\.Instance\.Classify\("),
+            worker);
+
+        /* And it is NOT expressed as a branch inside the arm, which would keep the fault out of the
+           general arm and cost it both the phase in its stored row and that arm's reprobe decision. */
+        Assert.DoesNotContain(
+            "if (CollectorFaultCopyPhase.IsProvenStoreWrite(ex))", worker, StringComparison.Ordinal);
     }
 }
