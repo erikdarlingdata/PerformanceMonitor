@@ -184,6 +184,49 @@ public sealed class PostgresCancelOriginTests
     }
 
     /// <summary>
+    /// The unproven sentence DESCRIBES the cancel code as PostgreSQL's behaviour and never attributes it to
+    /// the fault in hand.
+    ///
+    /// <para><b>Why that distinction is load-bearing.</b>
+    /// <see cref="PostgresCancelSource.Unproven"/> is reachable for a fault carrying no SQLSTATE at all,
+    /// because <see cref="CollectorFaultCancelOrigin.For"/> is total on purpose — it does not rest on the
+    /// arm's filter. A sentence reading <c>(SQLSTATE 57014)</c> unconditionally would then rest on that
+    /// filter instead, and assert a code the fault never carried. That is #3118's own defect one layer up:
+    /// a confident claim that is true only because of something a caller elsewhere happens to do. The two
+    /// confident arms assert nothing beyond the <c>CommandTimeout</c> classification the method as a whole
+    /// is handed, which is the caller's to guarantee for all three of them.</para>
+    ///
+    /// <para>Both halves, because suppressing the claim proves nothing on its own: the code must still be
+    /// EXPLAINED, since the population that does carry it is the one an operator reads.</para>
+    /// </summary>
+    [Fact]
+    public void TheUnprovenSentenceDescribesTheCancelCodeRatherThanAttributingItToTheFault()
+    {
+        var noSqlState = new NpgsqlException("connection was closed");
+
+        Assert.Equal(PostgresCancelSource.Unproven, CollectorFaultCancelOrigin.For(noSqlState).Source);
+
+        var explanation = Explain(noSqlState);
+
+        Assert.DoesNotContain(
+            $"(SQLSTATE {CollectorFaultCancelOrigin.QueryCanceled})", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("ms (SQLSTATE", explanation, StringComparison.Ordinal);
+
+        Assert.Contains(
+            $"PostgreSQL raises SQLSTATE {CollectorFaultCancelOrigin.QueryCanceled}",
+            explanation,
+            StringComparison.Ordinal);
+
+        /* And the arm that IS only ever reached from a real 57014 still names it on the row, because there
+           the attribution is earned. Asserted here so the fix above cannot be "delete the code from every
+           sentence", which would cost the readable population its most identifying field. */
+        Assert.Contains(
+            $"ms (SQLSTATE {CollectorFaultCancelOrigin.QueryCanceled})",
+            Explain(Cancelled("canceling statement due to statement timeout")),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The two predicates over <c>57014</c> answer DIFFERENT questions, and this is the pin that keeps them
     /// from being collapsed back into one.
     ///

@@ -6148,10 +6148,19 @@ LIMIT 1";
                machine nor the knob; the wording is quoted rather than interpreted, because a human reading
                a translated or reworded message can place it and this code cannot. It rules the target's
                statement_timeout OUT, which is the actionable half - the alternative on offer is a
-               confident sentence about whichever machine the coin landed on. */
-            _ => $"{collectorName} on {where} was CANCELLED after {elapsed} ms (SQLSTATE "
-                 + $"{CollectorFaultCancelOrigin.QueryCanceled}), and this fault does not say WHOSE "
-                 + "deadline fired. PostgreSQL raises that code for the target's own statement_timeout, "
+               confident sentence about whichever machine the coin landed on.
+
+               The code is DESCRIBED as PostgreSQL's behaviour, never attributed to this fault, and that
+               distinction is load-bearing. Unproven is reachable for a fault carrying no SQLSTATE at all -
+               CollectorFaultCancelOrigin.For is total on purpose, so that it does not rest on the arm's
+               filter - and a sentence reading "(SQLSTATE 57014)" would then assert a code the fault never
+               carried. Resting the SENTENCE on the filter instead of the classifier would be this same
+               defect one layer up: a confident claim true only because of something a caller elsewhere
+               happens to do. The two arms above assert nothing beyond the CommandTimeout classification
+               this whole method is handed, which is the caller's to guarantee for all three. */
+            _ => $"{collectorName} on {where} was CANCELLED after {elapsed} ms, and this fault does not "
+                 + "say WHOSE deadline fired. PostgreSQL raises SQLSTATE "
+                 + $"{CollectorFaultCancelOrigin.QueryCanceled} for the target's own statement_timeout, "
                  + "for a pg_cancel_backend() aimed at the backend, and for the client CancelRequest this "
                  + "service's own command deadline sends: one code, three producers, and only the wording "
                  + $"tells them apart. The server said {QuotedCancelWording(origin.ServerText)}, which is "
