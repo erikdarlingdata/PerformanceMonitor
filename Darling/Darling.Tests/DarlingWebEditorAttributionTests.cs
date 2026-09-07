@@ -374,9 +374,20 @@ public sealed class DarlingWebEditorAttributionTests
     [Fact]
     public void EveryComposerRefusal_SeparatesAReadOnlySeatFromAFailedProbe()
     {
+        /* The flag has to be set by the session probe's BODY. Asserting it appears anywhere in the file is
+           satisfied by this very mechanism's own doc comment — which it was, and stripping the flag from the
+           default left the check green. Prose about a mechanism is not the mechanism. */
         var api = RepoFile.ReadRepoFile(SessionClientPath);
+        var probe = api.IndexOf("export function getSession()", StringComparison.Ordinal);
+        Assert.True(probe >= 0, $"getSession is gone from {SessionClientPath}; this pin is reading nothing.");
 
-        Assert.Contains("probe_failed", api, StringComparison.Ordinal);
+        var probeBody = CSharpSourceWalker.BraceBalanced(api, api.IndexOf('{', probe));
+
+        Assert.True(
+            probeBody.Contains("probe_failed", StringComparison.Ordinal),
+            "getSession's fail-closed default does not mark itself with probe_failed, so a transport failure is "
+          + "indistinguishable from a read-only seat and every composer's notice takes the wrong arm for one of "
+          + "them. Only this default can carry the flag — the server's answer never does.");
 
         var composers = Directory
             .EnumerateFiles(RepoFile.PathTo(WebRoot), "*.js", SearchOption.AllDirectories)
