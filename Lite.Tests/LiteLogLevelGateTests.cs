@@ -374,10 +374,19 @@ public sealed class LiteLogLevelGateTests : IDisposable
     /// compiled out of Release exactly as a <c>#if</c> body is. Both were verified legal and both were
     /// invisible to the adjacent-<c>#if</c> form this started as.</para>
     ///
+    /// <para>The attribute pattern is deliberately LOOSE — the bare token followed by <c>(</c>, with no
+    /// attribute brackets or qualifier required. The tight form that required <c>[</c> immediately before
+    /// it missed <c>[System.Diagnostics.Conditional("DEBUG")]</c>, which is how anyone who has not imported
+    /// the namespace writes it; a list position (<c>[Other, Conditional(…)]</c>) and a <c>global::</c>
+    /// prefix evaded it for the same reason. Loose costs a false red on an unrelated member that happened
+    /// to be called <c>Conditional</c>, which is a question someone answers in a minute. Tight costs a
+    /// silent miss of the exact defect, which is what this whole issue is about.</para>
+    ///
     /// <para><b>What it still cannot see</b>, since a scan's blind spot is a property of the detector: it
     /// reads <see cref="AppLogger"/> only, so a <c>[Conditional]</c> on some other type this one calls, or
     /// a directive in <see cref="AppLoggerAdapter{T}"/>, is out of scope — the runtime sweeps are what
-    /// answer for the adapter. It also keys on the ATTRIBUTE name, so an alias would evade it.</para>
+    /// answer for the adapter. It also keys on the attribute's NAME, so an alias
+    /// (<c>using C = System.Diagnostics.ConditionalAttribute;</c>) would evade it.</para>
     /// </summary>
     [Fact]
     public void NoLoggingDecision_IsMadeByThePreprocessor()
@@ -392,8 +401,8 @@ public sealed class LiteLogLevelGateTests : IDisposable
             .Matches(code, @"^[ \t]*#[ \t]*(if|elif|else|endif)\b", RegexOptions.Multiline)
             .Select(m => $"directive {m.Value.Trim()}")
             .Concat(Regex
-                .Matches(code, @"\[\s*Conditional(Attribute)?\s*\(", RegexOptions.CultureInvariant)
-                .Select(_ => "[Conditional] attribute"))
+                .Matches(code, @"\bConditional(?:Attribute)?\s*\(", RegexOptions.CultureInvariant)
+                .Select(m => $"attribute {m.Value.Trim()}"))
             .ToList();
 
         Assert.True(
