@@ -89,7 +89,16 @@ internal enum StoreCopyPhase
 /// <see cref="Describe"/> renders it into the message an operator reads. A consumer gating a re-attempt on
 /// safety requires <c>For(ex) == StoreCopyPhase.Start</c>; <see cref="StoreCopyPhase.Unknown"/> and
 /// <see cref="StoreCopyPhase.Data"/> both decline, which is the direction that costs nothing when the
-/// stamp is missing.</para>
+/// stamp is missing. <see cref="IsProvenStoreWrite"/> asks the coarser question — which SIDE of the
+/// service the fault came from — for the consumer that needs to route rather than to retry.</para>
+///
+/// <para><b>Every COPY the service performs stamps a phase</b>, not just the collector runner's:
+/// <c>DarlingCollectorRunner.CopyBatchOnceAsync</c> and the three AWS-API ingestors
+/// (<see cref="Targets.RdsPlanIngestor"/>, <see cref="Targets.RdsCpuIngestor"/>,
+/// <see cref="Targets.RdsDeadlockIngestor"/>) share the shape and therefore share the residual, so they
+/// share the axis. That uniformity is what lets a consumer treat "carries a phase" as a fact about the
+/// whole service rather than about one method — see <see cref="IsProvenStoreWrite"/>, which is only sound
+/// while it holds.</para>
 ///
 /// <para>Reading is total: an unstamped exception, or one whose payload is not a
 /// <see cref="StoreCopyPhase"/>, reads as <see cref="StoreCopyPhase.Unknown"/> and
@@ -107,16 +116,26 @@ internal static class CollectorFaultCopyPhase
     /// message and the consequence — no rows sent — because those are what tell the reader why this
     /// failure is the recoverable one, and a bare phase name would not.
     /// </summary>
+    /// <remarks>
+    /// <b>"store-write" leads, and it is the word doing the work for a reader.</b> Every arm this label can
+    /// reach also reports faults from READING the monitored server, and a bare "COPY" only names the store
+    /// to someone who already knows this product performs no COPY against a target. An operator holding a
+    /// <c>collection_log</c> row needs to know which SIDE failed before anything else in the sentence is
+    /// actionable — the remedy for a store write under contention has nothing in common with the remedy
+    /// for a target read that overran its deadline.
+    /// </remarks>
     internal const string StartPhaseLabel =
-        "COPY start phase (awaiting CopyInResponse on the connection's own CommandTimeout, no rows sent)";
+        "store-write COPY start phase (awaiting CopyInResponse on the connection's own CommandTimeout, "
+        + "no rows sent)";
 
     /// <summary>
     /// How <see cref="StoreCopyPhase.Data"/> is named in a message. It names the deadline that bounds it,
     /// so the reader can tell a data-phase failure from the start phase by the budget it ran out of rather
     /// than by inferring a phase from a duration.
     /// </summary>
+    /// <remarks>Leads with "store-write" for <see cref="StartPhaseLabel"/>'s reason.</remarks>
     internal const string DataPhaseLabel =
-        "COPY data phase (rows in flight under the collection-sweep deadline)";
+        "store-write COPY data phase (rows in flight under the collection-sweep deadline)";
 
     /// <summary>
     /// Records <paramref name="phase"/> on <paramref name="exception"/>. Best-effort, for
@@ -175,6 +194,26 @@ internal static class CollectorFaultCopyPhase
 
         return StoreCopyPhase.Unknown;
     }
+
+    /// <summary>
+    /// True when the fault is PROVABLY a write to the store rather than a read of the monitored server,
+    /// which a recorded phase establishes by construction: the only sites that stamp one are the four
+    /// binary COPYs into the store, and nothing that touches a target can reach them.
+    ///
+    /// <para><b>The name is what it can establish, and the converse does NOT hold.</b> False means "not
+    /// proven", never "not a store write". <see cref="StoreCopyPhase.Unknown"/> is what the dimension flush
+    /// and the transaction commit after the COPY read as (#1767) — genuine store writes that carry no
+    /// stamp — alongside every target read. So this separates a population it is certain about from
+    /// everything else, and a caller may only act on the certain side.</para>
+    ///
+    /// <para><b>Which is the direction that costs least, and the asymmetry is the point.</b> The consumer is
+    /// <see cref="DarlingWorker"/>'s PostgreSQL-target timeout arm, whose sentence tells an operator to
+    /// shrink the work a read asked for. Applied to a store write that is confidently wrong advice about an
+    /// operation that never ran against the target, and an operator acts on it; withheld from a store write
+    /// this predicate could not prove, the fault keeps a message that is merely less specific. A missing
+    /// stamp therefore loses a routing decision rather than making one.</para>
+    /// </summary>
+    internal static bool IsProvenStoreWrite(Exception? exception) => For(exception) != StoreCopyPhase.Unknown;
 
     /// <summary>
     /// The exception's message with its COPY phase named, or the message unchanged when there is no phase
