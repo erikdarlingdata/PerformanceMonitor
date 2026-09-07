@@ -551,6 +551,34 @@ public sealed class RefreshCeilingProvenancePinTests
         Assert.ThrowsAny<Exception>(() => AssertNoOpenPopulationClaim(unanchored));
     }
 
+    /// <summary>
+    /// Two doc runs cannot combine into a claim neither of them makes, checked on an arranged pair rather
+    /// than on the tree — the same way <see cref="DashNormalisationProbe"/> checks the normalisation it
+    /// depends on.
+    ///
+    /// <para><b>Why an arranged pair and not a hopeful comment.</b> <c>\s</c> matches <c>\n</c> in .NET, so
+    /// a newline between runs is NOT a barrier: a run ending in a quantifier and the next one opening with
+    /// a population noun would match as one claim across it. The only shape that can bridge the separator
+    /// is the one built here, and the separator has to be something no whitespace class can absorb.</para>
+    /// </summary>
+    [Fact]
+    public void TwoDocRuns_CannotCombineIntoAClaimNeitherOfThemMakes()
+    {
+        /* The first run ENDS in the quantifier and the second OPENS with the population noun. Neither run
+           states a population claim; only their concatenation could. */
+        var prose = JoinedDocProse(
+            "    /// a band every\r\n    int first;\r\n\r\n    /// readings arrive hourly\r\n    int second;\r\n");
+
+        /* Both halves present first, so a pass cannot come from the scan having read nothing. */
+        Assert.Contains("every", prose, StringComparison.Ordinal);
+        Assert.Contains("readings", prose, StringComparison.Ordinal);
+
+        Assert.False(UniversalOverAnOpenSeries.IsMatch(prose),
+            "two doc runs combined into a population claim neither of them makes, so the run separator is "
+            + "being absorbed by a pattern's whitespace class. Keep the separator non-whitespace: \\s "
+            + "matches \\n in .NET, so a newline cannot hold two runs apart.");
+    }
+
     /* ─────────────────────────────── verification ─────────────────────────────── */
 
     /// <summary>
@@ -1028,6 +1056,21 @@ public sealed class RefreshCeilingProvenancePinTests
     private const string InsideSlotMember = "        InsideSlot,";
 
     /// <summary>
+    /// What holds one doc run apart from the next in <see cref="JoinedDocProse"/>. Deliberately NOT
+    /// whitespace: <c>\s</c> matches <c>\n</c> in .NET, so a newline separator is crossed by any pattern
+    /// written with <c>\s+</c> — a run ending in "every" and an unrelated run opening with "readings" would
+    /// then match as one claim and fail this guard over prose that states nothing of the kind. A
+    /// non-whitespace sentinel cannot be absorbed by a whitespace class, so the property holds for every
+    /// pattern here rather than only for the ones written carefully — and
+    /// <see cref="TwoDocRuns_CannotCombineIntoAClaimNeitherOfThemMakes"/> is what says so, rather than this
+    /// paragraph.
+    ///
+    /// <para>A <c>NUL</c> rather than a printable sentinel, because it cannot occur in source prose —
+    /// so no comment can contain the thing that holds comments apart.</para>
+    /// </summary>
+    private const string DocRunSeparator = "\u0000";
+
+    /// <summary>
     /// The universal-quantifier form: a quantifier over a population of OBSERVATIONS, which is a series
     /// that gains a member every hour this job runs.
     ///
@@ -1048,7 +1091,7 @@ public sealed class RefreshCeilingProvenancePinTests
     /// here to acquire one.</para>
     /// </summary>
     private static readonly Regex UniversalOverAnOpenSeries =
-        new(@"\b(?:every|each|all)\s+(?:reading|readings|sample|samples|snapshot|snapshots)\b",
+        new(@"\b(?:every|each|all)[ \t]+(?:reading|readings|sample|samples|snapshot|snapshots)\b",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
@@ -1102,8 +1145,8 @@ public sealed class RefreshCeilingProvenancePinTests
     /// <see cref="DocProseFor"/> normalises a single declaration's — so a phrase that wraps across
     /// <c>///</c> lines is one string, and neither emphasis nor dash style can hide a match.
     ///
-    /// <para>Runs are kept newline-separated from each other rather than run together, so two adjacent
-    /// runs cannot manufacture a phrase that neither of them contains.</para>
+    /// <para>Runs are held apart by <see cref="DocRunSeparator"/> rather than run together, so no two of
+    /// them can manufacture a phrase that neither one contains.</para>
     /// </summary>
     private static string JoinedDocProse(string source)
     {
@@ -1131,7 +1174,7 @@ public sealed class RefreshCeilingProvenancePinTests
             runs.Add(string.Join(" ", current));
         }
 
-        var prose = string.Join("\n", runs)
+        var prose = string.Join(DocRunSeparator, runs)
             .Replace("<b>", string.Empty, StringComparison.Ordinal)
             .Replace("</b>", string.Empty, StringComparison.Ordinal)
             .Replace('—', '-')
