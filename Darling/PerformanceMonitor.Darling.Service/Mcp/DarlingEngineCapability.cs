@@ -111,6 +111,38 @@ WHERE server_id = $1";
         return (edition, kind);
     }
 
+    /// <summary>
+    /// The target's engine KIND token as the registry holds it, or <c>null</c> when it makes no claim — no
+    /// row, or a row no connect has stamped since V82 landed. Decode it through
+    /// <see cref="MonitoredEngineKind"/> rather than comparing strings.
+    ///
+    /// <para><b>Null is not an error and must not be read as "not Aurora".</b> Same contract as
+    /// <see cref="PostgresMajorVersionAsync"/>: callers use this to decide whether they may state that a
+    /// column is structurally absent on this FLAVOUR, and with no claim they say nothing rather than
+    /// guessing. <see cref="MonitoredEngineKind.IsAurora"/> already answers false for null, which is the
+    /// direction that stays honest — an unexplained NULL column beats an explanation naming the wrong
+    /// engine.</para>
+    ///
+    /// <para>A registry read that FAILS answers null, for the reason the two methods around it do: this
+    /// runs on a path that already has its data, and a capability probe must never turn a good answer
+    /// into a read error.</para>
+    /// </summary>
+    public static async Task<string?> EngineKindAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var (_, engineKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+            return engineKind;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     /// <summary>The registry's PostgreSQL major for one server (V100, #2653). $1 server_id.</summary>
     public const string PostgresMajorVersionSql = @"
 SELECT postgres_major_version
