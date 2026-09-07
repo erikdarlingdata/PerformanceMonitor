@@ -57,9 +57,10 @@ namespace Darling.Tests;
 /// them runs on such a change either way. It belongs instead in the category <c>build.yml</c>'s
 /// <c>darling-tree-guards</c> job already exists for — guards whose input is the repository rather than a
 /// path, like <c>FleetIdentifierScrubTests</c> — and that job runs this suite exactly when the build job's
-/// step reports <c>skipped</c>. The <c>darling-pg</c> job is not part of that trade: it declares its OWN
-/// <c>darling</c> filter, naming only <c>Darling/**</c> and the two workflow files, so no entry added to
-/// the build job's filter can stand up its throwaway cluster. <c>CrossAppGuardCiGateTests</c> does see the
+/// step reports <c>skipped</c>. The <c>darling-pg</c> job is not part of that trade: it reads the gate at
+/// <c>.github/darling-paths-filter.yml</c>, which names <c>Darling/**</c>, the shared libraries Darling
+/// compiles against, and the gate's own inputs — so no entry added to the build job's filter can stand up
+/// its throwaway cluster. <c>CrossAppGuardCiGateTests</c> does see the
 /// two <c>Lite.Tests</c> keys below — #3067 widened its anchor past the app directory, since
 /// <c>Lite.Tests</c> is a sibling of <c>Lite</c> rather than a directory inside it — and exempts them on
 /// this same reasoning, under the same bound.</para>
