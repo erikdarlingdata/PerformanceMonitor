@@ -35,6 +35,33 @@ namespace Darling.Tests;
 /// test and its negative control, they share the probe plumbing below, and separating them would leave the
 /// control one file away from the thing it controls. The cost is that one fast, storeless test is serialized
 /// with the live collection, which is cheaper than either alternative.</para>
+///
+/// <para><b>Which leg of <see cref="StoreWriteReattempt.IsSafeToReattempt"/> each test here covers, stated
+/// because it is not what the names suggest (#3111).</b> That gate is
+/// <c>IsTransportFault(fault) &amp;&amp; For(fault) == StoreCopyPhase.Start</c>, and the two legs are
+/// covered by different tests on different faults:</para>
+///
+/// <list type="bullet">
+/// <item><see cref="AFaultOutOfBeginBinaryImportCarriesStart_OnTheRealPath"/> covers the PHASE leg only.
+/// Its fault is measured, not assumed: an unopened connection makes the real
+/// <c>BeginBinaryImportAsync</c> raise <c>InvalidOperationException("Connection is not open")</c>, which is
+/// a start-phase fault that is NOT a transport fault — <see cref="PostgresTransportFault"/> walks the chain,
+/// finds no socket/stream/timeout link, and the outermost type is not an
+/// <see cref="NpgsqlException"/> either. So the full gate DECLINES that fault, and the test asserts exactly
+/// that rather than leaving the reader to infer a retry from it.</item>
+/// <item><see cref="ARealStartPhaseTimeoutIsATransportFaultAndTheGateAcceptsIt"/> covers BOTH legs, on the
+/// real path, on the population the gate exists for: a start-phase COPY timeout under store-side
+/// contention. It is the only test in the repository where a fault the runner itself produced is carried
+/// end to end into an accepted re-attempt decision.</item>
+/// <item><see cref="AFaultInsideTheRowLoopCarriesData_OnTheRealPath"/> is the phase leg's negative
+/// control.</item>
+/// </list>
+///
+/// <para><c>StoreWriteReattemptTests</c> covers the predicate's whole truth table, but it STAMPS its own
+/// faults and constructs its own transport shapes — so it pins the policy given a fault and deliberately
+/// owns nothing about which faults the runner really raises. That is the gap this class closes, and the
+/// reason it is worth naming: the transport leg was reachable only through hand-built exceptions, so
+/// nothing established that the faults the COPY actually produces satisfy it.</para>
 /// </summary>
 [Collection("live-postgres")]
 public class StoreCopyPhaseLivePostgresTests
@@ -57,6 +84,14 @@ public class StoreCopyPhaseLivePostgresTests
     /// fault — the importer never returned. The definition's <c>WritePayload</c> throws a distinctive
     /// exception, so if the row loop were ever reached this would surface as that fault instead of the
     /// connection's, and the assertion would name which.</para>
+    ///
+    /// <para><b>It covers the PHASE leg of the re-attempt gate and NOT the transport leg</b>, and the last
+    /// two assertions say so in the test rather than in prose. The fault this path really raises is an
+    /// <c>InvalidOperationException</c>, which is start-phase and is not transport — so
+    /// <see cref="StoreWriteReattempt.IsSafeToReattempt"/> declines it. Asserting that keeps the reader from
+    /// taking "a real start-phase fault on the real path" as evidence about a re-attempt, which is the
+    /// inference the class summary exists to head off, and it fails if either half of the gate is ever
+    /// loosened into accepting this shape.</para>
     /// </summary>
     [Fact]
     public async Task AFaultOutOfBeginBinaryImportCarriesStart_OnTheRealPath()
@@ -74,6 +109,96 @@ public class StoreCopyPhaseLivePostgresTests
             + "longer exercising the start phase.");
 
         Assert.Equal(StoreCopyPhase.Start, CollectorFaultCopyPhase.For(fault));
+
+        /* The scope of what this fault establishes, asserted. It is start-phase and it is not transport,
+           so the conjunction declines it — measured on the fault the path produces rather than assumed
+           from its type name. */
+        Assert.False(PostgresTransportFault.IsTransportFault(fault));
+        Assert.False(StoreWriteReattempt.IsSafeToReattempt(fault));
+    }
+
+    /// <summary>
+    /// The transport leg of <see cref="StoreWriteReattempt.IsSafeToReattempt"/>, on the real path, on a real
+    /// fault (#3111) — and with it the first end-to-end demonstration that the gate ACCEPTS something.
+    ///
+    /// <para><b>Why the sibling above does not cover this.</b> Its fault is an
+    /// <c>InvalidOperationException</c>: start-phase, but not a transport fault, so the conjunction
+    /// declines it. Every accepting case in the suite was a hand-stamped, hand-constructed exception. That
+    /// left the load-bearing claim — that a COPY start-phase stall really is a transport fault and
+    /// therefore really is re-attempted — resting on fixtures asserting their own shape, which is the
+    /// failure mode where a predicate passes its tests while being wrong about its subject.</para>
+    ///
+    /// <para><b>How the condition is induced, and why this shape.</b> A collector for an exceptional state
+    /// proves only that it parses when the state is absent, so the stall is produced rather than waited
+    /// for: a second session holds <c>ACCESS EXCLUSIVE</c> on the COPY's target table, which makes the
+    /// backend block acquiring its own lock BEFORE it can answer <c>CopyInResponse</c> — exactly the
+    /// regime <see cref="StoreCopyPhase.Start"/> describes, and exactly what a store-contention hypothesis
+    /// predicts. <c>CommandTimeout</c> is cut to a few seconds because the start phase runs on the
+    /// connection's own value and the default is Npgsql's undocumented 30 s; the connection string is
+    /// DERIVED from the live one rather than rebuilt, so the harness's host, port and credentials cannot
+    /// drift from it.</para>
+    ///
+    /// <para>Nothing is written and nothing needs cleaning: the lock is taken in a transaction that rolls
+    /// back, and the COPY never completes a row. Serialization with the rest of the live collection is what
+    /// makes a table lock safe to take at all, and this class already carries that attribute.</para>
+    /// </summary>
+    [Fact]
+    public async Task ARealStartPhaseTimeoutIsATransportFaultAndTheGateAcceptsIt()
+    {
+        var pg = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(pg), "Set DARLING_TEST_PG to run the transport-leg instance check.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var dataSource = NpgsqlDataSource.Create(pg!);
+        await using (var migrateConnection = await dataSource.OpenConnectionAsync(ct))
+        {
+            await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(migrateConnection, ct);
+        }
+
+        /* The blocker. ACCESS EXCLUSIVE conflicts with the ROW EXCLUSIVE a COPY takes, so the COPY's
+           backend waits on the lock manager and never reaches CopyInResponse. Rolled back, so the lock is
+           the whole of its effect. */
+        await using var blocker = await dataSource.OpenConnectionAsync(ct);
+        await using var blockerTransaction = await blocker.BeginTransactionAsync(ct);
+        await using (var takeLock = new NpgsqlCommand(
+            $"LOCK TABLE collect.{PhaseProbeTable} IN ACCESS EXCLUSIVE MODE", blocker, blockerTransaction))
+        {
+            await takeLock.ExecuteNonQueryAsync(ct);
+        }
+
+        /* Derived, not rebuilt: only the deadline differs from the live connection string. Its own data
+           source, so the physical connection is new and cannot be a pooled one that predates the store's
+           database-level search_path. */
+        var bounded = new NpgsqlConnectionStringBuilder(pg!)
+        {
+            CommandTimeout = StartPhaseTimeoutSeconds,
+        }.ConnectionString;
+
+        await using var boundedSource = NpgsqlDataSource.Create(bounded);
+        await using var connection = await boundedSource.OpenConnectionAsync(ct);
+
+        var fault = await CopyFaultAsync(
+            new PhaseProbeDefinition(PhaseProbeTable), boundedSource, connection, ct);
+
+        Assert.False(
+            fault is PhaseProbeReachedTheRowLoopException,
+            "the row loop must not be reachable while the COPY target is locked: WritePayload ran, so the "
+            + "blocker did not block and this test is measuring the data phase.");
+
+        /* The phase leg. */
+        Assert.Equal(StoreCopyPhase.Start, CollectorFaultCopyPhase.For(fault));
+
+        /* THE LEG THIS TEST EXISTS FOR — and the premise underneath it, so a pass cannot come from the
+           chain walk's NpgsqlException fallback while the fault is really something else. */
+        Assert.IsAssignableFrom<NpgsqlException>(fault);
+        Assert.IsType<TimeoutException>(fault.GetBaseException());
+        Assert.True(PostgresTransportFault.IsTransportFault(fault));
+
+        /* Both legs, so the gate accepts — the one claim no other test in the repository makes about a
+           fault the runner itself raised. */
+        Assert.True(StoreWriteReattempt.IsSafeToReattempt(fault));
+
+        await blockerTransaction.RollbackAsync(ct);
     }
 
     /// <summary>
@@ -100,7 +225,8 @@ public class StoreCopyPhaseLivePostgresTests
         }
 
         await using var connection = await dataSource.OpenConnectionAsync(ct);
-        var fault = await CopyFaultAsync(new PhaseProbeDefinition("wait_stats"), dataSource, connection, ct);
+        var fault = await CopyFaultAsync(
+            new PhaseProbeDefinition(PhaseProbeTable), dataSource, connection, ct);
 
         Assert.True(
             fault is PhaseProbeReachedTheRowLoopException,
@@ -114,17 +240,39 @@ public class StoreCopyPhaseLivePostgresTests
     private const string UnreachableStore = "Host=127.0.0.1;Port=1;Username=probe;Database=probe";
 
     /// <summary>
+    /// The real store table both live tests COPY into, named once because the transport-leg test also has
+    /// to LOCK it and the two spellings must be the same table — a lock on a different one would let the
+    /// COPY through and the test would silently measure the data phase instead. The store's own
+    /// database-level <c>search_path</c> puts <c>collect</c> first, so the definition's bare
+    /// <c>TargetTable</c> resolves to it while the <c>LOCK</c> qualifies it explicitly.
+    /// </summary>
+    private const string PhaseProbeTable = "wait_stats";
+
+    /// <summary>
+    /// The deadline the blocked start phase runs out of. Small because the start phase is bounded by the
+    /// CONNECTION's <c>CommandTimeout</c> rather than by the importer's own — that is the residual #3095
+    /// reports — and the default there is Npgsql's undocumented 30 s, which is dead time in every CI run.
+    /// </summary>
+    private const int StartPhaseTimeoutSeconds = 3;
+
+    /// <summary>
     /// Drives the SHIPPED private COPY body and returns the fault it raised. Reflection because the method
     /// is private and <c>InternalsVisibleTo</c> does not reach private members; a rename breaks this
     /// loudly, which is the correct failure for a test whose whole subject is that method.
     ///
     /// <para><b>Takes its connection and data source rather than owning them, and has no <c>finally</c>.</b>
-    /// Every caller holds both under <c>await using</c>, so disposal is the language's job. That is not
-    /// stylistic: a <c>DisposeAsync</c> in a <c>finally</c> can throw and REPLACE the body's exception,
-    /// which on this helper is the entire result being measured — and it is the same hazard
-    /// <c>LiveCleanupConversionRatchetTests</c> exists to stamp out. <c>LiveStoreCleanup</c> is not the
-    /// remedy here because there is nothing to clean: the COPY always faults, so no attempt commits a row.
-    /// </para>
+    /// Every caller holds both under <c>await using</c>, so disposal is the language's job — and the reason
+    /// is ORDERING, which turns on the fact that this helper RETURNS the fault instead of letting it
+    /// propagate. By the time a <c>finally</c> here would run, the <c>catch</c> below has already converted
+    /// the fault into this method's return value, so there is no in-flight exception for a throwing
+    /// <c>DisposeAsync</c> to replace; what it would replace is the returned exception object itself, and it
+    /// would do so BEFORE any caller had read a single assertion off it. Leaving disposal to each caller's
+    /// <c>await using</c> puts it at the end of the test method, after every assertion about the fault has
+    /// run — so a dispose that throws can only fail a test whose measurement is already complete, rather
+    /// than destroy the measurement. Same family of hazard as the one
+    /// <c>LiveCleanupConversionRatchetTests</c> exists to stamp out, differing in what is at risk.
+    /// <c>LiveStoreCleanup</c> is not the remedy here because there is nothing to clean: the COPY always
+    /// faults, so no attempt commits a row.</para>
     /// </summary>
     private static async Task<Exception> CopyFaultAsync(
         PhaseProbeDefinition definition,
