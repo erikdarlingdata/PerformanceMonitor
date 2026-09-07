@@ -83,6 +83,21 @@ public sealed class DarlingWebEditorAttributionTests
     /// <summary>A custom-view write on the store: the two method names that take an <c>updatedBy</c>.</summary>
     private static readonly Regex CustomViewWrite = new(@"\.(?:Create|Update)Async\s*\(", RegexOptions.Compiled);
 
+    /// <summary>
+    /// A READ of the seat's principal — <c>EditorPrincipal</c> as its own identifier, never as the tail of a
+    /// longer one. The word boundary is the entire assertion: a plain substring test for
+    /// <c>"EditorPrincipal"</c> is satisfied by <c>WebEditorPrincipal</c> and <c>McpEditorPrincipal</c>, so it
+    /// passes on exactly the constant-stamping code it exists to reject. Found by mutation — reverting one
+    /// write site to the constant left every check green, which is what a check that cannot fail looks like
+    /// from the inside.
+    /// </summary>
+    private static readonly Regex SeatPrincipalRead =
+        new(@"(?<![A-Za-z0-9_])EditorPrincipal(?![A-Za-z0-9_])", RegexOptions.Compiled);
+
+    /// <summary>The MCP provenance constant, matched whole for the same reason.</summary>
+    private static readonly Regex McpPrincipalRead =
+        new(@"(?<![A-Za-z0-9_])McpEditorPrincipal(?![A-Za-z0-9_])", RegexOptions.Compiled);
+
     /* =====================================================================================================
        R3 / R6 — the resolution itself, over real HttpContext instances.
        ===================================================================================================== */
@@ -135,11 +150,13 @@ public sealed class DarlingWebEditorAttributionTests
     /// by walking the file's code stream, which is what makes this cover a write site nobody has written yet:
     /// a pin naming today's create and update is blind to a third route added on any branch.
     ///
-    /// <para>The check is per-site and the assertion is POSITIVE — the argument list must contain
-    /// <c>EditorPrincipal</c>. A negative check ("does not pass <c>WebEditorPrincipal</c>") would be satisfied
-    /// by a site that passed a bare <c>"web"</c> literal instead, and string literals are blanked from the
-    /// code stream, so the negative form cannot even see that spelling. Requiring the seat read means every
-    /// way of NOT reading the seat fails, including ones not thought of here.</para>
+    /// <para>The check is per-site and the assertion is POSITIVE — the argument list must READ the seat's
+    /// <see cref="DarlingWebSeat.EditorPrincipal"/>, matched as a whole identifier. A negative check ("does
+    /// not pass <c>WebEditorPrincipal</c>") would be satisfied by a site passing a bare <c>"web"</c> literal
+    /// instead, and literals are blanked from the code stream, so the negative form cannot even see that
+    /// spelling. Requiring the seat read means every way of NOT reading the seat fails, including ones not
+    /// thought of here — but only with the identifier boundary, since <c>WebEditorPrincipal</c> ENDS in
+    /// <c>EditorPrincipal</c> and a substring test therefore passed on the constant it rejects.</para>
     ///
     /// <para>The floor on the discovered count is the load-bearing half: if the match stops finding call sites
     /// — a rename, a refactor to a different store method — an empty population satisfies a per-site loop
@@ -158,7 +175,7 @@ public sealed class DarlingWebEditorAttributionTests
           + "exists to check, so every per-site assertion below it passes vacuously.");
 
         var offenders = sites
-            .Where(site => !ArgumentsOf(code, site).Contains("EditorPrincipal", StringComparison.Ordinal))
+            .Where(site => !SeatPrincipalRead.IsMatch(ArgumentsOf(code, site)))
             .Select(site => $"line {LineOf(code, site)}: {Collapse(ArgumentsOf(code, site))}")
             .ToList();
 
@@ -355,7 +372,7 @@ public sealed class DarlingWebEditorAttributionTests
           + "create and the update, or the per-site loop below passes vacuously.");
 
         var offenders = sites
-            .Where(site => !ArgumentsOf(code, site).Contains("McpEditorPrincipal", StringComparison.Ordinal))
+            .Where(site => !McpPrincipalRead.IsMatch(ArgumentsOf(code, site)))
             .Select(site => $"line {LineOf(code, site)}: {Collapse(ArgumentsOf(code, site))}")
             .ToList();
 
