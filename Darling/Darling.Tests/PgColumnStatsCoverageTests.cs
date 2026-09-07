@@ -282,6 +282,15 @@ public sealed class PgColumnStatsCoverageTests
         Assert.True(
             floorHours >= 24,
             $"the evidence floor is {floorHours}h, shorter than pg_column_stats' own daily cadence");
+
+        /* AND THE VERDICT READ ACTUALLY USES IT. Everything above tests a pure function; deleting the one
+           call that applies it left every assertion here green, which is the seam this whole issue is a
+           third instance of - a correct mechanism nothing reaches. */
+        var verdictRead = CSharpSourceWalker.StripCommentsAndStrings(MemberBody(
+            "Darling/PerformanceMonitor.Darling.Storage/DarlingPgColumnStatsReader.cs",
+            "GetCoverageVerdictAsync"));
+
+        Assert.Contains("EvidenceStart(startUtc, endUtc)", verdictRead, StringComparison.Ordinal);
     }
 
     /// <summary>R7: a populated result that covers part of the target is its own answer, not the clean one.</summary>
