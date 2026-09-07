@@ -15,8 +15,15 @@ using Npgsql;
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
-/// Reads measured b-tree index bloat (<c>pg_index_bloat</c>, #2561) — the LATEST measurement per index,
-/// ranked by RECLAIMABLE BYTES rather than by density.
+/// Reads measured b-tree index bloat (<c>pg_index_bloat</c>, #2561) — the latest MEASUREMENT per index
+/// within the window, ranked by RECLAIMABLE BYTES rather than by density.
+///
+/// <para><b>The latest measurement, not the latest row (#3153).</b> The collector rotates which indexes it
+/// measures, so every index has a row on every cycle and most of them are labels rather than measurements.
+/// Keeping the newest row per index would hand back the newest LABEL and discard a real measurement a few
+/// cycles back in the same window — so an index measured on Monday would read as unmeasured on Tuesday.
+/// <see cref="PgIndexBloatRow.CaptureTime"/> is therefore when the index was MEASURED, which can predate
+/// the last collection by most of a pass.</para>
 ///
 /// <para><b>Ranking by density would be wrong, and this is the whole reason the read exists.</b> A tiny
 /// index at 40% density is worse-looking and worth nothing; a large one at 70% is where the space actually
@@ -53,7 +60,11 @@ public static class DarlingPgIndexBloatReader
     /// is a measurement rather than an absence of one.</param>
     /// <param name="SkippedReason">Non-null means this index was NOT measured — its bloat is unknown rather
     /// than zero. An empty index leaves this NULL: it was measured, and the measurement is that it is
-    /// empty.</param>
+    /// empty. Non-null here now means the WINDOW holds no measurement of this index at all, not merely that
+    /// the last cycle passed over it (#3153).</param>
+    /// <param name="CaptureTime">When the row this read kept was collected — so on a measured row, when the
+    /// index was last MEASURED. Under rotation that is not "the last cycle": it can be most of a pass old,
+    /// and a consumer showing the density owes the reader this timestamp beside it.</param>
     public sealed record PgIndexBloatRow(
         string? DatabaseName,
         string? SchemaName,
@@ -67,10 +78,40 @@ public static class DarlingPgIndexBloatReader
         double? LeafFragmentation,
         long? EstimatedReclaimableBytes,
         string? SkippedReason,
-        DateTime CaptureTime);
+        DateTime CaptureTime)
+    {
+        /// <summary>
+        /// When this index was MEASURED, or null when the window holds no measurement of it.
+        ///
+        /// <para>Not the same as <see cref="CaptureTime"/>, and the difference is the point (#3153): on a
+        /// labelled row <see cref="CaptureTime"/> is the LABEL's own timestamp, and showing that in a
+        /// "measured" column would read as the age of a measurement that does not exist. Defined here so
+        /// the grid and the MCP payload cannot disagree about which rows have an age at all.</para>
+        /// </summary>
+        public DateTime? MeasuredAt => SkippedReason is null ? CaptureTime : null;
+    }
 
-    /* DISTINCT ON the index identity ordered by collection_time DESC gives the newest measurement per index
-       in one pass. The outer ORDER BY then ranks for reading, which the inner one cannot do.
+    /* DISTINCT ON the index identity gives one row per index in one pass. The outer ORDER BY then ranks
+       for reading, which the inner one cannot do.
+
+       THE MEASURED ROW WINS, and only then the newest (#3153). Since the collector rotates which indexes it
+       measures, every index gets a row on every cycle and most of those rows are LABELS - so plain
+       collection_time DESC returns the newest LABEL and throws away a real measurement sitting a few days
+       back in the same window. Measured on a two-cycle store: an index measured at 72.5% density on day one
+       came back on day two with no density at all and a rotation-cursor reason, because day two's row was
+       newer. That turns the whole rotation mechanism into something an operator cannot see - the read would
+       only ever show the LAST cycle's measured set, which is what it showed before rotation existed.
+
+       So the row kept per index is the newest MEASUREMENT if the window holds one, and the newest label
+       otherwise - an index the window never measured still arrives with its reason, and still sorts to the
+       top. CaptureTime therefore means "when this index was last MEASURED" on a measured row, and it can
+       legitimately predate the last collection by most of a pass; the surfaces state that, because a density
+       presented without its age is a claim about now that it is not.
+
+       The whole row travels together on purpose. estimated_reclaimable_bytes is index_bytes scaled by the
+       density shortfall, so pairing today's size with an older density would compute a figure that describes
+       no state the index was ever in. Taking the measured row keeps size, density and estimate internally
+       consistent, at the cost of showing a size that may have grown since - which the timestamp discloses.
 
        database_name leads the distinct key (#2599) - this collector runs once per database, and an index
        name is only unique within one, so without it the newest collection_time silently picks which
@@ -137,7 +178,8 @@ public static class DarlingPgIndexBloatReader
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            ORDER BY database_name, schema_name, table_name, index_name, collection_time DESC
+            ORDER BY database_name, schema_name, table_name, index_name,
+                     (skipped_reason IS NULL) DESC, collection_time DESC
         ) AS latest
         /* Unmeasured first - a skipped index is the likeliest big win and must not be ranked below measured
            ones by a reclaimable figure it does not have. Then by reclaimable bytes, never by density: a

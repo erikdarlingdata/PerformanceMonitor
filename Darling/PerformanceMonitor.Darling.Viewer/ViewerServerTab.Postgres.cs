@@ -972,8 +972,12 @@ public partial class ViewerServerTab
               + "worth kilobytes next to a large one at 70%. **Leaf density is the server's raw figure and "
               + "is not 100-minus-bloat** — a freshly built index measures around 90, so the reclaimable "
               + "estimate is computed against that floor rather than against a full page."
+              + "  Each measured row is the latest MEASUREMENT of that index in this window, not the "
+              + "latest cycle - the collector measures a rotating slice, so check the Measured column "
+              + "before treating a density as current."
               + (skipped > 0
-                  ? $"  {skipped:N0} index(es) were NOT measured and are listed FIRST with their reason: "
+                  ? $"  {skipped:N0} index(es) have NO measurement in this window and are listed FIRST "
+                    + "with their reason: "
                     + "their bloat is unknown rather than zero. Read the reason - one naming the rotation "
                     + "cursor or the work budget is deferred to a later cycle in this pass, while one "
                     + "naming the measurement ceiling is permanent at that size and only the index-usage "

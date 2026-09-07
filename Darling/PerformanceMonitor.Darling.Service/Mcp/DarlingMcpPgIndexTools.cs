@@ -110,6 +110,12 @@ public sealed class DarlingMcpPgIndexTools
                     : (double?)null,
                 /* Present means NOT MEASURED. Named rather than boolean so the row says WHY. */
                 skipped_reason = r.SkippedReason,
+                /* WHEN the measurement was taken, which under rotation is not "the last cycle" (#3153): the
+                   collector measures a slice per cycle, so this row can be most of a pass old. Null on a
+                   labelled row rather than that row's own timestamp, which would read as the age of a
+                   measurement that does not exist - see PgIndexBloatRow.MeasuredAt, which the grid binds
+                   to as well so the two surfaces cannot disagree about it. */
+                measured_at = r.MeasuredAt?.ToString("o"),
             });
 
             return JsonSerializer.Serialize(new
@@ -129,7 +135,11 @@ public sealed class DarlingMcpPgIndexTools
                      + "pass honours; one naming the measurement ceiling is permanent at this size, and "
                      + "that index's growth is tracked by get_pg_index_usage instead. This census has no "
                      + "size floor, so it counts MORE indexes than get_pg_index_usage, which floors at "
-                     + "64 kB — the difference is that floor and nothing else."
+                     + "64 kB — the difference is that floor and nothing else. Each measured row is the "
+                     + "LATEST MEASUREMENT of that index in the window, not the latest cycle: the collector "
+                     + "measures a rotating slice, so read measured_at before treating a density as "
+                     + "current, and a row with a reason is one the window holds no measurement of at "
+                     + "all."
                      + (measured < rows.Count
                          ? $" {rows.Count - measured} of the {rows.Count} row(s) RETURNED are labelled rather than measured."
                          : string.Empty)
