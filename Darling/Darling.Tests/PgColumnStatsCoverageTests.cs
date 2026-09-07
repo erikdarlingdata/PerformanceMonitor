@@ -244,6 +244,46 @@ public sealed class PgColumnStatsCoverageTests
         Assert.Contains("cannot be established", unmeasured.Cause, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// R5's other half: the evidence lookback must not be the caller's window, or a short panel window
+    /// MANUFACTURES <see cref="PgColumnStatsCoverageArm.Undetermined"/> on a server whose answer is known.
+    ///
+    /// <para>The evidence collector is hourly and the subject collector is daily, so a one-hour viewer
+    /// window straddles zero or one evidence run — and reporting "no evidence" for a target measured 167
+    /// times in the past week is the failing-toward-a-confident-nothing direction. A wider caller window is
+    /// honoured as-is; only the floor is imposed.</para>
+    /// </summary>
+    [Fact]
+    public void TheEvidenceLookbackIsFlooredRatherThanTakenFromTheCallersWindow()
+    {
+        var end = new DateTime(2026, 9, 7, 20, 0, 0, DateTimeKind.Utc);
+        var floorHours = DarlingPgColumnStatsReader.MinimumEvidenceHours;
+
+        /* A one-hour read still looks back the floor. */
+        Assert.Equal(
+            end.AddHours(-floorHours),
+            DarlingPgColumnStatsReader.EvidenceStart(end.AddHours(-1), end));
+
+        /* A month-long read is NOT narrowed to the floor - the rows it returned come from that month, and
+           narrowing would report coverage over a population the data does not come from. */
+        Assert.Equal(
+            end.AddDays(-30),
+            DarlingPgColumnStatsReader.EvidenceStart(end.AddDays(-30), end));
+
+        /* Anchored on the END, so an as_of read gets evidence contemporary with the data it explains
+           rather than today's. */
+        var earlier = end.AddDays(-10);
+        Assert.Equal(
+            earlier.AddHours(-floorHours),
+            DarlingPgColumnStatsReader.EvidenceStart(earlier.AddHours(-1), earlier));
+
+        /* And the floor is at least the SUBJECT collector's cadence: pg_column_stats runs daily, so
+           evidence over a shorter span than one of its own cycles cannot describe the run being explained. */
+        Assert.True(
+            floorHours >= 24,
+            $"the evidence floor is {floorHours}h, shorter than pg_column_stats' own daily cadence");
+    }
+
     /// <summary>R7: a populated result that covers part of the target is its own answer, not the clean one.</summary>
     [Fact]
     public void PartialCoverageIsItsOwnArm()

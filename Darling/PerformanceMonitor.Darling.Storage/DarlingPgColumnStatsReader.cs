@@ -181,7 +181,7 @@ FROM (
         try
         {
             var evidence = await GetCoverageEvidenceAsync(
-                postgres, serverId, startUtc, endUtc, cancellationToken);
+                postgres, serverId, EvidenceStart(startUtc, endUtc), endUtc, cancellationToken);
 
             return PgColumnStatsCoverage.Classify(
                 evidence.EvidenceRuns,
@@ -194,6 +194,43 @@ FROM (
             return PgColumnStatsCoverage.EvidenceUnreadable(storedColumnRows);
         }
     }
+
+    /// <summary>
+    /// The shortest evidence lookback that can answer the coverage question, whatever window the CALLER
+    /// asked its data over.
+    ///
+    /// <para><b>The read's own window is the wrong window for this, and using it would manufacture
+    /// <see cref="PgColumnStatsCoverageArm.Undetermined"/> on servers whose answer is known.</b> Whether the
+    /// monitoring login can read <c>pg_stats</c> is a CURRENT state of the target, not a property of the
+    /// interval somebody happened to select in the viewer. <c>pg_table_bloat_stats</c> collects hourly, so a
+    /// one-hour panel window straddles zero or one of its runs, and a zero would report "no evidence" for a
+    /// target measured 167 times in the past week. Same reasoning as
+    /// <c>CollectorRuntimePrecondition</c>, which consults the LATEST run rather than a window for exactly
+    /// this: a precondition is a state, and a window is a question about history.</para>
+    ///
+    /// <para>A day rather than no lower bound at all, because the store table is a hypertable and an
+    /// unbounded scan would read every chunk of a 90-day retention to answer a diagnostic. A day is the
+    /// SUBJECT collector's own cadence — <c>pg_column_stats</c> runs daily, so evidence older than its last
+    /// run could describe a grant that has since changed, and evidence newer than a day is guaranteed to
+    /// exist wherever the hourly collector is running at all.</para>
+    ///
+    /// <para>Anchored on <paramref name="endUtc"/>, so an <c>as_of</c> read gets the evidence contemporary
+    /// with the data it is explaining rather than today's.</para>
+    /// </summary>
+    internal static DateTime EvidenceStart(DateTime startUtc, DateTime endUtc)
+    {
+        var floor = endUtc.AddHours(-MinimumEvidenceHours);
+
+        /* The WIDER of the two. A caller asking about a month gets a month - narrowing to a day there would
+           throw away measurements of tables the read's own rows come from. */
+        return startUtc < floor ? startUtc : floor;
+    }
+
+    /// <summary>
+    /// How far back <see cref="EvidenceStart"/> looks when the caller's window is shorter. Named so the
+    /// relationship to the subject collector's cadence is assertable rather than a number in a call.
+    /// </summary>
+    internal const int MinimumEvidenceHours = 24;
 
     /// <summary>The raw evidence, for callers that want the counts rather than the sentence.</summary>
     public static async Task<PgColumnStatsCoverageEvidence> GetCoverageEvidenceAsync(
