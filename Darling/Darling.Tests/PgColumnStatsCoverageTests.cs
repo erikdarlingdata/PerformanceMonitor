@@ -142,24 +142,47 @@ public sealed class PgColumnStatsCoverageTests
     /// <summary>
     /// R3's falsifier. Without this, <see cref="NoTwoDifferentArmsRenderTheSameCause"/> is satisfied by a
     /// classifier that had stopped selecting anything and merely echoed its inputs — the arms can never hold
-    /// identical counts, so their composed messages differ whatever the verdict says. Distinctive figures,
-    /// then assert none of them survives into the cause.
+    /// identical counts, so their composed messages differ whatever the verdict says.
+    ///
+    /// <para><b>Every arm, not one.</b> The first draft of this used a single input, which landed on
+    /// <see cref="PgColumnStatsCoverageArm.PartialVisibility"/>; a mutation that echoed the counts into the
+    /// <see cref="PgColumnStatsCoverageArm.CollectionFault"/> cause went GREEN under it. A falsifier has to
+    /// discriminate the thing being claimed, and the claim is about all of them.</para>
     /// </summary>
     [Fact]
     public void TheCauseCarriesNoneOfTheInputFigures()
     {
-        var verdict = PgColumnStatsCoverage.Classify(8_675_309, 424_242, 31_337, 90_210);
-
-        foreach (var figure in new[] { "8675309", "8,675,309", "424242", "424,242", "31337", "31,337", "90210", "90,210" })
+        var probes = new[]
         {
-            Assert.DoesNotContain(figure, verdict.Cause, StringComparison.Ordinal);
+            PgColumnStatsCoverage.Classify(0, 424_242, 31_337, 90_210),
+            PgColumnStatsCoverage.Classify(8_675_309, 0, 0, 0),
+            PgColumnStatsCoverage.Classify(8_675_309, 424_242, 0, 0),
+            PgColumnStatsCoverage.Classify(8_675_309, 424_242, 31_337, 0),
+            PgColumnStatsCoverage.Classify(8_675_309, 424_242, 31_337, 90_210),
+            PgColumnStatsCoverage.Classify(8_675_309, 424_242, 424_242, 90_210),
+            PgColumnStatsCoverage.EvidenceUnreadable(90_210),
+        };
+
+        /* And the probe set really does visit every arm, or "no arm echoes its inputs" would be a claim
+           about however many arms this list happens to reach. */
+        Assert.Equal(
+            Enum.GetValues<PgColumnStatsCoverageArm>().OrderBy(a => a).ToArray(),
+            probes.Select(p => p.Arm).Distinct().OrderBy(a => a).ToArray());
+
+        foreach (var probe in probes)
+        {
+            foreach (var figure in new[]
+                { "8675309", "8,675,309", "424242", "424,242", "31337", "31,337", "90210", "90,210" })
+            {
+                Assert.DoesNotContain(figure, probe.Cause, StringComparison.Ordinal);
+            }
         }
 
         /* And the counts are not merely absent from the cause - they are PRESENT in the census, or the
-           check above would be satisfied by a class that had stopped reporting them at all. */
-        Assert.Contains("424,242", verdict.Census, StringComparison.Ordinal);
-        Assert.Contains("31,337", verdict.Census, StringComparison.Ordinal);
-        Assert.Contains("90,210", verdict.Census, StringComparison.Ordinal);
+           checks above would be satisfied by a class that had stopped reporting them at all. */
+        Assert.Contains("424,242", probes[4].Census, StringComparison.Ordinal);
+        Assert.Contains("31,337", probes[4].Census, StringComparison.Ordinal);
+        Assert.Contains("90,210", probes[4].Census, StringComparison.Ordinal);
     }
 
     /// <summary>R3, on the specific pair the issue is about: the two LEGITIMATE zero-causes.</summary>
@@ -331,6 +354,12 @@ public sealed class PgColumnStatsCoverageTests
     /// causes and should — it describes what the tool collects — and a file-scoped scan would be satisfied by
     /// that attribute while the body went on reciting. Same reason the viewer scan is scoped to the loader
     /// rather than to a file holding twenty panels.</para>
+    ///
+    /// <para><b>The literals are JOINED before matching, not tested one at a time.</b> A per-literal check
+    /// went green against a restored copy of the exact prose this issue is about, because an operator-facing
+    /// sentence in this repo is a chain of concatenated literals wrapped at column 110 — "above a size
+    /// floor, " and "a monitoring login without SELECT on a " are two literals and one sentence. Matching
+    /// per literal tests the line wrapping.</para>
     /// </summary>
     [Fact]
     public void NeitherSurfaceAuthorsItsOwnMultiCauseProse()
@@ -338,21 +367,28 @@ public sealed class PgColumnStatsCoverageTests
         foreach (var (file, member, _) in Surfaces)
         {
             var body = MemberBody(file, member);
+            var prose = string.Join(
+                string.Empty,
+                CSharpSourceWalker.StringLiteralBodies(body).Select(l => l.Text));
 
-            foreach (var (start, literal) in CSharpSourceWalker.StringLiteralBodies(body))
-            {
-                var namesTheFloor = literal.Contains("size floor", StringComparison.OrdinalIgnoreCase)
-                    || literal.Contains("1 MB floor", StringComparison.OrdinalIgnoreCase);
-                var namesThePrivilegeFilter =
-                    literal.Contains("has_column_privilege", StringComparison.OrdinalIgnoreCase)
-                    || literal.Contains("SELECT privilege", StringComparison.OrdinalIgnoreCase)
-                    || literal.Contains("without SELECT", StringComparison.OrdinalIgnoreCase);
+            var namesTheFloor = prose.Contains("size floor", StringComparison.OrdinalIgnoreCase)
+                || prose.Contains("1 MB floor", StringComparison.OrdinalIgnoreCase);
+            var namesThePrivilegeFilter =
+                prose.Contains("has_column_privilege", StringComparison.OrdinalIgnoreCase)
+                || prose.Contains("SELECT privilege", StringComparison.OrdinalIgnoreCase)
+                || prose.Contains("without SELECT", StringComparison.OrdinalIgnoreCase);
 
-                Assert.False(
-                    namesTheFloor && namesThePrivilegeFilter,
-                    $"{member} authors a literal at offset {start} that recites BOTH zero-causes and selects "
-                    + $"neither, which is what #3154 is: {literal}");
-            }
+            Assert.False(
+                namesTheFloor && namesThePrivilegeFilter,
+                $"{member} authors prose reciting BOTH zero-causes and selecting neither, which is what "
+                + $"#3154 is. It has a classifier for that. Its literals joined: {prose}");
+
+            /* Neither half on its own either, in the surface's OWN words: a body that named only the
+               privilege filter would still be pre-empting the classifier, and would be wrong on the
+               target where the floor is the answer. */
+            Assert.False(
+                namesTheFloor || namesThePrivilegeFilter,
+                $"{member} names a zero-cause in its own prose rather than printing the verdict: {prose}");
         }
     }
 
