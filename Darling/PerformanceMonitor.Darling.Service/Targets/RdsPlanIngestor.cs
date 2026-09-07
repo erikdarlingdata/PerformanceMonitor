@@ -229,10 +229,6 @@ public sealed class RdsPlanIngestor
                 await importer.CompleteAsync(cancellationToken);
             }
         }
-        /* Stamped, then rethrown bare, for CopyBatchOnceAsync's reason: the fault keeps its own type,
-           message and inner chain, so every classification arm upstream sees exactly what it sees without
-           this. OperationCanceledException is excluded because a stopping token says the service is shutting
-           down, not which protocol exchange was in flight. */
         /* The start phase's deadline, re-raised as the shape a client-side deadline has here, on the same
            terms as DarlingCollectorRunner.CopyBatchOnceAsync. A throw from a catch arm leaves the whole
            try, so this fault is stamped HERE rather than by the arm below; the phase term in the filter is
@@ -245,6 +241,10 @@ public sealed class RdsPlanIngestor
             CollectorFaultCopyPhase.Stamp(breach, copyPhase);
             throw breach;
         }
+        /* Stamped, then rethrown bare, for CopyBatchOnceAsync's reason: the fault keeps its own type,
+           message and inner chain, so every classification arm upstream sees exactly what it sees without
+           this. OperationCanceledException is excluded because a stopping token says the service is shutting
+           down, not which protocol exchange was in flight. */
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             CollectorFaultCopyPhase.Stamp(ex, copyPhase);
