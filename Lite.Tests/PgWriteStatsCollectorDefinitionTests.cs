@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -26,7 +26,7 @@ public class PgWriteStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();
 
-    private static CollectorContext MakeContext(int major)
+    private static CollectorContext MakeContext(int major, bool isAurora = false)
         => new()
         {
             ServerId = 42,
@@ -37,12 +37,18 @@ public class PgWriteStatsCollectorDefinitionTests
             {
                 Engine = CollectorTargetEngine.PostgreSql,
                 PostgresMajorVersion = major,
+                IsAurora = isAurora,
             },
             ExcludedDatabases = Array.Empty<string>(),
         };
 
+    /// <summary>Stock PostgreSQL, which is what every version-surface assertion here is about.</summary>
     private static string Sql(int major)
         => PgWriteStatsCollector.Instance.BuildQuery(MakeContext(major)).Text;
+
+    /// <summary>The Aurora flavour of the same major.</summary>
+    private static string AuroraSql(int major)
+        => PgWriteStatsCollector.Instance.BuildQuery(MakeContext(major, isAurora: true)).Text;
 
     /// <summary>
     /// The columns 17 REMOVED from <c>pg_stat_bgwriter</c> must not be referenced on 17 or later. Five of
@@ -258,4 +264,138 @@ public class PgWriteStatsCollectorDefinitionTests
             }
         }
     }
+
+    /// <summary>
+    /// Aurora must not NAME <c>pg_stat_wal</c> anywhere - not in the SELECT list and not in the FROM
+    /// clause, because naming it is itself the <c>0A000</c>. Asserted as "the view is absent and its alias
+    /// is never dereferenced" rather than "the join line is gone": dropping the join while leaving one
+    /// <c>w.</c> reference behind would still be a syntax error on every target, and dropping the columns
+    /// while leaving the join behind would still raise 0A000 on every Aurora target. Both halves have to
+    /// hold, so both are checked.
+    /// </summary>
+    [Theory]
+    [InlineData(14)]
+    [InlineData(16)]
+    [InlineData(17)]
+    [InlineData(18)]
+    [InlineData(99)]
+    public void Aurora_NeitherNamesPgStatWal_NorDereferencesItsAlias(int major)
+    {
+        var sql = AuroraSql(major);
+
+        Assert.DoesNotContain("pg_stat_wal", sql, StringComparison.Ordinal);
+        Assert.DoesNotMatch(new Regex(@"\bw\."), sql);
+    }
+
+    /// <summary>
+    /// The point of the branch: on Aurora the checkpointer and background-writer columns are still READ,
+    /// not NULLed alongside the WAL ones. That is the mutation this catches and the only one - a branch
+    /// that widened to NULL b.buffers_clean too fails here and passes everything else.
+    ///
+    /// <para>It does NOT catch gating the collector off on Aurora, because this reaches BuildQuery
+    /// directly and never consults the gate. <see cref="AppliesTo_StillPassesOnAurora"/> is the pin for
+    /// that, and the two are separate on purpose: the wrong fixes are different edits and a single
+    /// assertion covering both would name neither when it failed.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(16)]
+    [InlineData(17)]
+    public void Aurora_StillReadsTheCheckpointerAndBgwriterColumns(int major)
+    {
+        var sql = AuroraSql(major);
+
+        Assert.Contains("pg_catalog.pg_stat_bgwriter", sql, StringComparison.Ordinal);
+        Assert.Contains("b.buffers_clean", sql, StringComparison.Ordinal);
+        Assert.Contains("b.maxwritten_clean", sql, StringComparison.Ordinal);
+        Assert.Contains("b.buffers_alloc", sql, StringComparison.Ordinal);
+        Assert.Contains("bgwriter_stats_reset", sql, StringComparison.Ordinal);
+
+        /* 17 moved these into pg_stat_checkpointer; below it they are still inside pg_stat_bgwriter. Either
+           way the checkpoint counters must be READ, which is what the version branches already decide. */
+        Assert.Contains(major >= 17 ? "pg_catalog.pg_stat_checkpointer" : "checkpoints_timed",
+            sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The stored shape is the UNION and does not vary by FLAVOUR either - same 26 aliases, same order as
+    /// the stock path of the same major. <see cref="ThePayloadShape_DoesNotVaryByVersion"/> pins this
+    /// against the version axis; without the flavour twin, an Aurora branch could omit a column instead of
+    /// NULLing it and shift every ordinal after it, which is the failure that class of change makes.
+    /// </summary>
+    [Theory]
+    [InlineData(16)]
+    [InlineData(17)]
+    [InlineData(18)]
+    public void Aurora_KeepsTheSamePayloadOrdinalsAsStock(int major)
+    {
+        /* Same line-based extraction ThePayloadShape_DoesNotVaryByVersion uses, and for the same reason:
+           the TABLE aliases (AS b, AS w) share the keyword with the column aliases, so a naive match
+           picks them up and shifts the list while looking like an ordering bug. Aurora has one table
+           alias and stock has two, so a naive match here would not merely be wrong - it would differ
+           BETWEEN the two shapes and make the flavour comparison below fail for the wrong reason. */
+        static string[] Aliases(string sql)
+            => sql.Split('\n')
+                .Where(line => !line.TrimStart().StartsWith("FROM", StringComparison.Ordinal)
+                            && !line.TrimStart().StartsWith("CROSS JOIN", StringComparison.Ordinal))
+                .Select(line => Regex.Match(line, @"\bAS\s+([a-z_]+),?\s*$"))
+                .Where(m => m.Success)
+                .Select(m => m.Groups[1].Value)
+                .ToArray();
+
+        var expected = PgWriteStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
+
+        Assert.Equal(expected, Aliases(AuroraSql(major)));
+        Assert.Equal(Aliases(Sql(major)), Aliases(AuroraSql(major)));
+    }
+
+    /// <summary>
+    /// Two UTC conversions on Aurora, not three: <c>wal_stats_reset</c> has no source to convert, so it is
+    /// a typed NULL. The stock path keeps all three, which
+    /// <see cref="StatsResetStamps_AreConvertedToUtc_NotBareCast"/> already holds. A NULL rather than a
+    /// bare cast matters for the same reason it does across majors: a read that differences a counter must
+    /// not be able to mistake an unavailable reset point for a known one.
+    /// </summary>
+    [Fact]
+    public void Aurora_ConvertsOnlyTheTwoResetStampsItCanRead()
+    {
+        var sql = AuroraSql(17);
+
+        Assert.Equal(2, Regex.Matches(sql, @"AT TIME ZONE 'UTC'").Count);
+        Assert.Contains("NULL::timestamp", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The stock path is UNCHANGED by the flavour branch - it still CROSS JOINs the view and still reads
+    /// the WAL counters. Without this, making the Aurora assertions pass by dropping the join everywhere
+    /// would go unnoticed, and stock PostgreSQL would silently lose the WAL half.
+    /// </summary>
+    [Theory]
+    [InlineData(16)]
+    [InlineData(17)]
+    public void StockPostgres_StillCrossJoinsPgStatWal_AndReadsItsCounters(int major)
+    {
+        var sql = Sql(major);
+
+        Assert.Contains("CROSS JOIN pg_catalog.pg_stat_wal AS w", sql, StringComparison.Ordinal);
+        Assert.Contains("w.wal_records", sql, StringComparison.Ordinal);
+        Assert.Contains("w.wal_bytes::numeric(38,0)", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The gate keeps passing on Aurora. This is the pin that stops the tempting wrong fix: an
+    /// <c>AppliesTo</c> that excluded Aurora would also silence the 0A000, and
+    /// <see cref="CollectorEngineCapability"/> would then derive a PERMANENT engine gap - telling an
+    /// operator the checkpoint and WAL write counters can never be collected on Aurora, when two thirds of
+    /// them now are.
+    /// </summary>
+    [Theory]
+    [InlineData(16)]
+    [InlineData(17)]
+    public void AppliesTo_StillPassesOnAurora(int major)
+        => Assert.True(PgWriteStatsCollector.Instance.AppliesTo(new CollectorTargetInfo
+        {
+            Engine = CollectorTargetEngine.PostgreSql,
+            PostgresMajorVersion = major,
+            IsAurora = true,
+        }));
 }
