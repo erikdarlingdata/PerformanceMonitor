@@ -88,8 +88,9 @@ public static class DarlingPgIndexBloatReader
        on a table with no rows, which is an entirely ordinary object (a fresh partition, a table whose rows
        were all deleted, a constraint index on an unpopulated table). avg_leaf_density is double precision in
        the store, so NaN is representable, persists, and is re-read on every later call. An IS NULL guard
-       reads as "handle the missing case" and covers only two of the three states a float column has, and
-       the surviving NaN reached a ::bigint cast that raises 22003 - failing the WHOLE read, not the row.
+       alone is not enough here, and it is not enough for a reason its own vocabulary hides: "handle the
+       missing case" covers two of the three states a float column has, and a NaN that reaches the ::bigint
+       cast below raises 22003, which fails the WHOLE read rather than the row.
 
        nullif(x, 'NaN'::double precision) is the whole normalisation, and it turns on a PostgreSQL semantic
        that is the opposite of the C one: NaN compares EQUAL to itself here, so nullif catches it and
@@ -108,10 +109,10 @@ public static class DarlingPgIndexBloatReader
        unmeasured and claim its bloat was unknown when it is known to be nil.
 
        THE ESTIMATE IS COMPUTED ONCE, in the inner scope, and the outer projection and the outer ORDER BY
-       both reference that one column. Two copies of the expression is what made a three-state guard a
-       correctness hazard rather than a typo: they have to agree, and the failure of a disagreement is the
-       ordering raising while the projection succeeds - a read that half works, for a reason no reader could
-       see. One expression cannot drift from itself. */
+       both reference that one column. Two copies of the expression would be a correctness hazard rather
+       than a duplication: they have to agree, and the failure of a disagreement is the ordering raising
+       while the projection succeeds - a read that half works, for a reason no reader could see. One
+       expression cannot drift from itself. */
     public const string PgIndexBloatSql = """
         SELECT database_name, schema_name, table_name, index_name, index_bytes, tree_level,
                empty_pages, deleted_pages,
