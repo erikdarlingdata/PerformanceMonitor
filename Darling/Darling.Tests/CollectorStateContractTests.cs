@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -102,14 +103,78 @@ public sealed class CollectorStateContractTests
     }
 
     [Fact]
-    public void TheOnlyCollectorDeclaringStateIsDefaultTraceEvents()
+    public void TheCollectorsDeclaringStateArePinned()
     {
-        /* Both hosts load and persist state ONLY for collectors that declare keys, so a second declaring
-           collector is a two-host change, not a definition-local one. Pinned on the catalog surface both
-           hosts iterate. */
+        /* Both hosts load and persist state ONLY for collectors that declare keys, so a declaring
+           collector is a two-host concern rather than a definition-local one. Pinned on the catalog
+           surface both hosts iterate.
+
+           TWO of them: default_trace_events' last-seen trace FILE (#1962), and pg_index_bloat's
+           per-database rotation cursor (#3153). Neither needed host CODE — the wiring below is generic —
+           but both depend on it, which is why they are enumerated in the same file that pins it. */
         Assert.Equal(
-            new[] { "default_trace_events" },
-            CollectorCatalog.All.Where(c => c.StateKeys.Count > 0).Select(c => c.Name).ToArray());
+            new[] { "default_trace_events", "pg_index_bloat" },
+            CollectorCatalog.All
+                .Where(c => c.StateKeys.Count > 0)
+                .Select(c => c.Name)
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .ToArray());
+    }
+
+    /// <summary>
+    /// Both hosts load state by <c>(server_id, collector_name)</c> and NOT by the declared key, which is
+    /// what lets a definition whose keys are discovered per cycle declare a PREFIX and still get them all.
+    ///
+    /// <para><b>Why this needs its own pin.</b> <c>pg_index_bloat</c> runs per DATABASE, so its rotation
+    /// cursors are keyed <c>rotate: || database_name</c> and the database set is not knowable at
+    /// declaration time — it declares the prefix, and the load returns every key stored under the
+    /// collector's name. Filtering the load down to the declared keys looks like an obvious tightening and
+    /// would return NOTHING for that collector: no cursor would ever load, rotation would stop, and the
+    /// collector would go straight back to re-measuring its largest index forever while every other row
+    /// claimed to be deferred. Nothing would fail, nothing would log, and #3153 would be reopened by a
+    /// change that looked like hygiene.</para>
+    ///
+    /// <para>Read out of both hosts' source, like <see cref="BothRunnersLoadAndPersistTheState"/> and for
+    /// the same reason: the seam is invisible to every behavioural test in this repo.</para>
+    /// </summary>
+    [Fact]
+    public void TheStateLoadIsByCollectorName_NotByDeclaredKey()
+    {
+        var root = FindRepoRoot();
+        Assert.True(root is not null, RepoRootNotFound);
+
+        var hosts = new[]
+        {
+            Path.Combine(root!, "Lite", "Services", "RemoteCollectorService.cs"),
+            Path.Combine(root!, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"),
+        };
+
+        foreach (var host in hosts)
+        {
+            var source = File.ReadAllText(host);
+            var name = Path.GetFileName(host);
+
+            var load = Regex.Match(
+                source,
+                @"SELECT state_key, state_value FROM collector_state WHERE (?<predicate>[^""]*)");
+
+            Assert.True(load.Success, $"{name} no longer reads collector_state with a recognisable SELECT");
+
+            var predicate = load.Groups["predicate"].Value;
+
+            Assert.Contains("server_id = $1", predicate, StringComparison.Ordinal);
+            Assert.Contains("collector_name = $2", predicate, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "state_key",
+                predicate,
+                StringComparison.Ordinal);
+        }
+
+        /* And the definition that depends on it really does declare a prefix rather than its keys. */
+        Assert.Equal(
+            new[] { PgIndexBloatCollector.RotationCursorKeyPrefix },
+            PgIndexBloatCollector.Instance.StateKeys.ToArray());
+        Assert.EndsWith(":", PgIndexBloatCollector.RotationCursorKeyPrefix, StringComparison.Ordinal);
     }
 
     [Fact]

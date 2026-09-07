@@ -329,21 +329,27 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     [Fact]
-    public void StateKeys_DeclaresTheLastSeenTracePath_AndIsTheOnlyCollectorWithState()
+    public void StateKeys_DeclaresTheLastSeenTracePath_AndTheDeclaringSetIsPinned()
     {
         Assert.Equal(
             new[] { "last_trace_file_path" },
             DefaultTraceEventsCollector.Instance.StateKeys.ToArray());
         Assert.Equal("last_trace_file_path", DefaultTraceEventsCollector.LastTraceFilePathStateKey);
 
-        /* Every other collector's dedup IS derivable from its rows (a MAX() over the target table), so it
-           declares no state and its host runs no state query. A second collector appearing here is a real
-           design decision — both hosts must load and persist its keys — not a silent addition. */
+        /* Almost every collector's dedup IS derivable from its rows (a MAX() over the target table), so it
+           declares no state and its host runs no state query. A collector appearing here is a real design
+           decision — both hosts must load and persist its keys — not a silent addition.
+
+           TWO declare state now. default_trace_events stores the trace FILE it last read (#1962). #3153
+           added pg_index_bloat's per-database rotation cursor, whose absence is what made the collector
+           re-measure its largest index every cycle forever while labelling the rest as merely deferred.
+           Ordered by name so this reads as a set rather than as an accident of catalog order. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "default_trace_events" }, declaring);
+        Assert.Equal(new[] { "default_trace_events", "pg_index_bloat" }, declaring);
     }
 
     [Fact]

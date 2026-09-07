@@ -28,14 +28,22 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>get_pg_index_bloat</c> is the measured counterpart of <c>get_pg_table_bloat</c>, and the difference
 /// is the whole point: table bloat is ESTIMATED from statistics and is suppressed when those statistics
 /// cannot be trusted, while this reads <c>pgstatindex</c>, which walks the index. That costs real I/O, so
-/// the collector measures only the largest indexes per cycle and LABELS the rest rather than dropping
-/// them — a row carrying <c>skipped_reason</c> is a real index that was not measured, not a healthy one.
+/// the collector measures a bounded slice per cycle, ROTATES that slice down the size order, and LABELS
+/// the rest rather than dropping them — a row carrying <c>skipped_reason</c> is a real index that was not
+/// measured, not a healthy one, and the reason distinguishes an index that is DEFERRED to a later cycle
+/// from one that is over the measurement ceiling and never measured at all (#3153).
 /// </para>
+///
+/// <para><b>Row counts differ from <c>get_pg_index_usage</c> by design</b> (#3158):
+/// <c>pg_index_bloat</c> is the COMPLETE btree census with no size floor, while
+/// <c>pg_index_usage_stats</c> reports only indexes of at least 64 kB (plus any invalid index at any
+/// size). Measured on one target: 2,500 against 1,517, a 65% difference that is entirely that one floor.
+/// Neither is missing objects.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpPgIndexTools
 {
-    [McpServerTool(Name = "get_pg_index_bloat"), Description("Gets MEASURED PostgreSQL index bloat from the pgstattuple extension: average leaf density, leaf fragmentation, empty and deleted pages, and how many bytes a REINDEX could plausibly reclaim. This is measured by walking the index, not estimated - contrast get_pg_table_bloat, which estimates from statistics. Low avg_leaf_density is the bloat signal: a freshly built btree is around 90%, and an index that has churned heavily falls well below that. Because measuring costs real I/O the collector measures only the largest indexes each cycle and LABELS the others, so a row with a skipped_reason is an index that was NOT measured rather than one that is healthy - never read a missing measurement as a clean bill of health.")]
+    [McpServerTool(Name = "get_pg_index_bloat"), Description("Gets MEASURED PostgreSQL index bloat from the pgstattuple extension: average leaf density, leaf fragmentation, empty and deleted pages, and how many bytes a REINDEX could plausibly reclaim. This is measured by walking the index, not estimated - contrast get_pg_table_bloat, which estimates from statistics. Low avg_leaf_density is the bloat signal: a freshly built btree is around 90%, and an index that has churned heavily falls well below that. Because measuring costs real I/O the collector measures a bounded slice each cycle, rotates that slice down the size order across cycles, and LABELS the others, so a row with a skipped_reason is an index that was NOT measured rather than one that is healthy - never read a missing measurement as a clean bill of health. Read the reason itself: 'above the rotation cursor' and 'work budget' mean a later cycle in this pass measures it, while 'larger than the measurement ceiling' means it is recorded at its size and NEVER measured, and only pg_index_usage_stats carries its size trend. This is the COMPLETE btree census with no size floor, so it returns MORE rows than get_pg_index_usage, which floors at 64 kB - 2,500 against 1,517 on one measured target. Neither census is missing objects.")]
     public static async Task<string> GetPgIndexBloat(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -114,8 +122,13 @@ public sealed class DarlingMcpPgIndexTools
                 measured_count = truncated ? (int?)null : measured,
                 note = "avg_leaf_density is the bloat signal — a freshly built btree sits near 90%. Rows "
                      + "carrying a skipped_reason were NOT measured (measuring walks the index, so the "
-                     + "collector bounds how many it does per cycle); a null measurement on those rows is "
-                     + "absence of data, never a clean result."
+                     + "collector bounds how many it does per cycle and rotates which ones across cycles); "
+                     + "a null measurement on those rows is absence of data, never a clean result. A reason "
+                     + "naming the rotation cursor or the work budget is a DEFERRAL a later cycle in this "
+                     + "pass honours; one naming the measurement ceiling is permanent at this size, and "
+                     + "that index's growth is tracked by get_pg_index_usage instead. This census has no "
+                     + "size floor, so it counts MORE indexes than get_pg_index_usage, which floors at "
+                     + "64 kB — the difference is that floor and nothing else."
                      + (measured < rows.Count
                          ? $" {rows.Count - measured} of the {rows.Count} row(s) RETURNED are labelled rather than measured."
                          : string.Empty)
