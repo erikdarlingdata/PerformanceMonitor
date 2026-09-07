@@ -196,6 +196,7 @@ public sealed class AlertReadFailureSurfaceTests
     public void TheNewestFailuresFactsAreNeverABlendOfTwo()
     {
         const string Key = "500";
+        const int WritesPerWriter = 200_000;
 
         /* One legal elapsed per read name, disjoint across writers, so a blend is DETECTABLE. A test that
            recorded the same elapsed from every thread could not fail no matter how torn the write was. */
@@ -209,79 +210,70 @@ public sealed class AlertReadFailureSurfaceTests
         var legal = pairs.ToDictionary(p => p.Read, p => p.ElapsedMs, StringComparer.Ordinal);
 
         var counter = new AlertReadFailureCounter();
-        var blends = new List<string>();
-        var observations = 0;
-        var stop = false;
 
-        /* Half the writers on a per-server key, so ReadFor can observe the whole trio and the elapsed can
-           be checked against the name it must belong to; half on the null key, because the fleet bucket is
-           the one several production sites share and is where a collision is most likely. */
+        /* Seeded before the writers start, so a read can never observe an empty bucket. The first version
+           of this test time-boxed the writers and counted observations instead, and its own
+           "observed nothing" guard fired on a CI runner: five queued work items on a small box left the
+           reader unscheduled until the window had closed. Bounded work plus a seeded bucket makes the
+           observation count a property of the code rather than of the runner's core count. */
+        counter.RecordReadFailure(Key, pairs[0].Read, pairs[0].ElapsedMs);
+
         var writers = pairs
-            .Select(pair => Task.Run(() =>
-            {
-                while (!Volatile.Read(ref stop))
+            .Select(pair => Task.Factory.StartNew(
+                () =>
                 {
-                    counter.RecordReadFailure(Key, pair.Read, pair.ElapsedMs);
-                    counter.RecordReadFailure(null, pair.Read, pair.ElapsedMs);
-                }
-            }))
+                    for (var i = 0; i < WritesPerWriter; i++)
+                    {
+                        counter.RecordReadFailure(Key, pair.Read, pair.ElapsedMs);
+
+                        /* Null key too: the fleet bucket is the one several production sites share, and so
+                           the one where a collision is likeliest. */
+                        counter.RecordReadFailure(null, pair.Read, pair.ElapsedMs);
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default))
             .ToArray();
 
-        var reader = Task.Run(() =>
+        /* The reader is THIS thread rather than a sixth queued work item, so it cannot go unscheduled. */
+        var blends = new List<string>();
+        var observations = 0;
+
+        while (!writers.All(w => w.IsCompleted))
         {
-            while (!Volatile.Read(ref stop))
+            var reading = counter.ReadFor(Key);
+            observations++;
+
+            Assert.NotNull(reading.LastFailureRead);
+
+            if (!legal.TryGetValue(reading.LastFailureRead!, out var expected))
             {
-                var reading = counter.ReadFor(Key);
-                if (reading.LastFailureRead is null)
-                {
-                    continue;
-                }
-
-                Interlocked.Increment(ref observations);
-
-                if (!legal.TryGetValue(reading.LastFailureRead, out var expected))
-                {
-                    lock (blends)
-                    {
-                        blends.Add($"unknown read name '{reading.LastFailureRead}'");
-                    }
-                }
-                else if (reading.LastFailureElapsedMs != expected)
-                {
-                    lock (blends)
-                    {
-                        blends.Add(
-                            $"'{reading.LastFailureRead}' paired with {reading.LastFailureElapsedMs} ms, "
-                            + $"which belongs to another failure (its own is {expected} ms)");
-                    }
-                }
-                else if (reading.LastFailureAtUtc is null)
-                {
-                    lock (blends)
-                    {
-                        blends.Add($"'{reading.LastFailureRead}' with an elapsed and no stamp");
-                    }
-                }
+                blends.Add($"unknown read name '{reading.LastFailureRead}'");
             }
-        });
-
-        Thread.Sleep(250);
-        Volatile.Write(ref stop, true);
-        Task.WaitAll(writers.Append(reader).ToArray());
-
-        Assert.True(
-            Volatile.Read(ref observations) > 0,
-            "the reader observed nothing, so its silence proves nothing");
-
-        lock (blends)
-        {
-            Assert.True(
-                blends.Count == 0,
-                $"{blends.Count} blended reading(s) over {observations} observations: "
-                + string.Join(" | ", blends.Take(5)));
+            else if (reading.LastFailureElapsedMs != expected)
+            {
+                blends.Add(
+                    $"'{reading.LastFailureRead}' paired with {reading.LastFailureElapsedMs} ms, which "
+                    + $"belongs to another failure (its own is {expected} ms)");
+            }
+            else if (reading.LastFailureAtUtc is null)
+            {
+                blends.Add($"'{reading.LastFailureRead}' with an elapsed and no stamp");
+            }
         }
 
-        /* And the settled trio is one writer's, not a mixture — asserted after the writers stop so this
+        Task.WaitAll(writers);
+
+        /* Guaranteed rather than hoped for: the bucket was seeded, so the first iteration observed a
+           complete trio whatever the scheduler did. */
+        Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
+        Assert.True(
+            blends.Count == 0,
+            $"{blends.Count} blended reading(s) over {observations} observation(s): "
+            + string.Join(" | ", blends.Take(5)));
+
+        /* And the settled trio is one writer's, not a mixture — asserted after the writers stop, so this
            half is about the VALUE rather than about timing. */
         var settled = counter.ReadFor(Key);
         Assert.NotNull(settled.LastFailureRead);
