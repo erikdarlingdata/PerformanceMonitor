@@ -78,27 +78,34 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
 
-        /* pgstattuple is contrib and ships with the bundled runtime, so this is expected to succeed. A rig
-           without it is a rig limitation rather than a product defect, hence skip rather than fail — but
-           the reason is stated, because a silently-skipped execution test is the thing this test exists to
-           object to. */
-        var pgstattupleAvailable = true;
-        try
+        /* pgstattuple is contrib and ships with the bundled runtime. SCHEMA public is not decoration: the
+           store's search_path is "collect, config, public", so a bare CREATE EXTENSION installs the
+           extension into collect, and the collector - which qualifies the function public.pgstatindex on
+           purpose - then fails with 42883 while the extension is, by every other measure, installed. That
+           schema is the product's real precondition, so this establishes it rather than working around it. */
+        await TryExecuteAsync(connection, "CREATE EXTENSION IF NOT EXISTS pgstattuple SCHEMA public", ct);
+
+        /* IF NOT EXISTS makes the SCHEMA clause a no-op against a store that already installed it
+           elsewhere, so the placement is repaired rather than assumed. */
+        if (!await PgstatindexResolvesInPublicAsync(connection, ct))
         {
-            await ExecuteAsync(connection, "CREATE EXTENSION IF NOT EXISTS pgstattuple", ct);
-        }
-        catch (PostgresException)
-        {
-            pgstattupleAvailable = false;
+            await TryExecuteAsync(connection, "ALTER EXTENSION pgstattuple SET SCHEMA public", ct);
         }
 
-        Assert.SkipWhen(!pgstattupleAvailable,
-            "pgstattuple is not installable on this rig, so pgstatindex cannot be invoked at all.");
+        /* The precondition is asserted as the FUNCTION being callable where the collector calls it, never
+           as CREATE EXTENSION having returned without error. Those two came apart on the first CI run of
+           this test - the create succeeded and the function was unreachable - which is why this reads the
+           catalog instead of trusting the DDL. A rig that still cannot offer it is a rig limitation and
+           skips with that reason stated. */
+        Assert.SkipWhen(
+            !await PgstatindexResolvesInPublicAsync(connection, ct),
+            "public.pgstatindex is not callable on this rig, so the collector's query cannot run at all.");
 
         /* The SHIPPED string, from the collector the service dispatches - not a copy of it. Literals,
            shape and all. */
         var sql = PgIndexBloatCollector.Instance.BuildQuery(MakeContext()).Text;
 
+        var bodySucceeded = false;
         try
         {
             await ExecuteAsync(connection, $"DROP SCHEMA IF EXISTS {ProbeSchema} CASCADE", ct);
@@ -147,12 +154,18 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
             var loops = await ReadPgstatindexLoopsAsync(connection, sql, ct);
 
             Assert.Equal(counts.Measured, loops);
+
+            bodySucceeded = true;
         }
         finally
         {
-            await using var cleanup = new NpgsqlConnection(connectionString);
-            await cleanup.OpenAsync(CancellationToken.None);
-            await ExecuteAsync(cleanup, $"DROP SCHEMA IF EXISTS {ProbeSchema} CASCADE", CancellationToken.None);
+            /* #1902: teardown goes through the shared helper, on its own connection and its own lifetime.
+               Opening one by hand leaves the throw-from-finally that replaces the body's exception, which
+               is how a real failure gets reported as cleanup noise. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await ExecuteAsync(cleanup, $"DROP SCHEMA IF EXISTS {ProbeSchema} CASCADE", cleanupCt);
+            });
         }
     }
 
@@ -231,6 +244,44 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
     {
         await using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Whether the collector's own qualified call target exists. Overloads are not distinguished — any
+    /// <c>pgstatindex</c> in <c>public</c> means the extension is where the query expects it.
+    /// </summary>
+    private static async Task<bool> PgstatindexResolvesInPublicAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT count(*)::int                AS overloads
+            FROM pg_catalog.pg_proc AS p
+            JOIN pg_catalog.pg_namespace AS n
+              ON n.oid = p.pronamespace
+            WHERE n.nspname = 'public'
+            AND   p.proname = 'pgstatindex'
+            """,
+            connection);
+
+        return (int)(await command.ExecuteScalarAsync(cancellationToken))! > 0;
+    }
+
+    /// <summary>
+    /// Runs a precondition statement whose success is verified by the catalog rather than by its own
+    /// return, so a failure here is not the finding — an unreachable function is, and it is checked
+    /// directly.
+    /// </summary>
+    private static async Task TryExecuteAsync(
+        NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ExecuteAsync(connection, sql, cancellationToken);
+        }
+        catch (PostgresException)
+        {
+        }
     }
 
     private static CollectorContext MakeContext() => new()
