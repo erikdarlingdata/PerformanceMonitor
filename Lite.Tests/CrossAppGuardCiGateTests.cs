@@ -884,7 +884,7 @@ public class CrossAppGuardCiGateTests
             {
                 /* Which SIDE lost the floor is the whole diagnosis, and a bare Assert.Contains names
                    neither: these two sat adjacent and message-less, so #3138 read a crude-parse failure
-                   here as an evaluated-side regression and spent an hour on a workflow file that was
+                   here as an evaluated-side regression and went looking in build.yml, which was
                    byte-identical to dev. The crude side is asserted first because it is the PRECONDITION
                    — if the second opinion cannot see the floor, the comparison below is measuring
                    nothing — but it now says so. */
@@ -902,7 +902,8 @@ public class CrossAppGuardCiGateTests
                     $"the EVALUATED read of {project} does not report {floor}, which the crude parse of " +
                     "the same XML does see. This is the defect this guard exists to catch: the live " +
                     "population has lost a cross-app project item that is spelled literally in the " +
-                    $"project file. Evaluated: [{string.Join(", ", evaluated.OrderBy(path => path, StringComparer.Ordinal))}]");
+                    "project file. Evaluated: [" +
+                    string.Join(", ", evaluated.OrderBy(path => path, StringComparer.Ordinal)) + "]");
             }
 
             var missed = parsedCross.Except(evaluated, StringComparer.Ordinal).ToList();
@@ -944,12 +945,13 @@ public class CrossAppGuardCiGateTests
     /// and the file that lost the most carries an even six. A guard that counted apostrophes would have
     /// called the worse of the two clean.</para>
     ///
-    /// <para><b>Prose in element TEXT was never the vector, and pinning that is the point.</b> The
+    /// <para><b>Prose in element TEXT was not the vector, and pinning that is the point.</b> The
     /// <c>&gt;</c>-to-<c>&lt;</c> arm of that regex consumed <c>&gt;Erik's tool&lt;</c> before the
-    /// apostrophe arm could open on it, so only a comment — which that arm cannot enter — could start a
-    /// bogus span. The element-text arm below passed before the fix as well as after it. It stays because
-    /// it is the difference between this diagnosis and the nearest plausible wrong one, and because a
-    /// fix that stripped apostrophes wholesale would break it.</para>
+    /// apostrophe arm could open on it, so the vector was a comment — the one construct that arm cannot
+    /// enter, since a comment's body carries no <c>&gt;</c> before its own terminator. The element-text
+    /// arm below therefore passed before the fix as well as after it. It stays because it is the
+    /// difference between this diagnosis and the nearest plausible wrong one, and because a fix that
+    /// stripped apostrophes wholesale would break it.</para>
     ///
     /// <para><b>Three arms nothing here could ever see</b> are a single-quoted attribute value, an
     /// entity-encoded separator and a CDATA body. The first is why the apostrophe arm was not simply
