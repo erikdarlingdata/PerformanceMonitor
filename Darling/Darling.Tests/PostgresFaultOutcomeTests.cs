@@ -480,12 +480,19 @@ public class PostgresFaultOutcomeTests
         Assert.IsNotAssignableFrom<NpgsqlException>(budgetExpiry);
 
         /* And the arm's filter carries the term that tells them apart. Pinned in source because an
-           exception filter cannot be invoked directly. */
+           exception filter cannot be invoked directly.
+
+           The two terms need not be ADJACENT, and requiring that was the wrong shape: #3111 added a third
+           conjunct between them, which reddened this pin without touching anything it asserts. What has to
+           hold is that both are conjuncts of the SAME filter, in this order — so the window forbids a brace
+           rather than counting newlines. A brace is what would mean the arm's body had begun, which is the
+           way the NpgsqlException term could be present in the file while absent from this filter, and it
+           is the only failure this pin was ever detecting through adjacency. */
         var worker = ReadSource(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
         Assert.Matches(
-            new Regex(@"&& ex is NpgsqlException\s*\r?\n\s*&& PostgresTargetProvider\.Instance\.Classify\("),
+            new Regex(@"&& ex is NpgsqlException[^{}]*?&& PostgresTargetProvider\.Instance\.Classify\("),
             worker);
     }
 

@@ -224,9 +224,19 @@ public class StoreCopyPhaseLivePostgresTests
             await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(migrateConnection, ct);
         }
 
-        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        /* The COPY connection comes from a data source built AFTER the migration, and that is load-bearing
+           rather than tidy. PgMigrations sets the store's search_path at DATABASE level, which a session
+           picks up only when its physical connection is opened — and Npgsql pools, so a connection taken
+           from the source above can be the very one the migrate ran on, carrying the search_path from
+           before the ALTER. The definition's TargetTable is bare, so on a store being migrated for the
+           FIRST time the COPY then fails 42P01 "relation wait_stats does not exist": Begin never returns,
+           the row loop is not entered, and this test fails claiming the data phase was unreachable. It
+           survives in a suite where some earlier live class has already migrated, which is the worst
+           version of the bug — measured on a fresh store, on PostgreSQL 16.15 and 17.11. */
+        await using var copySource = NpgsqlDataSource.Create(pg!);
+        await using var connection = await copySource.OpenConnectionAsync(ct);
         var fault = await CopyFaultAsync(
-            new PhaseProbeDefinition(PhaseProbeTable), dataSource, connection, ct);
+            new PhaseProbeDefinition(PhaseProbeTable), copySource, connection, ct);
 
         Assert.True(
             fault is PhaseProbeReachedTheRowLoopException,
