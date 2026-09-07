@@ -233,10 +233,12 @@ WITH candidates AS (
    RETURNED, with a reason, so the read never mistakes unmeasured for healthy.
 
    TWO figures, and the BYTE one is what bounds the work (#2997). A count bounds pages only where
-   count correlates with bytes; on the first production target it did not, and the 200 largest
-   sub-ceiling indexes there admitted 286 GB. The count survives because it is legible - an operator
-   can predict the biggest N in a way they cannot predict a byte figure - not because it bounds
-   anything: see CycleMeasureBudgetBytes for which of the two is load-bearing. */
+   count correlates with bytes; on the first production target it did not - at a 20 GB per-index
+   ceiling the 200 largest sub-ceiling indexes there admitted 286 GB, a figure that carries the
+   ceiling it was measured at because the ceiling is what decides which indexes are sub-ceiling. The
+   count survives because it is legible - an operator can predict the biggest N in a way they cannot
+   predict a byte figure - not because it bounds anything: see CycleMeasureBudgetBytes for which of
+   the two is load-bearing. */
 ranked AS (
     SELECT
         k.*,

@@ -200,10 +200,11 @@ public class PgIndexBloatCollectorDefinitionTests
     /// The CYCLE has a work budget, not just each index (#2617).
     ///
     /// <para><b>This is the assertion that would have caught a collector which never returned a row.</b>
-    /// <c>pgstatindex</c> reads every page it is pointed at, and the 20 GB ceiling bounds one index while
-    /// nothing bounded the statement. Measured on a live Aurora target: 1,517 indexes totalling 461 GB in a
-    /// single statement, which never finished and dropped the connection mid-read — <c>rows_ever = 0</c> for
-    /// the collector's entire life. The local rig had two indexes, so the question never arose there.</para>
+    /// <c>pgstatindex</c> reads every page it is pointed at, and the per-index ceiling bounds one index
+    /// while nothing bounded the statement. Measured on a live Aurora target: 1,517 indexes totalling
+    /// 461 GB in a single statement, which never finished and dropped the connection mid-read —
+    /// <c>rows_ever = 0</c> for the collector's entire life. The local rig had two indexes, so the question
+    /// never arose there.</para>
     /// </summary>
     [Fact]
     public void TheCycleHasAWorkBudget_NotJustAPerIndexCeiling()
@@ -288,10 +289,12 @@ public class PgIndexBloatCollectorDefinitionTests
     ///
     /// <para><b>This is the assertion that would have caught eleven consecutive failures.</b> The count
     /// budget from #2617 and the 300-second override from #2618 were both in place and both pinned, and
-    /// the collector still died every single run with <c>rows = 0</c> — because 200 sub-ceiling indexes
-    /// on a real Aurora target admit 286 GB, and <c>pgstatindex</c> reads every page of every one of
-    /// them. A count bounds pages only where count correlates with bytes, and the one target that had
-    /// the extension installed was the counterexample.</para>
+    /// the collector still died every single run with <c>rows = 0</c> — because on a real Aurora target,
+    /// at a 20 GB per-index ceiling, the 200 largest sub-ceiling indexes admitted 286 GB, and
+    /// <c>pgstatindex</c> reads every page of every one of them. A count bounds pages only where count
+    /// correlates with bytes, and the one target that had the extension installed was the counterexample.
+    /// The figure is quoted with the ceiling it was measured at because both are inputs to it: which
+    /// indexes count as sub-ceiling is what the ceiling decides.</para>
     ///
     /// <para>The bound has to select what the function is applied TO. Labelling rows over the budget
     /// while still passing every one of them to the function is precisely the shape that shipped: correct
@@ -311,10 +314,12 @@ public class PgIndexBloatCollectorDefinitionTests
     /// Only the indexes that will actually be READ may spend the budget.
     ///
     /// <para>An over-ceiling index is never handed to <c>pgstatindex</c>, so it costs no pages. Charging
-    /// it to the byte budget anyway would spend the allowance on work nobody does — and not marginally:
-    /// on the target this bounds, the three over-ceiling indexes total 71 GB against a 20 GB budget, so
-    /// the unfiltered running total would exhaust the budget before the first measurable index and the
-    /// collector would return zero measurements for a second, entirely new reason.</para>
+    /// it to the byte budget anyway would spend the allowance on work nobody does — and not marginally.
+    /// The over-ceiling indexes sort FIRST under size DESC and can exceed the whole budget between them,
+    /// so the unfiltered running total would be over budget before the first measurable index and the
+    /// collector would return zero measurements for a second, entirely new reason. Measured on a real
+    /// Aurora target at a 20 GB ceiling: three over-ceiling indexes totalling 71 GB, against a budget of
+    /// 20 GB.</para>
     /// </summary>
     [Fact]
     public void TheByteBudget_ChargesOnlyTheIndexesItWillActuallyRead()
