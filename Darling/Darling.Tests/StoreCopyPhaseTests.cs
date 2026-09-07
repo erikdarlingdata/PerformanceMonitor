@@ -331,12 +331,23 @@ public class StoreCopyPhaseTests
     /// <c>BeginBinaryImportAsync</c> — and the file list below is compared against what the scan found
     /// rather than trusted as its input.</para>
     ///
-    /// <para><b>The set equality is load-bearing for something specific.</b>
+    /// <para><b>The set equality is load-bearing for something specific, and it runs BOTH ways.</b>
     /// <see cref="CollectorFaultCopyPhase.IsProvenStoreWrite"/> reads "carries a phase" as "is a store
-    /// write", which is sound only while the stamping sites are all store COPYs and nothing else. A new
-    /// COPY site enlarges the population that predicate speaks for, and a new STAMPING site outside a COPY
-    /// would break its premise outright — so both have to be seen, and a list that grows silently would
-    /// show neither.</para>
+    /// write", and that is a biconditional: every COPY must stamp, and only a COPY may stamp. A new COPY
+    /// site enlarges the population the predicate speaks for; a stamping site OUTSIDE a COPY breaks its
+    /// premise outright and hands a target read the store-write label. Both are asserted, against the
+    /// discovered sets rather than against a list — see the two set assertions, which is where the second
+    /// direction lives, because the per-file loop can only speak about files it visited.</para>
+    ///
+    /// <para><b>What the stamping detector can and cannot see, stated rather than implied.</b> It matches a
+    /// QUALIFIED <c>CollectorFaultCopyPhase.Stamp(</c> in stripped code. Two things are therefore out of its
+    /// reach, and only one of them is closed here. A <c>using static</c> on the axis would make
+    /// <c>Stamp(</c> legal unqualified: that route is swept for and asserted empty, so the scan reports the
+    /// blind spot instead of reading clean past it. An unqualified call from INSIDE
+    /// <c>CollectorFaultCopyPhase.cs</c> itself is not covered and is deliberately out of scope — that file
+    /// is the axis's own definition rather than a fault path, and it holds the declaration the whole
+    /// pattern is named for, so it cannot be distinguished from a call by a text scan. Reflection is not
+    /// covered either, and nothing in this repository reaches an internal static that way.</para>
     ///
     /// <para>Read STRIPPED: this family names <c>BeginBinaryImportAsync</c> and both phase values
     /// repeatedly in prose, and <see cref="CollectorFaultCopyPhase"/> and <see cref="StoreWriteReattempt"/>
@@ -365,6 +376,8 @@ public class StoreCopyPhaseTests
             + "the service project, so nothing below is asserting anything about the COPY sites");
 
         var copySites = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        var stampSites = new SortedSet<string>(StringComparer.Ordinal);
+        var aliasedAxis = new SortedSet<string>(StringComparer.Ordinal);
 
         foreach (var file in sources)
         {
@@ -374,6 +387,19 @@ public class StoreCopyPhaseTests
             if (code.Contains("BeginBinaryImportAsync(", StringComparison.Ordinal))
             {
                 copySites.Add(Path.GetFileName(file), code);
+            }
+
+            if (code.Contains("CollectorFaultCopyPhase.Stamp(", StringComparison.Ordinal))
+            {
+                stampSites.Add(Path.GetFileName(file));
+            }
+
+            /* The one route the qualified-call test above cannot see: a `using static` on the axis makes
+               `Stamp(` legal unqualified, and the fault it stamps would be indistinguishable from a COPY's.
+               Collected here so the scan reports its own blind spot rather than reading clean past it. */
+            if (Regex.IsMatch(code, @"using\s+static\s+[\w.]*\bCollectorFaultCopyPhase\s*;"))
+            {
+                aliasedAxis.Add(Path.GetFileName(file));
             }
         }
 
@@ -386,6 +412,31 @@ public class StoreCopyPhaseTests
                 "RdsPlanIngestor.cs",
             },
             copySites.Keys.ToArray());
+
+        /* THE CONVERSE, and the half the per-file loop below structurally cannot reach: no file OUTSIDE
+           that set stamps a phase at all.
+
+           `IsProvenStoreWrite` reads "carries a phase" as "is a store write", and its soundness is a
+           BICONDITIONAL — every COPY stamps, AND only a COPY stamps. The loop below establishes the first
+           by visiting the discovered files; nothing in it can say anything about a file it never visited.
+           Add `CollectorFaultCopyPhase.Stamp(` to any target-read path and that fault carries a phase, so
+           `IsProvenStoreWrite` answers true, so DarlingWorker's PostgreSQL-target arm excludes it — and a
+           genuine target read loses the sentence that correctly describes it and is reported as a store
+           write. That is the confident-wrong direction that predicate's own remarks argue is the expensive
+           one, arrived at from the other side.
+
+           Equality rather than a subset, in one statement rather than two: a COPY site that stopped
+           stamping is also a defect, and the per-file assertions below already name it precisely. */
+        Assert.Equal(copySites.Keys.ToArray(), stampSites.ToArray());
+
+        /* And the scan's own blind spot, asserted empty rather than assumed so. */
+        Assert.True(
+            aliasedAxis.Count == 0,
+            "these files carry `using static ... CollectorFaultCopyPhase`, which lets Stamp( be called "
+            + "unqualified and makes the stamping-site scan above blind to it: "
+            + string.Join(", ", aliasedAxis)
+            + ". Either drop the using or widen the detector — an unqualified stamp on a target-read path "
+            + "is exactly what IsProvenStoreWrite cannot survive.");
 
         /* Every assertion below carries the FILE NAME in its message. A bare Assert.Matches inside a
            foreach over a discovered population reports which pattern failed and not which member failed
