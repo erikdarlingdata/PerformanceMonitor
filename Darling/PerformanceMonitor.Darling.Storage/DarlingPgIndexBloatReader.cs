@@ -92,7 +92,7 @@ public static class DarlingPgIndexBloatReader
        missing case" covers two of the three states a float column has, and a NaN that reaches the ::bigint
        cast below raises 22003, which fails the WHOLE read rather than the row.
 
-       nullif(x, 'NaN'::double precision) is the whole normalisation, and it turns on a PostgreSQL semantic
+       NULLIF(x, 'NaN'::double precision) is the whole normalisation, and it turns on a PostgreSQL semantic
        that is the opposite of the C one: NaN compares EQUAL to itself here, so nullif catches it and
        IS NOT DISTINCT FROM would too, while an IEEE-style self-inequality check (x <> x) is false and
        catches nothing. It is identity on a real density and on NULL, so the two states that already worked
@@ -116,8 +116,8 @@ public static class DarlingPgIndexBloatReader
     public const string PgIndexBloatSql = """
         SELECT database_name, schema_name, table_name, index_name, index_bytes, tree_level,
                empty_pages, deleted_pages,
-               nullif(avg_leaf_density, 'NaN'::double precision) AS avg_leaf_density,
-               nullif(leaf_fragmentation, 'NaN'::double precision) AS leaf_fragmentation,
+               NULLIF(avg_leaf_density, 'NaN'::double precision) AS avg_leaf_density,
+               NULLIF(leaf_fragmentation, 'NaN'::double precision) AS leaf_fragmentation,
                estimated_reclaimable_bytes,
                skipped_reason,
                collection_time
