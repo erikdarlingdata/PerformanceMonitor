@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, dev]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, L3116-skip-arm-base]
   release:
     types: [published]
   # Merge-queue runs. Inert until a queue ruleset is enabled on a branch (a repo setting),
