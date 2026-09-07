@@ -47,6 +47,12 @@ namespace PerformanceMonitor.Alerting;
 /// here and in the call site's log line it recorded no elapsed time anywhere and could not be classified at
 /// all.</para>
 ///
+/// <para><b>The discriminating reading is Darling's, and the gap is named rather than papered over.</b>
+/// Everything above needs the read to HAVE a deadline for the elapsed to say who ended it. Darling's alert
+/// pass sets one on every store read; Lite's <c>LiteAlertReadAdapter</c> reads the local store through
+/// <c>LocalDataService</c> with no command deadline. So Lite records the same measurement for the same
+/// payload shape, and on Lite it means only that a read became slow.</para>
+///
 /// <para><b>Deliberately in memory, and deliberately not persisted.</b> The thing being counted is a
 /// failure to read the store, so a counter that had to WRITE the store to be readable would be
 /// unavailable exactly when it has something to say. Every consumer of this count lives in the same
@@ -162,9 +168,11 @@ public sealed class AlertReadFailureCounter
     /// recorded no elapsed time anywhere and was unclassifiable.</para>
     ///
     /// <para>Not compared to a threshold here, and deliberately: the bound belongs to whichever adapter
-    /// issued the read (Darling's alert pass and Lite's are separate constants), so a limit baked into
-    /// this shared counter would be wrong for one of them. This records the measurement; the reader
-    /// compares it to the deadline their own SKU documents.</para>
+    /// issued the read, and the two SKUs do not even have the same KIND of bound. Darling's alert pass sets
+    /// an explicit <c>CommandTimeout</c> on every store read; Lite's <c>LiteAlertReadAdapter</c> reads the
+    /// local store with no command deadline at all. So a limit baked into this shared counter would be
+    /// wrong for one of them and meaningless for the other. This records the measurement; the reader
+    /// compares it to whatever deadline their own SKU actually sets.</para>
     ///
     /// <para>A negative value is clamped to zero. A negative duration on a health surface reads as a
     /// broken instrument rather than as a fast failure, and there is no reading it usefully.</para>
@@ -241,7 +249,9 @@ public sealed class AlertReadFailureCounter
     /// elapsed figure at the read's own command deadline says THIS PROCESS stopped waiting while the
     /// statement was still running on the store, and one well below the bound says the store returned a
     /// fault. Read it against the deadline the SKU documents for its alert pass — this record carries the
-    /// measurement and no threshold, because the two SKUs' bounds are separate constants.</para>
+    /// measurement and no threshold, because the two SKUs do not share a bound — and Lite's alerting
+    /// reads set no command deadline at all, so on Lite this is a plain duration rather than a
+    /// client-versus-server test.</para>
     ///
     /// <para>Null exactly when <paramref name="LastFailureAtUtc"/> is null, from the same test, so the pair
     /// cannot disagree: a reading either has a newest failure with both a stamp and an elapsed, or has
@@ -352,9 +362,10 @@ public sealed class AlertReadFailureCounter
                 reading.LastFailureElapsedMs.HasValue
                     ? string.Format(
                         CultureInfo.InvariantCulture,
-                        ", which ran {0} ms before it failed — at or about the alert pass's own command "
-                        + "deadline means this process stopped waiting while the statement was still "
-                        + "running on the store, and well below it means the store returned a fault",
+                        ", which ran {0} ms before it failed. Where the alert pass sets a command "
+                        + "deadline on its store reads, an elapsed at or about that bound means this "
+                        + "process stopped waiting while the statement was still running on the store, "
+                        + "and one well below it means the store returned a fault",
                         reading.LastFailureElapsedMs.Value)
                     : string.Empty);
 
@@ -411,13 +422,16 @@ public sealed class AlertReadFailureCounter
         + "alerting-side store reads that failed and were swallowed by design (the alert pass logs and skips "
         + "rather than firing or resolving on absent evidence), which is why they appear on no other health "
         + "surface: they are not collector runs and write no collection_log row. last_failure_elapsed_ms is "
-        + "how long that newest failing read ran before it faulted, and it is the term that says WHOSE "
-        + "deadline ended it: at or about the alert pass's own command deadline means this process stopped "
-        + "waiting while the statement was still running on the store, and well below that bound means the "
-        + "store returned a fault. Those need different answers, and the exception text cannot tell them "
-        + "apart because a client-side deadline renders as a torn stream with no SQLSTATE, exactly like a "
-        + "dropped connection. It is null exactly when last_failure_at is null, so an elapsed never "
-        + "describes an event with no stamp. It does NOT count fired "
+        + "how long that newest failing read ran before it faulted. Where the alert pass sets a command "
+        + "deadline on its store reads it is the term that says WHOSE deadline ended the read - at or about "
+        + "that bound means this process stopped waiting while the statement was still running on the store, "
+        + "and well below it means the store returned a fault - and those need different answers, because "
+        + "the exception text cannot tell them apart: a client-side deadline renders as a torn stream with "
+        + "no SQLSTATE, exactly like a dropped connection. Read it that way on the Darling service, whose "
+        + "alert pass sets an explicit command deadline. On Lite the alerting reads hit the local store with "
+        + "no command deadline of their own, so the figure there is a plain duration - it says a read became "
+        + "slow, and nothing about who ended it. Either way it is null exactly when last_failure_at is null, "
+        + "so an elapsed never describes an event with no stamp. It does NOT count fired "
         + "alerts that failed to DELIVER, and it makes no claim about them — that is the alert-history read's "
         + "question, not this one. instance_read_failures spans every server on this service plus the "
         + "fleet-scoped conditions that belong to no server and so appear in no per-server count: "

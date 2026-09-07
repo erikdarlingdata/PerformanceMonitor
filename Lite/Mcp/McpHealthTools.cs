@@ -429,11 +429,15 @@ public sealed class McpHealthTools
                        different precision guarantees for no reason. */
                     last_failure_at = alertReads.LastFailureAtUtc?.ToString("o"),
                     last_failure_read = alertReads.LastFailureRead,
-                    /* The classification term: the name says WHICH read went blind, this says whose deadline
-                       ended it. Reported on Lite for the same reason the counts are - one payload shape
-                       across both SKUs - and it reads against Lite's own store, not a Postgres one, so an
-                       elapsed at the app's read deadline means this app stopped waiting and one well below
-                       it means the local store returned a fault.
+                    /* How long the newest failing read ran before it faulted. Reported on Lite for the same
+                       reason the counts are - one payload shape across both SKUs - but it does NOT carry the
+                       same reading here, and saying so is the point of this comment. On Darling the figure
+                       is a client-versus-server discriminator, because the alert pass sets an explicit
+                       command deadline and an elapsed sitting at it means the service stopped waiting while
+                       the statement still ran. Lite's alerting reads go through LiteAlertReadAdapter into
+                       the local DuckDB store with NO command deadline of their own, so an elapsed here is a
+                       plain duration: useful for seeing that a read has become slow, and not evidence about
+                       who ended it.
 
                        Null exactly when last_failure_at is null, from the counter's own single currency
                        test, so this response can never carry a duration belonging to no event. */
