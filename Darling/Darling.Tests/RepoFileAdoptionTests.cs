@@ -114,6 +114,7 @@ public sealed class RepoFileAdoptionTests
         "DarlingPathFilterGateTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         "FleetPageAttentionFilterTests.cs",
+        "LockedModeRestoreCoverageTests.cs",
         "ServerPageTabsTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",

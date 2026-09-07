@@ -117,8 +117,16 @@ jobs:
           echo "VERSION=$nightly" >> $env:GITHUB_OUTPUT
           echo "Nightly version: $nightly"
 
+      # `shell: bash` with errexit for the reason build.yml's restore step carries it (#3143): a multi-line
+      # run block executes under pwsh on Windows, which reports the block's exit code as the LAST command's,
+      # so the two restores ahead of the last could print NU1004 and leave this step green. The project list
+      # is what this workflow publishes rather than the whole tree — build.yml's is the one that gates a
+      # merge, and LockedModeRestoreCoverageTests requires whole-tree lock-file coverage there and only there.
       - name: Restore dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
