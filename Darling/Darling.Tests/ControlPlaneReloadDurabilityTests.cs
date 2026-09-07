@@ -258,9 +258,7 @@ public sealed class ControlPlaneReloadDurabilityTests
 
         /* And exactly one assignment from the applied version, so a second one outside the branch cannot
            re-introduce the early advance alongside the correct one. */
-        Assert.Equal(
-            1,
-            Regex.Matches(code, @"_lastConfigVersion\s*=\s*appliedVersion\.Value\s*;").Count);
+        Assert.Single(Regex.Matches(code, @"_lastConfigVersion\s*=\s*appliedVersion\.Value\s*;"));
 
         /* Positive control on the negative above, through the identical pattern: an assertion that can
            only pass is not an assertion. */
@@ -288,7 +286,7 @@ public sealed class ControlPlaneReloadDurabilityTests
             + "caller's guard always succeeds and the config_version watermark advances on a reload that "
             + "applied nothing — the original defect, reachable again through the new return value");
 
-        Assert.Equal(1, Regex.Matches(reloadBody, @"return null\s*;").Count);
+        Assert.Single(Regex.Matches(reloadBody, @"return null\s*;"));
 
         /* And what it returns on SUCCESS is the view's own version, so the watermark, the log line and the
            applied config can never disagree. A method returning any other long would satisfy every
@@ -314,7 +312,7 @@ public sealed class ControlPlaneReloadDurabilityTests
 
         /* Exactly one reset, and it is on the success path — a reset in the catch would make every failure
            look like a first failure and restore the flood. */
-        Assert.Equal(1, Regex.Matches(code, @"_viewReadFailureStreak\s*=\s*0\s*;").Count);
+        Assert.Single(Regex.Matches(code, @"_viewReadFailureStreak\s*=\s*0\s*;"));
 
         /* Scoped to LoadViewAsync's own body. Searching the FILE for that catch signature finds an
            earlier member's copy of it — which made this comparison meaningless on the first run, and is

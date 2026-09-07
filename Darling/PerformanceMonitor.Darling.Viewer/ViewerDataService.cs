@@ -45,6 +45,11 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// PostgreSQL target's edition is 0, which the edition axis correctly reads as "no claim". Passing 0
     /// here for a server whose edition has not been read is exactly that same silence.
     /// </param>
+    /// <param name="postgresMajorVersion">
+    /// <c>servers.postgres_major_version</c> (V100). Defaulted like the two above so the test fakes that
+    /// construct a SQL Server row keep compiling, and so the two reader call sites stay the only places that
+    /// have to know the column exists.
+    /// </param>
     public DarlingServer(
         int serverId,
         string serverName,
@@ -53,7 +58,8 @@ public sealed class DarlingServer : INotifyPropertyChanged
         int? sqlMajorVersion,
         decimal monthlyCostUsd = 0,
         string? engineKind = null,
-        int engineEdition = CollectorEngineCapability.UnknownEngineEdition)
+        int engineEdition = CollectorEngineCapability.UnknownEngineEdition,
+        int? postgresMajorVersion = null)
     {
         ServerId = serverId;
         ServerName = serverName;
@@ -63,6 +69,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
         MonthlyCostUsd = monthlyCostUsd;
         EngineKind = engineKind;
         EngineEdition = engineEdition;
+        PostgresMajorVersion = postgresMajorVersion;
     }
 
     public int ServerId { get; }
@@ -101,8 +108,23 @@ public sealed class DarlingServer : INotifyPropertyChanged
             ? (string.IsNullOrWhiteSpace(EngineKind) ? null : EngineKind.Trim())
             : MonitoredEngineKind.DescribeEngineKind(EngineKind);
 
-    /// <summary>"SQL Server 2022"-style label for the server list; empty when the version is unknown.</summary>
-    public string VersionLabel => ViewerDataService.SqlVersionLabel(SqlMajorVersion);
+    /// <summary><c>servers.postgres_major_version</c> (V100, #2653) — the probed PostgreSQL major, or null
+    /// on a SQL Server target (where it is not a fact about the server) and on a PostgreSQL target that has
+    /// not reconnected since that rung. Read here so <see cref="VersionLabel"/> has the PostgreSQL
+    /// vocabulary's own number to render instead of the SQL Server one.</summary>
+    public int? PostgresMajorVersion { get; }
+
+    /// <summary>
+    /// "SQL Server 2022" / "PostgreSQL 18"-style label for the server list; empty when no version is known.
+    ///
+    /// <para>Engine-aware (#3145): it asks <see cref="EngineKind"/> which version vocabulary this row's
+    /// numbers belong to. Before that it fed <see cref="SqlMajorVersion"/> through a SQL-Server-only table,
+    /// and a PostgreSQL target — whose <c>sql_major_version</c> is <c>0</c> — rendered "SQL Server v0" in the
+    /// fleet sidebar while this very object's <see cref="IsPostgres"/> and <see cref="EngineDescription"/>
+    /// already knew better.</para>
+    /// </summary>
+    public string VersionLabel =>
+        MonitoredEngineVersion.DescribeEngineVersion(EngineKind, SqlMajorVersion, PostgresMajorVersion);
 
     // ── Runtime-only sidebar state (not from Postgres; drives the ported Lite server-row chrome) ──
 
@@ -358,9 +380,14 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// <c>ViewerDataService.MonitoredServers.cs</c>'s <c>ManagedServersSql</c>: that one is what the sidebar
     /// actually uses on a seeded store, so a discriminator added to only this query would have left every
     /// real deployment on the SQL Server tab set.
+    ///
+    /// <para><c>postgres_major_version</c> (V100) rides along for the same reason and with the same
+    /// both-queries requirement (#3145): it is the PostgreSQL vocabulary's own major, and without it the
+    /// sidebar's version label has nothing but <c>sql_major_version</c> — which is <c>0</c> on every
+    /// PostgreSQL target — to describe the row with.</para>
     /// </summary>
     public const string ServersSql =
-        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0) FROM servers ORDER BY display_name";
+        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0), postgres_major_version FROM servers ORDER BY display_name";
 
     /// <summary>
     /// The authoritative read-only probe (V8 security hardening): does the connected role hold INSERT
@@ -1599,28 +1626,12 @@ SELECT
                 reader.IsDBNull(4) ? null : reader.GetInt32(4),
                 reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7)));
+                reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7),
+                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
         }
 
         return servers;
     }
-
-    /// <summary>
-    /// Product-name label for a sql_major_version (2016+ is what the product supports; older or
-    /// unknown majors fall back to a bare version tag, null to empty).
-    /// </summary>
-    public static string SqlVersionLabel(int? sqlMajorVersion) => sqlMajorVersion switch
-    {
-        null => "",
-        11 => "SQL Server 2012",
-        12 => "SQL Server 2014",
-        13 => "SQL Server 2016",
-        14 => "SQL Server 2017",
-        15 => "SQL Server 2019",
-        16 => "SQL Server 2022",
-        17 => "SQL Server 2025",
-        _ => $"SQL Server v{sqlMajorVersion}",
-    };
 
     /// <summary>
     /// The active server's UTC offset in minutes from its most recent <c>server_properties</c> row — the

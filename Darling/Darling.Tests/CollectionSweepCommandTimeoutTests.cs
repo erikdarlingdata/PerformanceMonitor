@@ -431,6 +431,165 @@ public sealed class CollectionSweepCommandTimeoutTests
     }
 
     /// <summary>
+    /// The COPY's START phase — <c>BeginBinaryImportAsync</c> itself — carries a deadline too, at every
+    /// COPY writer, and it comes from the shared helper rather than from a number written at the site.
+    ///
+    /// <para><b>Why it needs its own guard rather than riding on
+    /// <see cref="EveryCopyWriter_SetsTheImporterDeadline"/>.</b> <c>NpgsqlBinaryImporter.Timeout</c>
+    /// cannot reach the call that RETURNS the importer, so that pin is satisfied while the phase a lock
+    /// wait actually stalls in runs unbounded — which is what happened: all four sites set the importer
+    /// deadline, that pin was green, and Begin sat on the connection's undocumented 30 s. Two phases, two
+    /// mechanisms, two guards.</para>
+    ///
+    /// <para><b>The census keys on <c>BeginBinaryImport</c> and NOT on <c>BeginBinaryImportAsync</c>,
+    /// deliberately.</b> Npgsql 10.0.3 also offers <c>BeginBinaryImport(string)</c> — synchronous, no
+    /// token parameter at all — so a site written that way can carry no start-phase bound by any
+    /// spelling, and every regex in this family anchored on the <c>Async</c> name was blind to it.
+    /// Dropping the suffix makes the sync form land in the census and fail the token assertions below
+    /// rather than be counted zero times, and <see cref="TheSyncCopyOverloadIsUnused"/> says the same
+    /// thing directly.</para>
+    ///
+    /// <para><b>Both directions.</b> The bounded token is required POSITIVELY, and the raw
+    /// <c>cancellationToken</c> is asserted absent — because a revert to the unbounded call is the exact
+    /// edit this exists to catch, and a pin that only required the presence of a bound somewhere in the
+    /// file would pass a site that had both.</para>
+    ///
+    /// <para><b>The argument-list window needs no statement walker</b>, and that is deliberate rather
+    /// than a shortcut: <c>[^;]*</c> over stripped source cannot leave the construction, because the
+    /// first semicolon after a COPY writer's opening parenthesis is the phase transition inside its own
+    /// block. The window is bounded by the language rather than by a character budget a longer argument
+    /// list could silently outgrow.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCopyWriter_BoundsTheStartPhaseWithTheSharedDeadline()
+    {
+        var untokened = new List<string>();
+        var rawToken = new List<string>();
+        var total = 0;
+        var deadlines = 0;
+        var bounded = 0;
+
+        var copyAnyForm = new Regex(@"BeginBinaryImport(?:Async)?\s*\(", RegexOptions.CultureInvariant);
+        var boundedToken = new Regex(
+            @"BeginBinaryImport(?:Async)?\s*\([^;]*startDeadline\.Token",
+            RegexOptions.CultureInvariant);
+        var inheritedToken = new Regex(
+            @"BeginBinaryImport(?:Async)?\s*\([^;]*(?<![A-Za-z0-9_])cancellationToken\s*\)",
+            RegexOptions.CultureInvariant);
+
+        /* The helper called with NO second argument. The optional deadline parameter exists so a test can
+           construct one that has already elapsed; a production site passing its own value would decouple
+           the busiest write in the process from the number this group derived, which is exactly what
+           TheCopyWriters_TakeTheSweepConstantRatherThanALiteral guards on the data-phase side. */
+        var sharedDeadline = new Regex(
+            @"StoreCopyStartDeadline\.Start\(\s*cancellationToken\s*\)", RegexOptions.CultureInvariant);
+
+        foreach (var path in ServiceSources())
+        {
+            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
+            var name = Path.GetFileName(path);
+
+            deadlines += sharedDeadline.Matches(code).Count;
+
+            var copies = copyAnyForm.Matches(code).Count;
+            total += copies;
+
+            if (copies == 0)
+            {
+                continue;
+            }
+
+            var boundedHere = boundedToken.Matches(code).Count;
+            bounded += boundedHere;
+
+            if (boundedHere < copies)
+            {
+                untokened.Add($"{name} ({copies} COPY writer(s), {boundedHere} bounded)");
+            }
+
+            foreach (Match raw in inheritedToken.Matches(code))
+            {
+                rawToken.Add($"{name}:{LineOf(code, raw.Index)}");
+            }
+        }
+
+        Assert.True(
+            untokened.Count == 0,
+            $"{untokened.Count} file(s) hold a binary COPY writer that does not hand Begin a bounded "
+            + "token, so its start phase runs on the connection's CommandTimeout — which Npgsql exposes "
+            + "read-only, offers no per-call overload for, and defaults to an undocumented 30 s. The start "
+            + $"phase is the one a lock wait stalls in: {string.Join(", ", untokened)}");
+
+        Assert.True(
+            rawToken.Count == 0,
+            $"{rawToken.Count} binary COPY writer(s) hand Begin the caller's own cancellationToken, which "
+            + "carries no deadline: " + string.Join(", ", rawToken));
+
+        /* All three counts, for EveryCopyWriter_SetsTheImporterDeadline's reason: a fifth COPY writer must
+           be looked at by a person even when it is correctly bounded, and a fifth deadline built somewhere
+           that is not a COPY writer is equally a thing to decide about rather than to inherit. The bounded
+           count is what stops the per-file check above passing vacuously on a sweep that read nothing. */
+        Assert.Equal(ExpectedCopyWriterSites, total);
+        Assert.Equal(ExpectedCopyWriterSites, bounded);
+        Assert.Equal(ExpectedCopyWriterSites, deadlines);
+    }
+
+    /// <summary>
+    /// The synchronous <c>BeginBinaryImport(string)</c> overload is unused, and it has to stay that way for
+    /// the start phase to be boundable at all: it takes no <c>CancellationToken</c>, and the connection's
+    /// <c>CommandTimeout</c> is read-only, so a COPY opened through it has no per-call deadline available
+    /// in any spelling.
+    ///
+    /// <para>Asserted separately from the census above rather than only through it. The census would catch
+    /// a sync site by failing its token assertions, but the message would say "does not hand Begin a
+    /// bounded token" and send the reader looking for a token to add — when the answer is that the overload
+    /// cannot take one and the call has to change shape.</para>
+    /// </summary>
+    [Fact]
+    public void TheSyncCopyOverloadIsUnused()
+    {
+        var sync = new Regex(@"BeginBinaryImport\s*\(", RegexOptions.CultureInvariant);
+
+        var offenders = ServiceSources()
+            .Select(p => (Name: Path.GetFileName(p),
+                          Code: CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(p))))
+            .Where(f => sync.IsMatch(f.Code))
+            .Select(f => f.Name)
+            .ToList();
+
+        Assert.True(
+            offenders.Count == 0,
+            "these files call the synchronous BeginBinaryImport(string) overload, which takes no "
+            + "CancellationToken — so its start phase cannot be bounded, the connection's CommandTimeout "
+            + "being read-only in Npgsql: " + string.Join(", ", offenders));
+    }
+
+    /// <summary>
+    /// The start phase takes the SAME constant as the row loop beside it, pinned on the
+    /// <see cref="System.TimeSpan"/> the helper actually applies rather than on the number parsed out of
+    /// the source.
+    ///
+    /// <para>Reading <c>TotalSeconds</c> off the constructed value is what makes this total: a
+    /// <c>TimeSpan.FromMilliseconds</c> in place of <c>FromSeconds</c> is a one-word edit that leaves every
+    /// source scan matching and reduces the bound by a factor of a thousand, and only the constructed
+    /// value can see it.</para>
+    /// </summary>
+    [Fact]
+    public void TheStartPhaseDeadline_IsTheSweepConstantAndNotJustItsDigits()
+    {
+        Assert.Equal(
+            ServiceCommandDeadlines.CollectionSweepSeconds,
+            StoreCopyStartDeadline.Deadline.TotalSeconds);
+
+        /* And the sentence a breached start phase carries names the deadline it breached, rendered from
+           that same TimeSpan — so the message cannot go on quoting a number the code stopped using. */
+        Assert.Contains(
+            $"within {ServiceCommandDeadlines.CollectionSweepSeconds}s",
+            StoreCopyStartDeadline.BreachMessage,
+            System.StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The value, bounded on both sides — see
     /// <see cref="ServiceCommandDeadlines.CollectionSweepSeconds"/> for the derivation. A band rather
     /// than an equality, following the precedent .Storage and .Viewer set: freezing the exact number

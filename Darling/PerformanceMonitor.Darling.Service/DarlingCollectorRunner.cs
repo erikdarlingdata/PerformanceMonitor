@@ -2619,6 +2619,13 @@ public sealed class DarlingCollectorRunner
         /* Naive-UTC storage — see PgCollectorRowWriter. */
         var storedCollectionTime = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
 
+        /* The start phase's deadline. It is separate from the importer's because it has to be: the
+           importer does not exist until Begin returns, and the await that returns it runs under the
+           connection's CommandTimeout, which Npgsql exposes read-only. StoreCopyStartDeadline carries the
+           value, the stop-versus-deadline discrimination and the fault shape; the two lines it costs here
+           are the token below and the arm that translates a breach. */
+        using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
+
         /* #3095: which COPY phase a fault came out of, stamped onto the exception by the arm below so a
            handler upstream can tell a start-phase failure from a data-phase one. Both render as
            "Exception while reading from stream", so nothing about the exception itself carries this.
@@ -2638,7 +2645,7 @@ public sealed class DarlingCollectorRunner
         try
         {
             using (var importer = await pgConnection.BeginBinaryImportAsync(
-                PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
+                PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
             {
                 copyPhase = StoreCopyPhase.Data;
 
@@ -2653,15 +2660,11 @@ public sealed class DarlingCollectorRunner
                    It takes the SAME constant because it is the same regime: no enclosing budget, one sweep permit
                    and one borrowed store connection held for the duration, retried on the collector's own cadence.
 
-                   And it NARROWS rather than closes. Measured against Npgsql 10.0.3: this bounds StartRowAsync /
-                   Write / CompleteAsync, but NOT the BeginBinaryImportAsync above it. Begin sends the COPY and
-                   awaits CopyInResponse under the CONNECTION's CommandTimeout, which Npgsql exposes read-only and
-                   BeginBinaryImportAsync has no overload for — so the start phase, which is where a lock wait
-                   stalls, stays on 30 s. Both phases surface as "Exception while reading from stream", which is
-                   why the distinction is invisible in a log; the copyPhase stamp above is what separates them,
-                   and it does not bound anything. Deliberately not closed by putting CommandTimeout on the
-                   shared data source's connection string: that would silently re-bound every site this sweep
-                   has not reached yet. The unbounded start phase is tracked on #3095. */
+                   It reaches ONE of the COPY's two phases, and that is a property of the API rather than a
+                   choice. Measured against Npgsql 10.0.3: this bounds StartRowAsync / Write / CompleteAsync,
+                   and nothing above them — the importer does not exist until Begin has returned. The await
+                   that returns it is bounded by startDeadline above, which is why the two lines are separate
+                   and why both take the same constant. */
                 importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
 
                 writer.Importer = importer;
@@ -2687,6 +2690,24 @@ public sealed class DarlingCollectorRunner
 
                 await importer.CompleteAsync(cancellationToken);
             }
+        }
+        /* The start phase's deadline, re-raised as the shape a client-side deadline has here. Npgsql
+           cancels Begin with an OperationCanceledException, and on this path that word is reserved for the
+           service stopping — the arm below excludes it from the phase stamp, and StoreWriteReattempt
+           refuses to re-attempt through one. Left in that shape a breach would be bounded and invisible.
+
+           The phase term in the filter is what makes this arm unable to lie, and it is not redundant with
+           Breached(). A throw from a catch arm leaves the whole try, so this fault is stamped HERE rather
+           than by the arm below — and Start is what the re-attempt gate acts on. Requiring copyPhase to
+           still hold its initial value makes the arm unreachable once the row loop has begun, whatever
+           Npgsql chooses to throw from inside it, so a data-phase fault cannot be relabelled as the
+           recoverable one. The stamp still reads the variable rather than naming a phase. */
+        catch (OperationCanceledException cancellation)
+            when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
+        {
+            var breach = StoreCopyStartDeadline.Breach(cancellation);
+            CollectorFaultCopyPhase.Stamp(breach, copyPhase);
+            throw breach;
         }
         /* Stamped, then rethrown bare: the fault keeps its own type, message and stack, so every
            classification arm upstream — PostgresTargetProvider.Classify, the reconnect decision in

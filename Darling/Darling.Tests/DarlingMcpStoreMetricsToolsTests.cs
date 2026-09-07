@@ -111,6 +111,47 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.DoesNotContain("now()", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The daily series is a LAST-SNAPSHOT selection, so the description has to say so (#3119). An
+    /// operator asking a maximum question of it — this job's longest run that day, whether it entered its
+    /// warning band — gets a confident wrong answer, because the day's peak is dropped rather than
+    /// smoothed, and nothing else on the surface says so.
+    ///
+    /// <para><b>Asserted TOGETHER with the shipped SQL rather than on its own.</b> The caveat is true only
+    /// while the read is a <c>DISTINCT ON</c> with a newest-first tiebreak; a read that became
+    /// max-preserving would make the sentence wrong in the other direction. Requiring both means either
+    /// half moving lands here and the pairing gets re-decided, instead of the sentence outliving the query
+    /// it describes.</para>
+    ///
+    /// <para><b>One ordered match rather than three substrings, and deliberately strict.</b> A description
+    /// that said "last snapshot" about some other field and "maximum" about a third would satisfy three
+    /// independent <c>Contains</c> calls while telling a reader nothing about the daily series. Strictness
+    /// here fails toward re-deciding the sentence: a rewording that still carries the claim goes red and
+    /// gets re-approved, where a looser match would let a rewording that DROPPED it pass.</para>
+    /// </summary>
+    [Fact]
+    public void TheDescription_SaysADailyPointIsALastSnapshotAndNotAMaximum()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        /* The selection the caveat is about. Both halves: DISTINCT ON alone would keep an arbitrary row,
+           and it is the newest-first tiebreak that makes the kept row the day's LAST. */
+        var sql = DarlingStoreMetricsReader.StoreMetricsDailySql;
+        Assert.Contains(
+            "DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))",
+            sql,
+            StringComparison.Ordinal);
+        Assert.Contains("metric_time DESC", sql, StringComparison.Ordinal);
+
+        /* The claim, in one match: the daily point, what it IS, and what it is not. */
+        Assert.Matches(@"daily point is that day's LAST snapshot[^.]*maximum", description!);
+
+        /* And the route that answers what this series cannot, so the caveat leaves a reader somewhere to
+           go rather than only telling them to distrust the number in front of them. */
+        Assert.Contains("timescaledb_information.job_history", description!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void GetStoreMetrics_IsInTheServerInstructions()
     {

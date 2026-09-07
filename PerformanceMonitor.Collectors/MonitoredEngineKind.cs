@@ -71,15 +71,24 @@ public static class MonitoredEngineKind
     {
         ArgumentNullException.ThrowIfNull(target);
 
-        return target.Engine switch
-        {
-            /* Aurora-ness is a PostgreSQL fact only; the SQL Server side has no such flavour split (RDS for
-               SQL Server runs the same T-SQL against the same DMVs, which is why it rides on
-               CollectorTargetInfo.IsAwsRds and not on this axis). */
-            CollectorTargetEngine.PostgreSql => target.IsAurora ? AuroraPostgres : Postgres,
-            _ => SqlServer,
-        };
+        return For(target.Engine, target.IsAurora);
     }
+
+    /// <summary>
+    /// The token for the two probed facts that decide it, for a caller holding those facts without a whole
+    /// <see cref="CollectorTargetInfo"/> — a <c>test_connect</c> result carries <c>engine</c> and
+    /// <c>isAurora</c> as JSON, not a target. Delegated to by <see cref="For(CollectorTargetInfo)"/> so the
+    /// Aurora-versus-stock decision is made in exactly one place; a second copy of it beside a probe reader
+    /// is how a surface ends up disagreeing with the registry about the same server.
+    /// </summary>
+    public static string For(CollectorTargetEngine engine, bool isAurora) => engine switch
+    {
+        /* Aurora-ness is a PostgreSQL fact only; the SQL Server side has no such flavour split (RDS for
+           SQL Server runs the same T-SQL against the same DMVs, which is why it rides on
+           CollectorTargetInfo.IsAwsRds and not on this axis). */
+        CollectorTargetEngine.PostgreSql => isAurora ? AuroraPostgres : Postgres,
+        _ => SqlServer,
+    };
 
     /// <summary>
     /// The dialect a token implies, or <c>null</c> when the token is absent or unrecognised. <c>null</c> is

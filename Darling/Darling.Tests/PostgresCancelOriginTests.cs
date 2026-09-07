@@ -307,15 +307,15 @@ public sealed class PostgresCancelOriginTests
 
         /* Exactly one origin decision, so a second arm cannot grow its own opinion about the same
            question — the shape #3111's store-write exclusion is pinned with. */
-        Assert.Equal(1, Regex.Matches(code, @"CollectorFaultCancelOrigin\.For\(ex\)").Count);
+        Assert.Single(Regex.Matches(code, @"CollectorFaultCancelOrigin\.For\(ex\)"));
 
         /* And it is the argument the sentence is built from, not a value computed beside it. The window
            has to admit the two intervening arguments and their comments — the walker blanks a comment's
            TEXT and keeps its length, so the measured span is 995 characters, not the 80 the code reads as.
            It would not admit a call moved out of the argument list. */
-        Assert.Equal(1, Regex.Matches(
+        Assert.Single(Regex.Matches(
             code,
-            @"PostgresTimeoutExplanation\([\s\S]{0,1500}?CollectorFaultCancelOrigin\.For\(ex\)\)").Count);
+            @"PostgresTimeoutExplanation\([\s\S]{0,1500}?CollectorFaultCancelOrigin\.For\(ex\)\)"));
 
         var inCode = Regex.Matches(code, CollectorFaultCancelOrigin.QueryCanceled).Count;
         var inLiterals = CSharpSourceWalker.StringLiteralBodies(worker)

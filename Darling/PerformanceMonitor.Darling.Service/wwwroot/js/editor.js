@@ -16,10 +16,10 @@
  *   filled) -> viz picker -> width (span 1|2) -> title -> a vizcfg sub-editor SEEDED by client-side derivation
  *   (derive.js) from a live sample fetch, then hand-tunable (columns/series/stats + a format per field).
  *
- * ACCESS: editing is available to any AUTHENTICATED seat — the same reach as viewing (network operation is the
- * normal mode). The server gates writes by the host auth (token->cookie + CIDR over the network; tokenless on
- * loopback) plus a Content-Type check; can_edit only goes false if the session probe itself failed, which shows
- * the reload notice below. All user text reaches the DOM via el()/textContent
+ * ACCESS: the server gates writes by the host auth (token->cookie + CIDR over the network; tokenless on
+ * loopback), a Content-Type check, and the seat's own role. can_edit goes false for an OIDC viewer — a correctly
+ * authenticated read-only seat — and also when the session probe itself failed; the two get different notices
+ * below, because telling a viewer to reload would promise something reloading cannot deliver. All user text reaches the DOM via el()/textContent
  * (R4 — el() throws on an html prop). Series COLOR is constrained to an <input type=color> (#rrggbb) + the
  * charts.js palette, NEVER free text, so it can't inject a style-attribute sink (reconciliation #4).
  *
@@ -70,8 +70,11 @@ export async function renderEditor(main, id) {
     mount(main, [
       backHead(id),
       el("div", { class: "strip empty" }, [
-        "Couldn't confirm your session, so the composer is read-only for now. Reload the page to edit; " +
-          "you can still open and export views.",
+        session.probe_failed
+          ? "Couldn't confirm your session, so the composer is read-only for now. Reload the page to edit; " +
+            "you can still open and export views."
+          : "Your account has read-only access, so the composer is read-only. You can still open and export " +
+            "views.",
       ]),
     ]);
     return;

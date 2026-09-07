@@ -21,10 +21,12 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the viewer's SQL against the Darling store contract (no live Postgres needed) and
-/// unit-tests the pure display helpers: the version label. (The naive-UTC → display conversion moved to
-/// the mode-aware <c>ViewerTimeHelper</c>, pinned in <c>ViewerTimeHelperTests</c>; the Overview trend
-/// reads + wait-category roll-up are pinned in <c>ViewerTrendsTests</c>.)
+/// Pins the viewer's SQL against the Darling store contract (no live Postgres needed). (The naive-UTC →
+/// display conversion moved to the mode-aware <c>ViewerTimeHelper</c>, pinned in
+/// <c>ViewerTimeHelperTests</c>; the Overview trend reads + wait-category roll-up are pinned in
+/// <c>ViewerTrendsTests</c>; the server VERSION label moved to <c>MonitoredEngineVersion</c> when it became
+/// engine-aware at #3145, and is pinned — table, callers, and the scans that discover the render sites — in
+/// <c>EngineAwareVersionLabelTests</c>.)
 /// </summary>
 public sealed class ViewerDataServiceTests
 {
@@ -40,28 +42,16 @@ public sealed class ViewerDataServiceTests
        replaced it with Lite's 7-day aggregate, pinned in ViewerDailyHealthTests along with the Daily
        Summary reads. */
 
-    [Theory]
-    [InlineData(13, "SQL Server 2016")]
-    [InlineData(14, "SQL Server 2017")]
-    [InlineData(15, "SQL Server 2019")]
-    [InlineData(16, "SQL Server 2022")]
-    [InlineData(17, "SQL Server 2025")]
-    [InlineData(99, "SQL Server v99")]
-    [InlineData(null, "")]
-    public void SqlVersionLabel_MapsKnownMajors_AndFallsBack(int? major, string expected)
-    {
-        Assert.Equal(expected, ViewerDataService.SqlVersionLabel(major));
-    }
+    /* The version-label theory that lived here pinned ViewerDataService.SqlVersionLabel, an engine-BLIND
+       formatter: it mapped a SQL Server major to a product name and every caller had to remember to ask
+       what engine the row was. Two of the four did not, and a PostgreSQL target — whose sql_major_version
+       is 0 — was labelled "SQL Server v0" in the fleet sidebar (#3145). The table is now private inside
+       MonitoredEngineVersion behind an entry point that takes the engine discriminator, so there is no
+       longer an engine-blind label to pin here. Its successors, including the 11/12 arms this theory never
+       covered and the whole caller population, are in EngineAwareVersionLabelTests.
 
-    /* The naive-UTC → display conversion moved from ViewerDataService.ToLocalTime to the mode-aware
+       The naive-UTC → display conversion moved from ViewerDataService.ToLocalTime to the mode-aware
        ViewerTimeHelper (Server/Local/UTC); it is pinned in ViewerTimeHelperTests. */
-
-    [Fact]
-    public void DarlingServer_VersionLabel_ComesFromTheMajorVersion()
-    {
-        var server = new DarlingServer(1, "SQL2022", "SQL2022", true, 16);
-        Assert.Equal("SQL Server 2022", server.VersionLabel);
-    }
 
     /* The old placeholder CollectorHealthRow record (a single latest-run snapshot with
        CollectionTimeLocal) was replaced by Lite's rich 7-day aggregate class in W1i; its HealthStatus
