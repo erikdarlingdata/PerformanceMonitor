@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
@@ -53,8 +54,69 @@ public partial class LocalDataService
     }
 
     /// <summary>
-    /// Creates and opens a DuckDB connection wrapped in an exclusive write lock, with a 5-second timeout
-    /// so the UI thread cannot freeze behind an in-flight archival.
+    /// The write-lock wait <see cref="OpenWriteConnectionAsync"/> gets in a host that declares none: what a
+    /// WPF dispatcher can afford to spend before <see cref="GetDatabaseStateDeviationsAsync"/> skips a
+    /// maintenance cycle rather than stall the window. The shipped app declares none, so this is the app's.
+    /// </summary>
+    internal static readonly TimeSpan DefaultWriteLockBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The runtime configuration property a host sets, in seconds, to state its own
+    /// <see cref="WriteLockBudget"/>. Declared as a <c>RuntimeHostConfigurationOption</c> in the host's
+    /// project file, which lands it in that host's <c>runtimeconfig.json</c>.
+    /// </summary>
+    internal const string WriteLockBudgetConfigKey = "PerformanceMonitorLite.WriteLockBudgetSeconds";
+
+    /// <summary>
+    /// How long <see cref="OpenWriteConnectionAsync"/> waits for the write lock in THIS host.
+    ///
+    /// <para><b>The wait belongs to the host, because the thing it protects does.</b>
+    /// <c>DuckDbInitializer.s_dbLock</c> is process-wide, so an acquisition here queues behind every other
+    /// holder in the process however few rows it means to touch, and a dispatcher awaiting this call cannot
+    /// afford an unbounded queue — which is the entire reason this one caller passes a timeout while the
+    /// app's other write-lock callers pass none. A host with no dispatcher to protect is in the position of
+    /// those other callers: waiting is the correct answer, and expiring is the wrong one.</para>
+    ///
+    /// <para>So the host states it in its own project file, where the value is fixed before <c>Main</c> and
+    /// out of reach of anything that runs afterwards. That matters more than it looks: this number governs
+    /// every caller in the process at once, so a settable static would let one component — or one test —
+    /// put every concurrent neighbour on whatever fuse it picked, which is a smaller copy of the problem
+    /// rather than a fix for it.</para>
+    ///
+    /// <para><c>Lite.Tests</c> is the host that declares one. Its classes hold their own DuckDB files but
+    /// share this lock, several of its test methods take the exclusive lock deliberately and hold it for
+    /// seconds while they assert on timing, and its acquisitions have no dispatcher behind them. Its budget
+    /// is two minutes — orders of magnitude above the holds its own suite takes, and still short enough to
+    /// fail loudly, with this method's own message, if a holder wedges rather than merely being slow.</para>
+    /// </summary>
+    internal static readonly TimeSpan WriteLockBudget =
+        ResolveWriteLockBudget(AppContext.GetData(WriteLockBudgetConfigKey));
+
+    /// <summary>
+    /// The seconds a host declared, as a budget. Absent, unparseable and non-positive all resolve
+    /// <see cref="DefaultWriteLockBudget"/>: the failure worth guarding against is a host quietly losing
+    /// its dispatcher protection, not a host quietly gaining a longer wait.
+    ///
+    /// <para>Takes the raw value rather than reading the key itself, so the parse can be exercised without
+    /// a second host. MSBuild types it as a JSON number in <c>runtimeconfig.json</c> and the host hands it
+    /// back as a string, which is why it is parsed rather than cast — and parsed against the invariant
+    /// culture, because a project file is not written in the machine's locale.</para>
+    /// </summary>
+    internal static TimeSpan ResolveWriteLockBudget(object? configured)
+    {
+        if (configured is string declared &&
+            double.TryParse(declared, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) &&
+            seconds > 0)
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        return DefaultWriteLockBudget;
+    }
+
+    /// <summary>
+    /// Creates and opens a DuckDB connection wrapped in an exclusive write lock, bounded by
+    /// <see cref="WriteLockBudget"/> so the UI thread cannot freeze behind an in-flight archival.
     ///
     /// <para><b>This doc comment used to say "use for UPDATE/DELETE/INSERT operations that must not race
     /// with archival or compaction", and was read as the house rule for the whole app (#2463).</b> It is
@@ -66,14 +128,14 @@ public partial class LocalDataService
     /// <c>DuckDbInitializer.s_dbLock</c>; the fourteen callers here are UPDATE, DELETE and #2208's
     /// multi-statement maintenance block, and all of them sit on the right side of it.</para>
     ///
-    /// <para>The 5-second timeout is this method's own contribution and is not part of the lock rule:
-    /// every other write-lock caller in the app waits indefinitely, which they can afford and the UI
-    /// thread cannot. See <see cref="LocalDataService.GetDatabaseStateDeviationsAsync"/> for what a
-    /// caller does when it expires.</para>
+    /// <para>The timeout is this method's own contribution and is not part of the lock rule: every other
+    /// write-lock caller in the app waits indefinitely, which they can afford and the UI thread cannot.
+    /// See <see cref="LocalDataService.GetDatabaseStateDeviationsAsync"/> for what a caller does when it
+    /// expires.</para>
     /// </summary>
     internal async Task<LockedConnection> OpenWriteConnectionAsync()
     {
-        var writeLock = _duckDb.AcquireWriteLock(timeout: TimeSpan.FromSeconds(5));
+        var writeLock = _duckDb.AcquireWriteLock(timeout: WriteLockBudget);
         try
         {
             var connection = _duckDb.CreateConnection();
