@@ -302,14 +302,23 @@ jobs:
       # #3143 was filed from, carrying the error in its own log, and the only job that went red was
       # darling-tree-guards, whose restore happens to be a single-command step.
       #
-      # Every project with a committed lock file is reached from this list, directly or through a
+      # Every project with a committed lock file bar one is reached from this list, directly or through a
       # ProjectReference — a locked-mode restore validates the lock file of every project in the graph it
-      # walks, not only the one it was handed. deprecated/Installer is named because nothing references it, so
-      # nothing reached it: while it was absent, an inconsistent lock file there passed all six restores this
-      # step used to run and failed only a direct restore of that project, which no workflow performed.
+      # walks, not only the one it was handed. The exception is deprecated/Installer, which nothing
+      # references and which is deliberately still absent: it is the only project publishing single-file, so
+      # the SDK adds an implicit Microsoft.NET.ILLink.Tasks reference at the SDK's OWN version, and its lock
+      # file is the only one carrying that entry. global.json rolls forward across patches, so the runner
+      # installed 10.0.303 against a lock file written under 10.0.302 and the two disagree on that entry
+      # alone — a lock file that cannot be right for both SDKs at once, which is a decision about pinning the
+      # SDK rather than something a restore line here can fix. Adding the line reported it for the first time
+      # (#3143): nothing had restored that project, so the drift had accumulated unseen.
+      #
       # LockedModeRestoreCoverageTests derives both requirements — from the lock files on disk and the
       # reference edges between projects — so a tenth lock file makes its restore mandatory rather than
-      # remembered, and re-spelling this block in a shell that swallows failures fails the suite.
+      # remembered, and re-spelling this block in a shell that swallows failures fails the suite. It derives
+      # the exception from the SDK coupling too, and ratchets its membership, so pinning the SDK exactly
+      # makes this restore mandatory and a second project taking an SDK-coupled reference fails rather than
+      # joining the exemption quietly.
       - name: Restore dependencies
         id: restore
         if: steps.fastpath.outputs.engaged != 'true'
@@ -327,7 +336,6 @@ jobs:
 
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
-          dotnet restore deprecated/Installer/PerformanceMonitorInstaller.csproj --locked-mode
           dotnet restore deprecated/Installer.Tests/Installer.Tests.csproj --locked-mode
           dotnet restore deprecated/Dashboard.Tests/Dashboard.Tests.csproj --locked-mode
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode

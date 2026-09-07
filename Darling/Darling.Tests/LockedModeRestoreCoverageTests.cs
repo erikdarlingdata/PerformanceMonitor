@@ -55,6 +55,22 @@ public sealed class LockedModeRestoreCoverageTests
     private static readonly string[] s_nightlySegments = { ".github", "workflows", "nightly.yml" };
 
     /// <summary>
+    /// The package whose version is the SDK's own rather than one anyone in this repository chose. The SDK
+    /// adds it implicitly to a project that publishes single-file, at the version bundled with whichever SDK
+    /// performed the restore — so a lock file recording it is pinned to an SDK patch, and cannot be right for
+    /// two patches at once.
+    /// </summary>
+    private const string SdkCoupledPackage = "Microsoft.NET.ILLink.Tasks";
+
+    /// <summary>
+    /// The lock files that cannot be validated in locked mode while the SDK patch floats — held as a ratchet
+    /// on the DERIVED set below, not as the requirement itself. Without the ratchet, a project newly
+    /// publishing single-file would take the exemption silently, which is the same shape of quiet widening
+    /// this class exists to stop.
+    /// </summary>
+    private static readonly string[] s_sdkCoupledLockFiles = { "deprecated/Installer" };
+
+    /// <summary>
     /// One <c>dotnet restore</c> invocation and what it names. The target is captured so the locked-mode
     /// requirement can be read per invocation rather than per file.
     /// </summary>
@@ -148,7 +164,8 @@ public sealed class LockedModeRestoreCoverageTests
 
     /// <summary>
     /// Every committed <c>packages.lock.json</c> is reached by a locked-mode restore the <c>build</c>
-    /// workflow runs, directly or through a <c>ProjectReference</c>.
+    /// workflow runs, directly or through a <c>ProjectReference</c> — bar the ones whose contents follow the
+    /// SDK rather than this repository's own choices.
     ///
     /// <para>Scoped to <c>build.yml</c> deliberately: that is the workflow whose checks gate a merge.
     /// <c>nightly.yml</c> restores what it publishes and is a backstop, so requiring whole-tree coverage
@@ -158,6 +175,7 @@ public sealed class LockedModeRestoreCoverageTests
     public void EveryCommittedLockFile_IsReachedByALockedModeRestoreInTheBuildWorkflow()
     {
         var buildYaml = ReadRepoFileLf(s_buildSegments);
+        var globalJson = ReadRepoFileLf("global.json");
 
         /* Non-vacuity, in the direction that matters: an empty lock-file set or an empty restore set both
            report perfect coverage. */
@@ -170,9 +188,9 @@ public sealed class LockedModeRestoreCoverageTests
            would never turn: deprecated/Dashboard holds a lock file, is named by no restore line in the
            workflow, and is covered only because Dashboard.Tests references it. */
         Assert.DoesNotContain("dotnet restore deprecated/Dashboard/Dashboard.csproj", buildYaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("deprecated/Dashboard", UncoveredLockFiles(buildYaml));
+        Assert.DoesNotContain("deprecated/Dashboard", UncoveredLockFiles(buildYaml, globalJson));
 
-        var uncovered = UncoveredLockFiles(buildYaml);
+        var uncovered = UncoveredLockFiles(buildYaml, globalJson);
 
         Assert.True(
             uncovered.Count == 0,
@@ -184,27 +202,69 @@ public sealed class LockedModeRestoreCoverageTests
     }
 
     /// <summary>
-    /// The coverage check reports an injected gap, in both of its arms.
+    /// The lock files exempt from that requirement are exactly the ones whose contents follow the SDK, and
+    /// there is one.
     ///
-    /// <para>Removing the restore of a project nothing references must uncover it, and removing the restore
-    /// of a project that others hang off must uncover THEM — otherwise the closure walk could be returning
-    /// everything it was handed and the assertion above would hold for a workflow that restored nothing.</para>
+    /// <para><b>Why an exemption exists at all.</b> <c>deprecated/Installer</c> is the only project
+    /// publishing single-file, so the SDK adds an implicit <c>Microsoft.NET.ILLink.Tasks</c> reference at the
+    /// version bundled with whichever SDK ran the restore. <c>global.json</c> rolls forward across patches,
+    /// so a runner on 10.0.303 wants <c>[10.0.11, )</c> where a lock file written under 10.0.302 records
+    /// <c>[10.0.10, )</c>. No restore line can make that file right for both, and nothing had restored the
+    /// project, so the drift accumulated unseen until #3143 pointed a restore at it.</para>
+    ///
+    /// <para><b>Why it is derived and ratcheted rather than a name in a list.</b> Derived, so pinning the SDK
+    /// exactly in <c>global.json</c> removes the exemption and makes the restore mandatory — the fix cancels
+    /// the excuse instead of leaving it behind. Ratcheted, so a second project taking an SDK-coupled
+    /// reference fails here rather than inheriting the exemption in silence, which is the widening this class
+    /// exists to catch. Both halves have to hold: the exemption is not the decision about whether that lock
+    /// file should exist, only an accurate statement that CI cannot currently check it.</para>
+    /// </summary>
+    [Fact]
+    public void TheExemptLockFiles_AreExactlyTheOnesWhoseContentsFollowTheSdk()
+    {
+        var globalJson = ReadRepoFileLf("global.json");
+
+        Assert.Equal(s_sdkCoupledLockFiles, SdkCoupledLockFiles(globalJson).ToArray());
+
+        /* The reason, read off the tree rather than restated: the exempt project publishes single-file, which
+           is what makes the SDK add the reference, and its lock file is the only one carrying it. */
+        Assert.Contains(
+            "<PublishSingleFile>true</PublishSingleFile>",
+            ReadRepoFileLf("deprecated", "Installer", "PerformanceMonitorInstaller.csproj"),
+            StringComparison.Ordinal);
+
+        Assert.Equal(
+            s_sdkCoupledLockFiles,
+            LockFileDirectories()
+                .Where(directory => ReadRepoFileLf(directory, "packages.lock.json").Contains(SdkCoupledPackage, StringComparison.Ordinal))
+                .ToArray());
+
+        /* And that the float is real: an SDK pinned exactly would leave nothing exempt. */
+        Assert.DoesNotContain("\"rollForward\": \"disable\"", globalJson, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The coverage check reports an injected gap, in all three of its arms.
+    ///
+    /// <para>Removing the restore of a project nothing references must uncover it; removing the restore of a
+    /// project that others hang off must uncover THEM; and pinning the SDK must uncover the one the SDK float
+    /// is what excuses. Without the third, the exemption could be unconditional and read as derived.</para>
     /// </summary>
     [Fact]
     public void TheCoverageCheck_ReportsAnInjectedGap()
     {
         var real = ReadRepoFileLf(s_buildSegments);
+        var globalJson = ReadRepoFileLf("global.json");
 
-        Assert.Empty(UncoveredLockFiles(real));
+        Assert.Empty(UncoveredLockFiles(real, globalJson));
 
-        /* The direct arm: deprecated/Installer is in nobody's closure, so its own restore line is the only
-           thing covering it. This is the gap #3143 measured. */
-        var withoutInstaller = real.Replace(
-            "          dotnet restore deprecated/Installer/PerformanceMonitorInstaller.csproj --locked-mode\n",
+        /* The direct arm: Lite.Tests is covered only by its own restore line. */
+        var withoutLiteTests = real.Replace(
+            "          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode\n",
             string.Empty,
             StringComparison.Ordinal);
-        Assert.NotEqual(real, withoutInstaller);
-        Assert.Contains("deprecated/Installer", UncoveredLockFiles(withoutInstaller));
+        Assert.NotEqual(real, withoutLiteTests);
+        Assert.Contains("Lite.Tests", UncoveredLockFiles(withoutLiteTests, globalJson));
 
         /* The closure arm: Dashboard.Tests is the only restore that reaches deprecated/Dashboard, and it
            reaches it only by reference. */
@@ -213,7 +273,17 @@ public sealed class LockedModeRestoreCoverageTests
             string.Empty,
             StringComparison.Ordinal);
         Assert.NotEqual(real, withoutDashboardTests);
-        Assert.Contains("deprecated/Dashboard", UncoveredLockFiles(withoutDashboardTests));
+        Assert.Contains("deprecated/Dashboard", UncoveredLockFiles(withoutDashboardTests, globalJson));
+
+        /* The exemption arm: with the SDK pinned exactly, deprecated/Installer stops being excusable and the
+           requirement reports it — which is the state a decision to keep that lock file has to reach. */
+        var pinnedSdk = globalJson.Replace(
+            "\"rollForward\": \"latestPatch\"",
+            "\"rollForward\": \"disable\"",
+            StringComparison.Ordinal);
+        Assert.NotEqual(globalJson, pinnedSdk);
+        Assert.Empty(SdkCoupledLockFiles(pinnedSdk));
+        Assert.Contains("deprecated/Installer", UncoveredLockFiles(real, pinnedSdk));
     }
 
     /// <summary>
@@ -434,9 +504,28 @@ public sealed class LockedModeRestoreCoverageTests
             .ToList();
 
     /// <summary>
-    /// The lock-file directories no restore in one workflow reaches.
+    /// The lock-file directories whose contents follow the SDK's version rather than this repository's
+    /// choices, and which therefore cannot satisfy a locked-mode restore while <c>global.json</c> lets the
+    /// SDK patch float. Empty when the SDK is pinned exactly, which is what makes the exemption a statement
+    /// about the current configuration rather than about those projects.
     /// </summary>
-    private static List<string> UncoveredLockFiles(string yaml)
+    private static List<string> SdkCoupledLockFiles(string globalJson)
+    {
+        if (globalJson.Contains("\"rollForward\": \"disable\"", StringComparison.Ordinal))
+        {
+            return new List<string>();
+        }
+
+        return LockFileDirectories()
+            .Where(directory => ReadRepoFileLf(directory, "packages.lock.json").Contains(SdkCoupledPackage, StringComparison.Ordinal))
+            .ToList();
+    }
+
+    /// <summary>
+    /// The lock-file directories no restore in one workflow reaches, excluding the ones the SDK float
+    /// excuses.
+    /// </summary>
+    private static List<string> UncoveredLockFiles(string yaml, string globalJson)
     {
         var reached = new HashSet<string>(StringComparer.Ordinal);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -468,7 +557,12 @@ public sealed class LockedModeRestoreCoverageTests
             }
         }
 
-        return LockFileDirectories().Where(directory => !reached.Contains(directory)).ToList();
+        var excused = SdkCoupledLockFiles(globalJson);
+
+        return LockFileDirectories()
+            .Where(directory => !reached.Contains(directory))
+            .Where(directory => !excused.Contains(directory, StringComparer.Ordinal))
+            .ToList();
     }
 
     /// <summary>
