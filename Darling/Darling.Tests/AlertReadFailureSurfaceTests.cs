@@ -1373,18 +1373,40 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains("subtitle: \"since this service started", js, StringComparison.Ordinal);
         Assert.Contains("NOT the trailing 7 days", js, StringComparison.Ordinal);
 
-        foreach (var key in new[]
+        /* DERIVED from the tool's own payload, not listed. A hardcoded key list here was blind to the
+           field this pin exists to protect: #3099 added last_failure_elapsed_ms to the tool and to the
+           JS, and the guard whose stated purpose is "a field added to the tool and not to a descriptor is
+           silently dropped" would have passed with the descriptor row deleted. A list of six keys cannot
+           notice the seventh — the exact shape this file warns about one level up, reproduced inside it.
+
+           The chain is now complete and each link is pinned: the record is tied to the tool payload by
+           TheDarlingSurface_CarriesEveryFieldOfTheReading, and the tool payload is tied to the panel
+           here. So a field added to the record reaches the panel or something reds.
+
+           finding and note are excluded and named: they are composed prose rather than stat columns, and
+           the panel renders neither as a stat. Excluding them by NAME rather than by a shape rule is
+           deliberate — a rule like "skip the long ones" would silently start excluding a real column. */
+        var payloadFields = Regex.Matches(
+                ExtractAlertReadBlock(ReadSource(Path.Combine(
+                    "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"))),
+                @"^\s*(?<field>[a-z][a-z0-9_]*)\s*=\s*", RegexOptions.Multiline)
+            .Select(m => m.Groups["field"].Value)
+            .Where(f => f is not ("finding" or "note"))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        /* Both directions, so an extractor that stopped matching cannot report clean. */
+        Assert.Equal(7, payloadFields.Count);
+        Assert.Contains("last_failure_elapsed_ms", payloadFields);
+
+        foreach (var field in payloadFields)
         {
-            "alert_read_health.server_read_failures",
-            "alert_read_health.server_alert_passes",
-            "alert_read_health.instance_read_failures",
-            "alert_read_health.last_failure_read",
-            "alert_read_health.last_failure_at",
-            "alert_read_health.counting_since",
-        })
-        {
-            Assert.Contains(key, js, StringComparison.Ordinal);
+            Assert.Contains("alert_read_health." + field, js, StringComparison.Ordinal);
         }
+
+        /* And the control: the same Contains form finds a plausible-but-absent key nowhere, so its
+           silence above is a real absence rather than a matcher that matches anything. */
+        Assert.DoesNotContain("alert_read_health.last_failure_elapsed_seconds", js, StringComparison.Ordinal);
     }
 
     [Fact]
