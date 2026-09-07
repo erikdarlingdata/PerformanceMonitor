@@ -32,18 +32,19 @@ public sealed class DarlingCustomViewsLiveTests
     private const string SampleDefinitionV2 = "{\"panels\":[{\"read\":\"get_cpu_utilization\",\"viz\":\"line\",\"span\":2}]}";
 
     /// <summary>
-    /// The create's <c>updated_by</c>, and deliberately NOT the <c>web</c> constant. This fixture used to pass
-    /// <c>"web"</c> and assert <c>"web"</c> came back, which a store that ignored the argument entirely and
-    /// hardcoded the constant satisfied perfectly — the assertion could not discriminate the binding it was
-    /// there to prove. Since #2550 that column carries an authenticated subject, so the fixture carries a
-    /// subject-shaped value: a placeholder, never a real address.
+    /// The create's <c>updated_by</c>, and deliberately NOT the <c>web</c> constant. A fixture that passes the
+    /// constant and asserts the constant comes back is satisfied by a store that ignores the argument and
+    /// hardcodes it, so it cannot discriminate the parameter binding it exists to prove. This column carries an
+    /// authenticated subject (#2550), so the fixture carries a subject-shaped value — a placeholder, never a
+    /// real address.
     /// </summary>
     private const string CreatePrincipal = "placeholder-author@example.invalid";
 
     /// <summary>
     /// The update's <c>updated_by</c>, DIFFERENT from the create's so the update is shown to REPLACE the stamp
-    /// rather than leave the creator's. Nothing asserted <see cref="CustomViewStore.UpdateSql"/>'s <c>$5</c>
-    /// end-to-end before, so a parameter swapped with <c>description</c> would have read as a clean pass.
+    /// rather than leave the creator's. That difference is what makes
+    /// <see cref="CustomViewStore.UpdateSql"/>'s <c>$5</c> provable end-to-end: one value shared with the
+    /// create lets an update that never binds it read back the expected string anyway.
     /// </summary>
     private const string UpdatePrincipal = "placeholder-editor@example.invalid";
 
@@ -118,7 +119,7 @@ public sealed class DarlingCustomViewsLiveTests
 
             /* update at the correct version -> Ok, version bumped to 2, and the stamp REPLACED. A different
                principal from the create's is what makes the last assertion able to fail: with one shared value
-               an update that never wrote $5 at all would still read back the expected string. */
+               an update that never writes $5 at all still reads back the expected string. */
             var updated = Assert.IsType<CustomViewResult.Ok>(
                 await store.UpdateAsync(view.Id, name1, "second", SampleDefinitionV2, 1, UpdatePrincipal, ct));
             Assert.Equal(2, updated.View!.Version);

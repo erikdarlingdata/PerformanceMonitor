@@ -784,9 +784,9 @@ public static class DarlingWebEndpoints
     /// constant, and the asymmetry is chosen rather than left over: MCP authenticates a CLIENT on its own
     /// network block with its own shared token and has no sign-in flow to carry a person through, so there is no
     /// subject to prefer. Stamping <c>mcp</c> always is the honest answer for a surface where per-user identity
-    /// does not exist — the same argument that used to justify a constant on the web surface, still true here
-    /// because MCP has no OIDC path. Giving MCP identity is a separate piece of work on a separate credential
-    /// model, not a line change here.
+    /// does not exist, and MCP is such a surface: it has no OIDC path, so a seat-derived stamp here would have
+    /// nothing to derive from. Giving MCP identity is a separate piece of work on a separate credential model,
+    /// not a line change here.
     /// </summary>
     internal const string McpEditorPrincipal = "mcp";
 

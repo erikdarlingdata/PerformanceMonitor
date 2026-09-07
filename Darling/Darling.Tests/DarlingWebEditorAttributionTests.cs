@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
@@ -23,13 +24,12 @@ namespace Darling.Tests;
 /// authenticated OIDC subject when that seat has one, the <c>web</c> constant when it does not — and no web
 /// write site stamps a constant of its own.</para>
 ///
-/// <para>This is #2550's first-named consequence and the half its OIDC work did not deliver: the subject was
-/// resolved, the seat was published on <see cref="HttpContext.Items"/>, and the two write sites went on
-/// passing <see cref="DarlingWebEndpoints.WebEditorPrincipal"/> — so the surface still could not answer WHO
-/// changed a dashboard. <see cref="DarlingWebSeat.EditorPrincipal"/> and <see cref="DarlingWebSeat.FromContext"/>
-/// both existed, both were unit-tested, and NEITHER had a production caller; the middleware's own comment named
-/// <c>/api/session</c> and "the updated_by stamps" as its consumers while neither read it. Correct narration
-/// over an absent mechanism is exactly what a source-derived pin catches and a behavioural one does not.</para>
+/// <para>This is #2550's first-named consequence: a dashboard that cannot say who changed it. The pieces are
+/// all one seam — the auth middleware resolves a seat and publishes it on <see cref="HttpContext.Items"/>,
+/// <see cref="DarlingWebSeat.FromContext"/> reads it back, <see cref="DarlingWebSeat.EditorPrincipal"/> turns it
+/// into a stamp — and every piece is individually correct and individually testable while the JOIN between them
+/// is not. A resolver with no caller is unit-tested and inert; a comment naming its consumers reads as evidence
+/// that they exist. That gap is what a source-derived pin sees and a behavioural one cannot.</para>
 ///
 /// <para><b>The routes this covers, derived from the property rather than from reading the assertions.</b>
 /// Reading members finds a WRONG assertion; only enumerating how a property can become false finds a MISSING
@@ -40,8 +40,8 @@ namespace Darling.Tests;
 /// which checks each discovered site SEPARATELY so reverting one of two still reds.</description></item>
 /// <item><term>R2 — passed but overwritten downstream</term><description>the store ignores the argument.
 /// <c>DarlingCustomViewsLiveTests</c> round-trips it against live Postgres; its fixture principal is
-/// deliberately NOT <c>web</c>, because a store that hardcoded <c>web</c> satisfied the old
-/// one.</description></item>
+/// deliberately NOT <c>web</c>, since a fixture whose value IS the constant cannot discriminate a hardcoded
+/// stamp from a bound one.</description></item>
 /// <item><term>R3 — the subjectless path regresses</term><description>the OIDC seat stamps correctly while the
 /// shared token stops stamping <c>web</c>: <see cref="EditorPrincipal_IsTheSubject_ElseWebForASubjectlessSeat"/>
 /// over real <see cref="HttpContext"/> instances, both directions.</description></item>
@@ -50,11 +50,11 @@ namespace Darling.Tests;
 /// to tomorrow's third. Counted a second, differently-failing way by
 /// <see cref="WebEditorPrincipal_IsReferencedOnlyByTheSeatsFallback"/>, which sees files the first scan does
 /// not read at all.</description></item>
-/// <item><term>R5 — the seat is never published</term><description>the failure with no symptom: if the
+/// <item><term>R5 — the seat is never published</term><description>the route with no symptom: if the
 /// middleware stops writing the item, <see cref="DarlingWebSeat.FromContext"/> returns the shared-token seat and
-/// every row silently reverts to <c>web</c> with nothing logged and no test failing.
-/// <see cref="AuthMiddleware_PublishesTheResolvedSeat_BeforeItForwards"/> is the only thing standing between
-/// that and a green build.</description></item>
+/// every row reverts to <c>web</c> with nothing thrown and nothing logged.
+/// <see cref="AuthMiddleware_PublishesTheResolvedSeat_BeforeItForwards"/> is the only thing between that and a
+/// green build.</description></item>
 /// <item><term>R6 — the fallback itself inverts</term><description><c>Subject ?? web</c> becoming a bare
 /// constant: already held by <c>DarlingWebOidcTests.Seat_EditorPrincipal_SubjectOrTheWebConstant</c>, and not
 /// duplicated here.</description></item>
@@ -86,10 +86,9 @@ public sealed class DarlingWebEditorAttributionTests
     /// <summary>
     /// A READ of the seat's principal — <c>EditorPrincipal</c> as its own identifier, never as the tail of a
     /// longer one. The word boundary is the entire assertion: a plain substring test for
-    /// <c>"EditorPrincipal"</c> is satisfied by <c>WebEditorPrincipal</c> and <c>McpEditorPrincipal</c>, so it
-    /// passes on exactly the constant-stamping code it exists to reject. Found by mutation — reverting one
-    /// write site to the constant left every check green, which is what a check that cannot fail looks like
-    /// from the inside.
+    /// <c>"EditorPrincipal"</c> is satisfied by <c>WebEditorPrincipal</c> and <c>McpEditorPrincipal</c>, which
+    /// makes it pass on exactly the constant-stamping code it exists to reject — a check that cannot fail, and
+    /// indistinguishable from a working one until a write site is reverted and nothing goes red.
     /// </summary>
     private static readonly Regex SeatPrincipalRead =
         new(@"(?<![A-Za-z0-9_])EditorPrincipal(?![A-Za-z0-9_])", RegexOptions.Compiled);
@@ -156,7 +155,7 @@ public sealed class DarlingWebEditorAttributionTests
     /// instead, and literals are blanked from the code stream, so the negative form cannot even see that
     /// spelling. Requiring the seat read means every way of NOT reading the seat fails, including ones not
     /// thought of here — but only with the identifier boundary, since <c>WebEditorPrincipal</c> ENDS in
-    /// <c>EditorPrincipal</c> and a substring test therefore passed on the constant it rejects.</para>
+    /// <c>EditorPrincipal</c> and a substring test therefore passes on the very constant it rejects.</para>
     ///
     /// <para>The floor on the discovered count is the load-bearing half: if the match stops finding call sites
     /// — a rename, a refactor to a different store method — an empty population satisfies a per-site loop
@@ -201,17 +200,17 @@ public sealed class DarlingWebEditorAttributionTests
     [Fact]
     public void WebEditorPrincipal_IsReferencedOnlyByTheSeatsFallback()
     {
-        var declaring = SeatPath.Replace('/', System.IO.Path.DirectorySeparatorChar);
-        var owning = EndpointsPath.Replace('/', System.IO.Path.DirectorySeparatorChar);
+        var declaring = SeatPath.Replace('/', Path.DirectorySeparatorChar);
+        var owning = EndpointsPath.Replace('/', Path.DirectorySeparatorChar);
 
-        var referencing = System.IO.Directory
-            .EnumerateFiles(RepoFile.PathTo(ServiceProject), "*.cs", System.IO.SearchOption.AllDirectories)
-            .Where(path => !path.Contains($"{System.IO.Path.DirectorySeparatorChar}obj{System.IO.Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                        && !path.Contains($"{System.IO.Path.DirectorySeparatorChar}bin{System.IO.Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+        var referencing = Directory
+            .EnumerateFiles(RepoFile.PathTo(ServiceProject), "*.cs", SearchOption.AllDirectories)
+            .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                        && !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             .Where(path => CSharpSourceWalker
-                .StripCommentsAndStrings(System.IO.File.ReadAllText(path))
+                .StripCommentsAndStrings(File.ReadAllText(path))
                 .Contains("WebEditorPrincipal", StringComparison.Ordinal))
-            .Select(path => System.IO.Path.GetRelativePath(RepoFile.Root, path))
+            .Select(path => Path.GetRelativePath(RepoFile.Root, path))
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
 
@@ -290,8 +289,8 @@ public sealed class DarlingWebEditorAttributionTests
     /// that rendering — so a hardcoded <c>true</c> makes a documented behaviour unreachable and shows a
     /// read-only seat buttons whose every click the middleware then refuses.
     ///
-    /// <para>Same root cause as the stamp and the same one-line shape, which is why it is here rather than
-    /// filed: both are endpoints that had a resolved seat available and read a literal instead.</para>
+    /// <para>Same seam as the stamp and the same shape of failure — an endpoint with a resolved seat available
+    /// answering from a literal instead — which is why the two are guarded together.</para>
     /// </summary>
     [Fact]
     public void SessionEndpoint_ReportsTheRequestingSeatsEditRight()
@@ -320,9 +319,9 @@ public sealed class DarlingWebEditorAttributionTests
 
     /// <summary>
     /// The live store round-trip's principals are distinct from each other AND from the <c>web</c> constant.
-    /// This pins the only property that makes that round-trip a falsifier rather than a formality: it passed
-    /// <c>"web"</c> and asserted <c>"web"</c> came back, so a store that dropped the argument and wrote the
-    /// constant satisfied it — the assertion could not tell a bound parameter from a hardcoded one. Distinct
+    /// This pins the only property that makes that round-trip a falsifier rather than a formality. Passing
+    /// <c>"web"</c> and asserting <c>"web"</c> comes back is satisfied by a store that drops the argument and
+    /// writes the constant, so such a fixture cannot tell a bound parameter from a hardcoded one. Distinct
     /// values also separate the create's stamp from the update's, which is what makes the update's <c>$5</c>
     /// binding provable at all.
     ///
@@ -352,8 +351,8 @@ public sealed class DarlingWebEditorAttributionTests
     /// Every custom-view write over MCP stamps <see cref="DarlingWebEndpoints.McpEditorPrincipal"/>, and that
     /// is CHOSEN, not left behind. MCP authenticates a client on its own network block with its own shared
     /// token and has no sign-in flow to carry a person through, so there is no subject to prefer and <c>mcp</c>
-    /// is the honest answer — the same argument that used to justify a constant on the web surface, still true
-    /// here only because MCP has no OIDC path.
+    /// is the honest answer for a surface where per-user identity does not exist. The web surface stamps a
+    /// person because it has an OIDC path to establish one; MCP has none, so there is nothing to derive.
     ///
     /// <para>Pinned so the asymmetry survives contact with someone tidying it: a reader who sees the web sites
     /// stamping a subject and the MCP sites stamping a constant would otherwise reasonably "finish the job",
