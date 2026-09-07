@@ -147,6 +147,21 @@
   // still checks when you open it, and installs in place from there.
   "check_for_updates_on_startup": true,
 
+  // ---- Log verbosity ------------------------------------------------------------------------------
+  // NO UI. How much reaches logs\lite_<date>.log:
+  //   "Trace" | "Debug" | "Information" | "Warning" | "Error" | "Critical" | "None"
+  // Case-insensitive; an unrecognised name leaves the default in force and is named in the
+  // startup dialog. A line below this level is never written.
+  //
+  // "Debug" adds the per-database collection timing lines — one per database per collector per
+  // cycle, "[server] collector [db] => N rows (sql:Nms, duckdb:Nms)" — which is what to set when
+  // you need to see which database in a collection is slow. They are off by default because at
+  // that rate they bury the collection failures the log is usually opened for.
+  //
+  // Applied at startup, so a change needs a restart. Collection success and failure are recorded
+  // in DuckDB's collection_log table at every level, including "None".
+  "log_minimum_level": "Information",
+
   // ---- Teams / Slack / generic / PagerDuty webhooks --------------------------------------------------
   // The URLs, the generic headers JSON and the PagerDuty routing key are SECRETS and live in
   // Windows Credential Manager, never in this file. Only these plain prefs are stored here.

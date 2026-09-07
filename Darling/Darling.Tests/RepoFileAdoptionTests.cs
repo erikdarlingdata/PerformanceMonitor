@@ -41,10 +41,12 @@ namespace Darling.Tests;
 /// boundary rather than a limitation.</para>
 ///
 /// <para><b>It sweeps <c>Darling.Tests</c> only</b>, because <see cref="TestDirectory"/> is this file's own
-/// directory. <c>Lite.Tests</c> carries five private <c>ReadRepoFile</c> declarations of its own —
+/// directory. <c>Lite.Tests</c> carries six private <c>ReadRepoFile</c> declarations of its own —
 /// <c>DetachedCollectorGateTests</c>, <c>GridPayloadColumnOrderPinTests</c>,
-/// <c>LiteOverviewCardExplainsItselfTests</c>, <c>LiteSidebarDotRendersTheCardStatusTests</c> and
-/// <c>QueryStoreServerGateTests</c> — and this says nothing about them. They are the same pattern in the
+/// <c>LiteLogLevelGateTests</c>, <c>LiteOverviewCardExplainsItselfTests</c>,
+/// <c>LiteSidebarDotRendersTheCardStatusTests</c> and <c>QueryStoreServerGateTests</c> — and this says
+/// nothing about them. That count is prose rather than an assertion, so it goes stale silently; a seventh
+/// arriving is exactly the drift the sibling pin below would catch if it existed. They are the same pattern in the
 /// sibling project, and <see cref="RepoFile"/> is shareable with it by the one <c>Compile Include</c> line
 /// that already brings <see cref="CSharpSourceWalker"/> across. Whoever takes that has to widen this sweep
 /// or add a sibling pin in <c>Lite.Tests</c>; a reader consolidated there while this scan still looks at one
