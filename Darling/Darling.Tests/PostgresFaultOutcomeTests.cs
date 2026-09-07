@@ -535,13 +535,13 @@ public class PostgresFaultOutcomeTests
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
         /* Refused ON the target: the statement got there, so the wall clock is target-side. */
-        Assert.Equal(1, Regex.Matches(worker, @"""SESSION_MISSING"", 0, runClock\.ElapsedMilliseconds, 0").Count);
-        Assert.Equal(1, Regex.Matches(worker, @"""YIELDED"", 0, runClock\.ElapsedMilliseconds, 0").Count);
-        Assert.Equal(1, Regex.Matches(worker, @"""PERMISSIONS"", 0, runClock\.ElapsedMilliseconds, 0, message").Count);
+        Assert.Single(Regex.Matches(worker, @"""SESSION_MISSING"", 0, runClock\.ElapsedMilliseconds, 0"));
+        Assert.Single(Regex.Matches(worker, @"""YIELDED"", 0, runClock\.ElapsedMilliseconds, 0"));
+        Assert.Single(Regex.Matches(worker, @"""PERMISSIONS"", 0, runClock\.ElapsedMilliseconds, 0, message"));
 
         /* The SQLSTATE arm passes a COMPUTED status rather than a literal, which is why it is invisible to a
            census keyed on the status strings and earns its own pin here. */
-        Assert.Equal(1, Regex.Matches(worker, @"collectorName, status, 0, runClock\.ElapsedMilliseconds, 0").Count);
+        Assert.Single(Regex.Matches(worker, @"collectorName, status, 0, runClock\.ElapsedMilliseconds, 0"));
 
         /* Never queried the target - the RDS log API and Performance Insights are both HTTPS. */
         Assert.Equal(2, Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, runClock\.ElapsedMilliseconds").Count);
@@ -556,8 +556,8 @@ public class PostgresFaultOutcomeTests
            any unrelated four-argument call elsewhere in this 6,600-line file, and a pin that reds on a
            change it does not guard is a pin someone eventually loosens. This form still catches a new arm
            whether it passes a literal status or a computed one. */
-        Assert.Equal(1, Regex.Matches(worker, @"collectorName, (?:""[A-Z_]+""|status), 0, 0, 0,").Count);
-        Assert.Equal(1, Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, 0, ex\.Message").Count);
+        Assert.Single(Regex.Matches(worker, @"collectorName, (?:""[A-Z_]+""|status), 0, 0, 0,"));
+        Assert.Single(Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, 0, ex\.Message"));
     }
 
     private static string ReadSource(string relativePath)

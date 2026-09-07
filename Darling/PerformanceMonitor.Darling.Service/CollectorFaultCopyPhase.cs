@@ -63,17 +63,17 @@ internal enum StoreCopyPhase
 /// Carries the <see cref="StoreCopyPhase"/> a collector store-write fault happened in, ON the exception,
 /// so a handler upstream can tell the two phases apart (#3095).
 ///
-/// <para><b>Why this is needed at all.</b> <c>DarlingCollectorRunner.WriteBatchAsync</c> bounds the COPY's
-/// data phase with <c>ServiceCommandDeadlines.CollectionSweepSeconds</c> on
-/// <c>NpgsqlBinaryImporter.Timeout</c>, but that property does not reach <c>BeginBinaryImportAsync</c>
-/// above it: Begin awaits <c>CopyInResponse</c> under the CONNECTION's <c>CommandTimeout</c>, which Npgsql
-/// 10.0.3 exposes read-only and offers no per-call overload for, so the start phase runs on Npgsql's
-/// undocumented 30 s default. Both phases surface as <c>Exception while reading from stream</c> — an
-/// <c>NpgsqlException</c> wrapping a <c>TimeoutException</c> for a client-side deadline and an
-/// <c>IOException</c> for a lost connection, rendering as the same text either way — so neither the
-/// message nor the outermost type separates a start-phase stall from a data-phase one. The start phase is
-/// where a lock wait stalls, which makes it the phase a store-contention hypothesis predicts and the one
-/// that was structurally undetectable.</para>
+/// <para><b>Why this is needed at all.</b> The two phases take separate deadlines, because Npgsql gives
+/// them separate mechanisms: <c>NpgsqlBinaryImporter.Timeout</c> bounds the row loop, and it cannot reach
+/// the <c>BeginBinaryImportAsync</c> that returns the importer — that await runs under the CONNECTION's
+/// <c>CommandTimeout</c>, which Npgsql 10.0.3 exposes read-only with no per-call overload, so
+/// <see cref="StoreCopyStartDeadline"/> bounds it through the token instead. Both phases take
+/// <c>ServiceCommandDeadlines.CollectionSweepSeconds</c>, and both surface as the same text — an
+/// <c>NpgsqlException</c> wrapping a <c>TimeoutException</c> for a client-side deadline, an
+/// <c>IOException</c> for a lost connection, rendering as <c>Exception while reading from stream</c> either
+/// way — so neither the message nor the outermost type separates a start-phase stall from a data-phase
+/// one. The start phase is where a lock wait stalls, which makes it the phase a store-contention hypothesis
+/// predicts and the one a duration alone cannot identify.</para>
 ///
 /// <para><b>Why <see cref="Exception.Data"/> and not a wrapper exception.</b> The same reasoning
 /// <see cref="CollectorFaultDatabase"/> records: fault classification on this path keys on the exception's
@@ -125,7 +125,7 @@ internal static class CollectorFaultCopyPhase
     /// for a target read that overran its deadline.
     /// </remarks>
     internal const string StartPhaseLabel =
-        "store-write COPY start phase (awaiting CopyInResponse on the connection's own CommandTimeout, "
+        "store-write COPY start phase (awaiting CopyInResponse under the collection-sweep store deadline, "
         + "no rows sent)";
 
     /// <summary>

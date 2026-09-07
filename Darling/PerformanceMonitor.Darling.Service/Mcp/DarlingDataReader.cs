@@ -183,8 +183,18 @@ internal static class DarlingDataReader
         string? ReplicaRole);
 
     /// <summary>One server-list entry — the registry row plus its newest collection instant (drives the
-    /// freshness-derived status the tool assigns; the viewer has no live ping either).</summary>
-    public sealed record ServerListRow(int ServerId, string ServerName, string? DisplayName, int? SqlMajorVersion, DateTime? LastCollection);
+    /// freshness-derived status the tool assigns; the viewer has no live ping either).
+    /// <para><c>EngineKind</c> and <c>PostgresMajorVersion</c> ride along because the row's version label is
+    /// engine-aware (#3145): without the discriminator this read fed <c>SqlMajorVersion</c> — <c>0</c> at
+    /// every PostgreSQL target — through a SQL-Server-only table and published "SQL Server v0".</para></summary>
+    public sealed record ServerListRow(
+        int ServerId,
+        string ServerName,
+        string? DisplayName,
+        int? SqlMajorVersion,
+        DateTime? LastCollection,
+        string? EngineKind = null,
+        int? PostgresMajorVersion = null);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).</summary>
     public sealed record ServerPropertiesReadRow(
@@ -1175,7 +1185,9 @@ internal static class DarlingDataReader
             s.server_name,
             s.display_name,
             s.sql_major_version,
-            (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = s.server_id) AS last_collection
+            (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = s.server_id) AS last_collection,
+            s.engine_kind,
+            s.postgres_major_version
         FROM servers s
         WHERE s.is_enabled
         ORDER BY s.server_name
@@ -1195,7 +1207,9 @@ internal static class DarlingDataReader
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.IsDBNull(4) ? null : reader.GetDateTime(4)));
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetInt32(6)));
         }
 
         return rows;

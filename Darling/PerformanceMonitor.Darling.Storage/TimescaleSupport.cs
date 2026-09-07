@@ -1651,7 +1651,7 @@ WITH NO DATA";
     ///
     /// <para><b>15 minutes over four slots is the configuration that was measured</b>, not a round number: the
     /// production store's <c>query_store_stats</c> job family was moved to :00/:15/:30/:45 and the first full
-    /// staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on every sample since —
+    /// staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on it —
     /// a cycle that STRADDLES the narrowing boundary
     /// (<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>), so its four figures record what the
     /// stagger did to lock waits and are not samples of the narrowed regime's cost.
@@ -1880,13 +1880,28 @@ WITH NO DATA";
     /// <c>AccessShareLock</c> on the same hypertable — the mechanism #3012 measured, which never needed chunk
     /// overlap at all.</para>
     ///
-    /// <para><b>So: the small-residual reading holds while this job completes well inside its slot, and what
-    /// invalidates it is this number approaching <see cref="RefreshPhaseStepMinutes"/> x 60.</b> At 594 s
-    /// against a 900-second slot the margin is 306 seconds, better than a third of the slot; the heaviest
+    /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
+    /// invalidates it is that runtime approaching <see cref="RefreshPhaseStepMinutes"/> x 60.</b> At 594 s
+    /// against a 900-second slot the margin is 306 seconds — the clearance the population above carries, a
+    /// property of that closed record rather than of current load; the heaviest
     /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
     /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
     /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
     /// into its neighbour and the grid needs redesigning, not renumbering.</para>
+    ///
+    /// <para><b>THE LIVE ENVELOPE, taken from the census read named above and stated apart from that
+    /// clearance because the two describe different populations (#3119).</b> Over <c>2026-09-06</c> — one
+    /// closed day, its 22 runs read from <c>timescaledb_information.job_history</c> at one row per run —
+    /// this job's maximum was <b>778.4 s</b>. That leaves <b>121.6 s</b> of the slot, <b>13.5%</b> of it,
+    /// and sits <b>28.4 s</b> PAST <see cref="RefreshSlotWarningSeconds"/>, which
+    /// <see cref="ClassifyRefreshSlotHeadroom"/> bands
+    /// <see cref="RefreshSlotHeadroom.ApproachingSlot"/>. Short of the slot width, so the grid's
+    /// precondition holds and this is not the failure the paragraph above asserts — but the residual is D
+    /// wide and D is that maximum, so "completes well inside its slot" is a description of the closed
+    /// population and not of that day. RefreshCeilingProvenancePinTests derives every figure stated against
+    /// that maximum from the grid's own constants and takes the band from the shipped classifier, so a
+    /// moved grid step moves them all and a reading that stopped classifying as a warning goes red rather
+    /// than sitting here as prose.</para>
     /// </summary>
     public const int HeaviestHourlyRefreshObservedCeilingSeconds = 594;
 
@@ -1916,8 +1931,9 @@ WITH NO DATA";
     /// down as an answer</b> — the same shape as <see cref="CompressionPhaseGuardMinutes"/>, whose <c>/2</c> is
     /// also a chosen fraction of a derived quantity. Two things had to hold. It must clear the routine band:
     /// five consecutive live readings during #3044's own review came back 335 s, 594 s, 465 s, 359 s and
-    /// 293 s — 32.6% to 66.0% of the slot — so a line at 83.3% leaves the observed peak a full sixth of the
-    /// slot below it and cannot cry wolf on load this store has already carried. And it must leave usable lead
+    /// 293 s — 32.6% to 66.0% of the slot — so a line at 83.3% leaves the peak of THAT set a full sixth of
+    /// the slot below it, which is what keeps it off the load those five represent. And it must leave
+    /// usable lead
     /// time: the remaining sixth is 150 s here, while the walk that carries this job through the hour advances
     /// by its own runtime each cycle (see the finish-to-start note on
     /// <see cref="SetCompressionSchedulePhaseSql"/>), so the warning lands while the job still finishes inside
@@ -1933,12 +1949,14 @@ WITH NO DATA";
     /// against the ceiling has to carry the decision on its own.</para>
     ///
     /// <para><b>This line sits ABOVE <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>, and that is
-    /// what makes a crossing mean something.</b> 750 s is <b>26% above</b> the largest run the narrowed
-    /// regime has been observed to produce, so a reading in this band is not "approaching a known ceiling" —
-    /// it is this job doing something its own record has no instance of, which is a different signal calling
-    /// for a different response. The relationship is what is pinned, not the two numbers: a ceiling that rose
-    /// past this line would put the grid's own sizing figure inside the warning band, and the pin says so
-    /// rather than leaving a reader to notice.</para>
+    /// what makes a crossing mean something.</b> 750 s is <b>26% above</b> the maximum of the closed
+    /// population that constant is derived from, so a reading in this band is not "approaching a known
+    /// ceiling" — it is past the whole of the record the compression grid is sized against, which is a
+    /// different signal calling for a different response. The band is reachable and not hypothetical: the
+    /// live envelope on <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> puts a measured run past
+    /// this line, stated there and not restated here so the figures have one home. The relationship is what
+    /// is pinned, not the two numbers: a ceiling that rose past this line would put the grid's own sizing
+    /// figure inside the warning band, and the pin says so rather than leaving a reader to notice.</para>
     /// </summary>
     public const int RefreshSlotWarningSeconds = RefreshPhaseSlotSeconds * 5 / 6;
 
@@ -1949,8 +1967,8 @@ WITH NO DATA";
     /// </summary>
     public enum RefreshSlotHeadroom
     {
-        /// <summary>Under <see cref="RefreshSlotWarningSeconds"/> — the routine band, and the one every
-        /// reading taken so far falls in. Not worth a line above Debug.</summary>
+        /// <summary>Under <see cref="RefreshSlotWarningSeconds"/> — the routine band, and therefore inside
+        /// the slot the refresh has to fit in. Not worth a line above Debug.</summary>
         InsideSlot,
 
         /// <summary>At or past <see cref="RefreshSlotWarningSeconds"/> but still inside
@@ -4204,9 +4222,15 @@ WHERE js.last_run_status = 'Success'";
     /// this both tick hourly but on independent anchors, and the refresh's start-minute walks (finish-to-start,
     /// so it advances by its own runtime each cycle), so some runs are seen twice and some not at all. That is
     /// adequate and it is what the condition needs: the thing being watched is a runtime trending with volume
-    /// over days, and a figure that persists near the line is seen by every tick. The complete per-run series
-    /// already exists in <c>collect.store_metrics</c> (<c>object_kind = 'background_job'</c>, #2136/V56) — this
-    /// read supplies the BOUND, which is what was missing, not the history.</para>
+    /// over days, and a figure that persists near the line is seen by every tick. Neither this read nor the
+    /// recorded series it is often confused with is MAX-PRESERVING: <c>collect.store_metrics</c>
+    /// (<c>object_kind = 'background_job'</c>, #2136/V56) is the same hourly grain taken by a different
+    /// sweep, and the daily point <c>get_store_metrics</c> serves from it is that day's LAST reading rather
+    /// than the day's largest — so a maximum question asked of either lands short, and a day's peak is
+    /// dropped rather than smoothed. The route that carries one row per run is
+    /// <c>timescaledb_information.job_history</c>, named on
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> and read there for the live envelope
+    /// (#3119). This read supplies the BOUND, which is what was missing, not the history.</para>
     /// </summary>
     public static string HeaviestRefreshRuntimeSql =>
         $@"
@@ -4289,12 +4313,12 @@ AND   js.last_run_status = 'Success'";
     /// A line derived from the slot, keyed on the view, naming the actual remedy, is the form that stays
     /// correct when either of those numbers moves.</para>
     ///
-    /// <para><b>Levels.</b> The routine band is Debug — every reading taken so far is in it, and an hourly
-    /// Information line about a healthy job is how a signal gets buried (the discipline
-    /// <see cref="LogCompressionActivity"/> already states). Approaching the slot is a Warning: still true,
-    /// still time to act. At or past the slot it is an Error, because a documented precondition of the shipped
-    /// compression grid is now FALSE — the highest level a log line has, and still not an alert, because the
-    /// action it calls for is re-deriving #3035's grid rather than anything an operator does tonight.</para>
+    /// <para><b>Levels.</b> The routine band is Debug — an hourly Information line about a healthy job is
+    /// how a signal gets buried (the discipline <see cref="LogCompressionActivity"/> already states).
+    /// Approaching the slot is a Warning: still true, still time to act. At or past the slot it is an Error,
+    /// because a documented precondition of the shipped compression grid is now FALSE — the highest level a
+    /// log line has, and still not an alert, because the action it calls for is re-deriving #3035's grid
+    /// rather than anything an operator does tonight.</para>
     /// </summary>
     public static void LogHeaviestRefreshSlotHeadroom(HeaviestRefreshSlotReading? reading, ILogger? logger)
     {
@@ -4313,7 +4337,7 @@ AND   js.last_run_status = 'Success'";
 
             case RefreshSlotHeadroom.ApproachingSlot:
                 logger.LogWarning(
-                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run series is collect.store_metrics where object_kind = 'background_job' (#3044).",
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run history is timescaledb_information.job_history, one row per run; the hourly collect.store_metrics series (object_kind = 'background_job') samples one reading an hour and serves a daily point that is the day's LAST, so neither answers a maximum question (#3044, #3119).",
                     reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot,
                     reading.ClearOfSlotSeconds, RefreshSlotWarningSeconds);
                 break;

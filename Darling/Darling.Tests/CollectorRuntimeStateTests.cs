@@ -393,7 +393,7 @@ public sealed class CollectorRuntimeStateTests
             + $"managed-bootstrap and store-connect stand-downs; found {terminal}.");
 
         /* Exactly one publish clears the failure phases, and it is the one that says collection started. */
-        Assert.Equal(1, Regex.Matches(code, @"_collectorState\.PublishCollecting\(").Count);
+        Assert.Single(Regex.Matches(code, @"_collectorState\.PublishCollecting\("));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────

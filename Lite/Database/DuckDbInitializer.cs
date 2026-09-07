@@ -85,8 +85,10 @@ public class DuckDbInitializer
     /// timeout waits behind an archival for however long the archival takes. Eleven current callers do
     /// that, and can: they are alert-sweep and mute-CRUD paths whose failures are caught, logged and
     /// non-fatal. <c>LocalDataService.OpenWriteConnectionAsync</c> is the one that cannot, because it is on
-    /// the path the UI thread awaits, so it passes 5 seconds and #2208's maintenance block treats the
-    /// timeout as "skip this cycle". If you are adding a caller, decide which of those two you are.</para>
+    /// the path the UI thread awaits, so it passes <c>LocalDataService.WriteLockBudget</c> — five seconds
+    /// in the shipped app, and whatever a host with no dispatcher to protect states instead — and #2208's
+    /// maintenance block treats the timeout as "skip this cycle". If you are adding a caller, decide which
+    /// of those two you are.</para>
     /// </summary>
     private static readonly ReaderWriterLockSlim s_dbLock = new(LockRecursionPolicy.NoRecursion);
 

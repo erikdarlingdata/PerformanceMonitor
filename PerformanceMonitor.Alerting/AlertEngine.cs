@@ -1062,7 +1062,7 @@ public sealed class AlertEngine
         {
             var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);           /* :418 */
 
-            if (tempDb != null && tempDb.UsedPercent >= _settings.TempDbSpaceThresholdPercent) /* :420 */
+            if (tempDb != null && tempDb.ReservedPercent >= _settings.TempDbSpaceThresholdPercent) /* :420 */
             {
                 _activeTempDbSpaceAlert[key] = true;                                /* :422 */
                 if (!suppressed && CooldownElapsed(_lastTempDbSpaceAlert, key, now, alertCooldown)) /* :423 */
@@ -1077,13 +1077,13 @@ public sealed class AlertEngine
                     /* :443-453. ShortMessage = the toast body of :435. */
                     await FireAsync(new AlertOutcome(
                         key, serverName, "tempdb Space",
-                        $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
+                        $"{tempDb.ReservedPercent:F0}% reserved ({tempDb.TotalReservedMb:F0} MB)",
                         $"{_settings.TempDbSpaceThresholdPercent}%",
                         tempDbContext, detailText,
-                        NumericCurrentValue: tempDb.UsedPercent,
+                        NumericCurrentValue: tempDb.ReservedPercent,
                         NumericThresholdValue: _settings.TempDbSpaceThresholdPercent,
                         Muted: isMuted, Severity: tempDbContext?.SeverityOverride,
-                        ShortMessage: $"tempdb {tempDb.UsedPercent:F0}% used"), ct);
+                        ShortMessage: $"tempdb {tempDb.ReservedPercent:F0}% reserved"), ct);
                 }
             }
             else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb) /* :456 */
@@ -1091,11 +1091,11 @@ public sealed class AlertEngine
                 _activeTempDbSpaceAlert[key] = false;                               /* :458 */
                 if (!suppressed)                                                    /* :459 */
                 {
-                    var pct = tempDb != null ? $"{tempDb.UsedPercent:F0}%" : "N/A"; /* :461 */
+                    var pct = tempDb != null ? $"{tempDb.ReservedPercent:F0}%" : "N/A"; /* :461 */
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, "tempdb Space",
                         "tempdb Space Resolved",                                    /* :463 */
-                        $"{serverName}: tempdb usage back to {pct}"), ct);          /* :464 */
+                        $"{serverName}: tempdb reserved space back to {pct}"), ct);          /* :464 */
                 }
             }
         }

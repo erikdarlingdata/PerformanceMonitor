@@ -38,10 +38,13 @@ namespace PerformanceMonitorLite.Tests;
 /// the write sites — archival, compaction, CHECKPOINT, the mute and alert-history stores —
 /// rather than a flat tax on every database call.</para>
 ///
-/// <para>That distinction decides what a fix could even look like: a collection fixture
-/// would serialize the READERS as well, so it does not address writer-driven contention and
-/// would cost more than it saves. Nobody has measured how much of the suite's ~190-220s is
-/// this, and the honest answer is that it may be very little.</para>
+/// <para>That distinction decides what a fix could even look like, and it rules out the
+/// obvious one. A shared collection over the classes that use this fixture serializes the
+/// READERS as well, which is where the wall clock goes, and it still would not bound the
+/// contention: the test methods that hold this lock EXCLUSIVELY for seconds at a time — the
+/// ones asserting on how a writer, a status-bar read or a cancellable read behaves while a
+/// writer holds it — build their own <c>DuckDbInitializer</c> and are not classes of this
+/// fixture at all, so a collection they are not in cannot stop them running alongside it.</para>
 ///
 /// <para>That lock is correct and must not be narrowed to fix this: production creates
 /// several <c>DuckDbInitializer</c> instances over the same <c>App.DatabasePath</c>
@@ -50,10 +53,14 @@ namespace PerformanceMonitorLite.Tests;
 /// suite for a real data race.</para>
 ///
 /// <para>The practical consequence is worth knowing when a test here fails oddly: a
-/// scheduling-pressure window can starve the 5-second write-lock acquisition in
-/// <c>LocalDataService.GetDatabaseStateDeviationsAsync</c>, whose maintenance block is
-/// best-effort and simply SKIPS on timeout. That is #2374 — a test that assumed the
-/// maintenance had run, rather than waiting for it, failed a nightly.</para>
+/// scheduling-pressure window can starve <c>LocalDataService.OpenWriteConnectionAsync</c>'s
+/// acquisition past a budget sized for a UI thread, which is #2374 —
+/// <c>GetDatabaseStateDeviationsAsync</c>'s maintenance block is best-effort and simply SKIPS
+/// on timeout, and a test that assumed the maintenance had run rather than waiting for it
+/// failed a nightly. This host therefore states its own budget
+/// (<c>LocalDataService.WriteLockBudgetConfigKey</c> in <c>Lite.Tests.csproj</c>): the wait a
+/// dispatcher cannot afford is one there is nothing here to protect, so an acquisition queued
+/// behind a neighbour's deliberate hold waits it out instead of expiring inside it.</para>
 /// </summary>
 public sealed class SharedDuckDbFixture : IAsyncLifetime
 {

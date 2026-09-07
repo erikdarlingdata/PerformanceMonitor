@@ -79,7 +79,7 @@ public sealed class IlCallSiteScannerTests
         /* What the scanner does now: one call site, at the real instruction boundary. */
         var decoded = IlCallSiteScanner.DecodeCallSites(il, nameof(TheSkippingByteScanLosesARealCall_WhichIsWhyTheScannerDecodesInstructions));
 
-        Assert.Equal(1, decoded.Count);
+        Assert.Single(decoded);
         Assert.Equal(GenuineOffset, decoded[0].Offset);
         Assert.Equal(ContrivedToken, decoded[0].Token);
 
@@ -134,7 +134,7 @@ public sealed class IlCallSiteScannerTests
         var decoded = IlCallSiteScanner.DecodeCallSites(il, nameof(ATwoByteOpcodeIsDecodedAsTwoBytes_NotAsTheOneByteInlineNonePrefixEntry));
 
         /* ldftn is InlineMethod but is neither call nor callvirt, so it is correctly not a call site. */
-        Assert.Equal(1, decoded.Count);
+        Assert.Single(decoded);
         Assert.Equal(6, decoded[0].Offset);
         Assert.Equal(ContrivedToken, decoded[0].Token);
     }

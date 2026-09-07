@@ -25,7 +25,7 @@ namespace Darling.Tests;
 /// it landed; V82 (#2530) has since been appended, and the assertions that belonged to being TOP moved with
 /// it rather than being re-pinned here.
 ///
-/// <para><b>What it fixes.</b> <c>TempDbSpaceInfo.UsedPercent</c> divided by
+/// <para><b>What it fixes.</b> <c>TempDbSpaceInfo.ReservedPercent</c> divided by
 /// <c>total_reserved + unallocated</c>, and both halves come from <c>dm_db_file_space_usage</c>, which
 /// reports the data files AS CURRENTLY ALLOCATED. That is distance to the next AUTOGROW. It reads as real
 /// headroom on a pre-sized on-prem box only because such a tempdb has already grown to its cap.</para>
@@ -182,14 +182,14 @@ public sealed class TempDbCeilingStoreTests
         Assert.Equal(62.44, azure.AllocatedMb, precision: 2);
         Assert.Equal(65_536d, azure.CapacityMb, precision: 2);
 
-        Assert.Equal(0.0912, azure.UsedPercent, precision: 4);
-        Assert.True(azure.UsedPercent < DefaultTempDbThresholdPercent);
+        Assert.Equal(0.0912, azure.ReservedPercent, precision: 4);
+        Assert.True(azure.ReservedPercent < DefaultTempDbThresholdPercent);
 
         /* And the number the old denominator produced, kept here so the size of the correction is on the
            record rather than being re-derived by hand: the same snapshot used to read 95.7% full. */
         var withoutTheCeiling = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69 };
-        Assert.Equal(95.69, withoutTheCeiling.UsedPercent, precision: 2);
-        Assert.True(withoutTheCeiling.UsedPercent >= DefaultTempDbThresholdPercent);
+        Assert.Equal(95.69, withoutTheCeiling.ReservedPercent, precision: 2);
+        Assert.True(withoutTheCeiling.ReservedPercent >= DefaultTempDbThresholdPercent);
     }
 
     /// <summary>
@@ -203,13 +203,13 @@ public sealed class TempDbCeilingStoreTests
         var unlimited = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200, MaxSizeMb = -1 };
 
         Assert.Equal(1000d, unlimited.CapacityMb, precision: 2);
-        Assert.Equal(80d, unlimited.UsedPercent, precision: 3);
-        Assert.True(unlimited.UsedPercent >= DefaultTempDbThresholdPercent);
+        Assert.Equal(80d, unlimited.ReservedPercent, precision: 3);
+        Assert.True(unlimited.ReservedPercent >= DefaultTempDbThresholdPercent);
 
         /* A snapshot from before the column existed reports 0, a different fact with the same answer: nobody
            measured a ceiling, so the allocation is the only honest denominator. */
         var notMeasured = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200 };
-        Assert.Equal(unlimited.UsedPercent, notMeasured.UsedPercent, precision: 9);
+        Assert.Equal(unlimited.ReservedPercent, notMeasured.ReservedPercent, precision: 9);
     }
 
     /// <summary>
@@ -223,14 +223,14 @@ public sealed class TempDbCeilingStoreTests
     {
         var capped = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200, MaxSizeMb = 4_000 };
 
-        Assert.Equal(20d, capped.UsedPercent, precision: 3);
-        Assert.True(capped.UsedPercent < DefaultTempDbThresholdPercent);
+        Assert.Equal(20d, capped.ReservedPercent, precision: 3);
+        Assert.True(capped.ReservedPercent < DefaultTempDbThresholdPercent);
 
         /* And it climbs back to the alert as the files actually approach the cap, which is the behaviour the
            old denominator could never produce: 3,400 MB reserved inside a 4,000 MB ceiling is 85%. */
         var nearlyFull = new TempDbSpaceInfo { TotalReservedMb = 3_400, UnallocatedMb = 100, MaxSizeMb = 4_000 };
-        Assert.Equal(85d, nearlyFull.UsedPercent, precision: 3);
-        Assert.True(nearlyFull.UsedPercent >= DefaultTempDbThresholdPercent);
+        Assert.Equal(85d, nearlyFull.ReservedPercent, precision: 3);
+        Assert.True(nearlyFull.ReservedPercent >= DefaultTempDbThresholdPercent);
     }
 
     /// <summary>
@@ -243,7 +243,7 @@ public sealed class TempDbCeilingStoreTests
         var shrunkCap = new TempDbSpaceInfo { TotalReservedMb = 950, UnallocatedMb = 50, MaxSizeMb = 400 };
 
         Assert.Equal(1000d, shrunkCap.CapacityMb, precision: 2);
-        Assert.Equal(95d, shrunkCap.UsedPercent, precision: 3);
+        Assert.Equal(95d, shrunkCap.ReservedPercent, precision: 3);
     }
 
     /// <summary>
@@ -295,8 +295,8 @@ public sealed class TempDbCeilingStoreTests
             var azure = await adapter.GetTempDbSpaceAsync(TestServerKey, ct);
             Assert.NotNull(azure);
             Assert.Equal(65_536d, azure!.MaxSizeMb, precision: 2);
-            Assert.Equal(0.0912, azure.UsedPercent, precision: 4);
-            Assert.True(azure.UsedPercent < DefaultTempDbThresholdPercent,
+            Assert.Equal(0.0912, azure.ReservedPercent, precision: 4);
+            Assert.True(azure.ReservedPercent < DefaultTempDbThresholdPercent,
                 "62 MB allocated against a 65,536 MB cap must not clear the 80% default.");
 
             /* The unlimited on-prem shape, newer so it wins the ORDER BY. -1 must survive the round trip AS
@@ -307,7 +307,7 @@ public sealed class TempDbCeilingStoreTests
 
             var unlimited = await adapter.GetTempDbSpaceAsync(TestServerKey, ct);
             Assert.Equal(-1d, unlimited!.MaxSizeMb, precision: 2);
-            Assert.Equal(80d, unlimited.UsedPercent, precision: 3);
+            Assert.Equal(80d, unlimited.ReservedPercent, precision: 3);
 
             /* And a pre-rung row, whose ceiling is genuinely NULL. It must arrive as 0 rather than throwing
                or reading as a zero-megabyte cap — this is what every historical row in a real store looks
@@ -316,7 +316,7 @@ public sealed class TempDbCeilingStoreTests
 
             var history = await adapter.GetTempDbSpaceAsync(TestServerKey, ct);
             Assert.Equal(0d, history!.MaxSizeMb, precision: 2);
-            Assert.Equal(80d, history.UsedPercent, precision: 3);
+            Assert.Equal(80d, history.ReservedPercent, precision: 3);
 
             bodySucceeded = true;
         }

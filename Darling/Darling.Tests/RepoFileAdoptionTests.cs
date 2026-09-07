@@ -37,7 +37,7 @@ namespace Darling.Tests;
 /// <c>DoesNotContain</c> would stop being ABLE to fire and report clean forever. Switching a pin off the LF
 /// reader is therefore a decision, and it reds here so it gets made on purpose.</para>
 ///
-/// <para><b>What this scan cannot see, stated rather than implied.</b> Three things, and the first is a
+/// <para><b>What this scan cannot see, stated rather than implied.</b> Four things, and the first is a
 /// boundary rather than a limitation.</para>
 ///
 /// <para><b>It sweeps <c>Darling.Tests</c> only</b>, because <see cref="TestDirectory"/> is this file's own
@@ -56,6 +56,17 @@ namespace Darling.Tests;
 /// private re-implementation under some other name evades it. The regex anchors on the name, and a name is
 /// all one file's text offers.</para>
 ///
+/// <para><b>It matches a CALL by NAME AND RECEIVER</b> — the bare name, or a receiver whose last segment is
+/// <c>RepoFile</c>. An aliased receiver (<c>using RF = RepoFile;</c>) and a call reached through a delegate
+/// captured from the method are both outside it. <b>The failure direction is why this is worth stating:</b>
+/// the raw and LF lists are decided by subtracting one count from the other, so a call matching neither
+/// pattern makes a file absent from BOTH lists rather than present in the wrong one — and an exact-set
+/// equality is satisfied by a file it cannot see just as well as by a file that belongs outside it. That is
+/// not hypothetical: while the receiver was excluded rather than consumed,
+/// <see cref="RepoFileResolutionEquivalenceTests"/> called the LF reader twice and sat outside the LF
+/// equality, which is the correct answer arrived at by not looking. It is now declared in
+/// <see cref="s_lfSubjects"/>, and the exemption is asserted to name a file the census can see.</para>
+///
 /// <para><b>It says nothing about the fifty-three classes here that carry their own repo-ROOT walk</b>
 /// without a reader on top of it. That is the same duplication one layer down, it is a larger population
 /// than this one was, and it is deliberately not in scope.</para>
@@ -72,11 +83,20 @@ public sealed class RepoFileAdoptionTests
         @"^[ \t]*(?:private|internal|public|protected)[^\r\n;=]*?\bReadRepoFile(?:Lf)?\s*\(",
         RegexOptions.Multiline | RegexOptions.Compiled);
 
-    private static readonly Regex RawCall = new(
-        @"(?<![\w.])ReadRepoFile\s*\(", RegexOptions.Compiled);
+    /// <summary>Every CALL to either reader, counted so the LF calls can be subtracted out below. The
+    /// receiver group is what makes a qualified call visible, and it has to be part of the MATCH rather than
+    /// permitted by the lookbehind: the lookbehind's job is excluding an unrelated
+    /// <c>Something.ReadRepoFile(</c>, and it does that by refusing a preceding <c>.</c>. Consuming our own
+    /// receiver moves the match start to before the dot, so the call is inside the match instead of behind
+    /// it, and every other receiver stays out.</summary>
+    private static readonly Regex AnyCall = new(
+        @"(?<![\w.])(?:[\w.]*\bRepoFile\.)?ReadRepoFile(?:Lf)?\s*\(", RegexOptions.Compiled);
 
+    /// <summary>The LF spelling alone, same receiver rule. <c>(?:Lf)?</c> above is what makes it a subset
+    /// rather than a disjoint pattern — the trailing <c>\s*\(</c> would otherwise separate the two names on
+    /// its own, and the count comparison below would then be comparing populations that never overlap.</summary>
     private static readonly Regex LfCall = new(
-        @"(?<![\w.])ReadRepoFileLf\s*\(", RegexOptions.Compiled);
+        @"(?<![\w.])(?:[\w.]*\bRepoFile\.)?ReadRepoFileLf\s*\(", RegexOptions.Compiled);
 
     /// <summary>
     /// The pins whose anchors span a line break, and which therefore read LF-normalised text.
@@ -94,11 +114,37 @@ public sealed class RepoFileAdoptionTests
         "DarlingPathFilterGateTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         "FleetPageAttentionFilterTests.cs",
+        "LockedModeRestoreCoverageTests.cs",
         "ServerPageTabsTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",
         "ViewTemplatesTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
+    };
+
+    /// <summary>
+    /// The files that call the LF reader without ANCHORING on it, and are therefore outside the set above
+    /// while being inside the census.
+    ///
+    /// <para>The distinction is the one <see cref="s_lfReaders"/> is keyed on: membership there is a property
+    /// of a pin's anchors. A file that calls the LF reader to EXERCISE it has no anchors spanning a line
+    /// break, so moving it between the two readers changes nothing about what its assertions can match, and
+    /// declaring it would state a property it does not have.</para>
+    ///
+    /// <para><b>Declared rather than left to fall out of the scan.</b> The one entry here was outside the
+    /// equality before the census could see a qualified receiver — the right answer produced by a scan that
+    /// could not see the file at all, which is indistinguishable from a scan that considered it. So each
+    /// entry is asserted to be VISIBLE to the census in
+    /// <see cref="TheLfReadingPins_AreExactlyTheOnesDeclaredHere"/>: an exemption for a file the scan cannot
+    /// find is an exemption doing no work, and it reds rather than reading as a decision.</para>
+    /// </summary>
+    private static readonly string[] s_lfSubjects =
+    {
+        /* The equivalence test FOR the reader, parameterised over both spellings and calling each of them
+           directly. It compares the reader's output against the bytes on disk put through the same
+           transform, so it performs the CRLF-to-LF normalisation itself rather than depending on the
+           reader's — which is the property membership above is about. */
+        "RepoFileResolutionEquivalenceTests.cs",
     };
 
     [Fact]
@@ -133,8 +179,26 @@ public sealed class RepoFileAdoptionTests
     {
         var (_, _, _, lfAdopters) = Survey();
 
+        /* Asserted BEFORE the equality, because it is the failure the equality cannot report. A file the
+           census cannot see is absent from lfAdopters and absent from the expectation, so both sides agree
+           and the equality passes — while the exemption that was supposed to be a decision about a visible
+           file is instead a coincidence about an invisible one. */
+        foreach (var subject in s_lfSubjects)
+        {
+            Assert.True(
+                lfAdopters.Contains(subject, StringComparer.Ordinal),
+                $"{subject} is exempted from the LF-reading set, but the census does not see it calling the "
+              + "LF reader. Either the call is gone, in which case delete the exemption — or the scan cannot "
+              + "see the spelling it uses, in which case this exemption is not the decision it claims to be "
+              + "and neither is the equality below");
+        }
+
+        /* Disjoint, so the concatenation below is a set. A file in both lists would duplicate in the
+           expectation and red the equality anyway, but on a length mismatch rather than on the mistake. */
+        Assert.Empty(s_lfReaders.Intersect(s_lfSubjects, StringComparer.Ordinal));
+
         Assert.Equal(
-            s_lfReaders.OrderBy(f => f, StringComparer.Ordinal).ToArray(),
+            s_lfReaders.Concat(s_lfSubjects).OrderBy(f => f, StringComparer.Ordinal).ToArray(),
             lfAdopters.ToArray());
 
         /* The floor that makes the equality above mean something. An empty tree satisfies an empty
@@ -187,10 +251,11 @@ public sealed class RepoFileAdoptionTests
                 lfAdopters.Add(name);
             }
 
-            /* RawCall matches the Lf spelling too — its name is a prefix — so a file is a raw adopter only
-               once every Lf call is accounted for. Counted by occurrence rather than by presence, so a class
-               that legitimately uses both readers lands in both lists instead of one arbitrarily. */
-            if (RawCall.Matches(code).Count > LfCall.Matches(code).Count)
+            /* AnyCall counts the Lf spelling too, so a file is a raw adopter exactly when its calls are not
+               all accounted for by the Lf pattern. Counted by occurrence rather than by presence, so a class
+               that legitimately uses both readers lands in both lists instead of one arbitrarily — which is
+               the difference between a subtraction and a comparison of two disjoint populations. */
+            if (AnyCall.Matches(code).Count > LfCall.Matches(code).Count)
             {
                 rawAdopters.Add(name);
             }
