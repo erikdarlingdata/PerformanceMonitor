@@ -42,6 +42,15 @@ namespace Darling.Tests;
 /// a locked-mode restore of <c>Installer.Tests</c> fail <c>NU1004</c> — so the closure arm encodes measured
 /// behaviour rather than an assumption about it.</para>
 ///
+/// <para><b>Where this runs.</b> Its inputs span the whole repository — every lock file, every project
+/// file, <c>global.json</c>, <c>Directory.Packages.props</c>, both workflows — so no area path filter
+/// reaches them, and <c>deprecated/Installer</c> in particular belongs to <c>installer</c> alone while the
+/// step that runs this suite is gated on <c>darling</c>. Coverage therefore rests on
+/// <c>darling-tree-guards</c>, which runs the whole suite exactly when the <c>darling</c> filter did not
+/// fire — the backstop <c>CrossAppGuardCiGateTests</c> documents and whose gate it pins. Growing a filter
+/// to name these paths instead would be a hand-maintained copy of a whole-tree input set, and the honest
+/// filter for a whole-tree guard is every path there is.</para>
+///
 /// <para><b>What this cannot see.</b> Whether the restores CI runs cover the packages a particular change
 /// moves; that is NuGet's resolution, not text. What it holds is the shape that lets those restores report a
 /// mismatch at all, plus #3143's refusal to reach green by dropping <c>--locked-mode</c>. Both detectors are
@@ -71,8 +80,18 @@ public sealed class LockedModeRestoreCoverageTests
     private static readonly string[] s_sdkCoupledLockFiles = { "deprecated/Installer" };
 
     /// <summary>
-    /// One <c>dotnet restore</c> invocation and what it names. The target is captured so the locked-mode
-    /// requirement can be read per invocation rather than per file.
+    /// The text of a <c>dotnet restore</c> and what it names, deliberately broad: any line carrying the
+    /// words is a candidate, so a restore appended to another command is still seen. Breadth is the safe
+    /// direction — anchoring to the start of a command would quietly return "no bare restores" for a
+    /// workflow that had one.
+    ///
+    /// <para><b>Read only through <see cref="IsRestoreInvocation"/>.</b> Breadth means it also matches a
+    /// MESSAGE naming the command, and this workflow carries one: the remediation annotation quotes the
+    /// command a human should run, and it sits above the restores it is about. Every question this class
+    /// asks is about restores the runner EXECUTES, so every one of them has to subtract that line — and
+    /// subtracting it at four call sites is how three of them came to disagree. That there is one call site
+    /// is asserted in <see cref="TheRawPatterns_AreReadOnlyThroughTheOneAccessor"/> rather than left to
+    /// discipline.</para>
     /// </summary>
     private static readonly Regex RestoreInvocation =
         new(@"dotnet restore\s+(?<target>\S+)", RegexOptions.Compiled);
@@ -96,16 +115,36 @@ public sealed class LockedModeRestoreCoverageTests
 
     /// <summary>
     /// A workflow-command annotation line — the one place a restore command appears as TEXT rather than as
-    /// something the runner executes, because the remediation message quotes the command to run.
+    /// something the runner performs. Narrow on purpose: a line printing <c>::error</c>, <c>::warning</c> or
+    /// <c>::notice</c> is a message to the log, not a command, and "a line mentioning echo" would excuse far
+    /// more than that.
     ///
-    /// <para>The exemption is deliberately this narrow rather than "a line mentioning echo", and the
-    /// detector it exempts from is deliberately broad: any line carrying <c>dotnet restore</c> is treated as
-    /// an invocation. A restore smuggled onto the end of another command still gets read, which is the
-    /// direction to be wrong in — the alternative, anchoring the pattern to the start of a command, would
-    /// quietly return "no bare restores" for a workflow that had one.</para>
+    /// <para>Read only through <see cref="IsRestoreInvocation"/>, for the reason given there.</para>
     /// </summary>
     private static readonly Regex Annotation =
         new(@"::(error|warning|notice)[ :]", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Whether one line is a <c>dotnet restore</c> the runner performs — the single place the breadth of one
+    /// pattern and the narrowness of the other are combined, and the only place either is read.
+    /// </summary>
+    private static bool IsRestoreInvocation(string line) =>
+        RestoreInvocation.IsMatch(line) && !Annotation.IsMatch(line);
+
+    /// <summary>
+    /// What one restore line names, or an empty string if the line is not one.
+    /// </summary>
+    private static string RestoreTarget(string line) =>
+        IsRestoreInvocation(line) ? RestoreInvocation.Match(line).Groups["target"].Value : string.Empty;
+
+    /// <summary>
+    /// Whether one line mentions a restore at all, message or command. Exists so the assertions that the
+    /// exclusion CHANGES an answer can be written without a second copy of the pattern: a class that only
+    /// knew the narrow population could not state that the broad one differs from it, and "the exclusion is
+    /// load-bearing" is the claim that needs stating.
+    /// </summary>
+    private static bool MentionsRestore(string line) =>
+        RestoreInvocation.IsMatch(line);
 
     /// <summary>
     /// Every step that runs <c>dotnet restore</c> reports a failure from EVERY restore in it.
@@ -159,6 +198,16 @@ public sealed class LockedModeRestoreCoverageTests
     [InlineData(true, "\n      - name: Restore\n        run: dotnet restore A.csproj --locked-mode\n        env:\n          CI: 'true'\n")]
     // One restore, but not the whole command — the build's exit code is what reports.
     [InlineData(false, "\n      - name: Restore\n        run: |\n          dotnet restore A.csproj --locked-mode\n          dotnet build A.csproj --no-restore\n")]
+    // The real workflow's shape: a message naming the command sits ABOVE the errexit line it is nothing to
+    // do with. Errexit still precedes every restore, so the step is safe — and an anchor that latched onto
+    // the message would find nothing above it and call this unsafe.
+    [InlineData(true, "\n      - name: Restore\n        shell: bash\n        run: |\n          echo \"::error title=T::Regenerate with 'dotnet restore Solution.sln --force-evaluate'\"\n          set -euo pipefail\n          dotnet restore A.csproj --locked-mode\n          dotnet restore B.csproj --locked-mode\n")]
+    // And the mirror: errexit above the message but the restores below both. Same verdict, so the message's
+    // position cannot decide the answer either way.
+    [InlineData(true, "\n      - name: Restore\n        shell: bash\n        run: |\n          set -euo pipefail\n          echo \"::error title=T::Regenerate with 'dotnet restore Solution.sln --force-evaluate'\"\n          dotnet restore A.csproj --locked-mode\n          dotnet restore B.csproj --locked-mode\n")]
+    // A step that only PRINTS the command guards no restore, so it has nothing to propagate. Judged as a
+    // restore step it would be flagged, which is a red build for a step that runs no restore at all.
+    [InlineData(true, "\n      - name: Say what to run\n        run: |\n          echo \"::error title=T::Run 'dotnet restore Solution.sln --force-evaluate'.\"\n          exit 1\n")]
     public void TheStepShapeCheck_ReadsTheShapeRatherThanTheStepName(bool propagates, string step) =>
         Assert.Equal(propagates, PropagatesEveryFailure(step));
 
@@ -358,6 +407,90 @@ public sealed class LockedModeRestoreCoverageTests
     public void TheLockedModeRequirement_ReadsEveryRestoreAndOnlyTheMessageIsExempt(int offending, string yaml) =>
         Assert.Equal(offending, RestoresOutsideLockedMode(yaml).Count);
 
+    /// <summary>
+    /// On the real workflow the message exclusion moves the anchor, and the shape check's verdict depends on
+    /// its landing in the right place.
+    ///
+    /// <para><b>This is the assertion the synthetic table could not make.</b> Not one of the tabled step
+    /// shapes contained an annotation line, so every one of them anchored on a real restore and the table
+    /// could not tell a correct anchor from one that had latched onto the remediation message. The workflow
+    /// this class guards DOES contain such a line, above the restores it is about — so the detector was
+    /// validated on inputs of a shape its subject does not have, and returned the right verdict for that
+    /// step by the coincidence that <c>shell: bash</c> and the errexit line both sit above the message
+    /// too.</para>
+    ///
+    /// <para>The mutation is what discriminates. Moving the errexit line to sit between the message and the
+    /// first performed restore leaves the step SAFE — errexit still precedes every restore — and an anchor
+    /// latched onto the message would report it unsafe, because nothing above the message sets errexit. A
+    /// verdict that survives that move is a verdict taken from the right line.</para>
+    /// </summary>
+    [Fact]
+    public void TheMessageExclusion_MovesTheAnchor_AndTheVerdictComesFromWhereItLands()
+    {
+        var step = RestoreSteps(ReadRepoFileLf(s_buildSegments), ".github/workflows/build.yml")
+            .Single(candidate => candidate.Contains("set -euo pipefail", StringComparison.Ordinal));
+
+        var lines = step.Split('\n');
+        var mentioned = Array.FindIndex(lines, MentionsRestore);
+        var performed = Array.FindIndex(lines, IsRestoreInvocation);
+
+        /* The exclusion is load-bearing HERE, not merely available: the first mention of a restore in this
+           step is not one the runner performs, and the first one it performs comes later. */
+        Assert.True(mentioned >= 0, "no line in the restore step mentions a restore");
+        Assert.False(IsRestoreInvocation(lines[mentioned]), $"expected the first mention to be a message, got: {lines[mentioned].Trim()}");
+        Assert.True(performed > mentioned, $"expected the first performed restore ({performed}) to come after the first mention ({mentioned})");
+
+        Assert.True(PropagatesEveryFailure(step), "the real restore step reports as unable to propagate a failure");
+
+        /* Errexit moved below the message and above every restore: still safe, and only an anchor on the
+           right line can say so. */
+        var errexit = Array.FindIndex(lines, SetsErrExit.IsMatch);
+        Assert.True(errexit >= 0 && errexit < performed, $"errexit is at {errexit}, the first performed restore at {performed}");
+
+        var moved = lines.Where((_, index) => index != errexit).ToList();
+        moved.Insert(Array.FindIndex(moved.ToArray(), MentionsRestore) + 1, lines[errexit]);
+        var mutated = string.Join('\n', moved);
+
+        Assert.NotEqual(step, mutated);
+        Assert.True(
+            PropagatesEveryFailure(mutated),
+            "with errexit between the remediation message and the first performed restore, the step is still "
+            + "safe — reporting it unsafe means the shape check anchored on the message rather than on a "
+            + "restore, which is what this assertion exists to catch");
+    }
+
+    /// <summary>
+    /// The raw patterns are read in exactly the accessors declared for them, and nowhere else.
+    ///
+    /// <para>The population is DERIVED — every member of this class that dereferences either pattern — so a
+    /// fifth reader arriving by paste reds instead of joining silently. That is the failure this pin is
+    /// about rather than a stylistic preference: the exclusion was originally applied at the one call site
+    /// that had gone red and not at the other three, which is a fix to an instance rather than to a class,
+    /// and it left the shape check reading its anchor through the unfiltered pattern.</para>
+    /// </summary>
+    [Fact]
+    public void TheRawPatterns_AreReadOnlyThroughTheOneAccessor()
+    {
+        var source = ReadRepoFileLf("Darling", "Darling.Tests", "LockedModeRestoreCoverageTests.cs");
+
+        Assert.Equal(
+            new[] { "IsRestoreInvocation", "MentionsRestore", "RestoreTarget" },
+            MembersReadingTheRawPatterns(source).ToArray());
+
+        /* The walk finds a reader put somewhere else. Without this the equality above is satisfied just as
+           well by a scan that cannot see a member at all. The anchor carries no escape sequences on purpose:
+           an injection whose search text does not match the source silently mutates nothing, and then the
+           NotEqual below is the only thing standing between that and a vacuous pass. */
+        var smuggled = source.Replace(
+            "Array.FindIndex(lines, IsRestoreInvocation)",
+            "Array.FindIndex(lines, line => RestoreInvocation.IsMatch(line))",
+            StringComparison.Ordinal);
+
+        Assert.NotEqual(source.Length, smuggled.Length);
+        Assert.Contains("PropagatesEveryFailure", MembersReadingTheRawPatterns(smuggled));
+
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -378,7 +511,7 @@ public sealed class LockedModeRestoreCoverageTests
     private static List<string> RestoreSteps(string yaml, string workflow)
     {
         var steps = Regex.Split(yaml, @"(?=\n {6}- )")
-            .Where(step => RestoreInvocation.IsMatch(step))
+            .Where(step => step.Split('\n').Any(IsRestoreInvocation))
             .ToList();
 
         Assert.True(steps.Count > 0, $"{workflow} runs no dotnet restore — find where it moved before editing this test");
@@ -386,10 +519,10 @@ public sealed class LockedModeRestoreCoverageTests
         /* Counted two ways, because the two fail differently. A step boundary this split does not recognise
            leaves its restore lines outside every block returned, and the check then reports the steps it did
            find as safe while saying nothing about the one it lost — a partial answer wearing a green tick.
-           The file's own invocation count cannot lose a step to a boundary it never looks for. */
+           The file's own line count cannot lose a step to a boundary it never looks for. */
         Assert.Equal(
-            RestoreInvocation.Matches(yaml).Count,
-            steps.Sum(step => RestoreInvocation.Matches(step).Count));
+            yaml.Split('\n').Count(IsRestoreInvocation),
+            steps.Sum(step => step.Split('\n').Count(IsRestoreInvocation)));
 
         return steps;
     }
@@ -400,7 +533,7 @@ public sealed class LockedModeRestoreCoverageTests
     private static bool PropagatesEveryFailure(string step)
     {
         var lines = step.Split('\n');
-        var firstRestore = Array.FindIndex(lines, line => RestoreInvocation.IsMatch(line));
+        var firstRestore = Array.FindIndex(lines, IsRestoreInvocation);
 
         if (firstRestore < 0)
         {
@@ -425,7 +558,7 @@ public sealed class LockedModeRestoreCoverageTests
             .TakeWhile(line => line.Trim().Length > 0 && Indent(line) > runIndent)
             .ToList();
 
-        if (lines.Count(line => RestoreInvocation.IsMatch(line)) == 1
+        if (lines.Count(IsRestoreInvocation) == 1
             && Regex.IsMatch(lines[firstRestore], @"^\s*run: dotnet restore ")
             && continuation.Count == 0)
         {
@@ -440,25 +573,24 @@ public sealed class LockedModeRestoreCoverageTests
     }
 
     /// <summary>
-    /// Every line of a fragment of YAML that carries a <c>dotnet restore</c>, annotation lines included, as
-    /// their own text — the population the locked-mode requirement is read against, and the count its
-    /// non-vacuity floor is taken from.
+    /// Every line of a fragment of YAML that performs a <c>dotnet restore</c> — the population the
+    /// locked-mode requirement is read against, and the count its non-vacuity floor is taken from. A message
+    /// quoting the command is not in it, because the runner prints that rather than running it.
     /// </summary>
     private static List<string> RestoreLines(string yaml) =>
         yaml.Replace("\r\n", "\n", StringComparison.Ordinal)
             .Split('\n')
-            .Where(line => RestoreInvocation.IsMatch(line))
+            .Where(IsRestoreInvocation)
             .Select(line => line.Trim())
             .ToList();
 
     /// <summary>
     /// The restore lines that opt out of locked mode: no <c>--locked-mode</c>, or a <c>--force-evaluate</c>
-    /// that overrides it. Annotation lines are excluded because the runner prints them rather than running
-    /// them.
+    /// that overrides it. The message exclusion is inherited rather than repeated here, which is the point
+    /// of there being one accessor.
     /// </summary>
     private static List<string> RestoresOutsideLockedMode(string yaml) =>
         RestoreLines(yaml)
-            .Where(line => !Annotation.IsMatch(line))
             .Where(line => !line.Contains("--locked-mode", StringComparison.Ordinal)
                         || line.Contains("--force-evaluate", StringComparison.Ordinal))
             .ToList();
@@ -494,11 +626,14 @@ public sealed class LockedModeRestoreCoverageTests
     }
 
     /// <summary>
-    /// The project files one workflow restores by name, as absolute paths.
+    /// The project files one workflow restores by name, as absolute paths. Read from the performed restores
+    /// only: a message quoting a restore of the SOLUTION would otherwise enter the closure walk, and the
+    /// reason it does not today is that it names a <c>.sln</c> — a property of the message's wording, not of
+    /// this code.
     /// </summary>
     private static List<string> RestoredProjects(string yaml) =>
-        RestoreInvocation.Matches(yaml)
-            .Select(match => match.Groups["target"].Value)
+        yaml.Split('\n')
+            .Select(RestoreTarget)
             .Where(target => target.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
             .Select(target => Path.GetFullPath(Path.Combine(Root, target.Replace('/', Path.DirectorySeparatorChar))))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -564,6 +699,53 @@ public sealed class LockedModeRestoreCoverageTests
             .Where(directory => !reached.Contains(directory))
             .Where(directory => !excused.Contains(directory, StringComparer.Ordinal))
             .ToList();
+    }
+
+    /// <summary>
+    /// One dereference of a raw pattern — the name followed by a dot. The field declarations are not reads,
+    /// so they stay out of the population without being named as exceptions.
+    /// </summary>
+    private static readonly Regex RawPatternRead =
+        new(@"\b(RestoreInvocation|Annotation)\s*\.", RegexOptions.Compiled);
+
+    /// <summary>
+    /// One member declaration of this class, at its four-space indent, and the name it declares.
+    /// </summary>
+    private static readonly Regex MemberDeclaration =
+        new(@"^    (?:private|internal|public)[^(=]*?\b(?<name>\w+)\s*(?:\(|=|=>|$)", RegexOptions.Compiled);
+
+    /// <summary>
+    /// The members of this class that dereference a raw pattern, taken from its own source by walking each
+    /// read up to the member declaration above it.
+    ///
+    /// <para>Read off <c>CSharpSourceWalker.StripCommentsAndStrings</c> rather than a hand-rolled skip of
+    /// <c>///</c> lines. Two things in this file spell a pattern read without being one: the doc comments
+    /// that name the accessors, and the string literal in the self-validation below, which quotes a read in
+    /// order to inject one. A line filter catches the first and not the second — measured, it reported this
+    /// class's own pin as a reader — and the walker preserves newlines, so the member walk still lines up
+    /// with the source it is reading.</para>
+    /// </summary>
+    private static SortedSet<string> MembersReadingTheRawPatterns(string source)
+    {
+        var members = new SortedSet<string>(StringComparer.Ordinal);
+        var member = "(no enclosing member)";
+
+        foreach (var line in CSharpSourceWalker.StripCommentsAndStrings(source).Split('\n'))
+        {
+            var declaration = MemberDeclaration.Match(line);
+
+            if (declaration.Success)
+            {
+                member = declaration.Groups["name"].Value;
+            }
+
+            if (RawPatternRead.IsMatch(line))
+            {
+                members.Add(member);
+            }
+        }
+
+        return members;
     }
 
     /// <summary>
