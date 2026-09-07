@@ -372,6 +372,16 @@ target carrying 361 tables over the collector's size floor, 107 of them analyzed
 and collected nothing. An empty per-column statistics panel on a busy database means this grant is missing,
 not that the planner has no statistics.
 
+**You no longer have to know that from here.** Until #3154 that sentence was the only place the distinction
+was written down, and nobody reads a runbook while looking at an empty grid: the panel and
+`get_pg_column_stats` both listed the size floor and the privilege filter and selected neither. They now name
+which one applies, and report it on a POPULATED result too — a login that can read four tables of twenty
+produces a ranking that looks complete. `get_pg_column_stats` returns the arm as its own `coverage` field
+(`StatisticsNotVisible` is this grant; `BelowSizeFloor` is a server with nothing large enough and needs no
+action; `CollectionFault` means neither explains it and is ours to fix). The two counts behind the verdict
+come from `pg_table_bloat_stats`, which collects on **writers only**, so on a read replica the answer is
+honestly `Undetermined` rather than a guess.
+
 The fix is one grant:
 
 ```sql
