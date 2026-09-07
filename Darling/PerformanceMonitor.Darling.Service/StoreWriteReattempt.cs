@@ -60,6 +60,18 @@ internal static class StoreWriteReattempt
     /// the lost sample this exists to prevent, because a zero delta reads as a genuinely idle interval,
     /// carries no error, and never self-corrects.</para>
     ///
+    /// <para><b>This conjunct is only as sound as the stamping site, which is in another file.</b> It
+    /// means something exactly because <c>Start</c> is in force ONLY until <c>BeginBinaryImportAsync</c>
+    /// returns and can never be applied to a fault raised once the row loop has begun — a property of
+    /// <see cref="DarlingCollectorRunner"/>'s COPY block, not of this predicate, and one that a reader
+    /// auditing the gate cannot see from here. It is pinned by
+    /// <c>TheCopyWriteStampsTheStartPhaseUntilBeginReturns</c> in <c>Darling.Tests/StoreCopyPhaseTests.cs</c>,
+    /// whose load-bearing assertion is that NO site hard-stamps <c>Start</c> at all, so the value can only
+    /// arise from the variable's initial state. Widening that <c>try</c>, or adding a stamping call site,
+    /// changes what this gate authorises. The tests in <c>StoreWriteReattemptTests</c> stamp their own
+    /// faults, so they pin the predicate GIVEN a stamp and deliberately own nothing on the producer
+    /// side.</para>
+    ///
     /// <para><see cref="StoreCopyPhase.Unknown"/> declines, and that is deliberate rather than incidental:
     /// it is what an unstamped exception reads as, and it covers the dimension flush and transaction
     /// commit that follow the COPY (#1767) — which genuinely can commit. Requiring

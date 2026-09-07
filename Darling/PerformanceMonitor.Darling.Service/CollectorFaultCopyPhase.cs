@@ -35,6 +35,15 @@ internal enum StoreCopyPhase
     /// log-only string: a <c>COPY ... FROM STDIN</c> cannot commit without row data, so the store is
     /// byte-identical; and <c>CollectorDeltaCalculator</c> advances its baseline inside
     /// <c>WritePayload</c>, which runs in the row loop below, so no baseline has moved either.</para>
+    ///
+    /// <para><b>A RE-ATTEMPT DECISION now rests on this, not just a diagnostic.</b>
+    /// <see cref="StoreWriteReattempt.IsSafeToReattempt"/> requires this value positively before it will
+    /// re-run a collector's batch, and it does so for exactly the two properties above: without the first
+    /// the re-attempt could duplicate the batch, and without the second it would re-derive every delta
+    /// against an already-advanced baseline and commit a fabricated zero. So anything that widens when
+    /// this value can be produced — a wider <c>try</c> around the COPY, a new stamping call site, or a
+    /// frame allowed to relabel <see cref="Data"/> as this — changes what a retry is authorised to do,
+    /// and the tests on the consumer side stamp their own faults and will not catch it.</para>
     /// </summary>
     Start = 1,
 
@@ -117,7 +126,10 @@ internal static class CollectorFaultCopyPhase
     /// <para>An existing stamp is kept rather than overwritten. The innermost frame to catch a fault is the
     /// one that knows which phase raised it, so a later, wider frame must not be able to relabel a
     /// <see cref="StoreCopyPhase.Data"/> fault as <see cref="StoreCopyPhase.Start"/> — that is the one
-    /// direction in which a wrong answer authorises something.</para>
+    /// direction in which a wrong answer authorises something, and what it authorises is named:
+    /// <see cref="StoreWriteReattempt.IsSafeToReattempt"/> re-runs the batch on
+    /// <see cref="StoreCopyPhase.Start"/>, so a relabelled fault buys a duplicated write and a delta
+    /// column of zeros rather than a merely misleading log line.</para>
     /// </summary>
     internal static void Stamp(Exception? exception, StoreCopyPhase phase)
     {
