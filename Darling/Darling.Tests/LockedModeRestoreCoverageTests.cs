@@ -441,7 +441,8 @@ public sealed class LockedModeRestoreCoverageTests
 
     /// <summary>
     /// Every line of a fragment of YAML that carries a <c>dotnet restore</c>, annotation lines included, as
-    /// their own text. The population the requirement below is read against.
+    /// their own text — the population the locked-mode requirement is read against, and the count its
+    /// non-vacuity floor is taken from.
     /// </summary>
     private static List<string> RestoreLines(string yaml) =>
         yaml.Replace("\r\n", "\n", StringComparison.Ordinal)
@@ -578,9 +579,15 @@ public sealed class LockedModeRestoreCoverageTests
         Path.GetRelativePath(Root, absolute).Replace(Path.DirectorySeparatorChar, '/');
 
     /// <summary>
-    /// Whether a path sits under a <c>bin</c> or <c>obj</c> directory below the repository root. Restore
-    /// writes a copy of both the lock files and the project files into <c>obj</c>, and counting those would
-    /// make the requirement depend on whether anyone had built the tree.
+    /// Whether a path sits under a <c>bin</c> or <c>obj</c> directory below the repository root.
+    ///
+    /// <para>No build output in this tree holds a <c>packages.lock.json</c> or a <c>.csproj</c> today —
+    /// restore writes <c>project.assets.json</c> and the generated props and targets, not copies of these —
+    /// so this filter currently changes no answer, and that is said out loud rather than left to look like a
+    /// measurement. It is here because the sweeps above are recursive globs over the whole repository, and a
+    /// copy appearing under <c>obj</c> would be reported as a lock-file directory no restore reaches: a red
+    /// requirement produced by a local artefact, failing for whoever had built the tree and passing for
+    /// whoever had not. The repository already excludes build output by construction for the same reason.</para>
     /// </summary>
     private static bool IsBuildOutput(string absolute) =>
         Path.GetRelativePath(Root, absolute)

@@ -320,7 +320,6 @@ jobs:
       # makes this restore mandatory and a second project taking an SDK-coupled reference fails rather than
       # joining the exemption quietly.
       - name: Restore dependencies
-        id: restore
         if: steps.fastpath.outputs.engaged != 'true'
         shell: bash
         run: |
