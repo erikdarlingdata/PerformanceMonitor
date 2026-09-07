@@ -640,18 +640,24 @@ public sealed class EngineAwareVersionLabelTests
             Assert.Equal("SQL Server 2022", Row(observed, SqlServerRowName).VersionLabel);
 
             /* And the MANAGED read, which is what a seeded store's sidebar actually calls. Its config rows
-               have to exist for the join to yield anything. */
+               have to exist for the join to yield anything, and the store has to read as SEEDED or
+               GetManagedServersAsync returns the OBSERVED read verbatim — which would silently make the two
+               assertions below a re-run of the two above. Seeded idempotently rather than asserted, so this
+               does not depend on whether some other live test in the shared store got here first (the
+               ON CONFLICT DO NOTHING form several of them already use); the assertion after it is then a
+               real check that ManagedServersSql was the query that ran. */
             await InsertConfigRowAsync(connection, TestContext.Current.CancellationToken, PostgresRowId, PostgresRowName);
             await InsertConfigRowAsync(connection, TestContext.Current.CancellationToken, SqlServerRowId, SqlServerRowName);
+            await ExecuteAsync(
+                connection, TestContext.Current.CancellationToken,
+                "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
 
-            var managed = await viewer.GetManagedServersAsync(TestContext.Current.CancellationToken);
-
-            /* Guard against the fallback: GetManagedServersAsync returns the OBSERVED read verbatim on an
-               unseeded store, which would make the two assertions below a re-run of the two above. */
             Assert.True(
                 await viewer.IsConfigSeededAsync(TestContext.Current.CancellationToken),
                 "the store reports config as unseeded, so GetManagedServersAsync fell back to the observed "
               + "read and this half of the test is not exercising ManagedServersSql at all");
+
+            var managed = await viewer.GetManagedServersAsync(TestContext.Current.CancellationToken);
 
             Assert.Equal("PostgreSQL 18", Row(managed, PostgresRowName).VersionLabel);
             Assert.Equal("SQL Server 2022", Row(managed, SqlServerRowName).VersionLabel);
@@ -770,6 +776,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(serverName);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task ExecuteAsync(NpgsqlConnection connection, CancellationToken ct, string sql)
+    {
+        using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync(ct);
     }
 
