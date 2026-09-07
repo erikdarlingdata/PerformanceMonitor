@@ -232,7 +232,7 @@ public sealed class ViewerServerSummaryDisplayTests
         var item = new ServerSummaryItem { LastCollectionTime = Now.AddSeconds(-30) };
         item.ApplyFreshness(Now);
         Assert.True(item.IsOnline);
-        Assert.False(item.HasCollectorErrors);
+        Assert.False(item.CollectionStale);
         Assert.False(item.IsOffline);
         Assert.Equal("Online", item.StatusDisplay);
     }
@@ -243,7 +243,7 @@ public sealed class ViewerServerSummaryDisplayTests
         var item = new ServerSummaryItem { LastCollectionTime = Now.AddMinutes(-5) };
         item.ApplyFreshness(Now);
         Assert.True(item.IsOnline);
-        Assert.True(item.HasCollectorErrors);
+        Assert.True(item.CollectionStale);
         Assert.False(item.IsOffline);
         Assert.Equal("Warning", item.StatusDisplay);
     }
@@ -263,7 +263,7 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Null(neverCollected.IsOnline);
         Assert.False(neverCollected.IsOffline);
         Assert.True(neverCollected.AwaitingFirstCollection);
-        Assert.False(neverCollected.HasCollectorErrors);
+        Assert.False(neverCollected.CollectionStale);
         Assert.Equal("Awaiting first collection", neverCollected.StatusDisplay);
 
         /* And a later real collection clears the awaiting state through the same path. */

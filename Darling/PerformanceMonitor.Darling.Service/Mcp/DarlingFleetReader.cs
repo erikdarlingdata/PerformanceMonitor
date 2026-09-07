@@ -400,10 +400,10 @@ GROUP BY server_id, collector_name";
         var flags = ServerCollectionStatusRules.FlagsFor(freshness);
         var isOnline = flags.IsOnline;
         var awaitingFirstCollection = flags.AwaitingFirstCollection;
-        var hasCollectorErrors = flags.HasCollectorErrors;
+        var collectionStale = flags.CollectionStale;
 
         var overall = ServerHealthClassifier.OverallMetricSeverity(metrics);
-        var band = ServerHealthClassifier.ClassifyBand(isOnline, awaitingFirstCollection, hasCollectorErrors, overall);
+        var band = ServerHealthClassifier.ClassifyBand(isOnline, awaitingFirstCollection, collectionStale, overall);
 
         /* Per-server platform (design D4): the reliable signal the composer's measure auto-greying matches a
            measure's appliesTo against — see ClassifyPlatform for the edition mapping and why AWS RDS / msdb are
@@ -428,10 +428,10 @@ GROUP BY server_id, collector_name";
             IsSilenced = server.IsSilenced,
             Tags = tags ?? (IReadOnlyList<FleetTag>)Array.Empty<FleetTag>(),
             Band = band,
-            Status = StatusLabel(isOnline, awaitingFirstCollection, hasCollectorErrors),
+            Status = StatusLabel(isOnline, awaitingFirstCollection, collectionStale),
             IsOnline = isOnline,
             AwaitingFirstCollection = awaitingFirstCollection,
-            HasCollectorErrors = hasCollectorErrors,
+            CollectionStale = collectionStale,
             LastCollectionTime = lastCollection,
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherCpu,
@@ -569,8 +569,12 @@ GROUP BY server_id, collector_name";
     }
 
     /// <summary>A short "why it needs attention" line for a ranked server, from the card's own banded metrics —
-    /// mirrors the WPF <c>FleetRollup.BuildReason</c> content over the pre-banded card.</summary>
-    private static string BuildReason(FleetServerCard c)
+    /// mirrors the WPF <c>FleetRollup.BuildReason</c> content over the pre-banded card.
+    ///
+    /// <para>Internal so the prose can be asserted against the card it describes. The clause a flag produces
+    /// is the plainest statement of what that flag means, and #3098 is a field whose name and whose clause
+    /// said different things for long enough that four readings of the name were wrong.</para></summary>
+    internal static string BuildReason(FleetServerCard c)
     {
         if (c.IsOnline == false)
         {
@@ -618,7 +622,7 @@ GROUP BY server_id, collector_name";
             parts.Add($"{c.FailedCollectorCount} collector{(c.FailedCollectorCount == 1 ? "" : "s")} failing");
         }
 
-        if (c.HasCollectorErrors)
+        if (c.CollectionStale)
         {
             parts.Add("collection stale");
         }
@@ -629,8 +633,8 @@ GROUP BY server_id, collector_name";
     /// <summary>The card's status word. Delegates to the one ladder every Darling surface renders (#2473):
     /// this file's own copy agreed with the WPF card, but the WPF sidebar row's copy did not, and three
     /// agreeing copies plus one that does not is still four places where the answer is decided.</summary>
-    private static string StatusLabel(bool? isOnline, bool awaitingFirstCollection, bool hasCollectorErrors) =>
-        ServerCollectionStatusRules.Classify(isOnline, hasCollectorErrors, awaitingFirstCollection).Word();
+    private static string StatusLabel(bool? isOnline, bool awaitingFirstCollection, bool collectionStale) =>
+        ServerCollectionStatusRules.Classify(isOnline, collectionStale, awaitingFirstCollection).Word();
 
     /// <summary>
     /// Classifies a server's raw SERVERPROPERTY('EngineEdition') into the RELIABLE per-server platform flags the
@@ -1006,7 +1010,26 @@ public sealed class FleetServerCard
     [JsonPropertyName("status")] public string Status { get; init; } = "";
     [JsonPropertyName("is_online")] public bool? IsOnline { get; init; }
     [JsonPropertyName("awaiting_first_collection")] public bool AwaitingFirstCollection { get; init; }
-    [JsonPropertyName("has_collector_errors")] public bool HasCollectorErrors { get; init; }
+
+    /// <summary>
+    /// The newest collection has lagged past <see cref="ServerHealthThresholds.StaleThreshold"/> without being
+    /// old enough to call the server dark — <see cref="ServerFreshness.Stale"/>, from
+    /// <see cref="ServerCollectionStatusRules.FlagsFor"/>. It is what bands an otherwise-calm card Warning.
+    ///
+    /// <para><b>Derivable from this same payload, which is the point.</b> The flag is a function of
+    /// <c>last_collection</c> against the roll-up's <c>generated_at</c>, and <c>status</c> reads
+    /// <c>"Warning"</c> whenever it is true on a reachable server. A reader who cannot check a field's name
+    /// against its population has to trust the name, and #3098 measured what that costs on this one: two
+    /// agents drew four wrong conclusions from it in a single day, one of them a retracted claim about WHEN a
+    /// cluster of collector errors happened. Every field on this card that cannot be recomputed from the card
+    /// is one more that has to be trusted.</para>
+    ///
+    /// <para><b>Not an error signal, and there are two that are.</b> <c>failed_collector_count</c> counts
+    /// collectors currently failing and <c>collector_severity</c> bands it. Those and this one disagree
+    /// routinely and correctly: a server can collect on time with a collector failing, and can go quiet with
+    /// every collector's last run a success.</para>
+    /// </summary>
+    [JsonPropertyName("collection_stale")] public bool CollectionStale { get; init; }
     [JsonPropertyName("last_collection")] public DateTime? LastCollectionTime { get; init; }
 
     [JsonPropertyName("cpu_percent")] public double? CpuPercent { get; init; }
