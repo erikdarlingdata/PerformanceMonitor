@@ -376,11 +376,24 @@ not that the planner has no statistics.
 was written down, and nobody reads a runbook while looking at an empty grid: the panel and
 `get_pg_column_stats` both listed the size floor and the privilege filter and selected neither. They now name
 which one applies, and report it on a POPULATED result too — a login that can read four tables of twenty
-produces a ranking that looks complete. `get_pg_column_stats` returns the arm as its own `coverage` field
-(`StatisticsNotVisible` is this grant; `BelowSizeFloor` is a server with nothing large enough and needs no
-action; `CollectionFault` means neither explains it and is ours to fix). The two counts behind the verdict
-come from `pg_table_bloat_stats`, which collects on **writers only**, so on a read replica the answer is
-honestly `Undetermined` rather than a guess.
+produces a ranking that looks complete. `get_pg_column_stats` returns the arm as its own `coverage` field, and
+every value it can take means something different to you:
+
+| `coverage` | what it means | your move |
+|---|---|---|
+| `StatisticsNotVisible` | tables clear the floor, none of their statistics are readable by the monitoring login | **this grant** |
+| `PartialVisibility` | some are readable, the rest are not — the ranking you are looking at is a subset | **this grant**; treat the result as partial until then |
+| `BelowSizeFloor` | nothing on the server is large enough for this collector to read | nothing; there is nothing to collect |
+| `FullyMeasured` | every table above the floor is represented | nothing |
+| `CollectionFault` | tables clear the floor AND are readable, and nothing was stored anyway | ours — neither cause explains it, so raise it |
+| `EvidenceStale` | rows exist, yet no table clears the floor in the evidence window | nothing on the grant; the rows describe tables that may have since shrunk, been truncated or been dropped |
+| `Undetermined` | the two counts could not be established | nothing; see below |
+
+The two counts behind every verdict come from `pg_table_bloat_stats`, which collects on **writers only** and
+hourly, so on a read replica — where `pg_column_stats` does run — the answer is honestly `Undetermined`
+rather than a guess. They are measured over a fixed 24-hour lookback while the row count is measured over
+whatever window you asked for, which is why `EvidenceStale` exists and why the census states the span beside
+each figure: do not draw a ratio between two numbers spanning different intervals.
 
 The fix is one grant:
 

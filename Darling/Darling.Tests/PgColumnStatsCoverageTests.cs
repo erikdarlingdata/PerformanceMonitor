@@ -461,6 +461,45 @@ public sealed class PgColumnStatsCoverageTests
             seen.OrderBy(a => a).ToArray());
     }
 
+    /// <summary>
+    /// The operator documentation names EVERY arm, derived from the enum rather than from a list somebody
+    /// remembered to extend.
+    ///
+    /// <para>This exists because the doc went stale inside this PR. The runbook table was written when there
+    /// were six arms and named four of them; adding <see cref="PgColumnStatsCoverageArm.EvidenceStale"/>
+    /// left it a partial enumeration reading as though it covered the field — and the missing arm was the
+    /// one an operator is least able to interpret unaided, since it prints a verdict that cannot be
+    /// attributed directly beside a non-empty result. A prose list of enum members is a frozen enumeration:
+    /// correct on the day it is written and silently wrong afterwards, with nothing that fails.</para>
+    ///
+    /// <para>The runbook is the target rather than the README because it is the file that tells an operator
+    /// what to DO about each arm, which is the claim going stale matters for.</para>
+    /// </summary>
+    [Fact]
+    public void TheRunbookNamesEveryCoverageArm()
+    {
+        var runbook = ReadSource("docs/postgres-first-target-runbook.md");
+
+        var missing = Enum.GetValues<PgColumnStatsCoverageArm>()
+            .Where(arm => !runbook.Contains(arm.ToString(), StringComparison.Ordinal))
+            .Select(arm => arm.ToString())
+            .ToList();
+
+        Assert.Empty(missing);
+
+        /* And the field itself is named, or the table above is a glossary for something the reader has no
+           way to find. */
+        Assert.Contains("`coverage`", runbook, StringComparison.Ordinal);
+
+        /* And the span caveat travels with it: the two counts and the row count are measured over different
+           intervals, which is the fact that makes EvidenceStale intelligible rather than a contradiction.
+           A doc naming the arm without that fact tells an operator the name of something inexplicable. */
+        Assert.Contains(
+            PgColumnStatsCoverage.EvidenceHours.ToString(CultureInfo.InvariantCulture) + "-hour",
+            runbook,
+            StringComparison.Ordinal);
+    }
+
     /// <summary>R7: a populated result that covers part of the target is its own answer, not the clean one.</summary>
     [Fact]
     public void PartialCoverageIsItsOwnArm()
