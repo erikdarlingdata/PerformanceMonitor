@@ -597,14 +597,24 @@ public class PgIndexBloatCollectorDefinitionTests
         Assert.Contains("current_database()", plan.Text, StringComparison.Ordinal);
         Assert.Matches(new Regex(@"WHERE c\.database_name = pg_catalog\.current_database\(\)"), plan.Text);
 
-        /* Both databases' cursors travel, and ordered by name so identical state emits identical text
-           rather than whatever the dictionary iterates. */
+        /* Both databases' cursors travel, ordered by database name. */
         Assert.Equal(6, plan.Parameters.Count);
         Assert.Equal("alpha", plan.Parameters[0].Value);
         Assert.Equal("zeta", plan.Parameters[3].Value);
 
-        Assert.Equal(plan.Text, Plan(new Dictionary<string, string>(state.Reverse().ToDictionary(
-            kv => kv.Key, kv => kv.Value), StringComparer.Ordinal)).Text);
+        /* And identical state binds identical VALUES whatever order the dictionary iterates, so one cycle's
+           statement is reproducible from its state alone.
+
+           Asserted over the bound values and NOT over the text, which is the correction that makes this
+           pin able to fail at all: the cursors are parameters, so two cursors always emit the same
+           @rot_db_0/@rot_db_1 placeholders and a text comparison passes however the values were ordered.
+           The first version of this assertion compared texts and was therefore vacuous. */
+        var reversed = Plan(new Dictionary<string, string>(
+            state.Reverse().ToDictionary(kv => kv.Key, kv => kv.Value), StringComparer.Ordinal));
+
+        Assert.Equal(
+            plan.Parameters.Select(p => $"{p.Name}={p.Value}").ToArray(),
+            reversed.Parameters.Select(p => $"{p.Name}={p.Value}").ToArray());
     }
 
     /// <summary>
