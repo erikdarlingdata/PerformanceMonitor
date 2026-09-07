@@ -72,6 +72,13 @@ namespace Darling.Tests;
 /// the pattern still matches, so a mutation that merely broke a regex cannot pass as a caught drift. And
 /// <see cref="Verify"/> requires that it CONSUMED every pin in <see cref="Pins"/>, because a pattern defined
 /// in the list and never asserted against anything looks exactly like a pattern doing work.</para>
+///
+/// <para><b>And the SCOPING rule, held file-wide rather than only where it is stated (#3133).</b>
+/// <see cref="Verify"/> requires the ceiling paragraph's own enumeration to carry a CLOSED scope;
+/// <see cref="NoOpenPopulationClaim_SurvivesOutsideTheSentenceThatRejectsIt"/> requires the rest of the
+/// file not to break the same rule. Two copies of one universal described the routine refresh band with
+/// the sentence rejecting them sitting between them, so where the rule is stated is not where it needs
+/// enforcing.</para>
 /// </summary>
 public sealed class RefreshCeilingProvenancePinTests
 {
@@ -472,6 +479,71 @@ public sealed class RefreshCeilingProvenancePinTests
         Assert.True(Ceiling < WatchLine,
             "the ceiling now classifies as a warning, so the doc comment's claim that the watch line sits "
             + "above the observed range is stale.");
+    }
+
+    /// <summary>
+    /// The scoping rule <see cref="Verify"/> enforces for the ceiling's own paragraph, applied to the whole
+    /// file (#3133). A scope has to CLOSE a population: <c>every reading</c> closes nothing, and
+    /// <c>the readings so far</c> is relative to a reading time a doc comment does not have. Both forms
+    /// described the routine refresh band in this file while the sentence rejecting them sat in it too.
+    ///
+    /// <para><b>Matched against JOINED doc prose, which is why this is a test and not a grep.</b> One of the
+    /// two sites wrapped as "the one every / reading taken so far falls in", so a line-oriented search for
+    /// the phrase found the other one and returned a confident count that was short by one. Runs are joined
+    /// before any pattern runs, the same normalisation <see cref="DocProseFor"/> applies to a single
+    /// declaration.</para>
+    ///
+    /// <para><b>The one permitted occurrence is ANCHORED to the sentence that rejects it, not exempted by
+    /// location.</b> Exempting the doc run the rule lives in would let a fresh universal be added to that
+    /// run and pass. Requiring the quotation instead means a reworded rule turns this red and the allowance
+    /// gets re-decided rather than quietly widening — and it is what makes the scan non-vacuous, because a
+    /// walk that read nothing fails that same assertion.</para>
+    ///
+    /// <para><b>What this does NOT hold, said plainly rather than left looking covered.</b> It guards the
+    /// two PHRASINGS the rule names, not staleness itself: nothing in the code can know the live series, so
+    /// no assertion can recognise an open population claim in wording it has never seen, and a third
+    /// phrasing of the same claim passes this and still breaks the rule. What carries the rest is that the
+    /// claim is ABSENT rather than reworded — the band is described by
+    /// <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/> and by what the level means, so there is no
+    /// census for a later edit to keep current. The population that IS published carries its own assertion
+    /// in <see cref="TheDerivedFiguresAreExactlyStateable_AndTheConstantIsThePopulationMaximum"/>.</para>
+    /// </summary>
+    [Fact]
+    public void NoOpenPopulationClaim_SurvivesOutsideTheSentenceThatRejectsIt()
+    {
+        AssertNoOpenPopulationClaim(ReadTimescaleSupportSource());
+    }
+
+    /// <summary>
+    /// Each shape the guard forbids, injected ONE AT A TIME into a copy of the source with the guard
+    /// required to fail on it — a bundled mutation reports that something fired, not which clause did.
+    ///
+    /// <para>The first case goes back in WRAPPED across two <c>///</c> lines, so it proves the joining is
+    /// load-bearing rather than tidy: unjoined, that mutation is invisible, which is how the original pair
+    /// came to be counted as one.</para>
+    /// </summary>
+    [Fact]
+    public void TheOpenPopulationGuard_ReportsEachForbiddenShape()
+    {
+        var source = ReadTimescaleSupportSource();
+
+        /* Clean first. Without this, every case below could be reporting a violation that was already
+           there, which is indistinguishable from a caught mutation. */
+        AssertNoOpenPopulationClaim(source);
+
+        Assert.ThrowsAny<Exception>(() => AssertNoOpenPopulationClaim(
+            InjectDocLines(source, InsideSlotMember, "/// and the one every", "/// reading taken so far falls in.")));
+
+        Assert.ThrowsAny<Exception>(() => AssertNoOpenPopulationClaim(
+            InjectDocLines(source, InsideSlotMember, "/// The readings so far are all inside it.")));
+
+        /* And the anchor: reword the rule's own quotation and the allowance stops being granted. */
+        var unanchored = source.Replace(
+            @"""the readings so far"" carries a scope",
+            @"""a scope read against now"" carries a scope",
+            StringComparison.Ordinal);
+        Assert.NotEqual(source, unanchored);
+        Assert.ThrowsAny<Exception>(() => AssertNoOpenPopulationClaim(unanchored));
     }
 
     /* ─────────────────────────────── verification ─────────────────────────────── */
@@ -941,5 +1013,129 @@ public sealed class RefreshCeilingProvenancePinTests
             + "[CallerFilePath], so there is no copy to go stale); restore the path rather than pointing it "
             + "at a fixture.");
         return File.ReadAllText(path);
+    }
+
+    /* ─────────────────────────────── the scoping rule, file-wide ─────────────────────────────── */
+
+    /// <summary>The enum member whose summary carried one of the two universals, and the coordinate
+    /// <see cref="TheOpenPopulationGuard_ReportsEachForbiddenShape"/> injects at. Its own declaration line,
+    /// indentation included, so the injected lines land in that member's doc run.</summary>
+    private const string InsideSlotMember = "        InsideSlot,";
+
+    /// <summary>
+    /// The universal-quantifier form: a claim over a series that gains a reading every hour the job runs,
+    /// carrying no scope at all.
+    /// </summary>
+    private static readonly Regex UniversalOverAnOpenSeries =
+        new("every reading", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// The relative-scope form. It looks scoped and is not: a doc comment has no timestamp of its own for
+    /// "so far" to be read against.
+    /// </summary>
+    private static readonly Regex RelativeScope =
+        new("readings so far", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// The rule sentence's own quotation of <see cref="RelativeScope"/>, which it names in order to reject
+    /// it — the single permitted occurrence, and the anchor the permission is measured against.
+    /// </summary>
+    private static readonly Regex RelativeScopeRejected =
+        new(@"""the readings so far"" carries a scope", RegexOptions.Compiled);
+
+    /// <summary>
+    /// The rule, checked against every doc-comment run in TimescaleSupport.cs at once.
+    /// </summary>
+    private static void AssertNoOpenPopulationClaim(string source)
+    {
+        var prose = JoinedDocProse(source);
+
+        /* THE ANCHOR, first, because both clauses below are measured against it - and because a scan that
+           read nothing produces zero here, which is what stops them passing vacuously. */
+        var rejected = RelativeScopeRejected.Matches(prose).Count;
+        Assert.True(rejected == 1,
+            $"the sentence quoting \"the readings so far\" in order to REJECT it appears {rejected} times "
+            + "rather than once, so this guard's single allowance is no longer anchored to it. If the rule "
+            + "is being reworded, move this anchor with it deliberately; do not drop the assertion, because "
+            + "zero here is also what a scan that read no doc comments at all looks like.");
+
+        var universal = UniversalOverAnOpenSeries.Matches(prose).Count;
+        Assert.True(universal == 0,
+            $"{universal} doc comment(s) in TimescaleSupport.cs claim something of \"every reading\", which "
+            + "closes no population: that series gains a reading every hour this job runs, so the claim is "
+            + "false as soon as one reading falls outside it and nothing in the file can notice. Say what "
+            + "the band IS - it is defined by its constant and needs no census. If a population claim is "
+            + "genuinely wanted, CLOSE it (\"up to <hh:mmZ>\") and pin it here the way Verify pins the "
+            + "ceiling paragraph's; a closed claim with no assertion rots just as fast.");
+
+        var relative = RelativeScope.Matches(prose).Count;
+        Assert.True(relative == rejected,
+            $"\"readings so far\" appears {relative} times against the {rejected} the rule sentence quotes, "
+            + "so a doc comment is now USING the form that sentence rejects. It reads as a scope and is "
+            + "not one: a doc comment has no timestamp of its own for \"so far\" to be relative to.");
+    }
+
+    /// <summary>
+    /// Every doc-comment run in the file, each joined to one line and normalised the way
+    /// <see cref="DocProseFor"/> normalises a single declaration's — so a phrase that wraps across
+    /// <c>///</c> lines is one string, and neither emphasis nor dash style can hide a match.
+    ///
+    /// <para>Runs are kept newline-separated from each other rather than run together, so two adjacent
+    /// runs cannot manufacture a phrase that neither of them contains.</para>
+    /// </summary>
+    private static string JoinedDocProse(string source)
+    {
+        var runs = new List<string>();
+        var current = new List<string>();
+
+        foreach (var raw in source.Split('\n'))
+        {
+            var line = raw.Trim('\r', ' ', '\t');
+            if (line.StartsWith("///", StringComparison.Ordinal))
+            {
+                current.Add(line.Length > 3 ? line[3..].Trim() : string.Empty);
+                continue;
+            }
+
+            if (current.Count > 0)
+            {
+                runs.Add(string.Join(" ", current));
+                current.Clear();
+            }
+        }
+
+        if (current.Count > 0)
+        {
+            runs.Add(string.Join(" ", current));
+        }
+
+        var prose = string.Join("\n", runs)
+            .Replace("<b>", string.Empty, StringComparison.Ordinal)
+            .Replace("</b>", string.Empty, StringComparison.Ordinal)
+            .Replace('—', '-')
+            .Replace('–', '-');
+        return Regex.Replace(prose, "[ \t]+", " ").Trim();
+    }
+
+    /// <summary>
+    /// Inserts <paramref name="docLines"/> immediately above <paramref name="member"/>'s declaration line in
+    /// a COPY of <paramref name="source"/>, extending that member's doc run — the coordinate the whole-file
+    /// scan reads, so a mutation lands where the guard looks. Indentation comes from the declaration itself
+    /// rather than being written in, so a reindented file cannot produce a line the scan quietly skips.
+    /// </summary>
+    private static string InjectDocLines(string source, string member, params string[] docLines)
+    {
+        var index = source.IndexOf(member, StringComparison.Ordinal);
+        Require(index > 0,
+            $"{ParseMiss}: could not find '{member}' in TimescaleSupport.cs, so no mutation was injected and "
+            + "the case that follows would pass on a file it never changed");
+        Require(source.IndexOf(member, index + 1, StringComparison.Ordinal) < 0,
+            $"{ParseMiss}: '{member}' appears more than once, so a mutation aimed at it is not aimed at one "
+            + "known doc run");
+
+        var indent = member[..(member.Length - member.TrimStart().Length)];
+        var mutated = source.Insert(index, string.Concat(docLines.Select(line => indent + line + "\r\n")));
+        Assert.NotEqual(source, mutated);
+        return mutated;
     }
 }
