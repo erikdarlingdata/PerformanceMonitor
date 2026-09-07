@@ -75,7 +75,7 @@ public partial class LocalDataService
     /// <c>NumberStyles.Float</c> admits exponents, and .NET parses the invariant <c>Infinity</c> symbol
     /// whatever the style, so <c>1e300</c> and <c>Infinity</c> both reach
     /// <see cref="TimeSpan.FromSeconds"/> as positive doubles that overflow it. Out of a static
-    /// initializer that throw is a <see cref="TypeInitializationException"/> on the first store call in
+    /// initializer that throw is a <c>TypeInitializationException</c> on the first store call in
     /// the process — worse than the timeout it would be replacing, and a third outcome besides "the wait
     /// succeeded" and "fail loudly".
     /// </summary>

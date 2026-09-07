@@ -134,7 +134,7 @@ public sealed class WriteLockBudgetTests
     /// can: <c>NumberStyles.Float</c> admits exponents and .NET parses the invariant <c>Infinity</c>
     /// symbol whatever the style, so <c>"1e300"</c> and <c>"Infinity"</c> arrive as positive doubles that
     /// overflow <see cref="TimeSpan.FromSeconds"/>. Out of a static initializer that is a
-    /// <see cref="TypeInitializationException"/> on the first store call anywhere in the process, which
+    /// <c>TypeInitializationException</c> on the first store call anywhere in the process, which
     /// is strictly worse than the timeout it replaces. Positivity alone does not reach it — it bounds the
     /// other end.</para>
     ///
