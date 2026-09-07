@@ -237,7 +237,7 @@ public class CollectorStallProbeStoreTests
 
         /* Exactly one arm in the runner: a second call site would be a second concurrent probe per server,
            which is the pool bound this design promises not to exceed. */
-        Assert.Equal(1, Regex.Matches(runner, @"StallProbeArm\.Start\(").Count);
+        Assert.Single(Regex.Matches(runner, @"StallProbeArm\.Start\("));
 
         /* Both gates reach the policy from the call site. */
         Assert.Contains("StallProbeArm.Start(\n                    server.Target.Engine,\n                    definition.PerItemWallClockBudget,",
