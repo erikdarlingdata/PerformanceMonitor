@@ -463,13 +463,36 @@ public sealed class LiteLogLevelGateTests : IDisposable
     private readonly record struct Site(string Method, LogLevel Level, string Template, int Offset);
 
     /// <summary>
-    /// Every per-cycle timing emit site in the run path, plus the control site nearest the first of them,
-    /// resolved out of the real source. The emitting call sits ahead of the literal and the literal is its
-    /// first argument, so the LAST call ahead of it is the one. Read out of the comment-and-literal-stripped
-    /// text so a <c>.LogInformation(</c> named in a comment above the site cannot be mistaken for the site's
-    /// own call.
+    /// The source scan, done ONCE for the whole class. Four pins ask for it and the file does not change
+    /// during a run, so repeating it was three redundant reads of a ~900-line file plus three more
+    /// comment-and-literal walks and a regex over a large prefix. That is CPU this class spends beside
+    /// sixty-one test classes whose store writes wait on a process-wide lock with a five-second budget
+    /// (<c>DuckDbInitializer.s_dbLock</c>) — so avoidable work in a helper is not free to the run even
+    /// though this class touches no store itself.
+    /// </summary>
+    private static readonly Lazy<(List<Site> Sites, Site? Control)> s_scan =
+        new(() =>
+        {
+            var sites = ScanSource(out var control);
+            return (sites, control);
+        });
+
+    /// <summary>
+    /// Every per-cycle timing emit site in the run path, plus the control site nearest the first of them.
     /// </summary>
     private static List<Site> TimingSites(out Site? control)
+    {
+        control = s_scan.Value.Control;
+        return s_scan.Value.Sites;
+    }
+
+    /// <summary>
+    /// The scan itself, resolved out of the real source. The emitting call sits ahead of the literal and
+    /// the literal is its first argument, so the LAST call ahead of it is the one. Read out of the
+    /// comment-and-literal-stripped text so a <c>.LogInformation(</c> named in a comment above the site
+    /// cannot be mistaken for the site's own call.
+    /// </summary>
+    private static List<Site> ScanSource(out Site? control)
     {
         var source = ReadRepoFile(EmitFile);
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
