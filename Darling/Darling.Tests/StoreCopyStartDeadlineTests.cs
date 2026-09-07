@@ -187,11 +187,26 @@ public class StoreCopyStartDeadlineTests
     /// Waits for the deadline's token to be cancelled, through a registration rather than a delay — see the
     /// class summary. A registration on an already-cancelled token runs immediately, so this returns
     /// without yielding in that case rather than waiting for a scheduler.
+    ///
+    /// <para><b>The wait is BOUNDED, and that is the difference between a pin and a hang.</b> Left
+    /// unbounded, the one mutation that stops the deadline being applied at all — dropping
+    /// <c>CancelAfter</c> from the constructor — makes every test here wait forever. Measured: the suite
+    /// produced no pass, no failure and no message, and never exited, which in CI is a job timeout with
+    /// nothing naming the cause. A bounded wait turns that same mutation into a named assertion failure.
+    /// The budget is enormous against a timer that should already have fired, so it cannot flake on a
+    /// loaded runner.</para>
     /// </summary>
-    private static Task ElapsedAsync(StoreCopyStartDeadline deadline)
+    private static async Task ElapsedAsync(StoreCopyStartDeadline deadline)
     {
         var elapsed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        deadline.Token.Register(() => elapsed.TrySetResult());
-        return elapsed.Task;
+        using var registration = deadline.Token.Register(() => elapsed.TrySetResult());
+
+        var settled = await Task.WhenAny(elapsed.Task, Task.Delay(TimeSpan.FromSeconds(30)));
+
+        Assert.True(
+            settled == elapsed.Task,
+            "the start-phase deadline never cancelled its token, so nothing bounds a COPY's start phase — "
+            + "the deadline is not reaching the linked source at all. Asserted rather than awaited without "
+            + "a limit, because an unbounded await reports this as a hang carrying no message.");
     }
 }
