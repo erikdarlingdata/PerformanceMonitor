@@ -6545,6 +6545,31 @@ LIMIT 1";
                too, so it still forces no reprobe, and now reports the budget's own message and the real
                elapsed time rather than a borrowed narrative. */
             && ex is NpgsqlException
+            /* #3111: and NOT a write to the STORE. The engine term above was standing in for "this fault
+               came from reading the target", and for a store write that proxy is simply false — the store
+               connection is Npgsql whatever the target's engine is, so a COPY timeout satisfies both terms
+               above and lands here. Observed on a real fault: a start-phase COPY timeout under store-side
+               contention arrives as an NpgsqlException wrapping a TimeoutException, classifies
+               CommandTimeout, and reached this arm.
+
+               What it then got was the client-side sentence below, whose remedy is target-read-specific:
+               "Npgsql cancelled the read mid-stream ... the work asked for does not fit the deadline ...
+               shrinking the work is the right one." Shrinking a read is not the remedy for a COPY blocked
+               on a store-side lock, and a confident wrong instruction is worse than a vague one because an
+               operator acts on it.
+
+               #3095's phase axis is the discriminator this filter lacked: a recorded phase is only ever
+               written by a COPY into the store, so it identifies a store write BY CONSTRUCTION rather than
+               by inference. Excluded here rather than given a store-side sentence of its own, so that one
+               fault reports one way: the general arm below already renders the phase into both the app log
+               and the collection_log row, and it is where this same fault already lands on a SQL Server
+               target. A second authored sentence would make the identical store fault read differently
+               depending on the monitored target's engine, which the store write has nothing to do with.
+
+               Only the PROVEN population moves. An unstamped fault keeps #2997's sentence, so the post-COPY
+               dimension flush and commit (#1767) are still described as target reads — see
+               IsProvenStoreWrite for why that residual is the affordable direction. */
+            && !CollectorFaultCopyPhase.IsProvenStoreWrite(ex)
             && PostgresTargetProvider.Instance.Classify(ex, yieldsOnLockTimeout: false)
                == CollectorTargetFault.CommandTimeout)
         {
@@ -6587,12 +6612,14 @@ LIMIT 1";
         catch (Exception ex)
         {
             /* #3095: the COPY phase is named when the fault carries one. This arm is where a collector's
-               binary COPY into the STORE lands — the store connection is Npgsql whatever the target's
-               engine is, so a store-write fault reaches neither the SQLSTATE arm above (it is not a
-               PostgresException) nor the PostgreSQL-target timeout arm (that one requires a PostgreSQL
-               target) — and "Exception while reading from stream" is all it said. Both COPY phases produce
-               that same string, and the start phase is the one still on the connection's undocumented 30 s
-               default, so the message could not say which deadline had been reached.
+               binary COPY into the STORE lands, on EITHER engine, and that uniformity is deliberate: it
+               reaches neither the SQLSTATE arm above (it is not a PostgresException) nor the
+               PostgreSQL-target timeout arm (#3111 excludes a proven store write from it, since the store
+               connection is Npgsql whatever the target's engine is and the fault would otherwise satisfy
+               that arm's every term on a PostgreSQL target). "Exception while reading from stream" is all
+               it said: both COPY phases produce that same string, and the start phase is the one still on
+               the connection's undocumented 30 s default, so the message could not say which deadline had
+               been reached.
 
                Computed once and used for BOTH the app log and the collection_log row, because the stored
                row is the instrument any measurement of this population reads; naming the phase only in the

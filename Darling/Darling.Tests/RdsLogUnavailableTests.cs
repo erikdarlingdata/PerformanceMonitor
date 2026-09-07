@@ -102,7 +102,21 @@ public sealed class RdsLogUnavailableTests
         var source = File.ReadAllText(Path.Combine(RepoRoot(),
             "Darling", "PerformanceMonitor.Darling.Service", "Targets", "RdsPlanIngestor.cs"));
 
-        var catchIndex = source.IndexOf("catch (Exception ex) when (ex is not OperationCanceledException)", StringComparison.Ordinal);
+        /* Anchored to IngestAsync FIRST, because the catch signature is no longer unique in this file: the
+           COPY in WriteAsync carries an identically-spelled arm that stamps the phase and rethrows bare
+           (#3111). Taking the first occurrence in the file happens to be right today only because
+           IngestAsync is declared above WriteAsync, which is a fact about layout and not about either arm —
+           reorder the two methods and this pin would read the COPY's arm, find no
+           RdsLogUnavailableException in it, and report that the tolerant catch had regressed. Naming the
+           method makes the pin say which arm it means. */
+        var methodIndex = source.IndexOf(
+            "public async Task<RdsIngestOutcome> IngestAsync(", StringComparison.Ordinal);
+        Assert.True(methodIndex >= 0, "IngestAsync's declaration moved — this pin needs re-anchoring.");
+
+        var catchIndex = source.IndexOf(
+            "catch (Exception ex) when (ex is not OperationCanceledException)",
+            methodIndex,
+            StringComparison.Ordinal);
         Assert.True(catchIndex >= 0, "The ingestor's tolerant catch is gone — this pin needs re-anchoring.");
 
         var body = source[catchIndex..];
