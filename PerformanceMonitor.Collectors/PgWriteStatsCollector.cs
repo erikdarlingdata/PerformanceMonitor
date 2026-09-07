@@ -110,9 +110,16 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
         double? WalSyncTimeMs,
         DateTime? WalStatsReset);
 
-    /* Three joinless scalar subqueries rather than a CROSS JOIN of three views. Each view is a guaranteed
-       single row, so the result is one row either way, but a subquery per column keeps every version branch
-       local to the column it affects instead of forcing the whole FROM clause to be version-shaped.
+    /* The CHECKPOINTER columns are joinless scalar subqueries; pg_stat_bgwriter and pg_stat_wal are
+       CROSS JOINed below as b and w. Each of the three views is a guaranteed single row, so the result
+       is one row whichever shape is used, but a subquery per column keeps a branch local to the column
+       it affects instead of letting it shape the FROM clause.
+
+       That difference is load-bearing rather than stylistic, and the two JOINED views are the proof: a
+       source named in FROM cannot be branched away one column at a time, so an engine that rejects it
+       fails the whole row and takes the other views' columns down with it. pg_stat_wal on Aurora is
+       exactly that case, which is what the isAurora branch below is for - it removes the view from FROM
+       rather than only NULLing the columns read from it.
 
        stats_reset is timestamptz on all three; AT TIME ZONE 'UTC' rather than ::timestamp, because the cast
        renders in the SESSION's TimeZone and the store contract is naive UTC. Same rule as pg_stat_io.

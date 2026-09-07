@@ -299,21 +299,23 @@ public sealed class DarlingMcpPgServerStateTools
             var timed = row.CheckpointsTimed ?? 0;
             var requested = row.CheckpointsRequested ?? 0;
 
-            /* #2653: 17 removed buffers_backend / buffers_backend_fsync from pg_stat_bgwriter with no
-               successor there, so the collector writes NULL for them and the fact now lives in pg_stat_io.
-               Without the registry's major this read cannot tell that structural absence from a measurement
-               that did not happen, and its note explained a column that will never have a value here. */
-            var postgresMajor = await DarlingEngineCapability.PostgresMajorVersionAsync(
+            /* Both registry facts in ONE read, because this payload has two kinds of structurally
+               absent column and neither is distinguishable from an unmeasured one without asking.
+
+               VERSION (#2653): 17 removed buffers_backend / buffers_backend_fsync from
+               pg_stat_bgwriter with no successor there, so the collector writes NULL and the fact
+               lives in pg_stat_io.
+
+               FLAVOUR (#3156): Aurora does not implement pg_stat_wal at all - pg_stat_get_wal()
+               raises 0A000 there - so every wal_* column is NULL on an Aurora target.
+
+               Two reads would let one axis be answered from this server's row and the other from a
+               stale copy, which is the hazard PostgresTargetFactsSql is a single statement for. Same
+               discipline on both axes: a registry making no claim produces no claim here. */
+            var (postgresMajor, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(
                 postgres, resolved.ServerId);
             var backendCountersRemoved = postgresMajor >= BuffersBackendRemovedInMajor;
-
-            /* The FLAVOUR twin of the version fact above (#3156). Aurora does not implement pg_stat_wal at
-               all - pg_stat_get_wal() raises 0A000 there - so every wal_* column is structurally absent on
-               an Aurora target rather than a measurement that did not happen, and this read cannot tell
-               those apart without asking the registry. Read with the same discipline: a registry making no
-               claim produces no claim here. */
-            var walAbsentOnAurora = MonitoredEngineKind.IsAurora(
-                await DarlingEngineCapability.EngineKindAsync(postgres, resolved.ServerId));
+            var walAbsentOnAurora = MonitoredEngineKind.IsAurora(engineKind);
 
             return JsonSerializer.Serialize(new
             {
