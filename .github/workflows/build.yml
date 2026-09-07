@@ -297,21 +297,21 @@ jobs:
       #
       # `shell: bash` with errexit, not the runner default. A multi-line run block executes under pwsh on
       # Windows, which does not abandon the block on a native command's non-zero exit and reports the block's
-      # exit code as the LAST command's — so five of the six restores here printed NU1004 and left this step
-      # green. That is not a hypothetical: the required `build` check passed on both Dependabot pull requests
-      # #3143 was filed from, carrying the error in its own log, and the only job that went red was
-      # darling-tree-guards, whose restore happens to be a single-command step.
+      # exit code as the LAST command's — so under the default shell any restore but the last is unable to
+      # fail this step. Measured on the Dependabot pull requests #3143 was filed from: the required `build`
+      # check passed carrying `error NU1004` in its own log, and the only job that went red was
+      # darling-tree-guards, whose restore is a single-command step.
       #
       # Every project with a committed lock file bar one is reached from this list, directly or through a
       # ProjectReference — a locked-mode restore validates the lock file of every project in the graph it
-      # walks, not only the one it was handed. The exception is deprecated/Installer, which nothing
-      # references and which is deliberately still absent: it is the only project publishing single-file, so
-      # the SDK adds an implicit Microsoft.NET.ILLink.Tasks reference at the SDK's OWN version, and its lock
-      # file is the only one carrying that entry. global.json rolls forward across patches, so the runner
-      # installed 10.0.303 against a lock file written under 10.0.302 and the two disagree on that entry
-      # alone — a lock file that cannot be right for both SDKs at once, which is a decision about pinning the
-      # SDK rather than something a restore line here can fix. Adding the line reported it for the first time
-      # (#3143): nothing had restored that project, so the drift had accumulated unseen.
+      # walks, not only the one it was handed. The exception is deprecated/Installer, and it is deliberate.
+      # That project is the only one publishing single-file, so the SDK adds an implicit
+      # Microsoft.NET.ILLink.Tasks reference at the SDK's OWN version, and its lock file is the only one
+      # carrying that entry; global.json rolls forward across patches, so a runner on 10.0.303 wants
+      # [10.0.11, ) where a file written under 10.0.302 records [10.0.10, ). No restore line makes that file
+      # right for both, and nothing references the project, so nothing else reaches it either: a restore
+      # pointed at it reports NU1004 from dev today, with no dependency change involved (#3143). Whether it
+      # should carry a lock file at all, and whether global.json should pin the SDK exactly, are decisions.
       #
       # LockedModeRestoreCoverageTests derives both requirements — from the lock files on disk and the
       # reference edges between projects — so a tenth lock file makes its restore mandatory rather than
@@ -326,11 +326,11 @@ jobs:
           set -euo pipefail
 
           # NU1004 offers two remedies and one of them is dropping locked mode, which trades the closure pin
-          # rather than restoring it. Dependabot moves Directory.Packages.props and cannot regenerate the lock
-          # files that belong with it, so its weekly pull request lands here; naming the command that
-          # reconciles them is the difference between a red check that gets acted on and one that gets waited
-          # out. The trap keeps the message on the failure itself, so no second step can report green beside a
-          # red restore.
+          # rather than restoring it. Dependabot moves Directory.Packages.props and does not regenerate the
+          # lock files that belong with it, so its weekly pull request lands on this step; naming the command
+          # that reconciles them is the difference between a red check that gets acted on and one that gets
+          # waited out. The message rides an ERR trap rather than a following step, so nothing can report
+          # green beside a red restore.
           trap 'echo "::error title=Lock files disagree with Directory.Packages.props::Regenerate with '"'"'dotnet restore PerformanceMonitor.sln --force-evaluate'"'"' and commit every packages.lock.json it rewrites. Do not remove --locked-mode: the lock files are the only pin on the transitive closure, and the props diff does not show it moving."' ERR
 
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
