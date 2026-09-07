@@ -1000,7 +1000,11 @@ public class CrossAppGuardCiGateTests
                 $"the document for '{route}' answered without {present}, which it spells literally, so " +
                 $"the absence asserted next is the absence of a READ. Found: [{string.Join(", ", found)}]");
 
-            Assert.DoesNotContain($"{DarlingTestsDir}/{leaf}", found);
+            Assert.False(
+                found.Contains($"{DarlingTestsDir}/{leaf}"),
+                $"the crude parse now sees {leaf} ({route}), which its doc says it does not. That is the " +
+                "one direction a lower bound may not move: an over-read makes this a partial oracle for " +
+                $"the evaluated set rather than a floor under it. Found: [{string.Join(", ", found)}]");
         }
 
         /* THE LIVE DEFECT. An apostrophe in one comment, another in the next, the item between them - and
