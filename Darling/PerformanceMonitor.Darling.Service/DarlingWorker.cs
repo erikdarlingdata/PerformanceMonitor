@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Data;
 using System.Globalization;
 using System.IO;
@@ -3194,6 +3195,7 @@ public sealed class DarlingWorker : BackgroundService
         double? sqlCpu = null;
         double? totalCpu = null;
 
+        var cpuReadClock = Stopwatch.StartNew();
         try
         {
             (sqlCpu, totalCpu) = await ReadLatestCpuAsync(runtime.ServerId, cancellationToken);
@@ -3204,12 +3206,13 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] Latest-CPU read for the alert pass failed: {Message}",
-                server.Config.DisplayName, ex.Message);
+            _logger.LogError("[{Server}] Latest-CPU read for the alert pass failed after {ElapsedMs} ms: {Message}",
+                server.Config.DisplayName, cpuReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
-                runtime.ServerId.ToString(CultureInfo.InvariantCulture), "latest-CPU read");
+                runtime.ServerId.ToString(CultureInfo.InvariantCulture), "latest-CPU read", cpuReadClock.ElapsedMilliseconds);
         }
 
+        var sweepReadClock = Stopwatch.StartNew();
         try
         {
             var snapshot = new AlertServerSnapshot(
@@ -3239,10 +3242,10 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] Alert sweep failed: {Message}", server.Config.DisplayName, ex.Message);
+            _logger.LogError("[{Server}] Alert sweep failed after {ElapsedMs} ms: {Message}", server.Config.DisplayName, sweepReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
-                "shared engine sweep");
+                "shared engine sweep", sweepReadClock.ElapsedMilliseconds);
         }
     }
 
@@ -3280,6 +3283,7 @@ public sealed class DarlingWorker : BackgroundService
            and alerts that fired. The count stays truthful and the gap stays named. */
         _readFailures.RecordPass(snapshot.ServerKey);
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
@@ -3375,9 +3379,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL outage-predictor reads");
+            _logger.LogError("[{Server}] PostgreSQL alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL outage-predictor reads", readClock.ElapsedMilliseconds);
         }
 
         /* #2711/#2719: Deadlocks, Blocking, Long-Running Query, Poison Wait and High CPU, each
@@ -3421,6 +3425,7 @@ public sealed class DarlingWorker : BackgroundService
         const string metricName = "High CPU";
         var key = snapshot.ServerKey;
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var now = DateTime.UtcNow;
@@ -3477,9 +3482,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL CPU alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL CPU alert read");
+            _logger.LogError("[{Server}] PostgreSQL CPU alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL CPU alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -3505,6 +3510,7 @@ public sealed class DarlingWorker : BackgroundService
         var key = snapshot.ServerKey;
         var stateStore = new PgAlertStateStore(_postgres, _logger);
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             /* #2716: seed the watermark from the same config_edge_trigger_watermarks row
@@ -3591,9 +3597,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL deadlock alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL deadlock alert read");
+            _logger.LogError("[{Server}] PostgreSQL deadlock alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL deadlock alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -3619,6 +3625,7 @@ public sealed class DarlingWorker : BackgroundService
         var key = snapshot.ServerKey;
         var stateStore = new PgAlertStateStore(_postgres, _logger);
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             /* #2716: same restart-survival seed as EvaluatePgDeadlocksAsync — see its comment. */
@@ -3702,9 +3709,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL blocking alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read");
+            _logger.LogError("[{Server}] PostgreSQL blocking alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -3754,6 +3761,7 @@ public sealed class DarlingWorker : BackgroundService
         const string metricName = "Long-Running Query";
         var key = snapshot.ServerKey;
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var thresholdMinutes = alertSettings.LongRunningQueryThresholdMinutes;
@@ -3819,9 +3827,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL long-running-query alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL long-running-query alert read");
+            _logger.LogError("[{Server}] PostgreSQL long-running-query alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL long-running-query alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -3884,6 +3892,7 @@ public sealed class DarlingWorker : BackgroundService
         const string metricName = PostgresAlertEvaluator.PoisonWaitMetric;
         var serverKey = snapshot.ServerKey;
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
@@ -4022,9 +4031,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL poison wait alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL poison wait alert read");
+            _logger.LogError("[{Server}] PostgreSQL poison wait alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL poison wait alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -4349,6 +4358,7 @@ LIMIT 1";
     /// </summary>
     private async Task EvaluateCompressionJobHealthAsync(CancellationToken cancellationToken)
     {
+        var readClock = Stopwatch.StartNew();
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
@@ -4408,9 +4418,9 @@ LIMIT 1";
         }
         catch (Exception ex)
         {
-            _logger.LogError("Compression-job health check failed: {Message}", ex.Message);
+            _logger.LogError("Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
-                null, "store background-job health reads (compression, job cadence, retention holds)");
+                null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
         }
     }
 

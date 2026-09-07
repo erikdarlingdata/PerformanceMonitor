@@ -1477,6 +1477,60 @@ public sealed class AlertEngineTests
         var finding = AlertReadFailureCounter.FormatFinding(reading);
         Assert.NotNull(finding);
         Assert.Contains(reading.LastFailureRead!, finding, StringComparison.Ordinal);
+
+        /* And every one of those swallowed reads recorded how long it ran. Not a value here — the reads
+           fault immediately against a throwing adapter, so the assertion is only that the measurement
+           EXISTS; the falsifier below is what shows it is a measurement. */
+        Assert.NotNull(reading.LastFailureElapsedMs);
+    }
+
+    /// <summary>
+    /// #3099: the elapsed the counter receives is a measurement OF THE READ, not a value in the slot.
+    ///
+    /// <para><b>Why a source scan is not enough, and this is the discriminating falsifier.</b>
+    /// <c>AlertReadFailureSurfaceTests</c> proves from source that every counted site starts a
+    /// <see cref="System.Diagnostics.Stopwatch"/> before its <c>try</c> and hands
+    /// <c>ElapsedMilliseconds</c> to the counter and its log line. It cannot prove the number that arrives
+    /// came from that clock — a site could measure and then record something else, and every structural
+    /// check would still pass. So this drives the REAL engine over a read that takes a known minimum time
+    /// and asserts the recorded figure reflects it.</para>
+    ///
+    /// <para>Asserted as a FLOOR with a tolerance, never a ceiling: a timing test with an upper bound is a
+    /// flake on a loaded runner, and the failure mode this guards is a constant — almost certainly zero —
+    /// so the floor is the whole claim. And the count is asserted at one, so the elapsed cannot belong to
+    /// some other check that failed later in the pass.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheRecordedElapsed_MeasuresTheReadRatherThanBeingAConstant()
+    {
+        const int delayMs = 120;
+
+        /* Only the forced-plan check is enabled, so exactly one read happens and exactly one fails —
+           which is what makes the single elapsed unambiguously that read's. */
+        var adapter = new ThrowingAdapter { ForcePlanDelay = TimeSpan.FromMilliseconds(delayMs) };
+        var counter = new AlertReadFailureCounter();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.ForcePlanFailureEnabled = true;
+
+        var engine = new AlertEngine(
+            h.Settings, adapter, h.StateStore, h.Deliverer, _ => false,
+            utcNow: () => h.Now, readFailures: counter);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var reading = counter.ReadFor(Key);
+
+        Assert.Equal(1, reading.ServerReadFailures);
+        Assert.Equal("forced-plan failures", reading.LastFailureRead);
+        Assert.NotNull(reading.LastFailureElapsedMs);
+
+        /* A generous tolerance under the delay, because Task.Delay may fire slightly early on a coarse
+           timer and this test must not be the flaky one. Even so it is two orders of magnitude above the
+           zero a constant would report. */
+        Assert.True(
+            reading.LastFailureElapsedMs >= delayMs - 30,
+            $"a read that took at least {delayMs} ms recorded {reading.LastFailureElapsedMs} ms, which is "
+            + "what a constant in the slot would look like");
     }
 
     [Fact]
@@ -1506,6 +1560,7 @@ public sealed class AlertEngineTests
         Assert.Equal(0, reading.InstanceReadFailures);
         Assert.Null(reading.LastFailureAtUtc);
         Assert.Null(reading.LastFailureRead);
+        Assert.Null(reading.LastFailureElapsedMs);
 
         /* A clean reading carries no sentence at all, rather than a sentence saying it is clean — the
            #3017 discipline: a finding that always renders trains a reader to skip it. */
@@ -1586,8 +1641,23 @@ public sealed class AlertEngineTests
         public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
 
-        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
+        /// <summary>
+        /// How long this ONE read spends before it faults. Exists so a test can prove the elapsed reaching
+        /// the counter is a measurement of the read rather than a value in the slot: a source scan can show
+        /// a clock is started before the try and read in the catch, and cannot show that the number the
+        /// counter receives came from it.
+        /// </summary>
+        public TimeSpan ForcePlanDelay { get; set; } = TimeSpan.Zero;
+
+        public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default)
+        {
+            if (ForcePlanDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(ForcePlanDelay, cancellationToken);
+            }
+
             throw new InvalidOperationException("store down");
+        }
     }
 
     [Fact]

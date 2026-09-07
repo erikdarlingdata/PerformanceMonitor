@@ -35,6 +35,18 @@ namespace PerformanceMonitor.Alerting;
 /// <c>collection_log</c> FELL over the same hours (23, 7, 5, 2). Two populations moving in opposite
 /// directions, and the rising one was the invisible one.</para>
 ///
+/// <para><b>Every recorded failure carries how long it waited.</b> The count says a condition went blind;
+/// the elapsed says whose deadline ended it. A read that gives up AT its own command timeout was cut off
+/// by this process while the statement was still running on the store; one that fails far below the bound
+/// carries a fault the store returned. The exception text cannot separate them — a client-side deadline
+/// renders as a torn stream with no SQLSTATE, identically to a dropped connection — so the duration is the
+/// only discriminator, and a population whose elapsed clusters at a bound and never below it is
+/// client-side expiry, because a client deadline fires at its bound while a server fault lands anywhere.
+/// That argument was already available for the COLLECTOR population from <c>collection_log.duration_ms</c>;
+/// this class's population writes no <c>collection_log</c> row by design, so until the elapsed was recorded
+/// here and in the call site's log line it recorded no elapsed time anywhere and could not be classified at
+/// all.</para>
+///
 /// <para><b>Deliberately in memory, and deliberately not persisted.</b> The thing being counted is a
 /// failure to read the store, so a counter that had to WRITE the store to be readable would be
 /// unavailable exactly when it has something to say. Every consumer of this count lives in the same
@@ -86,6 +98,7 @@ public sealed class AlertReadFailureCounter
         public long Passes;
         public long LastFailureTicks;
         public string? LastFailureRead;
+        public long LastFailureElapsedMs;
     }
 
     private readonly ConcurrentDictionary<string, ServerCounts> _byServer =
@@ -130,16 +143,49 @@ public sealed class AlertReadFailureCounter
     /// carry — and an exception message can carry host and database names, which must not reach an MCP
     /// response.</para>
     /// </param>
-    public void RecordReadFailure(string? serverKey, string readName)
+    /// <param name="elapsedMilliseconds">
+    /// Wall clock from the start of the read attempt to the fault, in milliseconds.
+    ///
+    /// <para><b>Why a duration is on this call at all, given the read name already says which condition
+    /// went blind.</b> The name says WHICH read failed; the elapsed says WHOSE deadline ended it. A read
+    /// that gives up at its own command timeout was cut off by this process — the statement was still
+    /// running on the store when the client stopped waiting — whereas one that fails far below the bound
+    /// carries a fault the store returned. Those two have different remedies and the exception text
+    /// cannot tell them apart: Npgsql renders a client-side deadline as a torn stream with no SQLSTATE,
+    /// which is the same rendering as a dropped connection.</para>
+    ///
+    /// <para><b>The argument this makes available.</b> A population of failures whose elapsed clusters AT
+    /// a bound and never below it is client-side deadline expiry, because a client deadline fires at its
+    /// bound while an external cancel or a server fault lands anywhere. That argument already settles the
+    /// collector population from <c>collection_log.duration_ms</c>; the alerting population writes no
+    /// <c>collection_log</c> row by design, so without this parameter and the matching log line it
+    /// recorded no elapsed time anywhere and was unclassifiable.</para>
+    ///
+    /// <para>Not compared to a threshold here, and deliberately: the bound belongs to whichever adapter
+    /// issued the read (Darling's alert pass and Lite's are separate constants), so a limit baked into
+    /// this shared counter would be wrong for one of them. This records the measurement; the reader
+    /// compares it to the deadline their own SKU documents.</para>
+    ///
+    /// <para>A negative value is clamped to zero. A negative duration on a health surface reads as a
+    /// broken instrument rather than as a fast failure, and there is no reading it usefully.</para>
+    /// </param>
+    public void RecordReadFailure(string? serverKey, string readName, long elapsedMilliseconds)
     {
         var name = string.IsNullOrWhiteSpace(readName) ? "unnamed read" : readName;
         var nowTicks = _utcNow().Ticks;
+        var elapsed = elapsedMilliseconds < 0 ? 0 : elapsedMilliseconds;
 
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? _fleet : Bucket(serverKey!);
         Interlocked.Increment(ref bucket.ReadFailures);
         Interlocked.Exchange(ref bucket.LastFailureTicks, nowTicks);
         bucket.LastFailureRead = name;
+        Interlocked.Exchange(ref bucket.LastFailureElapsedMs, elapsed);
 
+        /* The instance side stays a COUNT plus a stamp plus a name. It deliberately does not carry the
+           elapsed: nothing renders ReadInstance today, so an instance-wide elapsed would be a measurement
+           with no reader, which is the defect one level down from the one #3013 closed. The elapsed reaches
+           an operator two ways — per-server through Reading, and for every recorded site including the
+           fleet-scoped ones through the log line the call site writes. */
         Interlocked.Increment(ref _instanceReadFailures);
         Interlocked.Exchange(ref _instanceLastFailureTicks, nowTicks);
         _instanceLastFailureRead = name;
@@ -187,6 +233,20 @@ public sealed class AlertReadFailureCounter
     /// is the mistake <c>last_error</c> already taught this surface (#3010).
     /// </param>
     /// <param name="LastFailureRead">Which read failed most recently for this server.</param>
+    /// <param name="LastFailureElapsedMs">
+    /// How long the newest failing read for this server ran before it faulted, in milliseconds, or null if
+    /// it has none.
+    ///
+    /// <para>The classification term, and the reason it sits beside the stamp rather than replacing it: an
+    /// elapsed figure at the read's own command deadline says THIS PROCESS stopped waiting while the
+    /// statement was still running on the store, and one well below the bound says the store returned a
+    /// fault. Read it against the deadline the SKU documents for its alert pass — this record carries the
+    /// measurement and no threshold, because the two SKUs' bounds are separate constants.</para>
+    ///
+    /// <para>Null exactly when <paramref name="LastFailureAtUtc"/> is null, from the same test, so the pair
+    /// cannot disagree: a reading either has a newest failure with both a stamp and an elapsed, or has
+    /// neither. One nonzero measurement beside a null stamp would be a duration belonging to no event.</para>
+    /// </param>
     /// <param name="CountingSinceUtc">When counting began — see <see cref="CountingSince"/>.</param>
     public sealed record Reading(
         long ServerReadFailures,
@@ -194,6 +254,7 @@ public sealed class AlertReadFailureCounter
         long InstanceReadFailures,
         DateTime? LastFailureAtUtc,
         string? LastFailureRead,
+        long? LastFailureElapsedMs,
         DateTime CountingSinceUtc);
 
     /// <summary>
@@ -212,6 +273,7 @@ public sealed class AlertReadFailureCounter
         var serverFailures = bucket is null ? 0L : Interlocked.Read(ref bucket.ReadFailures);
         var serverPasses = bucket is null ? 0L : Interlocked.Read(ref bucket.Passes);
         var lastTicks = bucket is null ? 0L : Interlocked.Read(ref bucket.LastFailureTicks);
+        var lastElapsed = bucket is null ? 0L : Interlocked.Read(ref bucket.LastFailureElapsedMs);
 
         return new Reading(
             serverFailures,
@@ -219,6 +281,10 @@ public sealed class AlertReadFailureCounter
             Interlocked.Read(ref _instanceReadFailures),
             lastTicks == 0 ? null : new DateTime(lastTicks, DateTimeKind.Utc),
             bucket?.LastFailureRead,
+            /* The same currency test as the stamp above, so the two cannot disagree: an elapsed with no
+               stamp beside it would be a duration belonging to no event, and a zero elapsed is a real
+               reading (a read that faulted immediately) rather than an absence. */
+            lastTicks == 0 ? null : lastElapsed,
             CountingSince);
     }
 
@@ -273,9 +339,24 @@ public sealed class AlertReadFailureCounter
             ? string.Format(CultureInfo.InvariantCulture, ", newest at {0:yyyy-MM-dd HH:mm:ss}Z", reading.LastFailureAtUtc.Value)
             : string.Empty;
 
+        /* The elapsed rides on the same sentence as the name because the two answer one question together:
+           which read went blind, and whose deadline ended it. Stated as a measurement against "its own
+           command deadline" rather than against a number, because the bound is the calling SKU's constant
+           and this shared formatter does not know which SKU it is rendering for. */
         var which = string.IsNullOrWhiteSpace(reading.LastFailureRead)
             ? string.Empty
-            : string.Format(CultureInfo.InvariantCulture, " The newest was the {0} read.", reading.LastFailureRead);
+            : string.Format(
+                CultureInfo.InvariantCulture,
+                " The newest was the {0} read{1}.",
+                reading.LastFailureRead,
+                reading.LastFailureElapsedMs.HasValue
+                    ? string.Format(
+                        CultureInfo.InvariantCulture,
+                        ", which ran {0} ms before it failed — at or about the alert pass's own command "
+                        + "deadline means this process stopped waiting while the statement was still "
+                        + "running on the store, and well below it means the store returned a fault",
+                        reading.LastFailureElapsedMs.Value)
+                    : string.Empty);
 
         return string.Format(
             CultureInfo.InvariantCulture,
@@ -329,7 +410,14 @@ public sealed class AlertReadFailureCounter
         + "had to write the store would be unavailable exactly when it has something to report. It counts "
         + "alerting-side store reads that failed and were swallowed by design (the alert pass logs and skips "
         + "rather than firing or resolving on absent evidence), which is why they appear on no other health "
-        + "surface: they are not collector runs and write no collection_log row. It does NOT count fired "
+        + "surface: they are not collector runs and write no collection_log row. last_failure_elapsed_ms is "
+        + "how long that newest failing read ran before it faulted, and it is the term that says WHOSE "
+        + "deadline ended it: at or about the alert pass's own command deadline means this process stopped "
+        + "waiting while the statement was still running on the store, and well below that bound means the "
+        + "store returned a fault. Those need different answers, and the exception text cannot tell them "
+        + "apart because a client-side deadline renders as a torn stream with no SQLSTATE, exactly like a "
+        + "dropped connection. It is null exactly when last_failure_at is null, so an elapsed never "
+        + "describes an event with no stamp. It does NOT count fired "
         + "alerts that failed to DELIVER, and it makes no claim about them — that is the alert-history read's "
         + "question, not this one. instance_read_failures spans every server on this service plus the "
         + "fleet-scoped conditions that belong to no server and so appear in no per-server count: "

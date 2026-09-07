@@ -2221,6 +2221,10 @@ const ALERT_READ_STATS = [
   { key: "alert_read_health.server_alert_passes", label: "Alert passes", format: "int" },
   { key: "alert_read_health.instance_read_failures", label: "Blind reads (service)", format: "int" },
   { key: "alert_read_health.last_failure_read", label: "Which read", format: "text", small: true },
+  /* Beside "Which read" because the two answer one question together: which condition went blind, and
+     whose deadline ended it. An elapsed at or about the alert pass's command deadline is this service
+     giving up while the statement still ran on the store; well below it is a fault the store returned. */
+  { key: "alert_read_health.last_failure_elapsed_ms", label: "Ran for", format: "ms", small: true },
   { key: "alert_read_health.last_failure_at", label: "Newest", format: "reltime", small: true },
   { key: "alert_read_health.counting_since", label: "Counting since", format: "reltime", small: true },
 ];

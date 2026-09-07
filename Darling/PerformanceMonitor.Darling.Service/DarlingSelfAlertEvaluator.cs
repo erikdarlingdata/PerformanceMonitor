@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -430,6 +431,7 @@ internal sealed class DarlingSelfAlertEvaluator
            first fresh collection lands. */
         if (_hasBeenOnline.ContainsKey(Key(serverId)))
         {
+            var collectionReadClock = Stopwatch.StartNew();
             try
             {
                 /* #2107: store-backed window/threshold (clamped on read); the constants remain
@@ -447,8 +449,8 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Collection-health self-alert failed: {Message}", serverName, ex.Message);
-                _readFailures?.RecordReadFailure(Key(serverId), "collection-health self-alert");
+                _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), "collection-health self-alert", collectionReadClock.ElapsedMilliseconds);
             }
         }
 
@@ -457,6 +459,7 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
+        var captureReadClock = Stopwatch.StartNew();
         try
         {
             var missing = await ReadMissingCaptureSessionsAsync(postgres, serverId, cancellationToken);
@@ -468,10 +471,11 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Capture-down self-alert failed: {Message}", serverName, ex.Message);
-            _readFailures?.RecordReadFailure(Key(serverId), "capture-down self-alert");
+            _logger?.LogError("[{Server}] Capture-down self-alert failed after {ElapsedMs} ms: {Message}", serverName, captureReadClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(Key(serverId), "capture-down self-alert", captureReadClock.ElapsedMilliseconds);
         }
 
+        var agentReadClock = Stopwatch.StartNew();
         try
         {
             /* Agent Not Running (#1433 Phase 2): the collected agent_status snapshot says the target's SQL
@@ -510,8 +514,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Agent-not-running self-alert failed: {Message}", serverName, ex.Message);
-            _readFailures?.RecordReadFailure(Key(serverId), "agent-not-running self-alert");
+            _logger?.LogError("[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(Key(serverId), "agent-not-running self-alert", agentReadClock.ElapsedMilliseconds);
         }
 
         /* Availability Group health (#991). Skipped entirely when the master AG switch is off, so a fleet that
@@ -521,6 +525,7 @@ internal sealed class DarlingSelfAlertEvaluator
            signal, and the collection-stopped alert owns staleness. */
         if (_notifyAgHealth())
         {
+            var agReadClock = Stopwatch.StartNew();
             try
             {
                 /* Each grain is gated on its OWN snapshot time: the two AG collectors are scheduled
@@ -546,8 +551,8 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Availability-Group self-alert failed: {Message}", serverName, ex.Message);
-                _readFailures?.RecordReadFailure(Key(serverId), "Availability-Group self-alert");
+                _logger?.LogError("[{Server}] Availability-Group self-alert failed after {ElapsedMs} ms: {Message}", serverName, agReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), "Availability-Group self-alert", agReadClock.ElapsedMilliseconds);
             }
         }
 
@@ -693,6 +698,7 @@ internal sealed class DarlingSelfAlertEvaluator
     public async Task EvaluateCollectorCostAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         List<Mcp.DarlingCollectorCostReader.CostRegression> regressions;
+        var readClock = Stopwatch.StartNew();
         try
         {
             regressions = await Mcp.DarlingCollectorCostReader.GetCostRegressionsAsync(
@@ -702,8 +708,8 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* A self-alert read that fails must not take the loop down — it is best-effort telemetry. */
-            _logger?.LogDebug(ex, "collector-cost regression evaluation failed");
-            _readFailures?.RecordReadFailure(null, "collector-cost regression self-alert");
+            _logger?.LogDebug(ex, "collector-cost regression evaluation failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "collector-cost regression self-alert", readClock.ElapsedMilliseconds);
             return;
         }
 

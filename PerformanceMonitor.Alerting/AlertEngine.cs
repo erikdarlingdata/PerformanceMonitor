@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -329,6 +330,7 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var blocking = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, BlockingWatermarkMetric);
@@ -355,8 +357,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to seed edge-trigger watermarks for {ServerKey}: {Message}", key, ex.Message);
-            _readFailures?.RecordReadFailure(key, "edge-trigger watermark seed");
+            _logger?.LogError("Failed to seed edge-trigger watermarks for {ServerKey} after {ElapsedMs} ms: {Message}", key, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "edge-trigger watermark seed", readClock.ElapsedMilliseconds);
         }
 
         _seededServerKeys[key] = true;
@@ -431,6 +433,7 @@ public sealed class AlertEngine
 
         if (_settings.BlockingEnabled)
         {
+            var readClock = Stopwatch.StartNew();
             try
             {
                 /* ONE fetch serves the rolling count, the excluded-database recount (:118-133),
@@ -464,8 +467,8 @@ public sealed class AlertEngine
             {
                 /* :129-132 shape — log and skip this check for the sweep (class remarks
                    adaptation (2)): never run the gate on a fabricated zero count. */
-                _logger?.LogError("Failed to check blocking for {Server}: {Message}", serverName, ex.Message);
-                _readFailures?.RecordReadFailure(key, "blocking");
+                _logger?.LogError("Failed to check blocking for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "blocking", readClock.ElapsedMilliseconds);
                 return;
             }
         }
@@ -708,6 +711,7 @@ public sealed class AlertEngine
         CurrentBlockingWaitResult? current = null;
         if (enabled)
         {
+            var readClock = Stopwatch.StartNew();
             try
             {
                 current = await _readAdapter.GetCurrentBlockingWaitAsync(key, ct);
@@ -720,8 +724,8 @@ public sealed class AlertEngine
             {
                 /* Log and skip for the sweep — state untouched, so a transient store error neither
                    fires nor resolves (the same adaptation (2) shape as the count gate). */
-                _logger?.LogError("Failed to check blocking wait time for {Server}: {Message}", serverName, ex.Message);
-                _readFailures?.RecordReadFailure(key, "blocking wait time");
+                _logger?.LogError("Failed to check blocking wait time for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "blocking wait time", readClock.ElapsedMilliseconds);
                 return;
             }
         }
@@ -786,6 +790,7 @@ public sealed class AlertEngine
 
         if (_settings.DeadlockEnabled)
         {
+            var readClock = Stopwatch.StartNew();
             try
             {
                 /* ONE fetch serves the rolling count, the excluded-database recount (:198-211),
@@ -809,8 +814,8 @@ public sealed class AlertEngine
             catch (Exception ex)
             {
                 /* :207-210 shape — log and skip (class remarks adaptation (2)). */
-                _logger?.LogError("Failed to check deadlocks for {Server}: {Message}", serverName, ex.Message);
-                _readFailures?.RecordReadFailure(key, "deadlocks");
+                _logger?.LogError("Failed to check deadlocks for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "deadlocks", readClock.ElapsedMilliseconds);
                 return;
             }
         }
@@ -891,6 +896,7 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var triggered = await _readAdapter.GetPoisonWaitDeltasAsync(key, _settings.PoisonWaitThresholdMs, ct); /* :278 */
@@ -953,8 +959,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check poison waits for {Server}: {Message}", serverName, ex.Message); /* :337 */
-            _readFailures?.RecordReadFailure(key, "poison waits");
+            _logger?.LogError("Failed to check poison waits for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :337 */
+            _readFailures?.RecordReadFailure(key, "poison waits", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -968,6 +974,7 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var longRunning = await _readAdapter.GetLongRunningQueriesAsync(       /* :346 */
@@ -1043,8 +1050,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check long-running queries for {Server}: {Message}", serverName, ex.Message); /* :409 */
-            _readFailures?.RecordReadFailure(key, "long-running queries");
+            _logger?.LogError("Failed to check long-running queries for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :409 */
+            _readFailures?.RecordReadFailure(key, "long-running queries", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1058,6 +1065,7 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);           /* :418 */
@@ -1105,8 +1113,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check TempDB space for {Server}: {Message}", serverName, ex.Message); /* :471 */
-            _readFailures?.RecordReadFailure(key, "TempDB space");
+            _logger?.LogError("Failed to check TempDB space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :471 */
+            _readFailures?.RecordReadFailure(key, "TempDB space", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1126,6 +1134,7 @@ public sealed class AlertEngine
         }
 
         bool conditionPresent = false;
+        var readClock = Stopwatch.StartNew();
         try
         {
             var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);      /* :480 */
@@ -1195,8 +1204,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check volume free space for {Server}: {Message}", serverName, ex.Message); /* :553 */
-            _readFailures?.RecordReadFailure(key, "volume free space");
+            _logger?.LogError("Failed to check volume free space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :553 */
+            _readFailures?.RecordReadFailure(key, "volume free space", readClock.ElapsedMilliseconds);
         }
 
         return conditionPresent;
@@ -1222,6 +1231,7 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var databases = await _readAdapter.GetPvsPressureAsync(key, ct);
@@ -1282,8 +1292,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check PVS pressure for {Server}: {Message}", serverName, ex.Message);
-            _readFailures?.RecordReadFailure(key, "PVS pressure");
+            _logger?.LogError("Failed to check PVS pressure for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "PVS pressure", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1316,6 +1326,7 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var files = await _readAdapter.GetDatabaseFileGrowthAsync(
@@ -1381,8 +1392,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check database file growth for {Server}: {Message}", serverName, ex.Message);
-            _readFailures?.RecordReadFailure(key, "database file growth");
+            _logger?.LogError("Failed to check database file growth for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "database file growth", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1396,6 +1407,7 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct); /* :562 */
@@ -1476,8 +1488,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check anomalous jobs for {Server}: {Message}", serverName, ex.Message); /* :630 */
-            _readFailures?.RecordReadFailure(key, "anomalous jobs");
+            _logger?.LogError("Failed to check anomalous jobs for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :630 */
+            _readFailures?.RecordReadFailure(key, "anomalous jobs", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1607,6 +1619,7 @@ public sealed class AlertEngine
         }
 
         List<DatabaseStateInfo> deviations;
+        var readClock = Stopwatch.StartNew();
         try
         {
             deviations = await _readAdapter.GetDatabaseStatesAsync(key, ct);
@@ -1619,8 +1632,8 @@ public sealed class AlertEngine
         {
             /* Log-and-skip, like the other collected reads: never resolve an active database on a
                failed fetch (that would fabricate a recovery), and never fire on absent evidence. */
-            _logger?.LogError("Failed to check database state for {Server}: {Message}", serverName, ex.Message);
-            _readFailures?.RecordReadFailure(key, "database state");
+            _logger?.LogError("Failed to check database state for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "database state", readClock.ElapsedMilliseconds);
             return;
         }
 
@@ -1819,6 +1832,7 @@ public sealed class AlertEngine
         }
 
         List<ForcePlanFailureInfo> failures;
+        var readClock = Stopwatch.StartNew();
         try
         {
             failures = await _readAdapter.GetForcePlanFailuresAsync(key, ct);
@@ -1831,8 +1845,8 @@ public sealed class AlertEngine
         {
             /* Log-and-skip, like every other collected read: never resolve an active plan on a failed
                fetch (that would fabricate a recovery), and never fire on absent evidence. */
-            _logger?.LogError("Failed to check forced-plan failures for {Server}: {Message}", serverName, ex.Message);
-            _readFailures?.RecordReadFailure(key, "forced-plan failures");
+            _logger?.LogError("Failed to check forced-plan failures for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "forced-plan failures", readClock.ElapsedMilliseconds);
             return;
         }
 
