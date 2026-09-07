@@ -69,7 +69,14 @@ jobs:
           # Emit the matched file list so the fast-path step can NAME what it classified
           # as documentation. A fast path that silently under-builds is the failure mode
           # worth guarding against, so the reason is always printed, never inferred.
-          list-files: shell
+          #
+          # json, for the reason the two Darling jobs' filters give: the list reaches the
+          # step through `env:` rather than a `${{ }}` interpolation into script text, and a
+          # runtime parameter expansion does not honour the `shell` format's backslash
+          # escapes. Eight tracked paths under Screenshots/ carry spaces and that whole
+          # directory is on the allowlist below, so the docs notice is the one that meets a
+          # spaced path first. A JSON array is self-delimiting and prints verbatim.
+          list-files: json
           filters: |
             # A change to a root build file (the solution, restore config, or THIS workflow) can
             # affect every product, so it forces a full build/test/publish.
@@ -269,8 +276,7 @@ jobs:
           if [ "${ALL_COUNT:-0}" -gt 0 ] && [ "${ALL_COUNT:-0}" -eq "${DOCS_COUNT:-0}" ] && [[ "${AREAS}" != *"=true"* ]]; then
             echo "engaged=true" >> "$GITHUB_OUTPUT"
             echo "::notice title=DOCS FAST PATH ENGAGED::All ${ALL_COUNT} changed files are on the documentation allowlist, so .NET setup, restore and versioning are skipped. This job still reports its result."
-            echo "Documentation files classified in this change:"
-            for f in ${DOCS_FILES}; do echo "  - ${f}"; done
+            echo "Documentation files classified in this change: ${DOCS_FILES:-[]}"
           else
             echo "engaged=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Full build::At least one changed file is off the documentation allowlist (${DOCS_COUNT:-0} of ${ALL_COUNT:-0} classified as documentation)."
@@ -666,7 +672,15 @@ jobs:
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
           # Emit the matched file list so the gate-decision step below can NAME what it matched, or
           # name what it did not match, instead of asserting a reason the decision came out as it did.
-          list-files: shell
+          # json rather than shell. The lists reach the notice through `env:` and never through a
+          # `${{ }}` interpolation into the script text, which is the pull_request script-injection
+          # footgun — and a runtime parameter expansion does not honour shell's backslash escapes, so
+          # the `shell` format's `a\ b.md` field-splits into two entries that name no file. Eight
+          # tracked paths under Screenshots/ carry spaces, and that directory is on the documentation
+          # allowlist, so it is the shape a screenshot PR reaches rather than a hypothetical. A JSON
+          # array is self-delimiting, so the notice prints it verbatim and reads unambiguously for any
+          # filename without parsing it at all.
+          list-files: json
           # ONE gate, shared with the Darling Linux build job below through dorny's `filters: <path>`
           # form, rather than a list of paths per job: the shared libraries Darling compiles against
           # are one dependency fact, and this job's own copy of it was empty while its sibling's was
@@ -701,12 +715,10 @@ jobs:
 
           if [ "${DARLING:-}" = "true" ]; then
             echo "::notice title=Darling PG tests running::${DARLING_COUNT:-0} of ${ALL_COUNT:-0} changed files are in the Darling gate (.github/darling-paths-filter.yml)."
-            echo "Changed files in the gate:"
-            for f in ${DARLING_FILES}; do echo "  - ${f}"; done
+            echo "Changed files in the gate: ${DARLING_FILES:-[]}"
           else
             echo "::notice title=Darling PG tests skipped::None of the ${ALL_COUNT:-0} changed files are in the Darling gate (.github/darling-paths-filter.yml), so the TimescaleDB suite did not run on this commit."
-            echo "Changed files, none of them in the gate:"
-            for f in ${ALL_FILES}; do echo "  - ${f}"; done
+            echo "Changed files, none of them in the gate: ${ALL_FILES:-[]}"
           fi
 
       - name: Setup .NET 10.0
@@ -864,7 +876,15 @@ jobs:
         uses: dorny/paths-filter@v4
         with:
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
-          list-files: shell
+          # json rather than shell. The lists reach the notice through `env:` and never through a
+          # `${{ }}` interpolation into the script text, which is the pull_request script-injection
+          # footgun — and a runtime parameter expansion does not honour shell's backslash escapes, so
+          # the `shell` format's `a\ b.md` field-splits into two entries that name no file. Eight
+          # tracked paths under Screenshots/ carry spaces, and that directory is on the documentation
+          # allowlist, so it is the shape a screenshot PR reaches rather than a hypothetical. A JSON
+          # array is self-delimiting, so the notice prints it verbatim and reads unambiguously for any
+          # filename without parsing it at all.
+          list-files: json
           # The same gate the darling-pg job above reads. The list of shared libraries that reaches
           # Darling belongs to both jobs, and holding it twice is how the copies came to differ: the
           # copy here named three of the seven, missing PerformanceMonitor.Alerting and
@@ -890,12 +910,10 @@ jobs:
 
           if [ "${DARLING:-}" = "true" ]; then
             echo "::notice title=Darling Linux build running::${DARLING_COUNT:-0} of ${ALL_COUNT:-0} changed files are in the Darling gate (.github/darling-paths-filter.yml)."
-            echo "Changed files in the gate:"
-            for f in ${DARLING_FILES}; do echo "  - ${f}"; done
+            echo "Changed files in the gate: ${DARLING_FILES:-[]}"
           else
             echo "::notice title=Darling Linux build skipped::None of the ${ALL_COUNT:-0} changed files are in the Darling gate (.github/darling-paths-filter.yml), so the linux-x64 publish and the image build did not run on this commit."
-            echo "Changed files, none of them in the gate:"
-            for f in ${ALL_FILES}; do echo "  - ${f}"; done
+            echo "Changed files, none of them in the gate: ${ALL_FILES:-[]}"
           fi
 
       - name: Setup .NET 10.0

@@ -164,8 +164,11 @@ public sealed class DarlingPathFilterGateTests
     {
         var job = JobBlock(ReadRepoFileLf(s_workflowSegments), jobId);
 
-        /* The file lists the notice names have to come from. */
-        Assert.Contains("list-files: shell", job, StringComparison.Ordinal);
+        /* The file lists the notice names have to come from, in the format that survives the `env:`
+           indirection: `shell` escapes for substitution into script TEXT, and a runtime parameter
+           expansion does not honour those escapes, so a path containing a space prints as two entries
+           that name no file. The format is pinned rather than merely required to be set. */
+        Assert.Contains("list-files: json", job, StringComparison.Ordinal);
 
         var step = StepBlock(job, stepName);
 
