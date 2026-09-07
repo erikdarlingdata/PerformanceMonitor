@@ -334,12 +334,14 @@ public sealed class AlertEngine
         try
         {
             var blocking = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, BlockingWatermarkMetric);
+            readClock.Restart();
             if (blocking.HasValue)
             {
                 _lastAlertedBlockingCount[key] = blocking.Value;
             }
 
             var deadlock = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric);
+            readClock.Restart();
             if (deadlock.HasValue)
             {
                 _lastAlertedDeadlockCount[key] = deadlock.Value;
@@ -899,7 +901,8 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var triggered = await _readAdapter.GetPoisonWaitDeltasAsync(key, _settings.PoisonWaitThresholdMs, ct); /* :278 */
+            var triggered = await _readAdapter.GetPoisonWaitDeltasAsync(key, _settings.PoisonWaitThresholdMs, ct);
+            readClock.Restart(); /* :278 */
 
             if (triggered.Count > 0)
             {
@@ -988,6 +991,7 @@ public sealed class AlertEngine
                 _settings.LongRunningQueryExcludeCdc,
                 _settings.ExcludedDatabases,
                 ct);
+            readClock.Restart();
 
             /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
                identically here: counting only at delivery lets an event that ages out during a cooldown mask
@@ -1068,7 +1072,8 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);           /* :418 */
+            var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);
+            readClock.Restart();           /* :418 */
 
             if (tempDb != null && tempDb.ReservedPercent >= _settings.TempDbSpaceThresholdPercent) /* :420 */
             {
@@ -1137,7 +1142,8 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);      /* :480 */
+            var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);
+            readClock.Restart();      /* :480 */
             var breached = AlertContextBuilders.GetBreachedVolumes(volumes, _settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb); /* :481 */
             conditionPresent = breached.Count > 0;                                  /* :487 — feeds the sweep result */
 
@@ -1235,6 +1241,7 @@ public sealed class AlertEngine
         try
         {
             var databases = await _readAdapter.GetPvsPressureAsync(key, ct);
+            readClock.Restart();
             var breached = AlertContextBuilders.GetBreachedPvsDatabases(databases, _settings.PvsThresholdPercent, _settings.PvsFloorGb);
 
             /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
@@ -1331,6 +1338,7 @@ public sealed class AlertEngine
         {
             var files = await _readAdapter.GetDatabaseFileGrowthAsync(
                 key, _settings.FileGrowthLookbackMinutes, ct);
+            readClock.Restart();
 
             var breached = AlertContextBuilders.GetBreachedFiles(
                 files, _settings.FileGrowthRiseMb, _settings.FileGrowthVolumePercent);
@@ -1410,7 +1418,8 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct); /* :562 */
+            var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct);
+            readClock.Restart(); /* :562 */
 
             /* #1812: a stale latest snapshot is NO evidence, in either direction. Firing on it re-alerts
                a historical run every cooldown forever (the per-run cooldown key deliberately expires each

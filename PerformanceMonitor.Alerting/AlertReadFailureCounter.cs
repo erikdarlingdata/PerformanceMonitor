@@ -47,6 +47,16 @@ namespace PerformanceMonitor.Alerting;
 /// here and in the call site's log line it recorded no elapsed time anywhere and could not be classified at
 /// all.</para>
 ///
+/// <para><b>One bounded operation per figure, which the call sites maintain rather than the counter.</b>
+/// The argument above needs the elapsed to be ONE deadline's worth. A counted block often performs several
+/// awaited operations — the PostgreSQL predictor group reads four store tables, the store background-job
+/// group five — so a single clock started at the top of the block would report the sum of everything that
+/// ran, and an ordinary client-side cutoff of the last read would read well ABOVE the per-read bound. Every
+/// site therefore restarts its clock after each awaited read that has a later await, so the figure is the
+/// elapsed of the operation that faulted. The one deliberate exception is the shared-engine-sweep entry,
+/// which wraps a whole alert pass and has no single read to bracket; its figure is the pass's, and its read
+/// name says so.</para>
+///
 /// <para><b>The discriminating reading is Darling's, and the gap is named rather than papered over.</b>
 /// Everything above needs the read to HAVE a deadline for the elapsed to say who ended it. Darling's alert
 /// pass sets one on every store read; Lite's <c>LiteAlertReadAdapter</c> reads the local store through
@@ -427,7 +437,10 @@ public sealed class AlertReadFailureCounter
         + "that bound means this process stopped waiting while the statement was still running on the store, "
         + "and well below it means the store returned a fault - and those need different answers, because "
         + "the exception text cannot tell them apart: a client-side deadline renders as a torn stream with "
-        + "no SQLSTATE, exactly like a dropped connection. Read it that way on the Darling service, whose "
+        + "no SQLSTATE, exactly like a dropped connection. A figure well ABOVE that bound is a third reading: "
+        + "the failure was not a single bounded read. Each site restarts its clock after every read so "
+        + "that is rare, and the one entry where it is expected is the shared engine sweep, whose "
+        + "figure covers a whole alert pass rather than one command. Read it that way on the Darling service, whose "
         + "alert pass sets an explicit command deadline. On Lite the alerting reads hit the local store with "
         + "no command deadline of their own, so the figure there is a plain duration - it says a read became "
         + "slow, and nothing about who ended it. Either way it is null exactly when last_failure_at is null, "

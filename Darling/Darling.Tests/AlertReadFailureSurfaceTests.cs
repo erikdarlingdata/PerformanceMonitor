@@ -732,6 +732,283 @@ public sealed class AlertReadFailureSurfaceTests
             expectedViolation: null);
     }
 
+    /// <summary>
+    /// Awaited callees inside a counted block, split by whether they are a STORE READ. Explicit and total:
+    /// an awaited call this table does not classify fails the pin rather than being assumed either way.
+    ///
+    /// <para><b>Why a table and not a prefix rule.</b> The first pass at this used a
+    /// <c>Get|Read|Has</c> prefix and silently under-counted — it missed
+    /// <c>LoadEdgeTriggerWatermarkAsync</c> and <c>LoadFailedJobWatermarkAsync</c>, which are two of the
+    /// three reads in the watermark-seed block, and reported that block as having none. A prefix guess
+    /// returns a confident partial answer with no error, which is the failure mode a scanning guard must
+    /// not have. A rename or a new read therefore reds here until someone classifies it, and the reason
+    /// each name is on the side it is on is visible in the two sets.</para>
+    /// </summary>
+    private static readonly HashSet<string> s_awaitedStoreReads = new(StringComparer.Ordinal)
+    {
+        "LoadEdgeTriggerWatermarkAsync", "LoadFailedJobWatermarkAsync",
+        "GetRecentBlockedProcessReportsAsync", "GetCurrentBlockingWaitAsync", "GetRecentDeadlocksAsync",
+        "GetPoisonWaitDeltasAsync", "GetLongRunningQueriesAsync", "GetTempDbSpaceAsync",
+        "GetVolumeFreeSpaceAsync", "GetPvsPressureAsync", "GetDatabaseFileGrowthAsync",
+        "GetAnomalousJobsAsync", "GetDatabaseStatesAsync", "GetForcePlanFailuresAsync",
+        "ReadCollectionSignalsAsync", "ReadMissingCaptureSessionsAsync", "ReadLatestAgentStatusAsync",
+        "HasAgentEverBeenSeenRunningAsync", "ReadLatestAgReplicaStatesAsync",
+        "ReadLatestAgDatabaseReplicaStatesAsync", "GetCostRegressionsAsync", "ReadLatestCpuAsync",
+        "GetWraparoundRiskAsync", "GetXminHorizonAsync", "GetReplicationSlotRiskAsync",
+        "GetLastAlertTimeAsync", "GetLatestAsync", "GetDeadlocksAsync",
+        "GetPgBlockingChainsDedupedByRootAsync", "GetCurrentLongRunningSessionsAsync",
+        "GetPoisonWaitPressureAsync", "ReadCompressionActivityAsync", "ReadHeaviestRefreshRuntimeAsync",
+        "ReadStuckCompressionJobsAsync", "ReadJobCadenceReadingsAsync", "ReadRetentionHoldReadingsAsync",
+    };
+
+    /// <summary>
+    /// Awaited calls in a counted block that are NOT store reads: the appliers, the deliveries, the state
+    /// writes, and the two whole-pass dispatches. They need no clock of their own — a fault in one of them
+    /// is not the population this measurement is for, and restarting the clock before a delivery would
+    /// report the delivery's elapsed under a field named for a read.
+    /// </summary>
+    private static readonly HashSet<string> s_awaitedNonReads = new(StringComparer.Ordinal)
+    {
+        "ApplyCollectionStoppedAsync", "ApplyCaptureDownAsync", "ApplyAgentNotRunningAsync",
+        "ApplyAgReplicaHealthAsync", "ApplyAgDatabaseHealthAsync", "FireAsync", "NotifyResolutionAsync",
+        "ObserveOccurrencesAsync", "ClearOccurrencesAsync", "SaveEdgeTriggerWatermarkAsync",
+        "DeliverAsync", "NotifyPgResolutionAsync", "EvaluateServerAsync", "EvaluatePostgresAlertsAsync",
+    };
+
+    private static readonly Regex s_awaitedCall = new(
+        @"await\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*(?<callee>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The figure a counted block records is ONE bounded operation's, not the whole block's.
+    ///
+    /// <para><b>The defect this closes, which the pin above could not see.</b> Every check in
+    /// <see cref="EveryCountedAlertingRead_MeasuresHowLongItRanBeforeItFailed"/> is satisfied by a single
+    /// clock started at the top of the block — and a block that performs several awaited operations then
+    /// reports the SUM of everything that ran. The PostgreSQL predictor group reads four store tables and
+    /// the store background-job group five, each bounded separately, so an ordinary client-side cutoff of
+    /// the last one would record well ABOVE the per-read deadline. That is a value the whole
+    /// at-the-bound-versus-below-it argument has no bucket for, and it would have shipped reading
+    /// perfectly plausibly.</para>
+    ///
+    /// <para><b>The property.</b> Between an awaited store read and the next awaited operation in the same
+    /// block there is a clock restart — so whatever faults, the elapsed is that operation's. Expressed as a
+    /// substring between two offsets rather than by parsing statements, which is what lets it catch the
+    /// shape that started this: three reads awaited inside ONE argument list, where no restart can sit
+    /// between them at all. Those three are now hoisted into locals for exactly that reason.</para>
+    ///
+    /// <para>A read that is the block's LAST await needs no restart — nothing follows it that could
+    /// inflate the figure, and a restart there would be dead code. The shared-engine-sweep block has no
+    /// store read at all: it wraps a whole alert pass, its figure is the pass's, and its read name says
+    /// so. Both are asserted rather than skipped, so neither becomes a hiding place.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCountedBlock_GivesTheFailingReadTheClockToItself()
+    {
+        var violations = new List<string>();
+        var blocks = 0;
+        var readsNeedingARestart = 0;
+        var blocksWithNoRead = new List<string>();
+
+        void Scan(string raw, string stripped, string where)
+        {
+            foreach (Match m in s_catch.Matches(stripped))
+            {
+                var open = stripped.IndexOf('{', m.Index);
+                if (open < 0)
+                {
+                    continue;
+                }
+
+                var strippedBody = CSharpSourceWalker.BraceBalanced(stripped, open);
+                if (!strippedBody.Contains("RecordReadFailure(", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                blocks++;
+                var rawBody = raw[open..(open + strippedBody.Length)];
+                var call = Regex.Match(rawBody, s_recordCall);
+                if (!call.Success)
+                {
+                    /* The sibling pin owns this case and names it; reporting it twice would make one
+                       defect look like two. */
+                    continue;
+                }
+
+                var clock = call.Groups["clock"].Value;
+                var readName = call.Groups["name"].Value;
+
+                /* The try body this catch belongs to — the same sibling-indent walk the sibling pin uses. */
+                var lineStart = raw.LastIndexOf('\n', m.Index) + 1;
+                var indent = raw[lineStart..m.Index];
+                var sibling = new Regex(@"\r?\n" + Regex.Escape(indent) + @"try[ \t]*\r?\n");
+                Match? nearest = null;
+                foreach (Match t in sibling.Matches(raw[..m.Index]))
+                {
+                    nearest = t;
+                }
+
+                Assert.NotNull(nearest);
+                var tryOpen = stripped.IndexOf('{', nearest!.Index + nearest.Length - 1);
+                Assert.True(tryOpen > 0, $"{where}: the {readName} block's try has no body");
+
+                /* STRIPPED, so an `await` written in prose cannot register as an operation and a
+                   `Restart()` mentioned in a comment cannot satisfy the property. Length is preserved, so
+                   the offsets still line up with the raw source. */
+                var body = CSharpSourceWalker.BraceBalanced(stripped, tryOpen);
+
+                var awaits = s_awaitedCall.Matches(body)
+                    .Select(a => (a.Index, Callee: a.Groups["callee"].Value))
+                    .ToList();
+
+                foreach (var (_, callee) in awaits)
+                {
+                    Assert.True(
+                        s_awaitedStoreReads.Contains(callee) || s_awaitedNonReads.Contains(callee),
+                        $"{where}: the {readName} block awaits {callee}, which is in neither "
+                        + "s_awaitedStoreReads nor s_awaitedNonReads. Classify it — a prefix guess is what "
+                        + "under-counted this population once already.");
+                }
+
+                if (!awaits.Any(a => s_awaitedStoreReads.Contains(a.Callee)))
+                {
+                    blocksWithNoRead.Add(readName);
+                    continue;
+                }
+
+                for (var i = 0; i < awaits.Count - 1; i++)
+                {
+                    if (!s_awaitedStoreReads.Contains(awaits[i].Callee))
+                    {
+                        continue;
+                    }
+
+                    readsNeedingARestart++;
+                    var gap = body[awaits[i].Index..awaits[i + 1].Index];
+                    if (!gap.Contains(clock + ".Restart();", StringComparison.Ordinal))
+                    {
+                        violations.Add(
+                            $"{where}: in the {readName} block, {awaits[i].Callee} is followed by "
+                            + $"{awaits[i + 1].Callee} with no {clock}.Restart() between them, so a fault "
+                            + "in the later one records both");
+                    }
+                }
+            }
+        }
+
+        foreach (var (relative, _, _) in s_wholeFileScopes)
+        {
+            var raw = ReadSource(relative);
+            Scan(raw, CSharpSourceWalker.StripCommentsAndStrings(raw), relative);
+        }
+
+        var workerRaw = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var workerStripped = CSharpSourceWalker.StripCommentsAndStrings(workerRaw);
+        foreach (var member in s_workerAlertMembers)
+        {
+            var (start, end) = MemberBody(workerStripped, member);
+            Scan(workerRaw[start..end], workerStripped[start..end], $"DarlingWorker.{member}");
+        }
+
+        Assert.True(
+            violations.Count == 0,
+            $"{violations.Count} counted block(s) can record more than one operation's elapsed: "
+            + string.Join(" | ", violations));
+
+        Assert.Equal(CountedSites, blocks);
+
+        /* Both directions on the walk, so a scan that stopped reaching cannot report clean: there are
+           reads to bracket, and the one read-free block is the one that is supposed to be read-free. */
+        Assert.True(readsNeedingARestart >= 25, $"only {readsNeedingARestart} read(s) needed a restart");
+        Assert.Equal(new[] { "shared engine sweep" }, blocksWithNoRead);
+    }
+
+    /// <summary>
+    /// The positive control for the scan above. Two fixtures that must red and one that must pass, through
+    /// the same substring property — including the shape that started this, where two reads sit inside one
+    /// argument list with nowhere to put a restart.
+    /// </summary>
+    [Fact]
+    public void TheRestartScanner_RedsOnTwoReadsSharingOneClock()
+    {
+        static (List<string> Violations, int Reads) Scan(string body, string clock)
+        {
+            var violations = new List<string>();
+            var awaits = s_awaitedCall.Matches(body)
+                .Select(a => (a.Index, Callee: a.Groups["callee"].Value))
+                .ToList();
+            var reads = 0;
+
+            for (var i = 0; i < awaits.Count - 1; i++)
+            {
+                if (!s_awaitedStoreReads.Contains(awaits[i].Callee))
+                {
+                    continue;
+                }
+
+                reads++;
+                if (!body[awaits[i].Index..awaits[i + 1].Index]
+                        .Contains(clock + ".Restart();", StringComparison.Ordinal))
+                {
+                    violations.Add(awaits[i].Callee);
+                }
+            }
+
+            return (violations, reads);
+        }
+
+        /* Bracketed: each read gets the clock to itself. */
+        var (ok, okReads) = Scan(
+            """
+            var a = await GetXminHorizonAsync(id, ct);
+            readClock.Restart();
+            var b = await GetWraparoundRiskAsync(id, ct);
+            readClock.Restart();
+            await DeliverAsync(a, b);
+            """,
+            "readClock");
+        Assert.Equal(2, okReads);
+        Assert.Empty(ok);
+
+        /* One clock across two reads — the class the review found. */
+        var (bad, badReads) = Scan(
+            """
+            var a = await GetXminHorizonAsync(id, ct);
+            var b = await GetWraparoundRiskAsync(id, ct);
+            readClock.Restart();
+            await DeliverAsync(a, b);
+            """,
+            "readClock");
+        Assert.Equal(2, badReads);
+        Assert.Equal(new[] { "GetXminHorizonAsync" }, bad);
+
+        /* And the shape that cannot be fixed by inserting a line: two reads awaited inside ONE argument
+           list. The scan sees it for the same reason — no restart between the two offsets. */
+        var (argList, argReads) = Scan(
+            """
+            var findings = Evaluate(
+                await GetWraparoundRiskAsync(id, ct),
+                await GetXminHorizonAsync(id, ct));
+            readClock.Restart();
+            await DeliverAsync(findings);
+            """,
+            "readClock");
+        Assert.Equal(2, argReads);
+        Assert.Equal(new[] { "GetWraparoundRiskAsync" }, argList);
+
+        /* A delivery does not need a clock of its own, so a block of nothing but deliveries reds nowhere —
+           the control that stops the scan flagging everything and passing by accident. */
+        var (deliveries, deliveryReads) = Scan(
+            """
+            await FireAsync(outcome);
+            await NotifyResolutionAsync(resolution);
+            """,
+            "readClock");
+        Assert.Equal(0, deliveryReads);
+        Assert.Empty(deliveries);
+    }
+
     private static void AssertScan(string fixture, int expectedSites, string? expectedViolation)
     {
         var violations = new List<string>();

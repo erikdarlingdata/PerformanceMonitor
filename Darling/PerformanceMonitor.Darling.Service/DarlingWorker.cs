@@ -3288,10 +3288,19 @@ public sealed class DarlingWorker : BackgroundService
         {
             var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
 
-            var findings = PostgresAlertEvaluator.Evaluate(
-                await adapter.GetWraparoundRiskAsync(runtime.ServerId, cancellationToken),
-                await adapter.GetXminHorizonAsync(runtime.ServerId, cancellationToken),
-                await adapter.GetReplicationSlotRiskAsync(runtime.ServerId, cancellationToken));
+            /* The three feed reads are hoisted into locals rather than awaited inside the Evaluate
+               argument list, so each one gets the clock to itself. As arguments they were three
+               sequentially awaited reads inside ONE statement, and a client-side cutoff of the third
+               reported the sum of all three — a figure above the per-read deadline, which is a reading
+               the elapsed has no bucket for. Same evaluation order; the argument list is unchanged. */
+            var wraparound = await adapter.GetWraparoundRiskAsync(runtime.ServerId, cancellationToken);
+            readClock.Restart();
+            var xmin = await adapter.GetXminHorizonAsync(runtime.ServerId, cancellationToken);
+            readClock.Restart();
+            var slots = await adapter.GetReplicationSlotRiskAsync(runtime.ServerId, cancellationToken);
+            readClock.Restart();
+
+            var findings = PostgresAlertEvaluator.Evaluate(wraparound, xmin, slots);
 
             var now = DateTime.UtcNow;
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
@@ -3319,6 +3328,7 @@ public sealed class DarlingWorker : BackgroundService
                 {
                     var seeded = await _historyStore.GetLastAlertTimeAsync(
                         snapshot.ServerKey, finding.MetricName, dedupKey: finding.Subject);
+                    readClock.Restart();
                     if (seeded.HasValue)
                     {
                         _lastPostgresAlert[cooldownKey] = seeded.Value;
@@ -3430,6 +3440,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             var now = DateTime.UtcNow;
             var reading = await DarlingPgCpuUtilizationReader.GetLatestAsync(_postgres, runtime.ServerId, now, cancellationToken);
+            readClock.Restart();
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
             var wasActive = _activePgCpuAlert.TryGetValue(key, out var activeBefore) && activeBefore;
@@ -3521,6 +3532,7 @@ public sealed class DarlingWorker : BackgroundService
             if (_pgDeadlockWatermarkSeeded.TryAdd(key, true))
             {
                 var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                readClock.Restart();
                 if (seeded.HasValue)
                 {
                     _lastAlertedPgDeadlockCount[key] = seeded.Value;
@@ -3535,6 +3547,7 @@ public sealed class DarlingWorker : BackgroundService
                collection_time would put a report in the wrong window and move it every cycle. */
             var rows = await DarlingPgDeadlockReader.GetDeadlocksAsync(
                 _postgres, runtime.ServerId, windowStart, now, limit: 50, cancellationToken);
+            readClock.Restart();
             var count = rows.Count;
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
@@ -3632,6 +3645,7 @@ public sealed class DarlingWorker : BackgroundService
             if (_pgBlockingWatermarkSeeded.TryAdd(key, true))
             {
                 var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                readClock.Restart();
                 if (seeded.HasValue)
                 {
                     _lastAlertedPgBlockingCount[key] = seeded.Value;
@@ -3649,6 +3663,7 @@ public sealed class DarlingWorker : BackgroundService
                row per root — never the only thing standing between a real distinct root and an undercount. */
             var rows = await DarlingPgBlockingReader.GetPgBlockingChainsDedupedByRootAsync(
                 _postgres, runtime.ServerId, windowStart, now, limit: 100, cancellationToken);
+            readClock.Restart();
 
             var worstPerRoot = WorstPgBlockingChainPerRoot(rows);
             var count = worstPerRoot.Count;
@@ -3770,6 +3785,7 @@ public sealed class DarlingWorker : BackgroundService
             var rows = await DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync(
                 _postgres, runtime.ServerId, thresholdMs: thresholdMinutes * 60_000L, now,
                 PgLongRunningQueryRecencyMinutes, limit: alertSettings.LongRunningQueryMaxResults, cancellationToken);
+            readClock.Restart();
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
             var wasActive = _activePgLongRunningQueryAlert.TryGetValue(key, out var activeBefore) && activeBefore;
@@ -3897,6 +3913,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
             var rows = await adapter.GetPoisonWaitPressureAsync(runtime.ServerId, cancellationToken);
+            readClock.Restart();
             var findings = PostgresAlertEvaluator.EvaluatePoisonWaits(rows);
 
             var now = DateTime.UtcNow;
@@ -3935,6 +3952,7 @@ public sealed class DarlingWorker : BackgroundService
                 {
                     var seeded = await _historyStore.GetLastAlertTimeAsync(
                         serverKey, finding.MetricName, dedupKey: finding.Subject);
+                    readClock.Restart();
                     if (seeded.HasValue)
                     {
                         _lastPgPoisonWaitAlert[cooldownKey] = seeded.Value;
@@ -4372,6 +4390,7 @@ LIMIT 1";
                 await TimescaleSupport.ReadCompressionActivityAsync(connection, _logger, cancellationToken),
                 DateTime.UtcNow,
                 _logger);
+            readClock.Restart();
 
             /* #3044: the heaviest hourly refresh's runtime against the SLOT it has to fit inside, which is a
                different bound from #2136's below and the one the compression phase grid rests on. The build-time
@@ -4385,9 +4404,11 @@ LIMIT 1";
             TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
                 await TimescaleSupport.ReadHeaviestRefreshRuntimeAsync(connection, _logger, cancellationToken),
                 _logger);
+            readClock.Restart();
 
             var stuckJobs = await TimescaleSupport.ReadStuckCompressionJobsAsync(
                 connection, DateTime.UtcNow, _logger, cancellationToken);
+            readClock.Restart();
             await _selfAlerts!.EvaluateCompressionJobsAsync(
                 stuckJobs,
                 jobId => TimescaleSupport.TryRearmJobAsync(connection, jobId, _logger, cancellationToken),
@@ -4400,6 +4421,7 @@ LIMIT 1";
                is the backstop. */
             var cadenceReadings = await TimescaleSupport.ReadJobCadenceReadingsAsync(
                 connection, _logger, cancellationToken);
+            readClock.Restart();
             await _selfAlerts!.EvaluateStoreJobCadenceAsync(cadenceReadings, cancellationToken);
 
             /* #2813: the Retention Held check rides the same connection and hourly cadence. A retention

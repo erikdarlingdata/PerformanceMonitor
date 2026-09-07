@@ -438,6 +438,7 @@ internal sealed class DarlingSelfAlertEvaluator
                    only as the shipped defaults. */
                 var (lastSuccess, recentRuns, recentSuccess) =
                     await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
+                collectionReadClock.Restart();
                 bool stopped = IsCollectionStopped(
                     lastSuccess, recentRuns, recentSuccess, _utcNow(),
                     SettingsStaleWindow, _settings.CollectionFailureThreshold, out var reason);
@@ -463,6 +464,7 @@ internal sealed class DarlingSelfAlertEvaluator
         try
         {
             var missing = await ReadMissingCaptureSessionsAsync(postgres, serverId, cancellationToken);
+            captureReadClock.Restart();
             await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -482,6 +484,7 @@ internal sealed class DarlingSelfAlertEvaluator
                Agent service is stopped. Only a FRESH reading judges — a stale row (collection lagging) yields
                null, so the collection-stopped alert owns staleness and this never false-alarms on old data. */
             var (agentCollectionTimeUtc, agentRunning) = await ReadLatestAgentStatusAsync(postgres, serverId, cancellationToken);
+            agentReadClock.Restart();
             bool? freshRunning = agentRunning.HasValue
                 && agentCollectionTimeUtc.HasValue
                 && _utcNow() - agentCollectionTimeUtc.Value < SettingsStaleWindow
@@ -500,6 +503,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (!_agentEverSeenRunning.TryGetValue(agentKey, out var everRan) || !everRan)
             {
                 everRan = await HasAgentEverBeenSeenRunningAsync(postgres, serverId, cancellationToken);
+                agentReadClock.Restart();
                 if (everRan)
                 {
                     _agentEverSeenRunning[agentKey] = true;
@@ -533,6 +537,7 @@ internal sealed class DarlingSelfAlertEvaluator
                    vouch for its stale rows. */
                 var (replicaTimeUtc, replicas) =
                     await ReadLatestAgReplicaStatesAsync(postgres, serverId, cancellationToken);
+                agReadClock.Restart();
                 if (IsFresh(replicaTimeUtc))
                 {
                     await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken);
@@ -540,6 +545,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
                 var (databaseTimeUtc, databases) =
                     await ReadLatestAgDatabaseReplicaStatesAsync(postgres, serverId, cancellationToken);
+                agReadClock.Restart();
                 if (IsFresh(databaseTimeUtc))
                 {
                     await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken);
