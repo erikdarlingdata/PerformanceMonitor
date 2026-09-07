@@ -89,6 +89,7 @@ public sealed class RepoFileAdoptionTests
     private static readonly string[] s_lfReaders =
     {
         "ChartWindowDomainTests.cs",
+        "DarlingPathFilterGateTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         "FleetPageAttentionFilterTests.cs",
         "ServerPageTabsTests.cs",

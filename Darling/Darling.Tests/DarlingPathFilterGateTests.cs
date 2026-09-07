@@ -10,9 +10,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -48,9 +48,14 @@ namespace Darling.Tests;
 public sealed class DarlingPathFilterGateTests
 {
     /// <summary>
-    /// The shared gate both Darling jobs read, repository-relative.
+    /// The shared gate both Darling jobs read, repository-relative — for messages, and as the path segments
+    /// the reads below take.
     /// </summary>
     private const string GatePath = ".github/darling-paths-filter.yml";
+
+    private static readonly string[] s_gateSegments = { ".github", "darling-paths-filter.yml" };
+
+    private static readonly string[] s_workflowSegments = { ".github", "workflows", "build.yml" };
 
     /// <summary>
     /// One <c>&lt;ProjectReference Include="..." /&gt;</c>, which is how the closure below is walked. MSBuild
@@ -75,8 +80,7 @@ public sealed class DarlingPathFilterGateTests
     [Fact]
     public void TheSharedGate_CoversEverySharedLibraryDarlingCompiles()
     {
-        var repo = RepoRoot();
-        var libraries = SharedLibraryClosure(repo);
+        var libraries = SharedLibraryClosure();
 
         /* Non-vacuity, and specifically that the walk is TRANSITIVE. Darling.Tests references exactly one
            shared library directly (PerformanceMonitor.Common); PerformanceMonitor.Collectors is two hops
@@ -85,7 +89,7 @@ public sealed class DarlingPathFilterGateTests
         Assert.Contains("PerformanceMonitor.Common", libraries);
         Assert.Contains("PerformanceMonitor.Collectors", libraries);
 
-        var missing = MissingFromGate(ReadRepoFileLf(repo, GatePath), libraries);
+        var missing = MissingFromGate(ReadRepoFileLf(s_gateSegments), libraries);
 
         Assert.True(
             missing.Count == 0,
@@ -103,10 +107,9 @@ public sealed class DarlingPathFilterGateTests
     [Fact]
     public void TheCoverageCheck_ReportsAnInjectedGap()
     {
-        var repo = RepoRoot();
-        var real = ReadRepoFileLf(repo, GatePath);
+        var real = ReadRepoFileLf(s_gateSegments);
 
-        Assert.Empty(MissingFromGate(real, SharedLibraryClosure(repo)));
+        Assert.Empty(MissingFromGate(real, SharedLibraryClosure()));
 
         /* Delete the entry #3116 was about. */
         var mutated = real.Replace(
@@ -114,7 +117,7 @@ public sealed class DarlingPathFilterGateTests
             string.Empty,
             StringComparison.Ordinal);
         Assert.NotEqual(real, mutated);
-        Assert.Contains("PerformanceMonitor.Collectors", MissingFromGate(mutated, SharedLibraryClosure(repo)));
+        Assert.Contains("PerformanceMonitor.Collectors", MissingFromGate(mutated, SharedLibraryClosure()));
 
         /* And the extglob form is what is required, not the directory. A bare 'dir/**' include paired with a
            negation elsewhere is the spelling that made these filters unconditionally true. */
@@ -123,7 +126,7 @@ public sealed class DarlingPathFilterGateTests
             "  - 'PerformanceMonitor.Collectors/**'",
             StringComparison.Ordinal);
         Assert.NotEqual(real, bareInclude);
-        Assert.Contains("PerformanceMonitor.Collectors", MissingFromGate(bareInclude, SharedLibraryClosure(repo)));
+        Assert.Contains("PerformanceMonitor.Collectors", MissingFromGate(bareInclude, SharedLibraryClosure()));
     }
 
     /// <summary>
@@ -137,7 +140,7 @@ public sealed class DarlingPathFilterGateTests
     [InlineData("darling-linux")]
     public void EachDarlingJob_ReadsTheSharedGate_AndCarriesNoListOfItsOwn(string jobId)
     {
-        var job = JobBlock(ReadRepoFileLf(RepoRoot(), ".github/workflows/build.yml"), jobId);
+        var job = JobBlock(ReadRepoFileLf(s_workflowSegments), jobId);
 
         Assert.Contains($"filters: {GatePath}", job, StringComparison.Ordinal);
 
@@ -159,7 +162,7 @@ public sealed class DarlingPathFilterGateTests
     [InlineData("darling-linux", "Report the Linux gate decision")]
     public void EachGateDecisionNotice_ReportsTheDecisionRatherThanACause(string jobId, string stepName)
     {
-        var job = JobBlock(ReadRepoFileLf(RepoRoot(), ".github/workflows/build.yml"), jobId);
+        var job = JobBlock(ReadRepoFileLf(s_workflowSegments), jobId);
 
         /* The file lists the notice names have to come from. */
         Assert.Contains("list-files: shell", job, StringComparison.Ordinal);
@@ -190,9 +193,9 @@ public sealed class DarlingPathFilterGateTests
     /// projects are excluded because they live under <c>Darling/</c>, which the gate's <c>Darling/**</c>
     /// entry already covers.
     /// </summary>
-    private static SortedSet<string> SharedLibraryClosure(string repo)
+    private static SortedSet<string> SharedLibraryClosure()
     {
-        var root = Path.GetFullPath(repo).TrimEnd(Path.DirectorySeparatorChar);
+        var root = Path.GetFullPath(Root).TrimEnd(Path.DirectorySeparatorChar);
         var libraries = new SortedSet<string>(StringComparer.Ordinal);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var pending = new Queue<string>();
@@ -292,25 +295,4 @@ public sealed class DarlingPathFilterGateTests
         return next.Success ? rest[..next.Index] : rest;
     }
 
-    /// <summary>
-    /// A repository file, read with the line endings normalised, so the assertions here do not depend on
-    /// whether the checkout landed CRLF or LF.
-    /// </summary>
-    private static string ReadRepoFileLf(string repo, string relative) =>
-        File.ReadAllText(Path.Combine(repo, relative.Replace('/', Path.DirectorySeparatorChar)))
-            .Replace("\r\n", "\n", StringComparison.Ordinal);
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null
-               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
-               && !Directory.Exists(Path.Combine(dir, ".git")))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return dir!;
-    }
 }
