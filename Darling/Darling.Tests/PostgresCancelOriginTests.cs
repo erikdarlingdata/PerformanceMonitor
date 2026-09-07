@@ -184,6 +184,32 @@ public sealed class PostgresCancelOriginTests
     }
 
     /// <summary>
+    /// An unexamined default names no machine.
+    ///
+    /// <para><see cref="CollectorFaultCancelOrigin"/> is a struct, so <c>default</c>, <c>new()</c> and a
+    /// dictionary miss all produce one, and whichever enum member sits at zero decides what those render
+    /// as. A confident member there would make a value nobody set state that the target's
+    /// <c>statement_timeout</c> fired and name a knob on the monitored server — this PR's own subject, one
+    /// level up, arriving through an unexamined default rather than a shared SQLSTATE.</para>
+    ///
+    /// <para>Asserted on the SENTENCE as well as the enum, because the enum value alone is satisfied by a
+    /// renderer that treats the zero as confident anyway.</para>
+    /// </summary>
+    [Fact]
+    public void AnUnexaminedDefaultNamesNoMachine()
+    {
+        Assert.Equal(PostgresCancelSource.Unproven, default(PostgresCancelSource));
+        Assert.Equal(PostgresCancelSource.Unproven, default(CollectorFaultCancelOrigin).Source);
+
+        var explanation = DarlingWorker.PostgresTimeoutExplanation(
+            "pg_index_bloat", "appdb", elapsedMs: 1, origin: default);
+
+        Assert.DoesNotContain(ServerArmHeadline, explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain(ServerArmInstruction, explanation, StringComparison.Ordinal);
+        Assert.Contains("does not say WHOSE deadline fired", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The unproven sentence DESCRIBES the cancel code as PostgreSQL's behaviour and never attributes it to
     /// the fault in hand.
     ///

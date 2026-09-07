@@ -16,17 +16,26 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para>Three-valued rather than a bool, because the evidence is three-valued. A bool forces every
 /// unproven cancel into one of the two confident answers, and both of them name a machine and a knob.</para>
+///
+/// <para><b>The unproven case is explicitly ZERO, so an unexamined default fails toward claiming
+/// nothing.</b> <see cref="CollectorFaultCancelOrigin"/> is a struct, so <c>default</c>, <c>new()</c> and a
+/// dictionary miss all produce one; whichever member sits first decides what those render as. With a
+/// confident value there, a value nobody set would state the target's <c>statement_timeout</c> fired and
+/// name a knob on the monitored server — a confident wrong machine from an unexamined default, which is
+/// this type's own subject one level up. The values are written out rather than left implicit so that
+/// reordering the members cannot quietly move the zero.</para>
 /// </summary>
 internal enum PostgresCancelSource
 {
+    /// <summary>A cancel the fault does not attribute to either side. Zero deliberately — see the type
+    /// summary.</summary>
+    Unproven = 0,
+
     /// <summary>The target's own <c>statement_timeout</c>, changed on the monitored server.</summary>
-    TargetStatementTimeout,
+    TargetStatementTimeout = 1,
 
     /// <summary>This service's command deadline, changed here.</summary>
-    OurCommandDeadline,
-
-    /// <summary>A cancel the fault does not attribute to either side.</summary>
-    Unproven,
+    OurCommandDeadline = 2,
 }
 
 /// <summary>
