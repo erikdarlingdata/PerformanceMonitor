@@ -31,6 +31,22 @@ public sealed class DarlingCustomViewsLiveTests
     private const string SampleDefinition = "{\"panels\":[{\"read\":\"get_wait_stats\",\"viz\":\"table\",\"span\":1}]}";
     private const string SampleDefinitionV2 = "{\"panels\":[{\"read\":\"get_cpu_utilization\",\"viz\":\"line\",\"span\":2}]}";
 
+    /// <summary>
+    /// The create's <c>updated_by</c>, and deliberately NOT the <c>web</c> constant. This fixture used to pass
+    /// <c>"web"</c> and assert <c>"web"</c> came back, which a store that ignored the argument entirely and
+    /// hardcoded the constant satisfied perfectly — the assertion could not discriminate the binding it was
+    /// there to prove. Since #2550 that column carries an authenticated subject, so the fixture carries a
+    /// subject-shaped value: a placeholder, never a real address.
+    /// </summary>
+    private const string CreatePrincipal = "placeholder-author@example.invalid";
+
+    /// <summary>
+    /// The update's <c>updated_by</c>, DIFFERENT from the create's so the update is shown to REPLACE the stamp
+    /// rather than leave the creator's. Nothing asserted <see cref="CustomViewStore.UpdateSql"/>'s <c>$5</c>
+    /// end-to-end before, so a parameter swapped with <c>description</c> would have read as a clean pass.
+    /// </summary>
+    private const string UpdatePrincipal = "placeholder-editor@example.invalid";
+
     private static string RequireLivePostgres()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -81,12 +97,12 @@ public sealed class DarlingCustomViewsLiveTests
         {
             /* create -> Ok, version 1, fields round-trip. */
             var created = Assert.IsType<CustomViewResult.Ok>(
-                await store.CreateAsync(name1, "first", SampleDefinition, "web", ct));
+                await store.CreateAsync(name1, "first", SampleDefinition, CreatePrincipal, ct));
             var view = created.View!;
             Assert.Equal(name1, view.Name);
             Assert.Equal("first", view.Description);
             Assert.Equal(1, view.Version);
-            Assert.Equal("web", view.UpdatedBy);
+            Assert.Equal(CreatePrincipal, view.UpdatedBy);
             Assert.Contains("panels", view.DefinitionJson, StringComparison.Ordinal);
 
             /* get -> Ok, matches. */
@@ -100,29 +116,32 @@ public sealed class DarlingCustomViewsLiveTests
             Assert.Contains(list, s => s.Id == view.Id && s.Name == name1 && s.Version == 1);
             Assert.Null(list.Single(s => s.Id == view.Id).Kind);
 
-            /* update at the correct version -> Ok, version bumped to 2. */
+            /* update at the correct version -> Ok, version bumped to 2, and the stamp REPLACED. A different
+               principal from the create's is what makes the last assertion able to fail: with one shared value
+               an update that never wrote $5 at all would still read back the expected string. */
             var updated = Assert.IsType<CustomViewResult.Ok>(
-                await store.UpdateAsync(view.Id, name1, "second", SampleDefinitionV2, 1, "web", ct));
+                await store.UpdateAsync(view.Id, name1, "second", SampleDefinitionV2, 1, UpdatePrincipal, ct));
             Assert.Equal(2, updated.View!.Version);
             Assert.Equal("second", updated.View.Description);
+            Assert.Equal(UpdatePrincipal, updated.View.UpdatedBy);
 
             /* stale update (still presenting version 1) -> Conflict, not a silent clobber. */
             Assert.IsType<CustomViewResult.Conflict>(
-                await store.UpdateAsync(view.Id, name1, "third", SampleDefinitionV2, 1, "web", ct));
+                await store.UpdateAsync(view.Id, name1, "third", SampleDefinitionV2, 1, CreatePrincipal, ct));
 
             /* duplicate name on CREATE -> Conflict. */
             Assert.IsType<CustomViewResult.Conflict>(
-                await store.CreateAsync(name1, null, SampleDefinition, "web", ct));
+                await store.CreateAsync(name1, null, SampleDefinition, CreatePrincipal, ct));
 
             /* duplicate name on UPDATE: a second view renamed onto the first's name -> Conflict. */
             var second = Assert.IsType<CustomViewResult.Ok>(
-                await store.CreateAsync(name2, null, SampleDefinition, "web", ct));
+                await store.CreateAsync(name2, null, SampleDefinition, CreatePrincipal, ct));
             Assert.IsType<CustomViewResult.Conflict>(
-                await store.UpdateAsync(second.View!.Id, name1, null, SampleDefinition, 1, "web", ct));
+                await store.UpdateAsync(second.View!.Id, name1, null, SampleDefinition, 1, CreatePrincipal, ct));
 
             /* update a non-existent id -> NotFound. */
             Assert.IsType<CustomViewResult.NotFound>(
-                await store.UpdateAsync(-999999, name1, null, SampleDefinition, 1, "web", ct));
+                await store.UpdateAsync(-999999, name1, null, SampleDefinition, 1, CreatePrincipal, ct));
 
             /* delete -> Ok; then get + delete-again -> NotFound. */
             Assert.IsType<CustomViewResult.Ok>(await store.DeleteAsync(view.Id, ct));

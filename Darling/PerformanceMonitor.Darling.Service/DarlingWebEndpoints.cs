@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.Http;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -288,10 +289,14 @@ public static class DarlingWebEndpoints
         var store = new CustomViewStore(postgres);
 
         /* A request that reaches this endpoint has already cleared the host's auth gate (network: token→cookie +
-           CIDR; loopback: on the host), so it is a trusted operator that may edit. The frontend reads this to
-           show/hide affordances; a failed probe fails closed to read-only in the UI. */
-        app.MapGet("/api/session", () =>
-            JsonNodeResult(new JsonObject { ["can_edit"] = true }));
+           CIDR; loopback: on the host), so it holds a seat. WHICH seat decides the answer: the shared token and
+           an OIDC admin may edit, an OIDC viewer may not. Reporting the request's own seat rather than a
+           constant is what makes the SPA's read-only rendering reachable — it hides every edit affordance on
+           can_edit: false, and the middleware's group-level write gate refuses the mutation regardless of what a
+           client sends, so this is the affordance layer, never the enforcement. A failed probe fails closed to
+           read-only in the UI. */
+        app.MapGet("/api/session", (HttpContext context) =>
+            JsonNodeResult(new JsonObject { ["can_edit"] = DarlingWebSeat.FromContext(context).CanEdit }));
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
         app.MapGet("/api/catalog", () => JsonNodeResult(BuildCatalogNode()));
@@ -336,7 +341,8 @@ public static class DarlingWebEndpoints
             try
             {
                 var result = await store.CreateAsync(
-                    request.Name, request.Description, request.DefinitionJson, WebEditorPrincipal, context.RequestAborted);
+                    request.Name, request.Description, request.DefinitionJson,
+                    DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
                 return result switch
                 {
                     CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
@@ -381,7 +387,8 @@ public static class DarlingWebEndpoints
             try
             {
                 var result = await store.UpdateAsync(
-                    id, request.Name, request.Description, request.DefinitionJson, expectedVersion, WebEditorPrincipal, context.RequestAborted);
+                    id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
+                    DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
                 return result switch
                 {
                     CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
@@ -754,13 +761,33 @@ public static class DarlingWebEndpoints
         _ => JsonValue.Create(value.ToString()),
     };
 
-    /// <summary>The <c>updated_by</c> stamp for a web edit. The web surface has no per-user identity, so a
-    /// constant is honest — it marks the row as web-authored.</summary>
+    /// <summary>
+    /// The <c>updated_by</c> stamp for a web edit made by a seat with NO subject — the shared token and the
+    /// tokenless loopback operator. A named OIDC seat stamps its own subject instead
+    /// (<see cref="DarlingWebSeat.EditorPrincipal"/> is the one place that choice is made), so this is the
+    /// fallback, not the web stamp.
+    ///
+    /// <para><b>The column is therefore heterogeneous, deliberately.</b> A row reads either as a person or as
+    /// the surface that wrote it, and a reader cannot tell which by shape alone — a directory that stamps an
+    /// opaque <c>sub</c> GUID produces values no more person-like than this one. The alternative was a second
+    /// column separating identity from provenance, rejected because the only consumer is a rendered byline
+    /// ("updated by X") that wants exactly one value, and splitting it would make every reader join two columns
+    /// to recover the string they already display. Nothing filters, sorts or groups on <c>updated_by</c>, so
+    /// heterogeneity costs nothing a query has to cope with; if something ever does, that is the moment to
+    /// revisit this, not before.</para>
+    /// </summary>
     internal const string WebEditorPrincipal = "web";
 
-    /// <summary>The <c>updated_by</c> stamp for a custom view created/updated over MCP (the
-    /// <c>create_custom_view</c> / <c>update_custom_view</c> tools). Like <see cref="WebEditorPrincipal"/> it is a
-    /// constant — the MCP surface has no per-user identity — and marks the row's provenance as MCP-authored.</summary>
+    /// <summary>
+    /// The <c>updated_by</c> stamp for a custom view created/updated over MCP (the <c>create_custom_view</c> /
+    /// <c>update_custom_view</c> tools). Unlike <see cref="WebEditorPrincipal"/> this stays an unconditional
+    /// constant, and the asymmetry is chosen rather than left over: MCP authenticates a CLIENT on its own
+    /// network block with its own shared token and has no sign-in flow to carry a person through, so there is no
+    /// subject to prefer. Stamping <c>mcp</c> always is the honest answer for a surface where per-user identity
+    /// does not exist — the same argument that used to justify a constant on the web surface, still true here
+    /// because MCP has no OIDC path. Giving MCP identity is a separate piece of work on a separate credential
+    /// model, not a line change here.
+    /// </summary>
     internal const string McpEditorPrincipal = "mcp";
 
     /* ── loopback determination (the web host's tokenless-loopback auth arm) ── */
