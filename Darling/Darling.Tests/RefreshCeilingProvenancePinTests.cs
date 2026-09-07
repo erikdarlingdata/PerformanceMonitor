@@ -503,10 +503,10 @@ public sealed class RefreshCeilingProvenancePinTests
     /// itself. Nothing in the code can know the live series, so no assertion can recognise an open
     /// population claim in a construction it has never seen; a claim built out of neither shape passes this
     /// and still breaks the rule. What carries the rest is that the claim is ABSENT rather than reworded —
-    /// the band is described by
-    /// <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/> and by what the level means, so there is no
-    /// census for a later edit to keep current. The population that IS published carries its own assertion
-    /// in <see cref="TheDerivedFiguresAreExactlyStateable_AndTheConstantIsThePopulationMaximum"/>.</para>
+    /// the band is described by <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/> and by what the
+    /// level means, so there is no census for a later edit to keep current. The population that IS
+    /// published carries its own assertion in
+    /// <see cref="TheDerivedFiguresAreExactlyStateable_AndTheConstantIsThePopulationMaximum"/>.</para>
     /// </summary>
     [Fact]
     public void NoOpenPopulationClaim_SurvivesOutsideTheSentenceThatRejectsIt()
