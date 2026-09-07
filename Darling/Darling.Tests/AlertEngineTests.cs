@@ -1110,18 +1110,18 @@ public sealed class AlertEngineTests
            would have to move, and the fact that it does not is the guarantee that no existing on-prem or RDS
            target with an unlimited (or uncollected) tempdb sees its number change. The capped case gets its
            own test below rather than being folded in here. */
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200 }; /* 80% used */
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200 }; /* 80% reserved */
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
-        Assert.Equal("80% used (800 MB)", fired.CurrentValue);                /* :446 */
+        Assert.Equal("80% reserved (800 MB)", fired.CurrentValue);                /* :446 */
         Assert.Equal(80d, fired.NumericCurrentValue!.Value, precision: 3);    /* :450 */
 
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 200, UnallocatedMb = 800 }; /* 20% used */
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 200, UnallocatedMb = 800 }; /* 20% reserved */
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("tempdb Space Resolved", resolution.Title);              /* :463 */
-        Assert.Equal("SRV-A: tempdb usage back to 20%", resolution.Message);  /* :461,:464 */
+        Assert.Equal("SRV-A: tempdb reserved space back to 20%", resolution.Message);  /* :461,:464 */
     }
 
     /// <summary>
@@ -1151,7 +1151,7 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
-        Assert.Equal("96% used (60 MB)", fired.CurrentValue);
+        Assert.Equal("96% reserved (60 MB)", fired.CurrentValue);
     }
 
     /* ---------------- low disk ---------------- */

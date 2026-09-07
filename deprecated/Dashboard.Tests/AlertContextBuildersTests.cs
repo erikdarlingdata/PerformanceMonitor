@@ -250,7 +250,7 @@ public class AlertContextBuildersTests
 
         Assert.NotNull(context);
         var item = Assert.Single(context!.Details);
-        Assert.Equal("tempdb — 80% Used", item.Heading);
+        Assert.Equal("tempdb — 80% Reserved", item.Heading);
         Assert.Equal(
             new List<(string, string)>
             {
