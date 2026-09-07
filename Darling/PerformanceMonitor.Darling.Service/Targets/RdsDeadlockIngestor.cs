@@ -183,6 +183,13 @@ public sealed class RdsDeadlockIngestor
         var writer = new PgCollectorRowWriter();
         var written = 0;
 
+        /* The start phase's deadline. It is separate from the importer's because the importer does not
+           exist until Begin returns, and the await that returns it runs under the connection's
+           CommandTimeout, which Npgsql exposes read-only. StoreCopyStartDeadline carries the value, the
+           stop-versus-deadline discrimination and the fault shape — see it for why a breach is re-raised
+           as a TimeoutException rather than left as the cancellation Npgsql threw. */
+        using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
+
         /* Which COPY phase a fault came out of, on the same terms as
            DarlingCollectorRunner.CopyBatchOnceAsync — see CollectorFaultCopyPhase, which is the authority
            for what each value means and what it authorises.
@@ -195,14 +202,15 @@ public sealed class RdsDeadlockIngestor
         try
         {
             using (var importer = await connection.BeginBinaryImportAsync(
-                PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
+                PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
             {
                 copyPhase = StoreCopyPhase.Data;
 
                 /* #2874: the COPY's own deadline, on NpgsqlBinaryImporter.Timeout — a TimeSpan on a different type
                    from the rest of the regime, invisible to a command-shaped regex, and inherited from the
-                   connection's CommandTimeout (30 s) when left unset. Same constant, same regime, and the same
-                   narrows-not-closes caveat about the Begin phase as DarlingCollectorRunner.WriteBatchAsync. */
+                   connection's CommandTimeout (30 s) when left unset. Same constant, same regime, and it reaches
+                   the row loop only — startDeadline above bounds the Begin that returns the importer, on the same
+                   terms as DarlingCollectorRunner.CopyBatchOnceAsync. */
                 importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
 
                 writer.Importer = importer;
@@ -228,6 +236,18 @@ public sealed class RdsDeadlockIngestor
 
                 await importer.CompleteAsync(cancellationToken);
             }
+        }
+        /* The start phase's deadline, re-raised as the shape a client-side deadline has here, on the same
+           terms as DarlingCollectorRunner.CopyBatchOnceAsync. A throw from a catch arm leaves the whole
+           try, so this fault is stamped HERE rather than by the arm below; the phase term in the filter is
+           what keeps the arm unreachable once the row loop has begun, whatever Npgsql throws from inside
+           it, so a data-phase fault cannot be relabelled as the one a re-attempt trusts. */
+        catch (OperationCanceledException cancellation)
+            when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
+        {
+            var breach = StoreCopyStartDeadline.Breach(cancellation);
+            CollectorFaultCopyPhase.Stamp(breach, copyPhase);
+            throw breach;
         }
         /* Stamped, then rethrown bare, for CopyBatchOnceAsync's reason: the fault keeps its own type,
            message and inner chain, so every classification arm upstream sees exactly what it sees without

@@ -6682,9 +6682,8 @@ LIMIT 1";
                PostgreSQL-target timeout arm (#3111 excludes a proven store write from it, since the store
                connection is Npgsql whatever the target's engine is and the fault would otherwise satisfy
                that arm's every term on a PostgreSQL target). "Exception while reading from stream" is all
-               it said: both COPY phases produce that same string, and the start phase is the one still on
-               the connection's undocumented 30 s default, so the message could not say which deadline had
-               been reached.
+               it said: the two COPY phases carry separate deadlines and produce that same string, so the
+               message could not say which of them had been reached.
 
                Computed once and used for BOTH the app log and the collection_log row, because the stored
                row is the instrument any measurement of this population reads; naming the phase only in the
