@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Diagnostics;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -133,10 +134,15 @@ public class StoreCopyPhaseLivePostgresTests
     /// for: a second session holds <c>ACCESS EXCLUSIVE</c> on the COPY's target table, which makes the
     /// backend block acquiring its own lock BEFORE it can answer <c>CopyInResponse</c> — exactly the
     /// regime <see cref="StoreCopyPhase.Start"/> describes, and exactly what a store-contention hypothesis
-    /// predicts. <c>CommandTimeout</c> is cut to a few seconds because the start phase runs on the
-    /// connection's own value and the default is Npgsql's undocumented 30 s; the connection string is
+    /// predicts. <c>CommandTimeout</c> is cut to a few seconds so that the CONNECTION's bound is the one
+    /// that fires: the start phase now also carries <see cref="StoreCopyStartDeadline"/>, and letting that
+    /// fire instead would spend the whole sweep deadline here and produce a different fault shape. Which of
+    /// the two ends the stall is asserted below rather than left to the arithmetic. The connection string is
     /// DERIVED from the live one rather than rebuilt, so the harness's host, port and credentials cannot
     /// drift from it.</para>
+    ///
+    /// <para><see cref="TheStartPhaseIsBoundedByTheSweepDeadlineNotTheConnectionsCommandTimeout"/> is this
+    /// test's twin from the other side, and the pair is what establishes that both bounds exist.</para>
     ///
     /// <para>Nothing is written and nothing needs cleaning: the lock is taken in a transaction that rolls
     /// back, and the COPY never completes a row. Serialization with the rest of the live collection is what
@@ -147,6 +153,16 @@ public class StoreCopyPhaseLivePostgresTests
     {
         var pg = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(pg), "Set DARLING_TEST_PG to run the transport-leg instance check.");
+
+        /* Which bound this test measures, asserted rather than inferred from two numbers a reader has to
+           go and compare. If the sweep deadline were ever re-derived below this, StoreCopyStartDeadline
+           would end the stall first and every assertion below about the fault's SHAPE would fail with
+           nothing saying why. */
+        Assert.True(
+            StartPhaseTimeoutSeconds < StoreCopyStartDeadline.Deadline.TotalSeconds,
+            $"this test needs the connection's {StartPhaseTimeoutSeconds}s CommandTimeout to fire before "
+            + $"the {StoreCopyStartDeadline.Deadline.TotalSeconds}s start-phase deadline, because it asserts "
+            + "Npgsql's own timeout shape; lower it, or move the assertion to the twin");
 
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = NpgsqlDataSource.Create(pg!);
@@ -196,6 +212,102 @@ public class StoreCopyPhaseLivePostgresTests
 
         /* Both legs, so the gate accepts — the one claim no other test in the repository makes about a
            fault the runner itself raised. */
+        Assert.True(StoreWriteReattempt.IsSafeToReattempt(fault));
+
+        await blockerTransaction.RollbackAsync(ct);
+    }
+
+    /// <summary>
+    /// The start phase is bounded by <see cref="StoreCopyStartDeadline"/> and not by whatever the store
+    /// connection's <c>CommandTimeout</c> happens to be — measured on the shipped COPY body, against a
+    /// real lock wait.
+    ///
+    /// <para><b>Why this cannot pass for the wrong reason.</b> <c>CommandTimeout</c> is set well ABOVE the
+    /// sweep deadline, so the connection's own bound cannot be what ends the stall, and the two bounds
+    /// produce DIFFERENT fault shapes: Npgsql's is an <c>NpgsqlException</c> wrapping a
+    /// <see cref="TimeoutException"/> — the shape the sibling above asserts — while a breached start-phase
+    /// deadline is a bare <see cref="TimeoutException"/> carrying
+    /// <see cref="StoreCopyStartDeadline.BreachMessage"/>. Remove the bound and this test does not fail
+    /// slowly or ambiguously: it waits for the connection's timeout and then fails on the type. The
+    /// elapsed range is asserted on both sides as well, so a deadline accidentally written in
+    /// milliseconds cannot satisfy the type and message alone.</para>
+    ///
+    /// <para><b>It really does cost the sweep deadline in wall clock</b>, and that is the price of driving
+    /// the SHIPPED private body rather than a copy: the production call site takes
+    /// <see cref="StoreCopyStartDeadline.Deadline"/> and there is nothing to inject a shorter one through.
+    /// A copy of the method with a test-sized deadline would prove the transcription works, which is not
+    /// the claim.</para>
+    ///
+    /// <para>Nothing is written and nothing needs cleaning, for the sibling's reasons: the lock is taken in
+    /// a transaction that rolls back, and the COPY never starts a row.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheStartPhaseIsBoundedByTheSweepDeadlineNotTheConnectionsCommandTimeout()
+    {
+        var pg = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(pg), "Set DARLING_TEST_PG to run the start-phase bound check.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var dataSource = NpgsqlDataSource.Create(pg!);
+        await using (var migrateConnection = await dataSource.OpenConnectionAsync(ct))
+        {
+            await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(migrateConnection, ct);
+        }
+
+        await using var blocker = await dataSource.OpenConnectionAsync(ct);
+        await using var blockerTransaction = await blocker.BeginTransactionAsync(ct);
+        await using (var takeLock = new NpgsqlCommand(
+            $"LOCK TABLE collect.{PhaseProbeTable} IN ACCESS EXCLUSIVE MODE", blocker, blockerTransaction))
+        {
+            await takeLock.ExecuteNonQueryAsync(ct);
+        }
+
+        /* DERIVED from the live string with only the deadline changed, like the sibling — and deliberately
+           raised rather than left at Npgsql's default, so the connection's bound is out of reach of the
+           whole test rather than merely unlikely to fire first. Relational to the constant, so a
+           re-derivation of the sweep deadline moves this with it instead of stranding it. */
+        var commandTimeoutSeconds = (int)StoreCopyStartDeadline.Deadline.TotalSeconds * 3;
+        var wellAboveTheDeadline = new NpgsqlConnectionStringBuilder(pg!)
+        {
+            CommandTimeout = commandTimeoutSeconds,
+        }.ConnectionString;
+
+        await using var boundedSource = NpgsqlDataSource.Create(wellAboveTheDeadline);
+        await using var connection = await boundedSource.OpenConnectionAsync(ct);
+
+        var clock = Stopwatch.StartNew();
+        var fault = await CopyFaultAsync(
+            new PhaseProbeDefinition(PhaseProbeTable), boundedSource, connection, ct);
+        clock.Stop();
+
+        Assert.False(
+            fault is PhaseProbeReachedTheRowLoopException,
+            "the row loop must not be reachable while the COPY target is locked: WritePayload ran, so the "
+            + "blocker did not block and this test is measuring the data phase.");
+
+        /* The shape that only the start-phase deadline produces. Exact type, because Npgsql's own timeout
+           arrives as an NpgsqlException wrapping one of these and would satisfy an assignability check. */
+        Assert.IsType<TimeoutException>(fault);
+        Assert.Equal(StoreCopyStartDeadline.BreachMessage, fault.Message);
+
+        /* And it is not readable as a shutdown, which is the whole reason the breach is translated at all.
+           Left as the cancellation Npgsql threw, this fault would be excluded from the phase stamp and
+           from the re-attempt gate, and would be reported as an orderly stop. */
+        Assert.IsNotAssignableFrom<OperationCanceledException>(fault);
+
+        /* It fired on its own clock rather than the connection's. Both sides: the upper bound is what says
+           Npgsql's timeout did not do this, and the lower bound is what a deadline written in
+           milliseconds would fail. */
+        Assert.InRange(
+            clock.Elapsed,
+            StoreCopyStartDeadline.Deadline - TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(commandTimeoutSeconds));
+
+        /* And the consequences the phase axis carries, on this fault: it is a transport fault, it is
+           start-phase, so the gate accepts it — a re-attempt after a start-phase stall is exactly-once and
+           delta-safe because no row was started and no baseline moved. */
+        Assert.True(PostgresTransportFault.IsTransportFault(fault));
+        Assert.Equal(StoreCopyPhase.Start, CollectorFaultCopyPhase.For(fault));
         Assert.True(StoreWriteReattempt.IsSafeToReattempt(fault));
 
         await blockerTransaction.RollbackAsync(ct);
@@ -259,9 +371,11 @@ public class StoreCopyPhaseLivePostgresTests
     private const string PhaseProbeTable = "wait_stats";
 
     /// <summary>
-    /// The deadline the blocked start phase runs out of. Small because the start phase is bounded by the
-    /// CONNECTION's <c>CommandTimeout</c> rather than by the importer's own — that is the residual #3095
-    /// reports — and the default there is Npgsql's undocumented 30 s, which is dead time in every CI run.
+    /// The CONNECTION deadline <see cref="ARealStartPhaseTimeoutIsATransportFaultAndTheGateAcceptsIt"/>
+    /// blocks against. Small for two reasons: Npgsql's default there is an undocumented 30 s, which is dead
+    /// time in every CI run, and it has to fire ahead of <see cref="StoreCopyStartDeadline.Deadline"/> for
+    /// that test to see Npgsql's own timeout shape rather than a translated breach. That ordering is
+    /// asserted in the test rather than left to two numbers sitting in different files.
     /// </summary>
     private const int StartPhaseTimeoutSeconds = 3;
 

@@ -24,11 +24,11 @@ namespace Darling.Tests;
 /// Pins that a collector store-write fault raised in the COPY's START phase is reported distinguishably
 /// from one raised in its DATA phase (#3095).
 ///
-/// <para><b>The defect.</b> <c>DarlingCollectorRunner.WriteBatchAsync</c> bounds the data phase with
-/// <c>ServiceCommandDeadlines.CollectionSweepSeconds</c> on <c>NpgsqlBinaryImporter.Timeout</c>, and that
-/// property does not reach <c>BeginBinaryImportAsync</c> above it — Begin awaits <c>CopyInResponse</c>
-/// under the connection's <c>CommandTimeout</c>, which Npgsql 10.0.3 exposes read-only with no per-call
-/// overload, so the start phase runs on the undocumented 30 s default. Both phases surface as
+/// <para><b>The defect.</b> The COPY's two phases take separate deadlines, because Npgsql gives them
+/// separate mechanisms: <c>NpgsqlBinaryImporter.Timeout</c> bounds the row loop and cannot reach the
+/// <c>BeginBinaryImportAsync</c> that returns the importer, whose await runs under the connection's
+/// <c>CommandTimeout</c> — read-only in Npgsql 10.0.3, with no per-call overload — so
+/// <c>StoreCopyStartDeadline</c> bounds it through the token. Both surface as
 /// <c>Exception while reading from stream</c>, so neither the message nor the outermost type separated
 /// them, and the start phase is where a lock wait stalls.</para>
 ///
@@ -301,21 +301,32 @@ public class StoreCopyPhaseTests
     }
 
     /// <summary>
-    /// The source comment at the COPY's deadline points at the OPEN issue for the residual it describes.
+    /// No source comment on the COPY path names an issue number as the tracker for the start phase.
     ///
-    /// <para>#2874 closed <c>completed</c> on 2026-09-05 having narrowed this regime rather than closed
-    /// it, and the comment recording the residual was the only tracker it had — so the closure left the
-    /// residual with no open home, which is why #3095 was filed. A reader who finds the comment first must
-    /// not be sent to a closed issue and conclude the start phase was fixed.</para>
+    /// <para>The start phase is bounded, so there is no residual left to track — and while there was one,
+    /// the comment recording it was the only tracker it had. That is what made a closed issue able to read
+    /// as a fixed defect twice: the comment named #2874, #2874 closed having narrowed the regime rather
+    /// than closed it, the comment was repointed at #3095, and #3095 closed the same way. A comment cannot
+    /// know whether the issue it names is still open, so it must not be where tracking lives. These
+    /// comments point at the MECHANISM instead — <c>StoreCopyStartDeadline</c> — which cannot go stale
+    /// while the code compiles.</para>
+    ///
+    /// <para>Asserted as the ABSENCE of both spellings this comment has actually had, rather than as the
+    /// presence of a replacement: a presence check is what the previous version of this test did, and it
+    /// could not tell an open tracker from a closed one.</para>
     /// </summary>
     [Fact]
-    public void TheCopyDeadlineCommentPointsAtTheOpenIssueForTheStartPhase()
+    public void NoCopyCommentNamesAnIssueAsTheTrackerForTheStartPhase()
     {
         var runner = ReadRepoFileLf(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
 
-        Assert.Contains("The unbounded start phase is tracked on #3095.", runner, StringComparison.Ordinal);
-        Assert.DoesNotContain("Tracked as a residual on #2874.", runner, StringComparison.Ordinal);
+        Assert.DoesNotContain("The unbounded start phase is tracked on", runner, StringComparison.Ordinal);
+        Assert.DoesNotContain("Tracked as a residual on", runner, StringComparison.Ordinal);
+
+        /* And the mechanism IS named, so this cannot pass by the comment having lost its subject
+           altogether — which would leave the next reader with a bound and no account of why it exists. */
+        Assert.Contains("startDeadline", runner, StringComparison.Ordinal);
     }
 
     /* ══ #3111: the axis covers EVERY store COPY, and one consumer routes on that ══════════════════════ */
@@ -480,11 +491,48 @@ public class StoreCopyPhaseTests
                 $"{name}: the COPY needs the stamp-and-rethrow-bare arm, excluding cancellation — a "
                 + "stopping token says the service is shutting down, not which exchange was in flight");
 
-            /* And no site hard-stamps Start. It can only arise from the variable's initial state, which is
-               what makes "Start means the importer never came back" a property of the control flow rather
-               than of somebody's judgement at a catch site. */
-            Assert.DoesNotContain(
-                "CollectorFaultCopyPhase.Stamp(ex, StoreCopyPhase.Start)", code, StringComparison.Ordinal);
+            /* The start-phase deadline's breach arm, which is the SECOND stamping site at each of these
+               methods and therefore the second thing that can decide what a re-attempt is authorised to do.
+               A throw from a catch arm leaves the whole try, so this fault cannot be stamped by the arm
+               above and has to be stamped here.
+
+               BOTH filter terms are required. Breached() alone would leave the arm's soundness resting on
+               a measurement of what Npgsql throws from inside the row loop; the phase term makes it
+               unreachable there by construction, whatever that turns out to be. Dropping it is the edit
+               that would let a data-phase fault be relabelled as the recoverable one, and it is the only
+               mutation here that BUYS something — a duplicated batch and a column of fabricated zero
+               deltas — rather than merely misreporting. */
+            Assert.True(
+                Regex.IsMatch(
+                    code,
+                    @"catch \(OperationCanceledException cancellation\)\s*when \(copyPhase == "
+                    + @"StoreCopyPhase\.Start && startDeadline\.Breached\(\)\)"),
+                $"{name}: the start-phase deadline's breach arm must be filtered on BOTH the live phase and "
+                + "Breached() — without the phase term it could fire for a fault raised inside the row loop "
+                + "and hand the re-attempt gate the one value it acts on");
+
+            Assert.True(
+                Regex.IsMatch(code, @"CollectorFaultCopyPhase\.Stamp\(breach, copyPhase\);\s*throw breach;"),
+                $"{name}: the breach arm must stamp the fault it raises with the LIVE phase and then throw "
+                + "it — an unstamped breach reads as Unknown and silently loses the re-attempt");
+
+            /* No site stamps a phase LITERAL, in either argument position.
+               `DoesNotContain("Stamp(ex, StoreCopyPhase.Start)")` named the variable `ex`, so it could not
+               see a stamp on any other variable — and this change adds one called `breach`. Matching the
+               phase argument instead of the fault argument closes the whole family: Start can then only
+               arise from copyPhase's initial state, which is what makes "Start means the importer never
+               came back" a property of the control flow rather than of a judgement at a catch site. */
+            Assert.True(
+                Regex.Matches(code, @"CollectorFaultCopyPhase\.Stamp\([^,)]+,\s*StoreCopyPhase\.").Count == 0,
+                $"{name}: no site may hand Stamp a phase literal — every stamp must read copyPhase, or "
+                + "Start stops being a fact about where the fault was raised");
+
+            /* Exactly two stamping calls: the breach arm and the general arm. A third is another opinion
+               about which phase is live, and the census above only counts FILES. */
+            Assert.True(
+                Regex.Matches(code, @"CollectorFaultCopyPhase\.Stamp\(").Count == 2,
+                $"{name}: expected exactly two stamping calls — the start-phase breach arm and the general "
+                + "stamp-and-rethrow arm; a third would be an unreviewed third opinion about the live phase");
         }
     }
 
