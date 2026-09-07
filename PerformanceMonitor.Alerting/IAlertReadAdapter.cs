@@ -127,7 +127,7 @@ public interface IAlertReadAdapter
 
     /// <summary>
     /// The latest tempdb space snapshot, or null when the store has none for this server.
-    /// Threshold evaluation (UsedPercent) stays engine-side.
+    /// Threshold evaluation (ReservedPercent) stays engine-side.
     /// </summary>
     Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(
         string serverKey, CancellationToken cancellationToken = default);
