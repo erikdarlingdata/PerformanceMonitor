@@ -487,9 +487,11 @@ public sealed class PgColumnStatsCoverageTests
 
         Assert.Empty(missing);
 
-        /* And the field itself is named, or the table above is a glossary for something the reader has no
-           way to find. */
-        Assert.Contains("`coverage`", runbook, StringComparison.Ordinal);
+        /* And the field is named IN THE TABLE HEADER, not merely somewhere in the file. "Appears at least
+           once" is satisfied by a mention three sections away, which leaves the arm list a glossary for
+           something the reader has no way to look up - and a mutation that stripped the field name from
+           the prose passed exactly that way. The header is the occurrence a reader keys off. */
+        Assert.Contains("| `coverage` |", runbook, StringComparison.Ordinal);
 
         /* And the span caveat travels with it: the two counts and the row count are measured over different
            intervals, which is the fact that makes EvidenceStale intelligible rather than a contradiction.
