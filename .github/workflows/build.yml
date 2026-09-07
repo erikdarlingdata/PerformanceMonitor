@@ -290,11 +290,44 @@ jobs:
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
+      # Central package management pins the DIRECT versions in Directory.Packages.props; the committed
+      # packages.lock.json files pin the TRANSITIVE closure, which is the half no diff shows and no review
+      # reads. This step is where a change that moves one without the other is rejected, so two things have to
+      # hold of it, and neither did (#3143).
+      #
+      # `shell: bash` with errexit, not the runner default. A multi-line run block executes under pwsh on
+      # Windows, which does not abandon the block on a native command's non-zero exit and reports the block's
+      # exit code as the LAST command's — so five of the six restores here printed NU1004 and left this step
+      # green. That is not a hypothetical: the required `build` check passed on both Dependabot pull requests
+      # #3143 was filed from, carrying the error in its own log, and the only job that went red was
+      # darling-tree-guards, whose restore happens to be a single-command step.
+      #
+      # Every project with a committed lock file is reached from this list, directly or through a
+      # ProjectReference — a locked-mode restore validates the lock file of every project in the graph it
+      # walks, not only the one it was handed. deprecated/Installer is named because nothing references it, so
+      # nothing reached it: while it was absent, an inconsistent lock file there passed all six restores this
+      # step used to run and failed only a direct restore of that project, which no workflow performed.
+      # LockedModeRestoreCoverageTests derives both requirements — from the lock files on disk and the
+      # reference edges between projects — so a tenth lock file makes its restore mandatory rather than
+      # remembered, and re-spelling this block in a shell that swallows failures fails the suite.
       - name: Restore dependencies
+        id: restore
         if: steps.fastpath.outputs.engaged != 'true'
+        shell: bash
         run: |
+          set -euo pipefail
+
+          # NU1004 offers two remedies and one of them is dropping locked mode, which trades the closure pin
+          # rather than restoring it. Dependabot moves Directory.Packages.props and cannot regenerate the lock
+          # files that belong with it, so its weekly pull request lands here; naming the command that
+          # reconciles them is the difference between a red check that gets acted on and one that gets waited
+          # out. The trap keeps the message on the failure itself, so no second step can report green beside a
+          # red restore.
+          trap 'echo "::error title=Lock files disagree with Directory.Packages.props::Regenerate with '"'"'dotnet restore PerformanceMonitor.sln --force-evaluate'"'"' and commit every packages.lock.json it rewrites. Do not remove --locked-mode: the lock files are the only pin on the transitive closure, and the props diff does not show it moving."' ERR
+
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+          dotnet restore deprecated/Installer/PerformanceMonitorInstaller.csproj --locked-mode
           dotnet restore deprecated/Installer.Tests/Installer.Tests.csproj --locked-mode
           dotnet restore deprecated/Dashboard.Tests/Dashboard.Tests.csproj --locked-mode
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
