@@ -6070,11 +6070,14 @@ LIMIT 1";
     /// <summary>
     /// The sentence a PostgreSQL command timeout gets instead of the transport's seven words (#2997).
     ///
-    /// <para><b>Why this is not folded into <see cref="PostgresFaultOutcome"/>.</b> That method takes a
-    /// <see cref="PostgresException"/>, and a client-side deadline never produces one: Npgsql surfaces it
-    /// as an <c>NpgsqlException</c> wrapping a <c>TimeoutException</c>, with no SQLSTATE to switch on. So
-    /// the classification it needed could not be reached through a SQLSTATE map however wide that map
-    /// grew — the gap was the parameter type, not the code list.</para>
+    /// <para><b>Why this is not folded into <see cref="PostgresFaultOutcome"/>.</b> Two reasons, and
+    /// neither is that a client-side deadline cannot produce a <see cref="PostgresException"/> — it can,
+    /// when the server's <c>57014</c> response beats the tearing stream. The first is the PARAMETER TYPE:
+    /// that method takes a <see cref="PostgresException"/>, and the shape a client-side deadline
+    /// normally arrives in is an <c>NpgsqlException</c> wrapping a <c>TimeoutException</c> with no
+    /// SQLSTATE at all, so it cannot be reached through a SQLSTATE map however wide that map grew. The
+    /// second is that the answer is not a function of the code: the split below turns on the message
+    /// text, which a switch over SQLSTATE cannot express whatever it is handed.</para>
     ///
     /// <para><b>The status stays ERROR.</b> The store has five and none of them means "ran out of time";
     /// PERMISSIONS is the non-fatal-degradation bucket and would wrongly exclude this from the error
@@ -6083,14 +6086,23 @@ LIMIT 1";
     /// the message names the collector, the database, the mechanism and the measured elapsed time, and
     /// the caller records that elapsed figure instead of a literal zero.</para>
     ///
-    /// <para><paramref name="serverCancelled"/> splits the two deadlines that both classify as
-    /// <see cref="CollectorTargetFault.CommandTimeout"/>, because the remedy differs and the raw text
-    /// cannot tell them apart: SQLSTATE 57014 is the SERVER cancelling the statement (a
-    /// <c>statement_timeout</c> on the target, which an operator changes on the target), while the
-    /// client-side deadline is ours and is changed here.</para>
+    /// <para><paramref name="origin"/> splits the deadlines that all classify as
+    /// <see cref="CollectorTargetFault.CommandTimeout"/>, because the remedy is on a different machine for
+    /// each. <b>The SQLSTATE does not carry that split and the message text does</b>, which is the reverse
+    /// of what the code alone suggests: 57014 is <c>query_canceled</c>, which PostgreSQL raises for the
+    /// target's <c>statement_timeout</c>, for a <c>pg_cancel_backend()</c>, and for the client
+    /// CancelRequest Npgsql sends when its own <c>CommandTimeout</c> expires — while
+    /// <c>canceling statement due to statement timeout</c> and
+    /// <c>canceling statement due to user request</c> are different strings. So the parameter is not a bool
+    /// over the code: that expression is
+    /// <see cref="PgBaselineProvider.IsCommandTimeout"/>'s first disjunct, where it correctly identifies
+    /// OUR deadline, and one expression cannot mean both. <see cref="CollectorFaultCancelOrigin.For"/>
+    /// reads the text instead, and reports <see cref="PostgresCancelSource.Unproven"/> for every wording it
+    /// does not recognise so that a translated or reworded message costs the weaker sentence rather than
+    /// the wrong machine.</para>
     /// </summary>
     internal static string PostgresTimeoutExplanation(
-        string collectorName, string? connectedDatabase, long elapsedMs, bool serverCancelled)
+        string collectorName, string? connectedDatabase, long elapsedMs, CollectorFaultCancelOrigin origin)
     {
         var where = string.IsNullOrWhiteSpace(connectedDatabase)
             ? "the connected database"
@@ -6101,11 +6113,14 @@ LIMIT 1";
            like different ones. */
         var elapsed = elapsedMs.ToString("N0", CultureInfo.InvariantCulture);
 
-        return serverCancelled
-            ? $"{collectorName} on {where} was CANCELLED BY THE SERVER after {elapsed} ms (SQLSTATE "
-              + "57014) — the target's own statement_timeout expired, so the deadline that fired is on "
-              + "the monitored server, not here. Nothing was collected this cycle: this is NOT 'there "
-              + "was nothing to collect'."
+        return origin.Source switch
+        {
+            PostgresCancelSource.TargetStatementTimeout =>
+                $"{collectorName} on {where} was CANCELLED BY THE SERVER after {elapsed} ms (SQLSTATE "
+                + $"{CollectorFaultCancelOrigin.QueryCanceled}) — the target's own statement_timeout "
+                + "expired, so the deadline that fired is on the monitored server, not here. Nothing was "
+                + "collected this cycle: this is NOT 'there was nothing to collect'.",
+
             /* "its command timeout", never the name of a knob. This arm fires for EVERY PostgreSQL
                collector classified as CommandTimeout, and only two of them set
                CommandTimeoutSecondsOverride at all - the rest fall back to
@@ -6113,14 +6128,56 @@ LIMIT 1";
                false for most collectors that can reach here, and would send an operator looking for a
                setting that collector does not have. The MEASURED elapsed time above says what the
                deadline actually was, which is the more useful number anyway: it is what applied,
-               rather than what was configured somewhere. */
-            : $"{collectorName} on {where} hit its CLIENT-SIDE command deadline after {elapsed} ms — "
-              + "its command timeout expired and Npgsql cancelled the read mid-stream, which is why the "
-              + "transport reports 'Exception while reading from stream' with no SQLSTATE. The statement "
-              + "was still running when it was cut off, so the work asked for does not fit the deadline; "
-              + "raising the deadline is the wrong half of that and shrinking the work is the right one. "
-              + "Nothing was collected this cycle: this is NOT 'there was nothing to collect'.";
+               rather than what was configured somewhere.
+
+               The no-SQLSTATE clause is why this sentence belongs to this arm alone and is not the
+               fall-through for everything that is not the server's statement_timeout: it describes the
+               shape Npgsql produces when its own deadline fires and it never reaches the server's error
+               response. A cancel that DID arrive as SQLSTATE 57014 would be contradicted by its own
+               explanation. */
+            PostgresCancelSource.OurCommandDeadline =>
+                $"{collectorName} on {where} hit its CLIENT-SIDE command deadline after {elapsed} ms — "
+                + "its command timeout expired and Npgsql cancelled the read mid-stream, which is why the "
+                + "transport reports 'Exception while reading from stream' with no SQLSTATE. The statement "
+                + "was still running when it was cut off, so the work asked for does not fit the deadline; "
+                + "raising the deadline is the wrong half of that and shrinking the work is the right one. "
+                + "Nothing was collected this cycle: this is NOT 'there was nothing to collect'.",
+
+            /* The honest arm, and the one this method exists to be able to reach. A 57014 whose wording is
+               not the statement_timeout one was cancelled by SOMETHING, and the code names neither the
+               machine nor the knob; the wording is quoted rather than interpreted, because a human reading
+               a translated or reworded message can place it and this code cannot. It rules the target's
+               statement_timeout OUT, which is the actionable half - the alternative on offer is a
+               confident sentence about whichever machine the coin landed on.
+
+               The code is DESCRIBED as PostgreSQL's behaviour, never attributed to this fault, and that
+               distinction is load-bearing. Unproven is reachable for a fault carrying no SQLSTATE at all -
+               CollectorFaultCancelOrigin.For is total on purpose, so that it does not rest on the arm's
+               filter - and a sentence reading "(SQLSTATE 57014)" would then assert a code the fault never
+               carried. Resting the SENTENCE on the filter instead of the classifier would be this same
+               defect one layer up: a confident claim true only because of something a caller elsewhere
+               happens to do. The two arms above assert nothing beyond the CommandTimeout classification
+               this whole method is handed, which is the caller's to guarantee for all three. */
+            _ => $"{collectorName} on {where} was CANCELLED after {elapsed} ms, and this fault does not "
+                 + "say WHOSE deadline fired. PostgreSQL raises SQLSTATE "
+                 + $"{CollectorFaultCancelOrigin.QueryCanceled} for the target's own statement_timeout, "
+                 + "for a pg_cancel_backend() aimed at the backend, and for the client CancelRequest this "
+                 + "service's own command deadline sends: one code, three producers, and only the wording "
+                 + $"tells them apart. The server said {QuotedCancelWording(origin.ServerText)}, which is "
+                 + "not its statement_timeout wording — so do not change statement_timeout on the target "
+                 + "on the strength of this row. Nothing was collected this cycle: this is NOT 'there was "
+                 + "nothing to collect'.",
+        };
     }
+
+    /// <summary>
+    /// The server's own cancel wording, quoted for an operator to read, degrading to a phrase when the
+    /// error carried none — the rule <c>PostgresTimeoutExplanation</c> already follows for an unknown
+    /// database. Quoting an empty string would present "the server said nothing" as "the server said
+    /// ''".
+    /// </summary>
+    private static string QuotedCancelWording(string? serverText)
+        => string.IsNullOrWhiteSpace(serverText) ? "nothing at all" : $"'{serverText}'";
 
     /// <summary>
     /// True when a SqlException is a permission denial — the expected failure when the least-privilege monitoring
@@ -6579,11 +6636,15 @@ LIMIT 1";
                indistinguishable from a dropped socket and was read as one twice.
 
                Deliberately AFTER the PostgresException arm above and not merged into it: this arm has
-               to catch a plain Exception, because a client-side deadline arrives as an
-               NpgsqlException wrapping a TimeoutException and never as a PostgresException at all.
-               SQLSTATE 57014 (the server cancelling) does reach the arm above first, where
-               PostgresFaultOutcome maps it to ERROR and so declines it — which is what lets both
-               deadlines land here and be told apart by type rather than by two separate arms.
+               to catch a plain Exception, because a client-side deadline normally arrives as an
+               NpgsqlException wrapping a TimeoutException, carrying no SQLSTATE for a SQLSTATE map to
+               switch on. Normally, not always — Npgsql enforces its deadline by sending a CancelRequest,
+               so the server's 57014 error response can arrive before the stream tears and OUR deadline
+               then surfaces as a PostgresException. A 57014 reaches the arm above first, where
+               PostgresFaultOutcome maps it to ERROR and so declines it, which is what lets both shapes
+               land here. Which one arrives is a RACE, so the exception's type cannot be what tells the
+               two deadlines apart, and neither can the SQLSTATE that three unrelated producers share:
+               CollectorFaultCancelOrigin reads what the server actually said.
 
                NO reprobe, and that is the same care the general catch takes: the provider classifies
                this CommandTimeout rather than ConnectionFatal precisely so a slow statement cannot
@@ -6591,7 +6652,6 @@ LIMIT 1";
                left to the general catch below, which is where the reprobe lives; classifying it here
                would take the reprobe away and re-create the bug that arm exists to fix. */
             var elapsedMs = runClock.ElapsedMilliseconds;
-            var serverCancelled = ex is PostgresException { SqlState: "57014" };
             var explanation = PostgresTimeoutExplanation(
                 collectorName,
                 /* Off the exception, not the runtime: pg_index_bloat fans out per database and opens its
@@ -6599,7 +6659,12 @@ LIMIT 1";
                    ran out of time. Naming the wrong database confidently is worse than naming none. */
                 CollectorFaultDatabase.For(ex, runtime.ConnectedDatabase),
                 elapsedMs,
-                serverCancelled);
+                /* Off the exception for the same reason, one line on: the machine whose deadline fired is
+                   read from what the server actually said, not inferred from the SQLSTATE - which is
+                   shared by the target's statement_timeout, an external cancel and our own. Naming the
+                   wrong MACHINE confidently is the same defect as naming the wrong database, and this
+                   arm's whole job is to be the row an operator acts on. */
+                CollectorFaultCancelOrigin.For(ex));
 
             _logger.LogError("  [{Server}] {Collector} => ERROR (timeout): {Message}",
                 server.Config.DisplayName, collectorName, explanation);
@@ -6635,10 +6700,10 @@ LIMIT 1";
 
             /* A dead connection poisons every collector — force a reconnect + reprobe. The Postgres arm
                matters as much as the SQL Server one and is deliberately NARROWER than "any
-               PostgresException": a statement_timeout (57014) is a slow query, not a dead socket, and
-               dropping the connection over one would turn a tuning problem into a reconnect storm. Only
-               the 08 class and the shutdown/unavailability codes qualify, which is exactly what the
-               provider's ConnectionFatal means. */
+               PostgresException": a cancelled statement (57014) is not a dead socket whichever side
+               cancelled it, and dropping the connection over one would turn a tuning problem into a
+               reconnect storm. Only the 08 class and the shutdown/unavailability codes qualify, which is
+               exactly what the provider's ConnectionFatal means. */
             if ((ex is SqlException sqlEx && (sqlEx.Class >= 20 || sqlEx.Number == -2))
                 /* ANY exception on a PostgreSQL target, not just a PostgresException. The pre-filter was the
                    bug: a dead socket surfaces as a plain NpgsqlException with no SQLSTATE — the provider

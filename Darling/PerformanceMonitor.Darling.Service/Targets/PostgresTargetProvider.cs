@@ -81,7 +81,11 @@ public sealed class PostgresTargetProvider : ITargetProvider
     /// <item>55000 / 55P03 — the object is not in the right state, or a lock could not be taken.
     /// Aurora raises a 55-class error for <c>aurora_stat_optimized_reads_cache()</c> when the feature
     /// is disabled, which a naive collector logs as a failure every single cycle.</item>
-    /// <item>57014 — <c>query_canceled</c>, which is what <c>statement_timeout</c> produces.</item>
+    /// <item>57014 — <c>query_canceled</c>. A <c>statement_timeout</c> on the target produces it, and so
+    /// do <c>pg_cancel_backend()</c> and the client CancelRequest Npgsql sends on its own
+    /// <c>CommandTimeout</c>: all three ran out of time, which is why one answer covers them, and none of
+    /// them is identifiable from the code, which is why naming the side that cancelled belongs to
+    /// <c>CollectorFaultCancelOrigin</c> and not here.</item>
     /// <item>08* — connection exceptions; 57P01/57P02/57P03 — shutdown and unavailability.</item>
     /// </list>
     /// </summary>
