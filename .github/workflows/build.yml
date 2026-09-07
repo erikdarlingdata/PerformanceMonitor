@@ -672,6 +672,7 @@ jobs:
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
           # Emit the matched file list so the gate-decision step below can NAME what it matched, or
           # name what it did not match, instead of asserting a reason the decision came out as it did.
+          #
           # json rather than shell. The lists reach the notice through `env:` and never through a
           # `${{ }}` interpolation into the script text, which is the pull_request script-injection
           # footgun — and a runtime parameter expansion does not honour shell's backslash escapes, so
