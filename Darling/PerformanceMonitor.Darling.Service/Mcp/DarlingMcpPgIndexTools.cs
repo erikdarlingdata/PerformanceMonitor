@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -138,7 +139,7 @@ public sealed class DarlingMcpPgIndexTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_column_stats"), Description("Gets PostgreSQL per-column distribution statistics from pg_stats: n_distinct, null fraction, average width, physical correlation, and the frequency of the single most common value. These are the numbers the PLANNER uses, so they explain plan shapes that otherwise look arbitrary. n_distinct is negative when PostgreSQL expresses it as a RATIO of table rows (-1 means every value is unique) and positive when it is an absolute count - do not compare the two without checking the sign. correlation near 1 or -1 means the column's physical order matches its logical order, which is what makes an index range scan cheap; near 0 makes the same scan expensive. A high top_value_frequency is the classic cause of a plan that is right for the common value and wrong for every other one. Only columns on tables above a size floor are collected, and only where the monitoring login can see the statistics.")]
+    [McpServerTool(Name = "get_pg_column_stats"), Description("Gets PostgreSQL per-column distribution statistics from pg_stats: n_distinct, null fraction, average width, physical correlation, and the frequency of the single most common value. These are the numbers the PLANNER uses, so they explain plan shapes that otherwise look arbitrary. n_distinct is negative when PostgreSQL expresses it as a RATIO of table rows (-1 means every value is unique) and positive when it is an absolute count - do not compare the two without checking the sign. correlation near 1 or -1 means the column's physical order matches its logical order, which is what makes an index range scan cheap; near 0 makes the same scan expensive. A high top_value_frequency is the classic cause of a plan that is right for the common value and wrong for every other one. Only columns on tables above a size floor are collected, and only where the monitoring login can see the statistics - so ALWAYS read the coverage field before acting on this: it names which of those produced the result, and PartialVisibility or StatisticsNotVisible means the statistics you are looking at are not all of them.")]
     public static async Task<string> GetPgColumnStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -156,23 +157,52 @@ public sealed class DarlingMcpPgIndexTools
 
         try
         {
+            var windowStart = windowEnd.AddHours(-hours_back);
+
             var rows = await DarlingPgColumnStatsReader.GetPgColumnStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+                postgres, resolved.ServerId, windowStart, windowEnd, limit);
+
+            /* Asked on BOTH paths, not just the empty one (#3154). A returned row set that covers a
+               fraction of the tables above the floor is the same defect as an unexplained empty, one
+               degree weaker: the ranking looks complete and is not. */
+            PgColumnStatsCoverageVerdict coverage;
 
             if (rows.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats")
-                    ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats")
-                    ?? McpHelpers.Status(
-                        "empty",
-                        $"No column statistics for {resolved.ServerName} in the last {hours_back} hour(s). "
-                        + "This collector runs DAILY and only reads tables above a size floor, so a small "
-                        + "database can be legitimately empty here. pg_stats is also filtered by "
-                        + "privilege: a monitoring login without SELECT on a table sees no rows for it, "
-                        + "and that looks identical to a table with no statistics.");
+                /* CAPABILITY, then PRECONDITION, then this read's own miss - the order
+                   CollectorRuntimePrecondition documents, and the three are asked in it rather than
+                   composed with ?? over three already-computed values. The coverage query used to run
+                   ahead of both, so a server that cannot have this surface at all, or whose collector
+                   recorded a denial, paid for evidence the ?? chain then threw away - and those are the
+                   callers least able to afford a round trip. Worse than the cost: computing the LAST
+                   answer first is how somebody later reorders the chain and does not notice they have
+                   changed which of the three wins. */
+                var capability = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats");
+
+                if (capability != null) return capability;
+
+                var precondition = await DarlingRuntimePrecondition.StatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats");
+
+                if (precondition != null) return precondition;
+
+                coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
+                    postgres, resolved.ServerId, windowEnd, rows.Count);
+
+                /* The arm, not a list of the arms. This message used to recite the size floor AND the
+                   privilege filter and select neither, which is prose about the mechanism rather than a
+                   diagnosis of it - measured on a 50-target fleet where the answer was the privilege
+                   filter on every one of them and no read said so. */
+                return McpHelpers.Status(
+                    "empty",
+                    $"No column statistics for {resolved.ServerName} in the last {hours_back} hour(s). "
+                    + "This collector runs DAILY, so a window shorter than a day can be empty on a "
+                    + "perfectly healthy server - widen it before concluding anything. " + coverage.Message);
             }
+
+            coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
+                postgres, resolved.ServerId, windowEnd, rows.Count);
 
             var columns = rows.Select(r => new
             {
@@ -197,10 +227,15 @@ public sealed class DarlingMcpPgIndexTools
                 server = resolved.ServerName,
                 hours_back,
                 column_count = rows.Count,
+                /* The arm as its own field, beside the sentence. Automation keys on names rather than
+                   parsing prose, and a caller deciding whether this ranking is safe to act on needs the
+                   partial-coverage answer in a form it can branch on. */
+                coverage = coverage.Arm.ToString(),
                 note = "n_distinct is a RATIO of table rows when negative and an absolute count when "
                      + "positive — check the sign before comparing two columns. correlation near ±1 is "
                      + "what makes an index range scan cheap. A null common_value_count means the column "
-                     + "has no most-common-value list at all, not that the list is empty.",
+                     + "has no most-common-value list at all, not that the list is empty. "
+                     + coverage.Message,
                 columns,
             }, McpHelpers.JsonOptions);
         }
