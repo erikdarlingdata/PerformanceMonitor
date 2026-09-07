@@ -93,6 +93,7 @@ public sealed class RepoFileAdoptionTests
         "FleetPageAttentionFilterTests.cs",
         "ServerPageTabsTests.cs",
         "StartupFailureTriageTests.cs",
+        "StoreCopyPhaseTests.cs",
         "ViewTemplatesTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
     };

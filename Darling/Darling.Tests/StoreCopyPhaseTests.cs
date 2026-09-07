@@ -13,6 +13,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -193,7 +194,7 @@ public class StoreCopyPhaseTests
     [Fact]
     public void TheCopyWriteStampsTheStartPhaseUntilBeginReturns()
     {
-        var runner = RepoFile.ReadRepoFileLf(
+        var runner = ReadRepoFileLf(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
 
         /* Start is the value in force before the COPY is opened. */
@@ -242,7 +243,7 @@ public class StoreCopyPhaseTests
     [Fact]
     public void TheGeneralFaultArmNamesTheCopyPhaseInBothTheLogAndTheStoredRow()
     {
-        var worker = RepoFile.ReadRepoFileLf(
+        var worker = ReadRepoFileLf(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 
         /* Composed once, from the helper, inside the general arm. */
@@ -287,7 +288,7 @@ public class StoreCopyPhaseTests
     [Fact]
     public void TheCopyDeadlineCommentPointsAtTheOpenIssueForTheStartPhase()
     {
-        var runner = RepoFile.ReadRepoFileLf(
+        var runner = ReadRepoFileLf(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
 
         Assert.Contains("The unbounded start phase is tracked on #3095.", runner, StringComparison.Ordinal);
