@@ -277,6 +277,19 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
                     rows,
                     r => r.SkippedReason is null && r.LeafPages is null && r.AvgLeafDensity is null);
 
+                /* And the complement, which is what makes the gate a BOUND rather than a label: no row may
+                   carry a reason AND a measurement. That shape means pgstatindex was pointed at an index
+                   this statement had already declared it was not going to read — the I/O is spent, the
+                   label denies it, and the output is otherwise indistinguishable from a working cycle.
+                   Measured with the rotation window removed from the gate on a 210-index probe: 200 of the
+                   210 rows came back saying "above the rotation cursor" with a tree_level on them. This is
+                   the same category as #2617 and #2997, where the bound sat on the nullable side of an
+                   outer join and read correctly while the statement read the whole instance.
+
+                   tree_level rather than a density: pgstatindex always returns a level, while an EMPTY
+                   index legitimately reports a null avg_leaf_density even though it was measured. */
+                Assert.DoesNotContain(rows, r => r.SkippedReason is not null && r.TreeLevel is not null);
+
                 candidateCounts.Add(rows.Count);
                 perCycle.Add(rows.Where(r => r.SkippedReason is null).Select(r => r.IndexOid).ToHashSet());
 
