@@ -562,6 +562,7 @@ public sealed class CollectionOutputBesideCostTests
     [InlineData("RowsStored")]
     [InlineData("RunsWithRows")]
     [InlineData("ProductiveRunPercent")]
+    [InlineData("OutputFinding")]
     public void BothSkusRowTypes_DocumentTheOutputMembers_Identically(string member)
     {
         var darling = DocComment(
@@ -584,17 +585,22 @@ public sealed class CollectionOutputBesideCostTests
     {
         var source = ReadRepoFile(relativePath);
 
-        /* The declaration, in either of the two shapes these members take: a stored property or an
-           expression-bodied one. */
-        var declaration = new[] { $"public long {member} {{ get; set; }}", $"public double {member} =>" }
-            .Select(d => source.IndexOf(d, StringComparison.Ordinal))
-            .FirstOrDefault(i => i > 0);
-        Assert.True(declaration > 0, $"{relativePath}: no declaration of {member} - this pin needs re-anchoring");
+        /* The declaration, matched by SHAPE rather than against a list of the exact type spellings these
+           members happen to use. That list held `public long X { get; set; }` and `public double X =>`,
+           and OutputFinding is `public string? X =>`, so adding it to the theory above matched neither
+           entry, and the pin failed its own re-anchoring precondition instead of guarding the member. A
+           shape match grows with the row type, which is why OrdinalMap below is derived too: a pin that
+           needs hand-editing before it can cover a new member is one nobody extends. */
+        var declaration = Regex.Match(
+            source,
+            $@"^[ \t]*public [^\r\n]*\b{Regex.Escape(member)}\b\s*(?:\{{ get; set; \}}|=>)",
+            RegexOptions.Multiline);
+        Assert.True(declaration.Success, $"{relativePath}: no declaration of {member} - this pin needs re-anchoring");
 
-        var summary = source.LastIndexOf("/// <summary>", declaration, StringComparison.Ordinal);
+        var summary = source.LastIndexOf("/// <summary>", declaration.Index, StringComparison.Ordinal);
         Assert.True(summary > 0, $"{relativePath}: {member} has no doc comment - this pin needs re-anchoring");
 
-        return Regex.Replace(source[summary..declaration], @"\s+", " ").Trim();
+        return Regex.Replace(source[summary..declaration.Index], @"\s+", " ").Trim();
     }
 
     private static readonly string[] ToolSources =
