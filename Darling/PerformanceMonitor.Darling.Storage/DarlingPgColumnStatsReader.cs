@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -37,10 +39,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// quantity: <c>-1</c> means distinct ≈ every row. A caller that formats it as a count will print
 /// "-1 distinct values" on the commonest possible column, a unique key.</para>
 ///
-/// <para><b>Zero rows has two causes and they are not the same.</b> <c>pg_stats</c> filters on
+/// <para><b>Zero rows has several causes and they are not the same.</b> <c>pg_stats</c> filters on
 /// <c>has_column_privilege</c>, so a monitoring role without SELECT on a table sees nothing for it — and
-/// row-level security empties the view too. Neither is an absence of problems, and a caller must say so
-/// rather than reporting healthy statistics.</para>
+/// row-level security empties the view too, while a target with no table above the collector's size floor
+/// has nothing to read in the first place. Neither is an absence of problems. Callers do not have to say
+/// which: <see cref="GetCoverageEvidenceAsync"/> reads the evidence and
+/// <see cref="PgColumnStatsCoverage.Classify"/> selects the arm, so the WPF panel and the MCP tool cannot
+/// disagree about what an empty means (#3154).</para>
 ///
 /// <para>Shared by the WPF tab and the MCP surface so there is one copy of this SQL, per #2530.</para>
 /// </summary>
@@ -95,6 +100,207 @@ public static class DarlingPgColumnStatsReader
                  database_name, schema_name, table_name, column_name
         LIMIT $4
         """;
+
+    /// <summary>
+    /// What <c>pg_table_bloat_stats</c> recorded about this server in this window: whether it ran at all,
+    /// how many tables clear <see cref="PgColumnStatsCollector.MinimumRelPages"/>, and how many of those had
+    /// every column's <c>pg_stats</c> row readable by the monitoring login. The three inputs
+    /// <see cref="PgColumnStatsCoverage.Classify"/> needs, and nothing else.
+    /// </summary>
+    /// <param name="EvidenceCollectorRan">
+    /// Whether <c>pg_table_bloat_stats</c> RAN for this server in the evidence window — a run, not a row,
+    /// and that distinction is the whole reason this field exists. A run that stored no rows is the
+    /// measurement establishing that nothing on the target clears the floor; collapsing the two would make
+    /// "measured, and everything is small" indistinguishable from "never measured here".
+    ///
+    /// <para>A boolean rather than a count because a count is what the decision costs, not what it needs:
+    /// nothing reads how MANY times it ran, and measured against the production store an
+    /// <c>EXISTS</c> probe answers in 6 ms where <c>count(*)</c> over the same predicate takes 152 —
+    /// <c>collection_log</c> has no index on (server_id, collector_name), so counting means a bitmap heap
+    /// scan that discarded 14,060 rows to keep 22. Proving ABSENCE is the worst case for a short-circuit and
+    /// it still measured 4.5 ms.</para>
+    /// </param>
+    public readonly record struct PgColumnStatsCoverageEvidence(
+        bool EvidenceCollectorRan,
+        int CandidateTables,
+        int TablesWithVisibleStatistics);
+
+    /* Both counts come from the LATEST measurement of each table in the window, which is why the derived
+       table exists at all: pg_table_bloat_stats is hourly and per-database, so a plain aggregate over the
+       window would count one table once per hour and report a fleet-sized candidate count for a schema
+       holding twelve tables.
+
+       estimate_unavailable is the pg_stats visibility signal, and it is read in its SOUND direction only:
+       false cannot happen unless every column of that table had a pg_stats row this login could read, so
+       count(... NOT estimate_unavailable) is a floor on visibility rather than an estimate of it. True has
+       three other causes (a name-typed column, reltuples < 0, a null page estimate), which is why the arm
+       built on zero-visible names the privilege filter as the cause and says what else the reading admits
+       instead of asserting a denied grant.
+
+       heap_pages is pg_class.relpages - the same column, on the same catalog, that the collector's own
+       WHERE filters on - so the candidate count is the collector's own predicate re-evaluated, not a
+       size-based approximation of it. The 1 MB floor pg_table_bloat_stats collects at is a different
+       measure (pg_relation_size), so the page filter here is not redundant with it: measured on the fleet,
+       1,263 of 1,264 tables past the byte floor also clear the page floor, and the one that does not is a
+       table this collector would genuinely skip.
+
+       The run probe is a scalar subquery rather than a join, so a server whose bloat collector ran and
+       stored NOTHING still reports its run - a join would drop exactly the row that distinguishes the
+       size-floor arm from the no-evidence one. EXISTS rather than count(*) because only the zero test is
+       read, and it is 25x cheaper on this store.
+
+       And it counts only runs that SUCCEEDED, which is not a detail: a bloat collector erroring on a
+       target still writes a collection_log row, so an unfiltered probe would say "it ran" while the
+       collector stored nothing - candidate_tables 0, visible 0 - and the classifier would answer
+       BelowSizeFloor, "nothing to fix". That is the exact false-innocence this whole issue closes,
+       reintroduced one level down in the EVIDENCE collector's own health. The status set is read from
+       EnumeratedCollectorDriver.FreshnessSuccessStatuses rather than retyped, so it is the same bar the
+       freshness reads and the self-alert evaluator apply, and a status added there propagates here.
+
+       $1 server_id, $2 window start, $3 window end. */
+    /// <summary>
+    /// <see cref="EnumeratedCollectorDriver.FreshnessSuccessStatuses"/> as a SQL <c>IN</c> list. Built from
+    /// the shared list rather than retyped so the bar for "this collector produced valid evidence" is the
+    /// one the freshness reads and the self-alert evaluator already use, and so a status added there reaches
+    /// this probe without anybody remembering to come here.
+    ///
+    /// <para>Literal-safe by construction: every element is a compile-time constant in this repo's own
+    /// source, never operator input.</para>
+    /// </summary>
+    private static readonly string EvidenceStatusList = string.Join(
+        ", ",
+        EnumeratedCollectorDriver.FreshnessSuccessStatuses.Select(status => "'" + status + "'"));
+
+    public static readonly string CoverageEvidenceSql = @"
+SELECT
+    (
+        SELECT EXISTS (
+            SELECT 1
+            FROM collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'pg_table_bloat_stats'
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   status IN (" + EvidenceStatusList + @")
+        )
+    )                                                                   AS evidence_collector_ran,
+    count(*) FILTER (WHERE latest.heap_pages >= " + PgColumnStatsCollector.MinimumRelPages + @")::int
+                                                                        AS candidate_tables,
+    count(*) FILTER (WHERE latest.heap_pages >= " + PgColumnStatsCollector.MinimumRelPages + @"
+                     AND   NOT latest.estimate_unavailable)::int        AS visible_tables
+FROM (
+    SELECT DISTINCT ON (database_name, schema_name, table_name)
+           heap_pages, estimate_unavailable
+    FROM pg_table_bloat_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    ORDER BY database_name, schema_name, table_name, collection_time DESC
+) AS latest";
+
+    /// <summary>
+    /// The coverage verdict for a <c>pg_column_stats</c> read — which arm produced
+    /// <paramref name="storedColumnRows"/>, and the sentence saying so.
+    ///
+    /// <para>A failed evidence read answers <see cref="PgColumnStatsCoverageArm.Undetermined"/> with its own
+    /// wording rather than throwing, the same rule <c>DarlingRuntimePrecondition</c> follows: this runs to
+    /// EXPLAIN a result the caller already has, and turning that into a read error would replace an
+    /// under-described answer with no answer.</para>
+    ///
+    /// <para><b>No window START, deliberately, and the signature says so by not having one.</b> The evidence
+    /// span is <see cref="EvidenceStart"/> to <paramref name="endUtc"/> whatever the caller read its rows
+    /// over — see that method for why. An accepted-but-ignored <c>startUtc</c> is worse than an absent one:
+    /// the caller passes a window, reasonably believes it is honoured, and neither the compiler nor the
+    /// answer tells them otherwise. Callers that want the raw counts over a span of their own choosing have
+    /// <see cref="GetCoverageEvidenceAsync"/>, which takes both ends and uses both.</para>
+    /// </summary>
+    /// <param name="endUtc">The instant the caller's read ENDS at, which the evidence window is anchored
+    /// on so an <c>as_of</c> read is explained by contemporary evidence rather than by today's.</param>
+    public static async Task<PgColumnStatsCoverageVerdict> GetCoverageVerdictAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime endUtc, int storedColumnRows,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        try
+        {
+            var evidence = await GetCoverageEvidenceAsync(
+                postgres, serverId, EvidenceStart(endUtc), endUtc, cancellationToken);
+
+            return PgColumnStatsCoverage.Classify(
+                evidence.EvidenceCollectorRan,
+                evidence.CandidateTables,
+                evidence.TablesWithVisibleStatistics,
+                storedColumnRows);
+        }
+        catch (Exception)
+        {
+            return PgColumnStatsCoverage.EvidenceUnreadable(storedColumnRows);
+        }
+    }
+
+    /// <summary>
+    /// The evidence lookback: a FIXED span ending where the caller's read ends, independent of how wide a
+    /// window the caller asked its data over.
+    ///
+    /// <para><b>The read's own window is the wrong window for this, in both directions.</b> A one-hour panel
+    /// window straddles zero or one run of the hourly evidence collector, so it would manufacture
+    /// <see cref="PgColumnStatsCoverageArm.Undetermined"/> for a target measured 167 times in the past week.
+    /// And a wide one is no better: the MCP tool defaults to 168 hours, where the census measured 242 ms
+    /// against 41 ms over a day — a diagnostic that runs on every call, empty or not, paying six times over
+    /// for history it does not use.</para>
+    ///
+    /// <para><b>Because it is not a question about history.</b> Whether the monitoring login can read
+    /// <c>pg_stats</c>, and whether anything on the target clears the size floor, are CURRENT states — and
+    /// <c>CollectorRuntimePrecondition</c> settled this shape already: it consults the LATEST run rather than
+    /// a window, on the reasoning that a precondition somebody has since satisfied must not keep being
+    /// reported. Averaging a month of candidate counts would answer a question nobody asked and cost more to
+    /// do it.</para>
+    ///
+    /// <para>A day rather than the latest row alone, because the store table is a hypertable and the count
+    /// is over DISTINCT tables — so it needs a span, and a day both bounds the chunks scanned and is the
+    /// SUBJECT collector's own cadence: <c>pg_column_stats</c> runs daily, so this is the evidence
+    /// contemporary with the run being explained, and it is guaranteed to exist wherever the hourly
+    /// collector is running at all.</para>
+    ///
+    /// <para>Anchored on <paramref name="endUtc"/>, so an <c>as_of</c> read gets the evidence contemporary
+    /// with the data it is explaining rather than today's.</para>
+    /// </summary>
+    /// <para>The span itself lives on <see cref="PgColumnStatsCoverage.EvidenceHours"/>, not here: it
+    /// appears in the census an operator reads, so the label and the query have to be the same figure and a
+    /// copy in this file is how they stop being.</para>
+    internal static DateTime EvidenceStart(DateTime endUtc) =>
+        endUtc.AddHours(-PgColumnStatsCoverage.EvidenceHours);
+
+    /// <summary>The raw evidence, for callers that want the counts rather than the sentence.</summary>
+    public static async Task<PgColumnStatsCoverageEvidence> GetCoverageEvidenceAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        await using var command = postgres.CreateCommand(CoverageEvidenceSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        /* SpecifyKind(Unspecified) at the bind, for the reason the row read below documents: Kind=Utc
+           infers timestamptz and the comparison against these naive columns then resolves at the store
+           session's TimeZone, which east of UTC slides the window off the data. An evidence read that
+           silently returned nothing would answer Undetermined on a server that has the evidence. */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new PgColumnStatsCoverageEvidence(false, 0, 0);
+        }
+
+        return new PgColumnStatsCoverageEvidence(
+            EvidenceCollectorRan: !reader.IsDBNull(0) && reader.GetBoolean(0),
+            CandidateTables: reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+            TablesWithVisibleStatistics: reader.IsDBNull(2) ? 0 : reader.GetInt32(2));
+    }
 
     public static async Task<List<PgColumnStatRow>> GetPgColumnStatsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,

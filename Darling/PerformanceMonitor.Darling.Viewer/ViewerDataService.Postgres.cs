@@ -425,12 +425,25 @@ public sealed partial class ViewerDataService
 
     /// <summary>Storage tab - per-column planner statistics (#2543), latest per column and ranked by
     /// suspicion rather than alphabetically: heavy skew first (the parameter-sensitivity signal), then low
-    /// correlation (why an index scan was rejected). Zero rows has TWO causes - no qualifying table, or a
-    /// monitoring role without SELECT, since pg_stats filters on has_column_privilege - and the caller must
-    /// not report either as healthy statistics.</summary>
+    /// correlation (why an index scan was rejected). This returns the ROWS only; what the row count MEANS is
+    /// <see cref="GetPgColumnStatsCoverageAsync"/>, and a caller that prints one without the other is back
+    /// to reporting a privilege denial as healthy statistics.</summary>
     public Task<List<DarlingPgColumnStatsReader.PgColumnStatRow>> GetPgColumnStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 100, CancellationToken cancellationToken = default) =>
         DarlingPgColumnStatsReader.GetPgColumnStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Storage tab - WHICH of pg_column_stats' outcomes produced the row count above (#3154):
+    /// nothing clears the collector's page floor, the monitoring login cannot see pg_stats, coverage is
+    /// partial, or neither legitimate cause applies and it is a fault. The same classifier
+    /// <c>get_pg_column_stats</c> calls, over the same evidence, so the panel and the tool cannot give one
+    /// operator two answers.
+    /// <para>Takes the window END only, mirroring the reader: coverage is a CURRENT state of the target, so
+    /// there is no start to honour and no start is accepted. A parameter passed and ignored would let the
+    /// panel look as though its own window governed this answer.</para></summary>
+    public Task<PgColumnStatsCoverageVerdict> GetPgColumnStatsCoverageAsync(
+        int serverId, DateTime endUtc, int storedColumnRows, CancellationToken cancellationToken = default) =>
+        DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
+            _dataSource, serverId, endUtc, storedColumnRows, cancellationToken);
 
     /// <summary>Replication tab - connected standbys and how far behind each got (#2544). Returns the latest
     /// sample AND the window's worst, because a replica that drifts hundreds of MB behind and recovers reads
