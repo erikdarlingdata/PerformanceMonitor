@@ -2608,7 +2608,13 @@ WITH NO DATA";
     /// <b>198 s</b> (<c>query_snapshots</c>) and <b>552 s</b> (<c>query_store_stats</c>) — stated in that
     /// order throughout this paragraph, which is the order of the minutes they held. Those are
     /// <c>collect.store_metrics</c>' hourly <c>background_job</c> snapshot — a LAST-RUN reading, so no
-    /// maximum question is answered by them (#3119) — and they are one store's and one night's. Under the
+    /// maximum question is answered by them (#3119) — and they are one store's and one night's. A far broader
+    /// population exists and is recorded on the change that added this member rather than restated here: a
+    /// multi-week <c>timescaledb_information.job_history</c> census of the same hypertables by hour of day,
+    /// which is maximum-capable where these readings are not. It puts <c>query_store_stats</c>' typical
+    /// midnight run INSIDE the clearance below and its upper tail PAST it. The readings quoted here are
+    /// therefore the weaker instrument, and they are kept because they are the ones the shares stated below
+    /// are computed from — a figure this file can be checked against beats a larger one it cannot. Under the
     /// grid in force that night the three started at <c>00:26</c>, <c>00:27</c> and <c>00:28</c> with
     /// <b>240 s</b>, <b>180 s</b> and <b>120 s</b> of clearance, so every one of them ran past the refresh
     /// that followed it. The one whose hypertable that refresh also READ was <c>query_store_stats</c>, and it
@@ -2678,8 +2684,16 @@ WITH NO DATA";
         ApproachingRefresh,
 
         /// <summary>At or past <see cref="CompressionMinuteClearanceSeconds"/>. The run was still holding its
-        /// <c>AccessExclusiveLock</c> when an hourly refresh started, which is the queue
-        /// <see cref="HourlyRefreshPhaseOrder"/>'s stagger exists to keep empty.</summary>
+        /// <c>AccessExclusiveLock</c> when AT LEAST ONE hourly refresh started, which is the queue
+        /// <see cref="HourlyRefreshPhaseOrder"/>'s stagger exists to keep empty.
+        ///
+        /// <para><b>At least one, and the band does not say how many.</b> A grid places a job's START; it
+        /// cannot bound its END, and no arrangement of a sixty-minute hour contains a run longer than an
+        /// hour. A long enough compression run passes several refresh starts in sequence — the light band
+        /// alone holds one per minute — so this band must not be read as "one refresh waited". How far past
+        /// the FIRST start the run went is reported (<see cref="CompressionActivity.ClearOfRefreshSeconds"/>);
+        /// how many starts it passed is not derived, because that needs each refresh's own runtime and not
+        /// just its minute.</para></summary>
         RefreshOverrun,
     }
 

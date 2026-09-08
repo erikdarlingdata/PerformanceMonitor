@@ -80,7 +80,7 @@ public sealed class CommentFilterAdoptionTests
     /// <see cref="AnalysisPassTokenThreadingTests"/> gives: the way a wildcard grows is that nobody has to
     /// name a new entry.
     ///
-    /// <para>Four kinds live here and they are not the same kind. Four <b>collect</b> a doc-comment run,
+    /// <para>Four kinds live here and they are not the same kind. Five <b>collect</b> a doc-comment run,
     /// where the prefix is what defines the run. One reads a <b>stated, measured</b> bound off a named file.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
@@ -103,6 +103,19 @@ public sealed class CommentFilterAdoptionTests
 
         ["Lite.Tests/AnalysisPassTokenThreadingTests.cs"] =
             "COLLECTS a doc run. The Lite twin of the above, same helper, same reason.",
+
+        ["Darling.Tests/CompressionClearanceWatchTests.cs"] =
+            "COLLECTS a doc run. DocProseWithMap walks the contiguous /// run above a named declaration for "
+            + "the same reason RefreshCeilingProvenancePinTests does - the figures being pinned live only in "
+            + "comments, so asking for the walker would leave nothing to read - and additionally returns a "
+            + "per-character map back into the source, which is what the drift sweep splices a bumped numeral "
+            + "through. Stated bound, and it is TWO: the walk STOPS at the first line that is not /// "
+            + "-prefixed, so a block comment between the run and its declaration truncates it, which is loud "
+            + "because the collected prose is then asserted to open at <summary>. And the map is exact only "
+            + "where the normalisation introduces no character - it strips <b> tags and folds dashes, neither "
+            + "of which yields a DIGIT, and digits are the only thing a pin here reads. The splice asserts "
+            + "the source span equals the captured text, so a numeral wrapped across two /// lines fails "
+            + "loudly rather than being partially replaced.",
 
         ["Darling.Tests/DocCommentHygieneTests.cs"] =
             "COLLECTS a doc run. DocRuns groups contiguous /// lines into the run that documents one member, "
