@@ -53,6 +53,25 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class StoreSelfMetrics
 {
     /// <summary>
+    /// The TimescaleDB GUC that decides whether <c>timescaledb_information.job_history</c> records anything
+    /// (#3175). Named ONCE, because the string has two consumers that must never disagree: the managed
+    /// provisioner writes it into postgresql.conf (<c>DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend</c>)
+    /// and the MCP read probes <c>pg_settings</c> for it (<c>DarlingStoreMetricsReader.JobExecutionLoggingSql</c>).
+    /// A retyped copy that drifted would not error — <c>pg_settings</c> would simply return no row for a name
+    /// nobody registered, which this read reports as "the server has no such setting". A wrong name and a
+    /// plain-PostgreSQL store would be indistinguishable.
+    ///
+    /// <para><b>Why it lives HERE and not on the provisioner that writes it.</b>
+    /// <c>DarlingManagedPostgres</c> is <c>[SupportedOSPlatform("windows")]</c>, so a constant declared
+    /// there makes every call site platform-dependent — CA1416 on a read that is not Windows-specific and
+    /// has no reason to be, for the sake of a string. This class is the platform-neutral owner of the
+    /// store's own background-job telemetry, and it is the class whose recorded series
+    /// (<see cref="BackgroundJobInsertSql"/>, one hourly sample per job) is the reason the per-run route
+    /// matters at all: a maximum question cannot be answered from a sample.</para>
+    /// </summary>
+    public const string JobExecutionLoggingSetting = "timescaledb.enable_job_execution_logging";
+
+    /// <summary>
     /// Per-statement command timeout for the sweep (#2317) — and, at the worker's call site, the
     /// budget for the WHOLE sweep via a linked CTS (see SweepStoreSelfMetricsAsync: this sweep is
     /// awaited on the main loop, so five sequential per-statement timeouts must not stack). The

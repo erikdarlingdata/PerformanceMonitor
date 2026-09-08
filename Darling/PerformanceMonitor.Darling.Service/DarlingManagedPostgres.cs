@@ -270,6 +270,73 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV10 = "# Managed by PerformanceMonitor Darling (v10 message locale) -- do not remove this block";
 
     /// <summary>
+    /// Marker for the v11 job-execution-logging block (#3175): pin
+    /// <c>timescaledb.enable_job_execution_logging</c> on, so <c>timescaledb_information.job_history</c>
+    /// records one row per background-job run. An ELEVENTH independently versioned block, and it exists for
+    /// a reason none of the others do — the setting was originally written into the <b>v1</b> block (#1681),
+    /// the one block whose marker is already present on every pre-existing cluster. <see cref="EnsureConfAppended"/>
+    /// skips a block whose marker it finds, so on any cluster that existed before #1681 the append that would
+    /// have carried the GUC never ran, and the setting never arrived. Every setting after v1 got its own
+    /// marker for exactly this reason; this one did not.
+    ///
+    /// <para><b>Why that is worse than a plain missing setting.</b> A maximum over an empty
+    /// <c>job_history</c> returns ZERO ROWS, and zero rows reads as <i>"no run exceeded the line"</i> rather
+    /// than as <i>"this instrument is off"</i> — an absence that reads as health, which is the failure shape
+    /// the rest of this codebase guards against explicitly. Measured on two field stores running the same
+    /// binary: the cluster initdb'd 2026-07-17 carried all ten markers, <b>no GUC line</b>, an effective
+    /// <c>off</c> with <c>source = default</c>, and ONE history row for 110 jobs; the cluster initdb'd
+    /// 2026-08-17 carried the line and 39,020 rows. Nothing in the first store's answer distinguished it
+    /// from a clean one, which silently scoped every <c>job_history</c>-derived conclusion to the newer
+    /// store.
+    ///
+    /// <para><b>MOVED out of v1 rather than duplicated into v11.</b> Leaving a copy in
+    /// <see cref="BuildConfAppend"/> would cost nothing at runtime (identical value, last occurrence wins)
+    /// and would leave the repository asserting this setting in the block that provably cannot deliver it —
+    /// which is the reading #1681 made, and the one the next person would copy. The GUC is stated once, in
+    /// the block that heals. <c>ConfV1BlockCarriesNoHealableSetting</c> pins the move so it cannot drift
+    /// back.</para>
+    ///
+    /// <para><b>DELIBERATELY NOT A WIDENING OF THE V1 MARKER, and the harm is measured rather than
+    /// asserted.</b> Making the v1 check ask "is the GUC line present?" instead of "is the v1 marker
+    /// present?" would re-append the WHOLE v1 block to every pre-existing cluster, and that block is
+    /// shared. <c>shared_preload_libraries</c> is list-valued and the last occurrence REPLACES the list
+    /// rather than extending it: measured on TimescaleDB 2.30.0/PG17, a conf carrying an operator's
+    /// <c>'timescaledb,pg_stat_statements'</c> came back up serving <c>'timescaledb'</c> alone once the v1
+    /// block was appended behind it. <c>listen_addresses</c> would likewise re-assert loopback over a
+    /// conf-configured exposure, and <c>port</c> would override a hand-edited one. A separate marker
+    /// re-applies none of it.</para>
+    ///
+    /// <para><b>Reload semantics, measured rather than assumed.</b> The GUC's context is <c>sighup</c>
+    /// (measured on 2.30.0: <c>pg_settings.context = 'sighup'</c>, and a conf append plus one
+    /// <c>pg_reload_conf()</c> moved it from <c>off</c>/<c>source = default</c> to <c>on</c>/<c>source =
+    /// configuration file</c>). This append runs BEFORE pg_ctl start, so on a service-owned start no reload
+    /// is needed and the setting is live on the very start that writes it. The exception is the
+    /// adopted-listener path in <see cref="EnsureRunningAsync"/>: a postmaster already running is neither
+    /// stopped nor signalled, so there the heal waits for the next service-owned start. <b>No reload is
+    /// issued and that is a decision, not an omission</b> — v9 and v10 carry the same exposure and the same
+    /// choice, signalling a server this service did not start is the same class of act as stopping one, and
+    /// a reload would apply this block while leaving the restart-only settings that the SAME heal may have
+    /// just appended (v2/v3/v4/v5/v7) inert. A half-applied conf is worse than a consistently deferred one:
+    /// it removes the operator's ability to reason about the server's state from "did the service own this
+    /// start".</para>
+    ///
+    /// <para><b>Healing starts logging; it does not recover history.</b> A store that has been running
+    /// without the GUC wrote no per-run rows and there is nothing to backfill — TimescaleDB does not retain
+    /// what it was told not to record. So the honest outcome is "logging starts now", which the append's log
+    /// line states rather than implies, and a <c>job_history</c> window that predates the heal stays empty
+    /// on purpose. <c>timescaledb_information.job_stats</c> remains the surface that reports on an
+    /// untouched store; it is maintained unconditionally, which is why every shipped read uses it.</para>
+    ///
+    /// <para><b>What this cannot beat.</b> <c>postgresql.auto.conf</c> is read after
+    /// <c>postgresql.conf</c>, so an <c>ALTER SYSTEM SET timescaledb.enable_job_execution_logging = off</c>
+    /// still wins — measured: with the appended block last in <c>postgresql.conf</c> the effective value was
+    /// <c>off</c> with <c>sourcefile</c> naming <c>postgresql.auto.conf</c>. That is precisely why the
+    /// read-side check reports the EFFECTIVE value and its source rather than the presence of this marker: a
+    /// marker says the product did its part, and only the effective value says the instrument is on.</para>
+    /// </summary>
+    public const string ConfMarkerV11 = "# Managed by PerformanceMonitor Darling (v11 job execution logging) -- do not remove this block";
+
+    /// <summary>
     /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
     /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
     /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
@@ -418,13 +485,12 @@ public sealed class DarlingManagedPostgres
         builder.Append("shared_preload_libraries = 'timescaledb'\n");
         builder.Append("port = ").Append(port).Append('\n');
         builder.Append("listen_addresses = '127.0.0.1'\n");
-        /* #1681: per-run audit trail for TimescaleDB background jobs. Off by default, which meant
-           timescaledb_information.job_errors and job_history returned ZERO rows for every job on a field
-           store — including jobs with dozens of confirmed successful runs. When a compression job hung
-           there (9 times in 6 days, always the two highest-write hypertables) there was no captured error,
-           no worker PID, no start/finish record: nothing to diagnose from. The rows are small and written
-           once per job run, not per row processed. */
-        builder.Append("timescaledb.enable_job_execution_logging = on\n");
+        /* timescaledb.enable_job_execution_logging lives in the v11 block, NOT here (#3175). It was here
+           (#1681) and that is why it never reached a single pre-existing cluster: this block's marker is
+           already present on any cluster that predates the setting, so the append carrying it is skipped
+           and the GUC arrives only on a fresh initdb. Every other setting added after v1 has its own
+           marker for exactly that reason. See ConfMarkerV11 for the measurement and for why the fix is a
+           new marker rather than a looser match on this one. */
         /* LZ4 TOAST (PG14+; the bundled runtime is PG18): large text/XML values — query text, plan
            XML, deadlock/blocked-process XML — auto-compress on write faster than the pglz default
            and about as small, shrinking the ~1-day hot window before TimescaleDB's columnar
@@ -860,6 +926,25 @@ public sealed class DarlingManagedPostgres
         builder.Append('\n');
         builder.Append(ConfMarkerV10).Append('\n');
         builder.Append("lc_messages = 'C'\n");
+        return builder.ToString();
+    }
+
+    /* ===================== v11 job execution logging ===================== */
+
+    /// <summary>
+    /// The v11 block: turn <c>timescaledb.enable_job_execution_logging</c> on so
+    /// <c>timescaledb_information.job_history</c> records one row per background-job run. This is the
+    /// setting #1681 put in the v1 block, where its marker guard meant it could only ever reach a fresh
+    /// initdb — see <see cref="ConfMarkerV11"/> for the two-store measurement, why the fix is a new marker
+    /// rather than a looser match on v1, what a heal does and does not recover, and the reload semantics.
+    /// Carries no fingerprint line, so the v8 staleness check's invariant about what it reads is untouched.
+    /// </summary>
+    public static string BuildJobExecutionLoggingConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV11).Append('\n');
+        builder.Append(StoreSelfMetrics.JobExecutionLoggingSetting).Append(" = on\n");
         return builder.ToString();
     }
 
@@ -1452,6 +1537,22 @@ public sealed class DarlingManagedPostgres
             File.AppendAllText(confPath, BuildMessageLocaleConfAppend());
             _logger.LogInformation(
                 "Appended v10 message locale to postgresql.conf (lc_messages = 'C'): PostgreSQL translates its severity labels under lc_messages, and the store's own log parser matches them as English tokens.");
+        }
+
+        /* Checked independently of v1-v10: an existing cluster heals by GAINING the job-execution-logging
+           block (#3175). This setting was written into the v1 block by #1681, and the v1 check above is the
+           one that a pre-existing cluster always answers "present" — so the GUC only ever reached a fresh
+           initdb, and every store older than that release has had timescaledb_information.job_history empty
+           the whole time. Its own marker is the whole fix; see ConfMarkerV11 for why widening v1's match
+           would have re-applied that shared block's list-valued shared_preload_libraries and its
+           listen_addresses, both measured to change behaviour. SIGHUP-context and appended before pg_ctl
+           start, so effective on this very start when the service owns it. */
+        if (!conf.Contains(ConfMarkerV11, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildJobExecutionLoggingConfAppend());
+            _logger.LogInformation(
+                "Appended v11 job execution logging to postgresql.conf ({Setting} = on): timescaledb_information.job_history records one row per background-job run, and without this it stays EMPTY — a maximum over it returns no rows, which reads as 'no run exceeded the line' rather than 'this instrument is off'. Logging starts from this start onward if the service owns it, otherwise from the next start it owns; runs before that point wrote nothing and CANNOT be recovered. job_stats remains the unconditional surface for a store that has not yet healed.",
+                StoreSelfMetrics.JobExecutionLoggingSetting);
         }
     }
 

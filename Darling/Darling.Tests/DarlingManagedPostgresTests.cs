@@ -7,8 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
@@ -249,6 +252,201 @@ public sealed class DarlingManagedPostgresTests
         /* `timezone`, not `log_timezone`: the session zone is what resolves a mixed timestamp/timestamptz
            comparison. Setting only the log zone would change what the log says and nothing about the data. */
         Assert.DoesNotContain("log_timezone", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The v11 job-execution-logging block (#3175). This block exists for a reason no other one does: the
+    /// setting was written into the <b>v1</b> block by #1681, and v1's marker is present on every
+    /// pre-existing cluster, so the append that carried it was skipped and the GUC reached fresh initdbs
+    /// only. It is asserted as a LAST-OCCURRENCE value rather than a substring, because that is what
+    /// PostgreSQL honours and what makes the block an override rather than a hope.
+    /// </summary>
+    [Fact]
+    public void JobExecutionLoggingConfAppend_PinsV11Marker_AndTurnsTheGucOn()
+    {
+        var block = DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV11, block, StringComparison.Ordinal);
+        Assert.Equal("on", LastSettingValue(block, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+        /* No fingerprint line, or the v8 staleness check silently stops checking (it reads the conf as it
+           stood before any of these appends, and only holds while no later block writes one). */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+
+        /* The blocks compose, they don't compete: this one restates exactly one setting. Every v1 name is
+           taken from the v1 builder rather than retyped, so a v1 that gained a setting is covered here too. */
+        foreach (var name in SettingNames(DarlingManagedPostgres.BuildConfAppend(5641)))
+        {
+            Assert.Null(LastSettingValue(block, name));
+        }
+    }
+
+    /// <summary>
+    /// The MOVE, pinned in both directions (#3175): the GUC is in the v11 block and is NOT in the v1 block.
+    ///
+    /// <para>Both halves matter and neither alone is the claim. Present-in-v11 alone would pass with a
+    /// duplicate left behind in v1 — harmless at runtime, and exactly the reading that produced the defect:
+    /// the repository would still assert this setting in the one block that provably cannot deliver it.
+    /// Absent-from-v1 alone would pass if the setting were dropped entirely.</para>
+    /// </summary>
+    [Fact]
+    public void TheJobExecutionLoggingGuc_IsInV11AndNotInTheUnhealableV1Block()
+    {
+        var v1 = DarlingManagedPostgres.BuildConfAppend(5641);
+        var v11 = DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend();
+
+        Assert.Null(LastSettingValue(v1, StoreSelfMetrics.JobExecutionLoggingSetting));
+        Assert.DoesNotContain(StoreSelfMetrics.JobExecutionLoggingSetting, v1, StringComparison.Ordinal);
+        Assert.Equal("on", LastSettingValue(v11, StoreSelfMetrics.JobExecutionLoggingSetting));
+    }
+
+    /// <summary>
+    /// The v1 block's CONTENT IS FROZEN, and this is the pin whose absence let #3175 happen (#1681 added a
+    /// setting here and nothing said anything).
+    ///
+    /// <para><b>Why a freeze rather than a minimum.</b> v1's marker is present on every cluster that
+    /// already exists, and <c>EnsureConfAppended</c> skips a block whose marker it finds — so a setting
+    /// added to this block can only ever reach a cluster that is initdb'd afterwards. That is not a
+    /// property of any particular setting; it is a property of the BLOCK. A new setting therefore needs its
+    /// own marker, and this test is the thing that says so at the moment someone types it into the wrong
+    /// builder rather than a release later.</para>
+    ///
+    /// <para>The three names are load-bearing beyond the count: <c>shared_preload_libraries</c> is
+    /// list-valued and a later assignment REPLACES the list rather than extending it, and
+    /// <c>listen_addresses</c>/<c>port</c> govern who can reach the store — which is why this block must
+    /// never be re-appended to a cluster that already has it, and why the fix for #3175 is a new marker
+    /// rather than a looser match on this one.</para>
+    /// </summary>
+    [Fact]
+    public void ConfV1Block_ContentIsFrozen_ANewSettingNeedsItsOwnMarker()
+    {
+        var names = SettingNames(DarlingManagedPostgres.BuildConfAppend(5641));
+
+        Assert.Equal(
+            new[] { "default_toast_compression", "listen_addresses", "port", "shared_preload_libraries" },
+            names.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>
+    /// Healing an EXISTING cluster's conf adds the v11 block and re-applies NO v1 content (#3175) — the
+    /// structural half of "do not simply widen the v1 marker", stated as an invariant over the file rather
+    /// than as prose on the marker.
+    ///
+    /// <para><b>What widening would have done, and why it is measured harm rather than tidiness.</b> Making
+    /// v1's check ask "is the GUC line present?" would re-append the whole shared v1 block to every
+    /// pre-existing cluster. Measured on TimescaleDB 2.30.0/PG17: a conf carrying an operator's
+    /// <c>shared_preload_libraries = 'timescaledb,pg_stat_statements'</c> came back up serving
+    /// <c>'timescaledb'</c> alone once the v1 block was appended behind it, because the GUC is list-valued
+    /// and the last assignment replaces the list. This test fails the moment any v1 setting appears twice.
+    /// </para>
+    ///
+    /// <para>The v1 names are DERIVED from the v1 builder rather than listed, so a v1 that gains a setting
+    /// (which <see cref="ConfV1Block_ContentIsFrozen_ANewSettingNeedsItsOwnMarker"/> forbids) is covered
+    /// here without editing this test.</para>
+    /// </summary>
+    [Fact]
+    public void HealingAConfWithoutV11_AppendsOnlyThatBlock_AndReAppliesNoV1Setting()
+    {
+        /* The field shape: a cluster whose conf carries v1 (and every later marker) but no v11 block, so
+           the GUC line is simply absent and nothing in the file says so. */
+        var existing = DarlingManagedPostgres.BuildConfAppend(5641)
+            + DarlingManagedPostgres.BuildTimeZoneConfAppend()
+            + DarlingManagedPostgres.BuildMessageLocaleConfAppend();
+
+        /* The pre-heal reading, asserted rather than assumed: absent, not off. There is no assignment at
+           all, which is what made the effective value `off` with `source = default` in the field. */
+        Assert.Null(LastSettingValue(existing, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+        var healed = existing + DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend();
+
+        /* The heal: exactly one v11 block, and the GUC now has exactly one assignment, whose value is on. */
+        Assert.Equal(1, CountOccurrences(healed, DarlingManagedPostgres.ConfMarkerV11));
+        Assert.Equal(1, CountOccurrences(healed, StoreSelfMetrics.JobExecutionLoggingSetting + " = "));
+        Assert.Equal("on", LastSettingValue(healed, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+        /* And nothing else moved: every v1 setting still has exactly ONE assignment, so no part of the
+           shared v1 block was re-applied. A widened v1 match would put every one of these at two. */
+        foreach (var name in SettingNames(DarlingManagedPostgres.BuildConfAppend(5641)))
+        {
+            Assert.Equal(1, CountOccurrences(healed, name + " = "));
+        }
+
+        /* The v1 marker itself is untouched, which is the direct statement that v1 did not re-fire. */
+        Assert.Equal(1, CountOccurrences(healed, DarlingManagedPostgres.ConfMarker));
+    }
+
+    /// <summary>
+    /// Every managed conf marker is distinct, and none is a SUBSTRING of another (#3175). Enumerated by
+    /// reflection over the <c>ConfMarker*</c> constants, so a v12 is covered on the commit that adds it.
+    ///
+    /// <para><b>Why substring and not just equality.</b> <c>EnsureConfAppended</c> asks each question as
+    /// <c>conf.Contains(marker)</c>. If one marker were a prefix or substring of another, a cluster
+    /// carrying only the longer block would answer "present" for the shorter one and silently never gain
+    /// it — the #3175 failure reproduced by a different route, and one that a rewording could introduce by
+    /// accident. Note the v1 marker is nearly a prefix of every later one and is saved only by the
+    /// parenthesised version segment sitting where v1 has <c> -- </c>; that is not obvious by eye, which is
+    /// why it is asserted.</para>
+    /// </summary>
+    [Fact]
+    public void EveryConfMarker_IsDistinct_AndNoneIsASubstringOfAnother()
+    {
+        var markers = typeof(DarlingManagedPostgres)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.StartsWith("ConfMarker", StringComparison.Ordinal))
+            .Select(f => (f.Name, Value: (string)f.GetRawConstantValue()!))
+            .ToArray();
+
+        /* A positive control on the enumeration itself: an empty or one-element set would make every
+           assertion below vacuously true, and a reflection filter that stopped matching is exactly the
+           silent failure this shape invites. Eleven blocks as of #3175. */
+        Assert.Equal(11, markers.Length);
+
+        Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
+
+        foreach (var (name, value) in markers)
+        {
+            foreach (var (otherName, otherValue) in markers)
+            {
+                if (string.Equals(name, otherName, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                Assert.False(
+                    otherValue.Contains(value, StringComparison.Ordinal),
+                    $"{name} is a substring of {otherName}, so EnsureConfAppended's Contains check for {name} " +
+                    "would be satisfied by a cluster that only ever gained the other block.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The assignment names in a conf fragment — the left side of every non-comment <c>=</c> line. Derived
+    /// from a builder's own output so a pin over "what this block writes" cannot drift from what it writes.
+    /// </summary>
+    private static string[] SettingNames(string conf)
+    {
+        var names = new List<string>();
+        foreach (var raw in conf.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=', StringComparison.Ordinal);
+            if (separator > 0)
+            {
+                var name = line[..separator].Trim();
+                if (!names.Contains(name, StringComparer.Ordinal))
+                {
+                    names.Add(name);
+                }
+            }
+        }
+
+        return names.ToArray();
     }
 
     /// <summary>
@@ -1137,6 +1335,155 @@ public sealed class DarlingManagedPostgresTests
             await owner.StopIfStartedByThisProcessAsync();
             TryDeleteRecursive(root.FullName);
         }
+    }
+
+    /// <summary>
+    /// #3175 PROPAGATION, proven against a real server: a cluster whose conf carries the v1 marker (and
+    /// every later one) but NO v11 block — the shape of every store initdb'd before this fix — must gain
+    /// <c>timescaledb.enable_job_execution_logging = on</c> on its next service-owned start, and must be
+    /// serving it, not merely carrying it in a file.
+    ///
+    /// <para>The pre-fix conf is reconstructed exactly rather than approximated: v11 is the last block
+    /// appended, so truncating at its marker restores the old file byte-for-byte, and the GUC then has no
+    /// assignment anywhere — which is precisely the field shape (all ten markers present, no GUC line,
+    /// effective <c>off</c> with <c>source = default</c>).</para>
+    ///
+    /// <para><b>The positive control, because "on" alone would be worthless here.</b> The reading is taken
+    /// together with <c>boot_val</c> and <c>source</c> in one row. <c>boot_val = 'off'</c> proves the
+    /// compiled-in default is off, so an observed <c>on</c> cannot be the value this server would have had
+    /// regardless — the exact confusion this whole issue is about, one level up. <c>source</c> then names
+    /// where the <c>on</c> came from, and <c>sourcefile</c> proves it was OUR postgresql.conf rather than
+    /// an <c>ALTER SYSTEM</c> in postgresql.auto.conf. Without those three the assertion would pass on a
+    /// server that was already on for an unrelated reason.</para>
+    ///
+    /// <para><c>context</c> is pinned as well, against the BUNDLED TimescaleDB rather than only the version
+    /// this was measured on locally: the marker's doc comment says a reload would carry this setting and
+    /// that the append-before-start is what makes a reload unnecessary. If TimescaleDB ever made it
+    /// restart-only, that reasoning would be wrong and this goes red instead of the comment quietly
+    /// becoming fiction.</para>
+    /// </summary>
+    [Fact]
+    public async Task ExistingStore_GainsJobExecutionLogging_OnNextStart_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe; " +
+            "Darling\\tools\\fetch-pg-runtime.ps1 -KeepWork leaves one under artifacts\\pg-runtime-work\\assemble\\pg-runtime) " +
+            "to run the #3175 conf-propagation E2E.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-pgv11-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var config = new PostgresConfig
+        {
+            Managed = true,
+            Port = FindFreeTcpPort(),
+            DataDirectory = dataDirectory,
+        };
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+
+        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+
+            /* A real store, provisioned the normal way. */
+            await owner.EnsureRunningAsync(timeout.Token);
+            await owner.StopIfStartedByThisProcessAsync();
+
+            /* Rewind to the pre-#3175 shape: v11 is appended last, so its marker is a clean truncation
+               point. */
+            var fresh = await File.ReadAllTextAsync(confPath, timeout.Token);
+            var v11Index = fresh.IndexOf(DarlingManagedPostgres.ConfMarkerV11, StringComparison.Ordinal);
+            Assert.True(v11Index > 0, "The fresh conf should carry the v11 block before it is rewound.");
+
+            var legacyConf = fresh[..v11Index];
+            await File.WriteAllTextAsync(confPath, legacyConf, timeout.Token);
+
+            /* The rewound file is the field shape, asserted on both axes: the v1 marker IS present (so the
+               v1 check will skip, which is the whole defect) and the GUC has NO assignment anywhere — not
+               an assignment set to off, an absence. */
+            Assert.Contains(DarlingManagedPostgres.ConfMarker, legacyConf, StringComparison.Ordinal);
+            Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV11, legacyConf, StringComparison.Ordinal);
+            Assert.Null(LastSettingValue(legacyConf, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+            /* The service-owned start: EnsureConfAppended heals BEFORE pg_ctl start, so the setting is live
+               on this very start rather than one restart later. */
+            var healedOwner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            var healedConnectionString = await healedOwner.EnsureRunningAsync(timeout.Token);
+            try
+            {
+                var healedConf = await File.ReadAllTextAsync(confPath, timeout.Token);
+                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarkerV11));
+                Assert.Equal("on", LastSettingValue(healedConf, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+                /* Appended, never rewritten in place: the v1 marker still occurs exactly once, so no part
+                   of that shared block was re-applied to heal this setting. */
+                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarker));
+                Assert.Equal(1, CountOccurrences(healedConf, "shared_preload_libraries = "));
+
+                var reading = await ReadJobExecutionLoggingSettingAsync(healedConnectionString, timeout.Token);
+
+                /* The positive control first: the compiled-in default is OFF, so the value below cannot be
+                   what this server would have served anyway. */
+                Assert.Equal("off", reading.BootValue);
+                Assert.Equal("on", reading.Setting);
+                Assert.Equal("configuration file", reading.Source);
+                Assert.Equal(
+                    Path.GetFullPath(confPath),
+                    Path.GetFullPath(reading.SourceFile ?? string.Empty));
+
+                /* SIGHUP-context, which is what makes "the append before pg_ctl start is enough, and no
+                   reload is issued" a decision rather than a gamble. */
+                Assert.Equal("sighup", reading.Context);
+            }
+            finally
+            {
+                await healedOwner.StopIfStartedByThisProcessAsync();
+            }
+
+            /* A third start must not append a second v11 block. */
+            Assert.Equal(1, CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV11));
+        }
+        finally
+        {
+            await owner.StopIfStartedByThisProcessAsync();
+            TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// One <c>pg_settings</c> row for the job-execution-logging GUC, read through an UNPOOLED connection so
+    /// the reading always costs real I/O against the server running right now. All five columns in one row
+    /// rather than five reads: the value only means anything beside its default and its provenance.
+    /// </summary>
+    private static async Task<(string? Setting, string? Source, string? SourceFile, string? BootValue, string? Context)>
+        ReadJobExecutionLoggingSettingAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        var unpooled = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
+        await using var connection = new NpgsqlConnection(unpooled);
+        await connection.OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand(
+            "SELECT setting, source, sourcefile, boot_val, context FROM pg_settings WHERE name = @name",
+            connection);
+        command.Parameters.AddWithValue("name", StoreSelfMetrics.JobExecutionLoggingSetting);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        /* A missing row would mean the TimescaleDB library is not preloaded, which is a different failure
+           from the setting being off — and one this test must not report as "off". */
+        Assert.True(
+            await reader.ReadAsync(cancellationToken),
+            $"pg_settings has no row for {StoreSelfMetrics.JobExecutionLoggingSetting}: the TimescaleDB library is not " +
+            "preloaded on this cluster, so the v1 shared_preload_libraries line did not take effect.");
+
+        return (
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4));
     }
 
     /// <summary>
