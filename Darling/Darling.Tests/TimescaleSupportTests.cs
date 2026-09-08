@@ -2768,6 +2768,15 @@ LIMIT 1", connection))
            per-run history an operator following this line goes looking for. */
         Assert.Contains("timescaledb_information.job_history", approaching.Joined, StringComparison.Ordinal);
 
+        /* #3175: and the line says WHEN that route is empty, which is the half a pointer cannot carry on its
+           own. job_history only records executions where timescaledb.enable_job_execution_logging is on, it
+           is off by default, and the conf block that sets it cannot be healed onto an older cluster - so an
+           operator following this line on such a store gets zero rows and reads them as a quiet hour.
+           Pinned because the shape is a known one: get_store_metrics' description pin has required this same
+           route to be NAMED since #3119 and passed the whole time the route answered nothing there. A pin on
+           a pointer's presence cannot tell you the thing pointed at replies. */
+        Assert.Contains("enable_job_execution_logging", approaching.Joined, StringComparison.Ordinal);
+
         var exceeded = new CapturingTestLogger();
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
             new HeaviestRefreshSlotReading(
