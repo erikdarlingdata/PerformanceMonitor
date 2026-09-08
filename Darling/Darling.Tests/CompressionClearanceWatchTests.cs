@@ -464,6 +464,82 @@ public sealed class CompressionClearanceWatchTests
             string.Create(CultureInfo.InvariantCulture, $":{assigned:00}"), drifted.Joined, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The enum's declaration ORDER is its severity order, which <c>IsTighter</c> relies on to rank a band
+    /// against a band. Pinned rather than left as a property of how the members happen to be written: a
+    /// reordering would silently invert the summary's choice of which policy to name.
+    /// </summary>
+    [Fact]
+    public void TheClearanceBands_AreDeclaredInSeverityOrder()
+    {
+        Assert.True(
+            TimescaleSupport.CompressionClearanceBand.InsideClearance
+                < TimescaleSupport.CompressionClearanceBand.ApproachingRefresh,
+            "InsideClearance no longer sorts below ApproachingRefresh");
+        Assert.True(
+            TimescaleSupport.CompressionClearanceBand.ApproachingRefresh
+                < TimescaleSupport.CompressionClearanceBand.RefreshOverrun,
+            "ApproachingRefresh no longer sorts below RefreshOverrun");
+    }
+
+    /// <summary>
+    /// The per-tick summary names the WORST reading, and the case that proves it is the one whose share of
+    /// its clearance cannot be computed at all: a drifted policy on a minute an hourly refresh also starts
+    /// on has ZERO clearance, so <see cref="CompressionActivity.PercentOfClearance"/> is null there.
+    ///
+    /// <para><b>Why this case and not a merely-large one.</b> Ranking by the share with a missing value
+    /// defaulted to zero ranks that policy BELOW a routine reading — the worst geometry the grid can produce,
+    /// passed over by the line documented as carrying the tightest reading. A large-but-finite overrun would
+    /// rank correctly under either rule, so it cannot tell the two apart. Raised by review.</para>
+    /// </summary>
+    [Fact]
+    public void ThePerTickSummary_NamesAZeroClearanceOverrun_OverAnyRoutineReading()
+    {
+        var refreshStart = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HourlyRefreshPhaseOrder[0]);
+        Assert.Equal(0, TimescaleSupport.CompressionMinuteClearanceSeconds(refreshStart));
+
+        var worst = ChunkCloseReadings[0].Hypertable;
+        var drifted = Reading(worst, refreshStart, seconds: 5d);
+
+        /* The premise: its share really is unavailable, so the two ranking rules genuinely differ here. */
+        Assert.Null(drifted.PercentOfClearance);
+        Assert.Equal(TimescaleSupport.CompressionClearanceBand.RefreshOverrun, drifted.ClearanceBand);
+
+        /* A routine companion with a REAL and non-trivial share, so a rule that defaults the missing one to
+           zero would pick this one. */
+        var routine = ChunkCloseReadings[2].Hypertable;
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(routine, out var routineMinute));
+        var companion = Reading(
+            routine,
+            routineMinute,
+            seconds: TimescaleSupport.CompressionMinuteClearanceSeconds(routineMinute) / 2d);
+
+        Assert.NotNull(companion.PercentOfClearance);
+        Assert.True(
+            companion.PercentOfClearance > 0d,
+            "the routine companion's share is not positive, so it cannot out-rank a zero defaulted from null "
+            + "and this case cannot tell the two rules apart");
+        Assert.Equal(TimescaleSupport.CompressionClearanceBand.InsideClearance, companion.ClearanceBand);
+
+        /* Both orders of arrival, because a comparator can be right in one and wrong in the other. */
+        foreach (var tick in new[]
+                 {
+                     new[] { companion, drifted },
+                     new[] { drifted, companion },
+                 })
+        {
+            var logger = new CapturingTestLogger();
+            TimescaleSupport.LogCompressionActivity(tick, DateTime.UtcNow, logger);
+
+            var summary = logger.Joined
+                .Split(" | ", StringSplitOptions.None)
+                .Single(line => line.Contains("tightest compression clearance", StringComparison.Ordinal));
+
+            Assert.Contains(worst, summary, StringComparison.Ordinal);
+            Assert.DoesNotContain(routine, summary, StringComparison.Ordinal);
+        }
+    }
+
     private static CompressionActivity Reading(string hypertable, int startMinute, double seconds) =>
         new(
             hypertable,

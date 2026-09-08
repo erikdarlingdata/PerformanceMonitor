@@ -5212,8 +5212,7 @@ WHERE j.proc_name LIKE '%compression%'
                 continue;
             }
 
-            if (tightest is null
-                || (item.PercentOfClearance ?? 0d) > (tightest.PercentOfClearance ?? 0d))
+            if (IsTighter(item, tightest))
             {
                 tightest = item;
             }
@@ -5256,6 +5255,47 @@ WHERE j.proc_name LIKE '%compression%'
                 CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[0]),
                 CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[^1]));
         }
+    }
+
+    /// <summary>
+    /// Which of two clearance readings is the one worth naming in the per-tick summary: the more SEVERE band
+    /// first, and within a band the larger share of its own clearance.
+    ///
+    /// <para><b>Band before share, because a share cannot rank a zero clearance.</b>
+    /// <see cref="CompressionActivity.PercentOfClearance"/> is null exactly when the clearance is ZERO, which
+    /// is reachable in production and is the worst geometry there is: a policy the converge could not put on
+    /// a fixed schedule, drifted onto a minute an hourly refresh also starts on.
+    /// <see cref="ClassifyCompressionClearance"/> already bands that
+    /// <see cref="CompressionClearanceBand.RefreshOverrun"/> for any non-negative run. Defaulting the missing
+    /// share to zero would rank the worst case BELOW a routine reading and the summary would name the wrong
+    /// policy — the per-item Warning still fires, so the cost is the aggregate line pointing away from the
+    /// thing it exists to point at. Raised by review.</para>
+    ///
+    /// <para>The share defaults to <see cref="double.PositiveInfinity"/> rather than zero for the same
+    /// reason, as a second line of defence if the band ordering were ever the thing that failed: an
+    /// undefined ratio over a zero denominator with a positive numerator has that limit, not zero.</para>
+    ///
+    /// <para>The enum's declaration ORDER is the severity order this relies on, which is why
+    /// <c>CompressionClearanceWatchTests</c> pins it rather than leaving it as a property of how the members
+    /// happen to be written.</para>
+    /// </summary>
+    private static bool IsTighter(CompressionActivity candidate, CompressionActivity? incumbent)
+    {
+        if (incumbent is null)
+        {
+            return true;
+        }
+
+        var candidateBand = candidate.ClearanceBand ?? CompressionClearanceBand.InsideClearance;
+        var incumbentBand = incumbent.ClearanceBand ?? CompressionClearanceBand.InsideClearance;
+
+        if (candidateBand != incumbentBand)
+        {
+            return candidateBand > incumbentBand;
+        }
+
+        return (candidate.PercentOfClearance ?? double.PositiveInfinity)
+            > (incumbent.PercentOfClearance ?? double.PositiveInfinity);
     }
 
     /// <summary>
