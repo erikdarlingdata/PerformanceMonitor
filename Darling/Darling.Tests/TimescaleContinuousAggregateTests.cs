@@ -472,6 +472,346 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
+    /// TREATMENT THREE of #3012's family, and the #3185 defect: the light band separates the members whose
+    /// runs are long enough for CPU and I/O contention to matter, and it does that WITHOUT widening.
+    ///
+    /// <para><b>The defect this is written against.</b> Distinct starts is a LOCK guarantee — two refreshes
+    /// hold mutually compatible <c>AccessShareLock</c>s, so light refreshes cannot convoy on each other and
+    /// the band was sized by member COUNT alone. Sized that way, a one-minute step put
+    /// <see cref="TimescaleSupport.QueryStoreStatsHourlyView"/> and
+    /// <see cref="TimescaleSupport.QueryStoreStatsCorrectedHourlyView"/> two minutes apart where the previous
+    /// grid had them fifteen, and two ~265 s aggregations overlapped for essentially their whole runs at
+    /// 5.4x the per-output-group cost, cardinality flat to 1.4%.</para>
+    ///
+    /// <para><b>Every probe is derived from
+    /// <see cref="TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds"/> here, not from
+    /// <see cref="TimescaleSupport.UnboundedLightRefreshSeparationMinutes"/>.</b> That member IS the guard,
+    /// and asserting a separation against the member that produced it is a tautology that passes at any
+    /// value including one minute. The requirement is that the gap covers the recorded light-refresh
+    /// CEILING, so the ceiling is what the gap is measured against.</para>
+    ///
+    /// <para><b>And the band's width is asserted as a SET IDENTITY rather than as a bound.</b> The whole
+    /// argument for this shape over a wider step is that the separation is free: a bound like "no light
+    /// minute past the span" would pass for a band that had grown and then been re-measured, while the set
+    /// identity says the band occupies exactly the positions it always did and the guard, the heaviest
+    /// refresh's window and the compression band are therefore untouched.</para>
+    /// </summary>
+    [Fact]
+    public void TheLightBand_SeparatesEveryUnboundedCardinalityRefresh_WithoutWidening()
+    {
+        var lightViews = TimescaleSupport.HourlyRefreshPhaseOrder
+            .Where(view => !string.Equals(
+                view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
+            .ToArray();
+
+        /* THE BAND DID NOT WIDEN: the light minutes are exactly the band's own positions, so nothing was
+           taken from the guard or from the heaviest refresh's window to pay for the separation. */
+        Assert.Equal(
+            Enumerable
+                .Range(0, TimescaleSupport.LightHourlyRefreshCount)
+                .Select(index => index * TimescaleSupport.LightRefreshStepMinutes)
+                .ToArray(),
+            lightViews.Select(TimescaleSupport.RefreshPhaseMinutesFor).OrderBy(minute => minute).ToArray());
+
+        var unbounded = lightViews
+            .Where(TimescaleSupport.IsUnboundedCardinalityRefresh)
+            .Select(view => (View: view, Minute: TimescaleSupport.RefreshPhaseMinutesFor(view)))
+            .OrderBy(placed => placed.Minute)
+            .ToArray();
+
+        /* POSITIVE CONTROL, and it is also the one thing that catches a mis-declared static initializer:
+           UnboundedCardinalityRefreshViews is a field built from HourlyRefreshDefinitions, and a version of
+           it that ran empty would classify every view deployment-bounded and pass every gap assertion below
+           for having no gaps to check. */
+        Assert.True(
+            unbounded.Length > 1,
+            "fewer than two light refreshes classify unbounded-cardinality, so the separation this case "
+            + "exists for has nothing to separate and every assertion below is vacuous — either the "
+            + "registry changed or TimescaleSupport.IsUnboundedCardinalityRefresh has stopped recovering "
+            + "GROUP BY terms from the shipped CREATE text (#3185)");
+
+        /* THE REQUIREMENT: consecutive unbounded members cannot overlap at the recorded ceiling. */
+        for (var index = 1; index < unbounded.Length; index++)
+        {
+            var gapSeconds = (unbounded[index].Minute - unbounded[index - 1].Minute) * 60;
+
+            Assert.True(
+                gapSeconds >= TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
+                $"{unbounded[index - 1].View} starts at :{unbounded[index - 1].Minute.ToString("00", CultureInfo.InvariantCulture)} "
+                + $"and {unbounded[index].View} at :{unbounded[index].Minute.ToString("00", CultureInfo.InvariantCulture)}, "
+                + $"a gap of {gapSeconds.ToString(CultureInfo.InvariantCulture)}s against a recorded light-refresh ceiling of "
+                + $"{TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds.ToString(CultureInfo.InvariantCulture)}s — so the two can overlap for "
+                + "the difference, which is the #3185 regression");
+        }
+
+        /* And the LAST of them clears the heaviest refresh's window, which is the same inequality as the
+           band holding them all: the window opens at LightBandSpanMinutes + the guard, and the guard is the
+           separation. Asserted in seconds against the ceiling so it is not that identity restated. */
+        Assert.True(
+            (unbounded[^1].Minute * 60) + TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds
+                <= TimescaleSupport.HeaviestRefreshStartMinute * 60,
+            $"{unbounded[^1].View} starts at :{unbounded[^1].Minute.ToString("00", CultureInfo.InvariantCulture)} and can run "
+            + $"{TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds.ToString(CultureInfo.InvariantCulture)}s, which reaches into the heaviest "
+            + $"refresh's window at :{TimescaleSupport.HeaviestRefreshStartMinute.ToString("00", CultureInfo.InvariantCulture)} — the one overlap the "
+            + "grid exists to prevent (#3012)");
+
+        /* THE MEASURED CASE, named because it is the pair #3185's readings were taken from. Kept beside the
+           general sweep for the reason the query_store_stats family is kept above: the sweep says the
+           property holds, this says the property covers the thing that was measured. */
+        Assert.True(
+            Math.Abs(
+                TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStoreStatsHourlyView)
+                - TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStoreStatsCorrectedHourlyView))
+                * 60
+            >= TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
+            "the two views #3185 measured at 5.4x per-group cost are back inside one light-refresh ceiling "
+            + "of each other");
+
+        /* THE FEASIBILITY BOUND IS NOT VACUOUS: it admits the shipped count and refuses some larger one, so
+           a registry that grew past what the band can separate goes red instead of overlapping quietly. */
+        Assert.True(TimescaleSupport.LightBandHoldsUnboundedRefreshCount(unbounded.Length));
+        Assert.Contains(
+            Enumerable.Range(unbounded.Length + 1, TimescaleSupport.LightHourlyRefreshCount),
+            count => !TimescaleSupport.LightBandHoldsUnboundedRefreshCount(count));
+
+        /* AND THE DEGRADED CASE, which is what the map does instead of refusing. Reached through the
+           order-taking seam at the registry's unbounded members ALONE: duplicating the whole registry
+           cannot reach it, because one light member in four is unbounded today and that is exactly the
+           density the separation admits — a doubled list doubles the positions as fast as the members. A
+           band that is all unbounded is the shape that does not fit, and it is the shape a run of heavy
+           registrations walks toward.
+
+           It degrades rather than throwing because CompressionPhaseMinutes is a static field whose
+           initializer reaches this map, and a static initializer that throws costs the whole type for the
+           life of the process. Measured, not assumed: mutating the GROUP BY recovery to return nothing
+           makes every view classify unbounded, and with a throwing map that took 72 tests red across four
+           unrelated files. */
+        var allUnbounded = TimescaleSupport.HourlyRefreshPhaseOrder
+            .Where(view => !string.Equals(
+                view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
+            .Where(TimescaleSupport.IsUnboundedCardinalityRefresh)
+            .ToArray();
+
+        /* The condition, evaluated over THAT order's band rather than over the shipped one —
+           LightBandHoldsUnboundedRefreshCount's public overload reads the shipped registry and answers
+           true for three members, because the shipped band has twelve positions for them. A band of three
+           has three. */
+        Assert.True(
+            TimescaleSupport.LightBandIndexForUnboundedRefresh(allUnbounded.Length - 1)
+                > allUnbounded.Length - 1,
+            "a band of nothing but today's unbounded members would still hold them all, so the degraded "
+            + "case below cannot be reached and this half of the case proves nothing");
+
+        var degraded = allUnbounded
+            .Select(view => TimescaleSupport.RefreshPhaseMinutesFor(allUnbounded, view))
+            .ToArray();
+
+        Assert.Equal(
+            Enumerable
+                .Range(0, allUnbounded.Length)
+                .Select(index => index * TimescaleSupport.LightRefreshStepMinutes)
+                .ToArray(),
+            degraded);
+
+        /* Distinct starts survive the degradation, which is the guarantee #3012 needed and the one the
+           separation is built on top of rather than in place of. */
+        Assert.Equal(degraded.Length, degraded.Distinct().Count());
+
+        /* AND THE GAP THE LIVE FINDING JUDGES AGAINST IS THE GAP THE MAP PRODUCED, per class. Raised by
+           review: LightRefreshSpacingMinutesFor reads two constants, so on its own it states a PROMISE, and
+           a promise nothing measures is what a doc comment says while the code does something else. This
+           measures the smallest distance between two of a class's minutes on the shipped map and holds the
+           member to it, so a layout change that stopped delivering the gap that member names is red here
+           rather than reported against a figure the band never honoured. */
+        foreach (var isUnbounded in new[] { true, false })
+        {
+            var minutes = lightViews
+                .Where(view => TimescaleSupport.IsUnboundedCardinalityRefresh(view) == isUnbounded)
+                .Select(TimescaleSupport.RefreshPhaseMinutesFor)
+                .OrderBy(minute => minute)
+                .ToArray();
+
+            Assert.True(minutes.Length > 1, $"the {(isUnbounded ? "unbounded" : "bounded")} class has "
+                + "fewer than two members on the band, so it has no gap to measure and this claim is vacuous");
+
+            var achieved = minutes.Zip(minutes.Skip(1), (earlier, later) => later - earlier).Min();
+            var member = lightViews.First(view =>
+                TimescaleSupport.IsUnboundedCardinalityRefresh(view) == isUnbounded);
+
+            Assert.Equal(TimescaleSupport.LightRefreshSpacingMinutesFor(member), achieved);
+        }
+    }
+
+    /// <summary>
+    /// MEMBERSHIP IS DERIVED FROM THE SHIPPED CREATE TEXT, and every grouping term in every registered
+    /// hourly aggregate has to be classified deliberately.
+    ///
+    /// <para><b>Why the rule is a list of COLUMNS and this is the guard that keeps it honest.</b> A list of
+    /// heavy VIEWS is a frozen enumeration — right until the next aggregate is registered, then silently
+    /// wrong, which is the positional coupling #3174 removed one level over. A view's one-bucket output
+    /// cardinality is decided by its own GROUP BY, so
+    /// <see cref="TimescaleSupport.IsUnboundedCardinalityRefresh"/> reads that. What can still go stale is
+    /// the COLUMN list: an aggregate registered tomorrow could group by a per-statement column nobody has
+    /// classified, and the quiet answer — "not on the per-statement list, therefore bounded" — is the answer
+    /// that gives it the least room. So every term is required to appear on one of the two lists, and the
+    /// bounded half lives HERE: it has no product consumer, and a new grouping column has to be classified
+    /// in a file that is red until someone does it.</para>
+    ///
+    /// <para><b>The parse is controlled per view before its result is used.</b> A recovery that matched
+    /// nothing would return no terms for every view, and no terms contains no per-statement column — so a
+    /// broken parse reports every aggregate deployment-bounded and a clean sweep for having checked nothing.
+    /// Two named views' exact term lists are asserted, one from each class, which is what discriminates a
+    /// working parse from one that merely returned something.</para>
+    /// </summary>
+    [Fact]
+    public void EveryGroupingTerm_IsClassified_AndTheParseIsControlledPerView()
+    {
+        /* Bounded by the DEPLOYMENT: servers, databases, schema objects, small enumerations, and the
+           collection instants a cadence produces. None of these grows with the monitored workload's
+           distinct statement population, which is what makes the cost of grouping by them predictable. */
+        var deploymentBounded = new[]
+        {
+            "server_id",
+            "server_name",
+            "database_name",
+            "module_name",
+            "schema_name",
+            "object_name",
+            "execution_type_desc",
+            "replica_role",
+            "bucket",
+            "collection_time",
+        };
+
+        foreach (var (createSql, view) in TimescaleSupport.HourlyRefreshDefinitions)
+        {
+            var terms = TimescaleSupport.RefreshGroupingTermsFor(createSql);
+
+            Assert.True(
+                terms.Count > 0,
+                $"no GROUP BY terms could be recovered from {view}'s CREATE, so its refresh cost class is "
+                + "being decided by an empty list — TimescaleSupport.RefreshGroupingTermsFor has stopped "
+                + "matching the shipped text (#3185)");
+
+            foreach (var term in terms)
+            {
+                Assert.True(
+                    TimescaleSupport.PerStatementGroupingColumns.Contains(term, StringComparer.Ordinal)
+                    || deploymentBounded.Contains(term, StringComparer.Ordinal)
+                    || term.StartsWith("time_bucket(", StringComparison.Ordinal),
+                    $"{view} groups by `{term}`, which is on neither TimescaleSupport."
+                    + "PerStatementGroupingColumns nor this case's deployment-bounded list. Decide which it "
+                    + "is: a column whose distinct count grows with the monitored workload's statement "
+                    + "population belongs on the first list and its view gets "
+                    + "UnboundedLightRefreshSeparationMinutes of the band; one bounded by the size of the "
+                    + "deployment belongs on the second and its view keeps LightRefreshStepMinutes. "
+                    + "Unclassified defaults to bounded, which is the answer that gives it the least room "
+                    + "(#3185)");
+            }
+        }
+
+        /* PARSE CONTROL, one view from each class, spelled out. Depth-zero splitting is what makes the
+           hierarchical view's time_bucket() come back as ONE term: a plain comma split yields a term of
+           `time_bucket('1 hour'` and one of `bucket)`, and the second of those is a real column name. */
+        Assert.Equal(
+            new[] { "server_id", "server_name", "database_name", "bucket" },
+            TimescaleSupport.RefreshGroupingTermsFor(TimescaleSupport.CreateQueryStatsDbHourlySql));
+
+        Assert.Equal(
+            new[] { "server_id", "server_name", "database_name", "module_name", "query_hash", "time_bucket('1 hour', bucket)" },
+            TimescaleSupport.RefreshGroupingTermsFor(TimescaleSupport.CreateQueryStoreStatsCorrectedHourlySql));
+
+        /* And the two classes both have members, so neither branch of the rule is dead. */
+        var byClass = TimescaleSupport.HourlyRefreshPhaseOrder
+            .GroupBy(TimescaleSupport.IsUnboundedCardinalityRefresh)
+            .ToDictionary(group => group.Key, group => group.Count());
+
+        Assert.True(byClass.TryGetValue(true, out var unboundedCount) && unboundedCount > 0);
+        Assert.True(byClass.TryGetValue(false, out var boundedCount) && boundedCount > 0);
+
+        /* A view the registry does not hold has no CREATE to classify, and the answer is loud rather than
+           the quiet "bounded" a defaulted lookup would give it. */
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TimescaleSupport.IsUnboundedCardinalityRefresh(TimescaleSupport.QueryStatsDailyView));
+
+        /* THE FAIL-SAFE ARM, exercised at the only surface that can reach it. Nothing in the registry is
+           unparseable, so this branch is unreachable through the shipped definitions — and an unreachable
+           guard reads as protection while certifying nothing. A CREATE with no GROUP BY at all classifies
+           UNBOUNDED, which gives that aggregate the wider gap and makes the band's feasibility bound the
+           thing that reports the problem, rather than handing it a one-minute step in silence. */
+        Assert.True(TimescaleSupport.GroupKeyIsUnboundedCardinality(
+            "CREATE MATERIALIZED VIEW collect.nothing AS SELECT 1 WITH NO DATA"));
+
+        /* And the arm is not a blanket true: a parseable, deployment-bounded key still answers false
+           through the same function, so the fail-safe cannot be what every view is riding on. */
+        Assert.False(TimescaleSupport.GroupKeyIsUnboundedCardinality(
+            TimescaleSupport.CreateQueryStatsDbHourlySql));
+        Assert.True(TimescaleSupport.GroupKeyIsUnboundedCardinality(
+            TimescaleSupport.CreateQueryStoreStatsHourlySql));
+    }
+
+    /// <summary>
+    /// THE STEP CANNOT BE WIDENED, which is #3185's first candidate repair answered in the build rather
+    /// than in a discussion.
+    ///
+    /// <para>"Give the light band a step sized by member duration" is the obvious reading of a band that
+    /// overlaps its own members, and it reads like a trade someone could choose to make against
+    /// <see cref="TimescaleSupport.HeaviestRefreshWindowMinutes"/>. It is not a trade:
+    /// <see cref="TimescaleSupport.WidestFeasibleLightRefreshStepMinutes"/> returns the SHIPPED step, so the
+    /// band is already as wide as the hour carries and every wider step is red. The binding constraint is
+    /// not the hour's sixty minutes — it is the heaviest refresh's watch line, which is why the infeasible
+    /// answer arrives two minutes in rather than at the fifty-five a duration-derived step would ask
+    /// for.</para>
+    ///
+    /// <para>Asserted at step + 1 as well, so the bound is TIGHT rather than merely true: a member that
+    /// returned the shipped step by reading it would pass the first assertion and fail this one.</para>
+    /// </summary>
+    [Fact]
+    public void TheWidestFeasibleLightRefreshStep_IsTheShippedOne_SoADurationDerivedStepIsRed()
+    {
+        Assert.Equal(
+            TimescaleSupport.LightRefreshStepMinutes,
+            TimescaleSupport.WidestFeasibleLightRefreshStepMinutes);
+
+        /* The opened-up chain agrees with the shipped one where they overlap, so it cannot drift into being
+           a second and kinder model of the grid — the requirement #3182 put on its guard twin. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotWarningSeconds,
+            TimescaleSupport.RefreshSlotWarningSecondsForLightBandAndGuard(
+                TimescaleSupport.LightBandSpanMinutes, TimescaleSupport.CompressionPhaseGuardMinutes));
+
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotWarningSecondsForGuardMinutes(
+                TimescaleSupport.CompressionPhaseGuardMinutes),
+            TimescaleSupport.RefreshSlotWarningSecondsForLightBandAndGuard(
+                TimescaleSupport.LightBandSpanMinutes, TimescaleSupport.CompressionPhaseGuardMinutes));
+
+        /* TIGHTNESS: one minute wider and the grid's own precondition is already false. */
+        var oneWider = (TimescaleSupport.LightHourlyRefreshCount - 1)
+            * (TimescaleSupport.LightRefreshStepMinutes + 1);
+
+        Assert.False(
+            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds
+                < TimescaleSupport.RefreshSlotWarningSecondsForLightBandAndGuard(
+                    oneWider, TimescaleSupport.CompressionPhaseGuardMinutes),
+            $"a {(TimescaleSupport.LightRefreshStepMinutes + 1).ToString(CultureInfo.InvariantCulture)}-minute light step still leaves a watch line above "
+            + "the heaviest refresh's recorded ceiling, so WidestFeasibleLightRefreshStepMinutes is "
+            + "understating what the hour carries and the argument for separating inside the band instead of "
+            + "widening it no longer holds (#3185)");
+
+        /* And the step a duration derivation would ask for — the light ceiling rounded up, which is the
+           same rounding CompressionPhaseGuardMinutes uses — is infeasible, which is the whole finding. */
+        var durationDerivedStep =
+            (int)Math.Ceiling(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds / 60.0);
+
+        Assert.True(
+            durationDerivedStep > TimescaleSupport.WidestFeasibleLightRefreshStepMinutes,
+            "a light step derived from the light-refresh ceiling now fits inside what the hour carries, so "
+            + "the uniform shape #3185 rejected has become available and the interleaved layout is no "
+            + "longer the only one that fits");
+    }
+
+    /// <summary>
     /// The phase grid is keyed on the VIEW, and nothing shipped carries a job id.
     ///
     /// <para>#3012's evidence names job ids in the 1050s. Those exist only on the store it was measured

@@ -3296,10 +3296,12 @@ LIMIT 1", connection))
     /// inside 896 s of refresh while every other pin in the tree stayed green. Both halves are asserted:
     /// the full assignment, and the heaviest view's own minute.</para>
     ///
-    /// <para><b>The table is the whole map, not a sample, and #3174 moved every row of it.</b> The heaviest
-    /// refresh is answered by identity and every other view takes the next minute of the light band, so
-    /// this table is also the readable statement of what "thirteen distinct minutes" resolves to on today's
-    /// list — the one place a reader can see the grid without re-deriving it.</para>
+    /// <para><b>The table is the whole map, not a sample, and #3185 moved the light band's half of it.</b>
+    /// The heaviest refresh is answered by identity; the three unbounded-cardinality light views take every
+    /// fourth position from the first, and the nine deployment-bounded ones fill the positions those leave
+    /// in registry order. So this table is also the readable statement of what "thirteen distinct minutes"
+    /// resolves to on today's list — the one place a reader can see the grid without re-deriving it, and
+    /// the one place the interleaving is visible as minutes rather than as a rule.</para>
     /// </summary>
     [Fact]
     public void TheRefreshGridIsUnchanged_AndTheCompressionGridsOneInputFromItIsPinned()
@@ -3308,14 +3310,14 @@ LIMIT 1", connection))
         {
             (TimescaleSupport.QueryStatsHourlyView, 0),
             (TimescaleSupport.ProcedureStatsHourlyView, 1),
-            (TimescaleSupport.QueryStoreStatsHourlyView, 2),
-            (TimescaleSupport.QueryStatsDbHourlyView, 3),
+            (TimescaleSupport.QueryStoreStatsHourlyView, 4),
+            (TimescaleSupport.QueryStatsDbHourlyView, 2),
             (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 15),
-            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 4),
-            (TimescaleSupport.PerfmonBaselineView, 5),
-            (TimescaleSupport.WaitStatsBaselineView, 6),
-            (TimescaleSupport.SessionStatsBaselineView, 7),
-            (TimescaleSupport.QueryStatsBaselineView, 8),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 8),
+            (TimescaleSupport.PerfmonBaselineView, 3),
+            (TimescaleSupport.WaitStatsBaselineView, 5),
+            (TimescaleSupport.SessionStatsBaselineView, 6),
+            (TimescaleSupport.QueryStatsBaselineView, 7),
             (TimescaleSupport.BlockedProcessBaselineView, 9),
             (TimescaleSupport.DeadlockBaselineView, 10),
             (TimescaleSupport.MemoryBaselineView, 11),
