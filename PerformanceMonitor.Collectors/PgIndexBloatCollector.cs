@@ -160,6 +160,16 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// but that row's duration and the shipped gate. The rate derived from the bytes that run actually
     /// measured is ~1,013 blocks/s, and it is the figure kept here.</para>
     ///
+    /// <para><b>What the denominator actually contains, because the name says "blocks per second" and
+    /// this is not a pure I/O rate.</b> <c>sql_duration_ms</c> on a <see cref="RunsPerDatabase"/> collector
+    /// is the SUM across databases of connect + execute + drain, so the figure below is blocks divided by
+    /// everything the statement spent, not by <c>pgstatindex</c> time alone — and the run it comes from
+    /// swept two databases, one of which failed fast on a missing extension. Every one of those terms
+    /// inflates the denominator, so the true per-block read rate is FASTER than this. That is the right
+    /// direction and the right quantity: what this constant feeds is a comparison against a command
+    /// deadline, and the deadline covers connect and drain too. A pure I/O rate would understate the
+    /// budget's real cost by exactly the terms it left out.</para>
+    ///
     /// <para><b>What this figure does NOT rest on.</b> n = 1 — one run, one target, one night. Two numbers
     /// elsewhere in this type read like corroboration and are not: <see cref="MeasureCeilingBytes"/>' "about
     /// 11 hours" for the over-ceiling set and "roughly an hour" for its largest member are this same rate
