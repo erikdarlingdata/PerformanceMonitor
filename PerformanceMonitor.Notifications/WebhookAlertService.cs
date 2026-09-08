@@ -107,10 +107,6 @@ public class WebhookAlertService
                     historyStore.GetLastWebhookSentUtcAsync(serverId, metricName, dedupKey));
     }
 
-    /// <summary>
-    /// Sends webhook alerts to all configured channels (Teams and/or Slack).
-    /// Respects the email cooldown setting for throttling. Never throws.
-    /// </summary>
     /* The four per-channel configuration gates, named so the fan-out's own if-conditions and
        AnyWebhookConfigured are the SAME expressions rather than two lists that have to be kept in step.
        Adding a channel and forgetting the disjunction would otherwise report "nothing configured" for a
@@ -135,6 +131,10 @@ public class WebhookAlertService
     public bool AnyWebhookConfigured =>
         TeamsConfigured || SlackConfigured || GenericConfigured || PagerDutyConfigured;
 
+    /// <summary>
+    /// Sends webhook alerts to all configured channels (Teams and/or Slack).
+    /// Respects the email cooldown setting for throttling. Never throws.
+    /// </summary>
     public async Task<bool> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
