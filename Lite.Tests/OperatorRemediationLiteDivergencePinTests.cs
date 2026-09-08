@@ -18,16 +18,19 @@ namespace Lite.Tests;
 /// #2138 phase 1 lands in Darling only, and this pin exists so that stays a DECISION rather than
 /// something the next lane inherits.
 ///
-/// <para><b>Why it is not in Lite.</b> Lite states, in its own code, that it has no privileged remediation
-/// path at all: <c>LiteRecommendationItem</c>'s remarks say Lite "produces a COPYABLE remediation command
-/// but has NO in-app Apply/execute path (SQL-side remediation execution is Dashboard-only, per project
-/// scope)", and <c>LiteRecommendationCardViewModel</c>'s say "Lite is ADVISE-ONLY. There is NO Apply
-/// button, NO privileged remediation execution". Adding an operator-armed force to Lite would reverse that
-/// scope decision, and the SKU it names as the owner — Dashboard — is deprecated, so there is no live SKU
-/// the decision points at any more. That is a product call, not an implementation detail, and it is open.
-/// The shared pure seam (<see cref="OperatorRemediationGate"/> / <see cref="OperatorRemediationFlow"/>)
-/// lives in <c>PerformanceMonitor.Analysis</c>, which Lite already references, so whichever way the call
-/// goes, no logic has to be written twice.</para>
+/// <para><b>Why it is not in Lite, and no longer provisionally.</b> Settled on #2138: remediation
+/// execution is Darling-only, permanently. The rule was already stated in Lite's own code, but with two
+/// different reasons, and only one of them survived — which is exactly the kind of thing this pin exists
+/// to keep honest. The obsolete half named the deprecated Dashboard SKU as the owner, so it pointed at
+/// nothing live. The half that decides it is Lite's STORE: a DuckDB file is per-workstation, so a
+/// remediation journal kept there cannot be the shared audit trail such a journal exists to be — two
+/// operators acting on one server would each hold half of it and neither could see the other's forces —
+/// and it cannot carry the bot's own-forces-only invariant, which is a predicate plus a self-reference
+/// within ONE shared store. No deprecation can invalidate that, which is why the wording now rests on it.</para>
+///
+/// <para>The shared pure seam (<see cref="OperatorRemediationGate"/> / <see cref="OperatorRemediationFlow"/>)
+/// still lives in <c>PerformanceMonitor.Analysis</c>, which Lite already references — so the divergence is
+/// about which SKU may ACT, never about duplicated logic.</para>
 ///
 /// <para><b>What this pin does.</b> It asserts the divergence is COMPLETE and its stated reason still
 /// exists. Both halves matter, and they fail in opposite directions: if Lite gains a remediation
@@ -185,16 +188,65 @@ public sealed class OperatorRemediationLiteDivergencePinTests
     /// could outlive its reason: someone could delete the advise-only remarks, and the divergence would
     /// carry on being enforced by a test whose justification had evaporated. Matched on the load-bearing
     /// phrases rather than whole paragraphs so a rewording that keeps the decision keeps the pin.
+    ///
+    /// <para>The RULE and the REASON are asserted separately, because the wording fix on #2138 is the
+    /// case that showed why: the rule never changed and one of its two reasons died, so a test that only
+    /// checked the rule would have gone on passing over a justification that named a deprecated SKU as
+    /// the owner of a capability. Asserting the reason too is what made this pin redden and get updated
+    /// rather than quietly outlive its premise.</para>
     /// </summary>
     [Fact]
-    public void TheAdviseOnlyScopeStatementsThisDivergenceRestsOn_StillExist()
+    public void TheAdviseOnlyStatementsAndTheirDurableReason_StillExist()
     {
         var item = ParitySource.ReadFile("Lite/Analysis/Recommendations/LiteRecommendationItem.cs");
         var card = ParitySource.ReadFile("Lite/Analysis/Recommendations/LiteRecommendationsViewModel.cs");
+        var tab = ParitySource.ReadFile("Lite/Controls/RecommendationsTab.xaml.cs");
 
+        /* The rule. Unchanged by the #2138 wording fix, and still the thing an operator relies on. */
         Assert.Contains("NO in-app Apply/execute path", item, StringComparison.Ordinal);
         Assert.Contains("Lite is ADVISE-ONLY", card, StringComparison.Ordinal);
         Assert.Contains("NO privileged remediation execution", card, StringComparison.Ordinal);
+        Assert.Contains("NO Apply button", tab, StringComparison.Ordinal);
+
+        /* The reason, in all three places that state the rule — the store argument, which a deprecation
+           cannot reach. Matched on "per-workstation" because that is the load-bearing word: it is what
+           makes a journal there unable to be a shared audit trail. */
+        foreach (var (file, text) in new[]
+                 {
+                     ("LiteRecommendationItem.cs", item),
+                     ("LiteRecommendationsViewModel.cs", card),
+                     ("RecommendationsTab.xaml.cs", tab),
+                 })
+        {
+            Assert.True(
+                text.Contains("per-workstation", StringComparison.Ordinal),
+                $"{file} states the advise-only rule without the store reason it now rests on. If the "
+                + "reason has moved, move this assertion with it — do not drop it, or the rule outlives "
+                + "its justification again (#2138).");
+        }
+
+        /* And the DEAD reason is gone from every one of them: it named the deprecated Dashboard SKU as
+           the owner of remediation execution, which is a claim about a live division of responsibility
+           that no longer exists. Reinstating it would be a regression to a justification that points
+           nowhere. */
+        foreach (var (file, text) in new[]
+                 {
+                     ("LiteRecommendationItem.cs", item),
+                     ("LiteRecommendationsViewModel.cs", card),
+                     ("RecommendationsTab.xaml.cs", tab),
+                 })
+        {
+            Assert.DoesNotContain("Dashboard-only", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("per project scope", text, StringComparison.Ordinal);
+        }
+
+        /* Positive control for those two absences: the same read DOES find the Dashboard named in these
+           files as a UI COMPARISON, which is deliberately left alone — its reason is the surface's tab
+           shape, not a scope claim, so the deprecation does not touch it. Without this control the
+           assertions above would pass just as well against a failed read. */
+        Assert.Contains(
+            "the Dashboard) no \"Open in Active Queries\" deep-link", card, StringComparison.Ordinal);
+        Assert.Contains("Dashboard's \"Open in Active Queries\" deep-link is omitted", tab, StringComparison.Ordinal);
     }
 
     private static System.Collections.Generic.List<string> LiteSourceFiles() =>

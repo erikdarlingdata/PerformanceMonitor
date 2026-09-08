@@ -42,7 +42,9 @@ public enum LiteRecommendationsState
 /// binds to, so the affordance model and the Ask-AI prompt are unit-testable.
 ///
 /// <para>
-/// Lite is ADVISE-ONLY. There is NO Apply button, NO privileged remediation execution, and (unlike
+/// Lite is ADVISE-ONLY, and permanently so (#2138): its store is a per-workstation DuckDB file, which
+/// cannot hold the shared audit trail of writes-to-a-server that a remediation journal has to be. There
+/// is NO Apply button, NO privileged remediation execution, and (unlike
 /// the Dashboard) no "Open in Active Queries" deep-link — the Lite Recommendations surface is a
 /// shared tab with a server selector, not a per-server tab that owns an Active Queries view, so that
 /// affordance is omitted gracefully. Every card offers "Ask AI" (copies an MCP investigation
