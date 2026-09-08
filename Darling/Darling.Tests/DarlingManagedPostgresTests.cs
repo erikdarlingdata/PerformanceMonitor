@@ -414,8 +414,11 @@ public sealed class DarlingManagedPostgresTests
     [Fact]
     public void EveryConfMarker_IsDistinct_AndNoneIsASubstringOfAnother()
     {
+        /* Public AND NonPublic, matching StoreLogSeverityLocaleTests.DeclaredConfMarkers: a marker does not
+           have to be public to be asked about by EnsureConfAppended, and the substring hazard is a property
+           of the Contains check, not of the accessibility of the constant it reads. */
         var markers = typeof(DarlingManagedPostgres)
-            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
             .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.StartsWith("ConfMarker", StringComparison.Ordinal))
             .Select(f => (f.Name, Value: (string)f.GetRawConstantValue()!))
             .ToArray();
