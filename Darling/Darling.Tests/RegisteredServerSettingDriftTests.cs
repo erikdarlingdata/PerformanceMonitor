@@ -875,7 +875,17 @@ public sealed class RegisteredServerSettingDriftTests
         /* The credential, and nothing else. A file entry legitimately carries a reference or a dev plaintext
            password against a store row holding a DPAPI blob, which is the supported shape rather than drift —
            and comparing a secret is how one reaches a log line. */
-        var excluded = new HashSet<string>(System.StringComparer.Ordinal) { "password", "encryptedPassword" };
+        /* V113 (#2138 phase 1) adds a SECOND credential, excluded for the same two reasons plus a third
+           that is specific to it. Same two: a file entry legitimately carries a reference against a store
+           row holding a blob, and comparing a secret is how one reaches a log line. The third: a drift
+           report is what triggers a disconnect-and-reconnect of the MONITORING connection, and the
+           remediation credential has nothing to do with that connection — reporting it would tear down
+           collection on a server because someone rotated a credential collection never uses. */
+        var excluded = new HashSet<string>(System.StringComparer.Ordinal)
+        {
+            "password", "encryptedPassword",
+            "remediationUsername", "remediationEncryptedPassword",
+        };
 
         var keys = typeof(MonitoredServer)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -947,7 +957,26 @@ public sealed class RegisteredServerSettingDriftTests
             unknown.Length == 0,
             "the drift report names a field that is not a darling.json per-server key: " + string.Join(", ", unknown));
 
-        /* And that the exclusion list has not quietly grown past the credential. */
-        Assert.Equal(new[] { "encryptedPassword", "password" }, excluded.OrderBy(k => k).ToArray());
+        /* And that the exclusion list has not quietly grown past the credential. The literal IS the
+           mechanism: an exclusion is only legitimate with an argument, and the argument belongs in the
+           comment above beside the key, so growing this list has to show up in a diff. V113 (#2138 phase 1)
+           added the remediation credential's two keys, which is why it is four rather than two. */
+        Assert.Equal(
+            new[] { "encryptedPassword", "password", "remediationEncryptedPassword", "remediationUsername" },
+            excluded.OrderBy(k => k).ToArray());
+
+        /* The property behind the literal, so this is not purely a frozen list that the next lane bumps
+           by reflex: only a CREDENTIAL key may be excluded. That is what stops the exclusion becoming the
+           easy way out for any field whose comparison is inconvenient — excluding trustServerCertificate,
+           the field #2552 actually reported, would fail here rather than passing with a bumped literal. */
+        foreach (var key in excluded)
+        {
+            Assert.Matches(
+                new System.Text.RegularExpressions.Regex(
+                    "(?:password|username)$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                        | System.Text.RegularExpressions.RegexOptions.CultureInvariant),
+                key);
+        }
     }
 }

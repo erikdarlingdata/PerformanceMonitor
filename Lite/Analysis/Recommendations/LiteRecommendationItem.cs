@@ -32,8 +32,13 @@ public enum LiteRecommendationSeverity
 /// <see cref="PerformanceMonitor.Analysis.AnalysisFinding"/>.
 ///
 /// <para>
-/// Lite produces a COPYABLE remediation command but has NO in-app Apply/execute path (SQL-side
-/// remediation execution is Dashboard-only, per project scope). A Lite card offers the diagnosis, the
+/// Lite produces a COPYABLE remediation command but has NO in-app Apply/execute path, permanently
+/// (#2138). The reason is Lite's STORE, not a division of labour between SKUs: Lite's DuckDB file is
+/// per-workstation, and a remediation journal kept there could not be the audit trail such a journal
+/// exists to be — two operators acting on the same server would each hold half of it and neither could
+/// see the other's forces. It also could not carry the auto-force bot's own-forces-only invariant, which
+/// is a predicate plus a self-reference WITHIN one shared store. So the execute path belongs to the SKU
+/// with a shared store, and no deprecation can move it back. A Lite card offers the diagnosis, the
 /// copy-paste T-SQL rendered from the finding's persisted
 /// <see cref="PerformanceMonitor.Analysis.RemediationAction"/> (the SAME shared renderer the Darling
 /// viewer uses, so the commands are byte-identical), and an "Ask AI" MCP prompt — the operator runs the

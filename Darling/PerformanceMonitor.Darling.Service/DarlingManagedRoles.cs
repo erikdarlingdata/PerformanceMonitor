@@ -125,8 +125,20 @@ public static class DarlingManagedRoles
                    fail-closed gate is why it must be named here: unclassified stays invisible to
                    `viewer` and the live security test fails until someone decides which side it is on. */
                 "plan_force_bot_enabled",
+                /* V113 (#2138 phase 1): the remediation credential's LOGIN NAME. Non-secret on the same
+                   reasoning as `username` two lines up — a login name is not a credential, and it is the
+                   only column that can answer "which identity would a remediation run as", which an
+                   operator has to be able to audit without holding the secret. It is also how the viewer
+                   learns a server is armed at all: the phase-1 surface exists when this is non-null, so a
+                   `viewer` seat that could not read it would see no surface on an armed server. */
+                "remediation_username",
             },
-            SecretColumns: new[] { "encrypted_password" }),
+            /* remediation_encrypted_password is the same kind of thing as encrypted_password beside it: a
+               DPAPI blob whose whole purpose is to authenticate a WRITE to a monitored server, so if
+               anything in this table is secret it is. Named explicitly rather than left unclassified
+               because unclassified is only invisible until someone "fixes" the failing security gate by
+               adding the column to whichever list is nearer. */
+            SecretColumns: new[] { "encrypted_password", "remediation_encrypted_password" }),
 
         new ViewerSecretTableAcl(
             "config_command",

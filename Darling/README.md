@@ -410,6 +410,12 @@ Two mutually exclusive modes — setting both `managed: true` and `connectionStr
 | `encryptMode` | `"Mandatory"` | `Mandatory` / `Strict` / `Optional`; unknown values fail closed to `Mandatory` |
 | `multiSubnetFailover` | `false` | |
 | `excludedDatabases` | `[]` | Databases excluded from collection |
+| `remediationUsername` | *(none)* | **Optional second credential, for operator-initiated remediation only (#2138).** The credential above stays read-only forever and is never used for a write. Omit both remediation keys — the default — and this server has no remediation surface at all: there is nothing to enable and nothing to disable. Both halves are required; one alone counts as unarmed and the service says so at connect. Always SQL auth when set, so there is no `remediationAuth` key: an integrated remediation identity would be the service account, which is the monitoring identity |
+| `remediationEncryptedPassword` | *(none)* | The remediation credential's secret: same DPAPI blob from `--encrypt-password`, or an `env:NAME` / `file:/path` reference. There is deliberately **no plaintext variant** of this one — a wrong monitoring password fails a read, a wrong remediation password fails a write against a production server |
+
+**Least privilege for the remediation credential.** Grant `ALTER` on each database you intend to force a plan in — that is what `sp_query_store_force_plan` / `sp_query_store_unforce_plan` need. `ALTER SERVER STATE` is needed *only* for the evict-first lever, because that is what a targeted `DBCC FREEPROCCACHE(plan_handle)` requires, and it is the expensive grant. It is genuinely optional: without it the flow degrades to force-only **with a named reason**, never silently. The service does not guess per platform — it asks the server with a read-only `has_perms_by_name` check, which answers for the credential's effective permissions however the grant arrived. Azure SQL Database has no `DBCC FREEPROCCACHE` at all, which no grant changes, and that is reported as its own reason rather than as a permission problem.
+
+> Phase 1 ships **no consumer of this credential**. It is accepted, stored and resolvable so the arming model can be reviewed and provisioned ahead of the write path; the service logs at connect that an armed server is inert in this build. Nothing in this release can write to a monitored server.
 
 ### capturePlans (boolean, optional)
 
