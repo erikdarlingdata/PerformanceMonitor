@@ -385,8 +385,25 @@ public class CollectorMeasurementSeamTests
 
            An argument it CANNOT resolve FAILS rather than being skipped. That is the direction that costs
            least to be wrong in: a future author passing a computed label is told to make it a const, where
-           a skip would silently exempt exactly the case a scanner cannot reason about. */
+           a skip would silently exempt exactly the case a scanner cannot reason about.
+
+           WHAT THIS SCAN CANNOT SEE, stated rather than assumed. It reads PerformanceMonitor.Collectors
+           only - which is where every definition lives (69 concrete ones, flat, one-to-one with
+           CollectorCatalog.All), but Measure is public, so a HOST could call it and this would not know.
+           Widening the sweep would be worse rather than better: `.Measure(` is a name this codebase uses
+           heavily for unrelated things - WPF's UIElement.Measure(Size), and the Compose subsystem's
+           MeasureCatalog.Measure(key) - so a repo-wide sweep would try to resolve `ratio.NumeratorKey` as
+           a measurement label and fail on code that has nothing to do with this seam.
+
+           That boundary is affordable because the invariant that MATTERS is closed for every caller rather
+           than only the scanned ones: Render rejects an illegal label and counts the rejection, so no
+           prose reaches error_message from anywhere. This sweep is not what makes prose unreachable - it
+           is what turns a first-party typo from a runtime throw on a healthy collector into a CI failure,
+           in the directory where such a typo would actually be written. */
         var directory = Path.Combine(RepoFile.Root, "PerformanceMonitor.Collectors");
+
+        /* TopDirectoryOnly because the directory is flat - verified rather than assumed: it holds no
+           subdirectories at all besides obj/ and bin/, which a recursive sweep would have to exclude. */
         var files = Directory.EnumerateFiles(directory, "*.cs", SearchOption.TopDirectoryOnly).ToList();
 
         /* The sweep is only evidence if it read the tree. An empty enumeration would pass this test while
