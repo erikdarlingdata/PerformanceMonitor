@@ -5146,6 +5146,16 @@ WHERE j.proc_name LIKE '%compression%'
     /// summary only fires when nothing is running and no chunk is eligible, which is the routine hour — so
     /// hanging the clearance figure off it would suppress it in exactly the hour the daily chunk close makes
     /// interesting.</para>
+    ///
+    /// <para><b>The off-phase report is one line for the store too, and that branch is where the discipline
+    /// binds hardest rather than least.</b> A policy starting on a minute other than its assigned one is a
+    /// property of the store, not of the hypertable: the phased read either succeeds or it does not, so on a
+    /// job catalog too old to expose <c>fixed_schedule</c>/<c>initial_start</c> every policy is off phase at
+    /// once and stays that way, because that failure does not heal. Per-hypertable it would be one
+    /// Information line per hypertable per hour, indefinitely, on precisely the store where the least can be
+    /// done about it. It is Information rather than Debug because it is the PRECONDITION of every other
+    /// figure in this block — a clearance measured on a store whose grid was never applied describes where a
+    /// policy ran, not where this product placed it.</para>
     /// </summary>
     public static void LogCompressionActivity(
         IReadOnlyList<CompressionActivity> activity, DateTime nowUtc, ILogger? logger)
@@ -5202,6 +5212,9 @@ WHERE j.proc_name LIKE '%compression%'
     private static void LogCompressionClearance(IReadOnlyList<CompressionActivity> activity, ILogger logger)
     {
         CompressionActivity? tightest = null;
+        CompressionActivity? driftExample = null;
+        var offPhase = 0;
+        var onTheGrid = 0;
 
         foreach (var item in activity)
         {
@@ -5240,10 +5253,26 @@ WHERE j.proc_name LIKE '%compression%'
 
             if (item.OffAssignedPhase)
             {
-                logger.LogInformation(
-                    "TimescaleDB: compression of {Hypertable} last started on :{Observed:00}, not the :{Assigned:00} the phase grid assigns it — its clearance is measured from where it actually ran. A policy that drifts by its own runtime each cycle is the finish-to-start scheduling #3035's fixed schedule replaces, which the converge cannot apply on a job catalog too old to expose initial_start.",
-                    item.HypertableName, item.ObservedStartMinute ?? 0, item.AssignedPhaseMinute ?? 0);
+                offPhase++;
+                driftExample ??= item;
             }
+
+            onTheGrid++;
+        }
+
+        /* ONE line for the whole store, not one per hypertable, and this is the branch where that matters
+           most rather than least. The condition is a property of the STORE - a job catalog too old to expose
+           fixed_schedule/initial_start fails the phased read on every start, which
+           ConvergeCompressionScheduleAsync documents - so it is true of every policy at once and it does not
+           heal. Per-hypertable, it would be seventy Information lines an hour forever on exactly the store
+           where the least can be done about it, which is the burial this method's own discipline forbids and
+           which the first version of this branch did. Raised by review. */
+        if (offPhase > 0 && driftExample is not null)
+        {
+            logger.LogInformation(
+                "TimescaleDB: {OffPhase} of {OnGrid} compression policies last started on a minute other than the one the phase grid assigns them (e.g. {Hypertable} on :{Observed:00} rather than :{Assigned:00}) — so every clearance figure in this block is measured from where those policies actually ran, not from where this product placed them. A policy that drifts by its own runtime each cycle is the finish-to-start scheduling #3035's fixed schedule replaces, which the converge cannot apply on a job catalog too old to expose initial_start.",
+                offPhase, onTheGrid, driftExample.HypertableName,
+                driftExample.ObservedStartMinute ?? 0, driftExample.AssignedPhaseMinute ?? 0);
         }
 
         if (tightest is not null)

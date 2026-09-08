@@ -452,16 +452,55 @@ public sealed class CompressionClearanceWatchTests
             new[] { Reading("a_table_this_product_does_not_own", 59, 5_000d) }, DateTime.UtcNow, foreignOnly);
         Assert.DoesNotContain("clearance", foreignOnly.Joined, StringComparison.Ordinal);
 
-        /* The drift line names BOTH minutes, because "off its slot" without the two numbers cannot be acted
-           on. */
-        TimescaleSupport.TryCompressionPhaseMinutesFor(hypertable, out var assigned);
+        /* THE OFF-PHASE REPORT IS ONE LINE FOR THE STORE, and the case that establishes it is the one the
+           condition actually produces: a job catalog too old to expose fixed_schedule/initial_start fails the
+           phased read on every start, so EVERY policy is off phase at once and stays that way. Per-hypertable
+           this branch was one Information line per hypertable per hour, indefinitely, on exactly that store.
+           Raised by review. */
+        var everyPolicyDrifted = TimescaleSupport.CompressionPhaseOrder
+            .Where(table => TimescaleSupport.TryCompressionPhaseMinutesFor(table, out var assignedMinute)
+                && assignedMinute != tightest)
+            .Select(table => Reading(table, tightest, seconds: 0.5d))
+            .ToArray();
+
+        Assert.True(
+            everyPolicyDrifted.Length > 1,
+            "fewer than two policies are off their assigned minute in this arrangement, so 'one line not N' "
+            + "is vacuous");
+
         var drifted = new CapturingTestLogger();
-        TimescaleSupport.LogCompressionActivity(
-            new[] { Reading(hypertable, tightest, 0.5d) }, DateTime.UtcNow, drifted);
+        TimescaleSupport.LogCompressionActivity(everyPolicyDrifted, DateTime.UtcNow, drifted);
+
+        var driftLines = drifted.Joined
+            .Split(" | ", StringSplitOptions.None)
+            .Where(line => line.Contains("other than the one the phase grid assigns", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.Single(driftLines);
+        Assert.StartsWith("Information:", driftLines[0], StringComparison.Ordinal);
+
+        /* It carries the COUNT out of the on-grid total, plus one worked example's two minutes - "off its
+           slot" without the numbers cannot be acted on. */
         Assert.Contains(
-            string.Create(CultureInfo.InvariantCulture, $":{tightest:00}"), drifted.Joined, StringComparison.Ordinal);
+            string.Create(CultureInfo.InvariantCulture, $"{everyPolicyDrifted.Length} of {everyPolicyDrifted.Length}"),
+            driftLines[0],
+            StringComparison.Ordinal);
         Assert.Contains(
-            string.Create(CultureInfo.InvariantCulture, $":{assigned:00}"), drifted.Joined, StringComparison.Ordinal);
+            string.Create(CultureInfo.InvariantCulture, $":{tightest:00}"), driftLines[0], StringComparison.Ordinal);
+
+        /* And it is SILENT when every policy is on its assigned minute, so a healthy store pays nothing. */
+        var onPhaseTick = TimescaleSupport.CompressionPhaseOrder
+            .Select(table =>
+            {
+                TimescaleSupport.TryCompressionPhaseMinutesFor(table, out var assignedMinute);
+                return Reading(table, assignedMinute, seconds: 0.5d);
+            })
+            .ToArray();
+
+        var quietDrift = new CapturingTestLogger();
+        TimescaleSupport.LogCompressionActivity(onPhaseTick, DateTime.UtcNow, quietDrift);
+        Assert.DoesNotContain(
+            "other than the one the phase grid assigns", quietDrift.Joined, StringComparison.Ordinal);
     }
 
     /// <summary>
