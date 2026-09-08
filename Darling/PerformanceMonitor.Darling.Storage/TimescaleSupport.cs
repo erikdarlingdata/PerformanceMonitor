@@ -2026,16 +2026,6 @@ WITH NO DATA";
     }
 
     /// <summary>
-    /// How many of the LIGHT band's members are unbounded-cardinality — counted through
-    /// <see cref="IsUnboundedCardinalityRefresh"/> over the shipped registry rather than written down, so
-    /// registering an aggregate moves the layout instead of leaving a stale count beside it.
-    /// </summary>
-    public static int UnboundedLightRefreshCount =>
-        HourlyRefreshPhaseOrder.Count(view =>
-            !string.Equals(view, HeaviestHourlyRefreshView, StringComparison.Ordinal)
-            && UnboundedCardinalityRefreshViews.Contains(view));
-
-    /// <summary>
     /// The minutes the grid keeps between two consecutive unbounded-cardinality light refreshes — the same
     /// expression <see cref="CompressionPhaseGuardMinutes"/> is, because it is the same question.
     ///
