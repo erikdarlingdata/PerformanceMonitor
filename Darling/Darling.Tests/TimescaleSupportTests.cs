@@ -2740,13 +2740,16 @@ LIMIT 1", connection))
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(null, quiet);
         Assert.Equal("(no log lines captured)", quiet.Joined);
 
-        /* THE ROUTINE-BAND CASE IS FED THE RECORDED CEILING, and after #3166's census re-derivation that
-           reading logs Warning rather than Debug — so this assertion FAILS and is left exactly as written.
-           It is the same inversion as the band pins: a sizing figure the product's own watch line calls a
-           warning cannot also be the example of a routine reading. Re-pointing this case at a lower literal
-           would keep the level table covered while quietly dropping the claim that the grid's own figure is
-           routine, which is the claim worth losing loudly. The remedy is the slot or the fraction (#3035,
-           #3044, #3107). */
+        /* THE ROUTINE-BAND CASE IS FED THE GRID'S OWN SIZING FIGURE, which is what makes asserting Debug
+           here worth anything. The recorded ceiling is 896 s, 71.1% of the 1,260 s slot and 154 s below the
+           1,050 s watch line — ceiling, slot and watch line are all #3178's — so
+           ClassifyRefreshSlotHeadroom bands it InsideSlot and the line comes out at Debug. A lower literal
+           would cover the level table just as well while dropping the claim this case exists to hold: that
+           the figure the grid is SIZED AROUND is a routine reading, not a warning. Because both sides are
+           read from TimescaleSupport rather than written as literals here, the two can only meet by a real
+           change — a census raising the ceiling (#3166) or a re-derivation narrowing the slot (#3174,
+           #3178) — and when they do, this case goes red instead of the product quietly calling its own
+           sizing figure a warning. */
         var inside = new CapturingTestLogger();
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
             new HeaviestRefreshSlotReading(
