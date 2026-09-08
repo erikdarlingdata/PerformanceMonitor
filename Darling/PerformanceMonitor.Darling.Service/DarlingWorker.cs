@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Data;
 using System.Globalization;
 using System.IO;
@@ -3194,6 +3195,7 @@ public sealed class DarlingWorker : BackgroundService
         double? sqlCpu = null;
         double? totalCpu = null;
 
+        var cpuReadClock = Stopwatch.StartNew();
         try
         {
             (sqlCpu, totalCpu) = await ReadLatestCpuAsync(runtime.ServerId, cancellationToken);
@@ -3204,12 +3206,13 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] Latest-CPU read for the alert pass failed: {Message}",
-                server.Config.DisplayName, ex.Message);
+            _logger.LogError("[{Server}] Latest-CPU read for the alert pass failed after {ElapsedMs} ms: {Message}",
+                server.Config.DisplayName, cpuReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
-                runtime.ServerId.ToString(CultureInfo.InvariantCulture), "latest-CPU read");
+                runtime.ServerId.ToString(CultureInfo.InvariantCulture), "latest-CPU read", cpuReadClock.ElapsedMilliseconds);
         }
 
+        var sweepReadClock = Stopwatch.StartNew();
         try
         {
             var snapshot = new AlertServerSnapshot(
@@ -3222,6 +3225,7 @@ public sealed class DarlingWorker : BackgroundService
                 Suppressed: false);
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);
+            sweepReadClock.Restart();
 
             /* PostgreSQL predictors ride alongside rather than inside the shared engine — see
                IPostgresAlertReadAdapter for why the read contract is separate. Gated on the probed engine,
@@ -3239,10 +3243,10 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] Alert sweep failed: {Message}", server.Config.DisplayName, ex.Message);
+            _logger.LogError("[{Server}] Alert sweep failed after {ElapsedMs} ms: {Message}", server.Config.DisplayName, sweepReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
-                "shared engine sweep");
+                "shared engine sweep", sweepReadClock.ElapsedMilliseconds);
         }
     }
 
@@ -3280,14 +3284,24 @@ public sealed class DarlingWorker : BackgroundService
            and alerts that fired. The count stays truthful and the gap stays named. */
         _readFailures.RecordPass(snapshot.ServerKey);
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
 
-            var findings = PostgresAlertEvaluator.Evaluate(
-                await adapter.GetWraparoundRiskAsync(runtime.ServerId, cancellationToken),
-                await adapter.GetXminHorizonAsync(runtime.ServerId, cancellationToken),
-                await adapter.GetReplicationSlotRiskAsync(runtime.ServerId, cancellationToken));
+            /* The three feed reads are hoisted into locals rather than awaited inside the Evaluate
+               argument list, so each one gets the clock to itself. As arguments they were three
+               sequentially awaited reads inside ONE statement, and a client-side cutoff of the third
+               reported the sum of all three — a figure above the per-read deadline, which is a reading
+               the elapsed has no bucket for. Same evaluation order; the argument list is unchanged. */
+            var wraparound = await adapter.GetWraparoundRiskAsync(runtime.ServerId, cancellationToken);
+            readClock.Restart();
+            var xmin = await adapter.GetXminHorizonAsync(runtime.ServerId, cancellationToken);
+            readClock.Restart();
+            var slots = await adapter.GetReplicationSlotRiskAsync(runtime.ServerId, cancellationToken);
+            readClock.Restart();
+
+            var findings = PostgresAlertEvaluator.Evaluate(wraparound, xmin, slots);
 
             var now = DateTime.UtcNow;
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
@@ -3315,6 +3329,7 @@ public sealed class DarlingWorker : BackgroundService
                 {
                     var seeded = await _historyStore.GetLastAlertTimeAsync(
                         snapshot.ServerKey, finding.MetricName, dedupKey: finding.Subject);
+                    readClock.Restart();
                     if (seeded.HasValue)
                     {
                         _lastPostgresAlert[cooldownKey] = seeded.Value;
@@ -3367,6 +3382,7 @@ public sealed class DarlingWorker : BackgroundService
                         finding.Severity,
                         finding.ShortMessage),
                     cancellationToken);
+                readClock.Restart();
             }
         }
         catch (OperationCanceledException)
@@ -3375,9 +3391,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL outage-predictor reads");
+            _logger.LogError("[{Server}] PostgreSQL alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL outage-predictor reads", readClock.ElapsedMilliseconds);
         }
 
         /* #2711/#2719: Deadlocks, Blocking, Long-Running Query, Poison Wait and High CPU, each
@@ -3421,10 +3437,12 @@ public sealed class DarlingWorker : BackgroundService
         const string metricName = "High CPU";
         var key = snapshot.ServerKey;
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var now = DateTime.UtcNow;
             var reading = await DarlingPgCpuUtilizationReader.GetLatestAsync(_postgres, runtime.ServerId, now, cancellationToken);
+            readClock.Restart();
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
             var wasActive = _activePgCpuAlert.TryGetValue(key, out var activeBefore) && activeBefore;
@@ -3462,6 +3480,7 @@ public sealed class DarlingWorker : BackgroundService
                         Severity: null,
                         ShortMessage: $"Total CPU at {reading.CpuPercent:F0}% (threshold: {alertSettings.CpuThresholdPercent}%)"),
                     cancellationToken);
+                readClock.Restart();
             }
             else if (wasActive)
             {
@@ -3477,9 +3496,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL CPU alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL CPU alert read");
+            _logger.LogError("[{Server}] PostgreSQL CPU alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL CPU alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -3505,6 +3524,7 @@ public sealed class DarlingWorker : BackgroundService
         var key = snapshot.ServerKey;
         var stateStore = new PgAlertStateStore(_postgres, _logger);
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             /* #2716: seed the watermark from the same config_edge_trigger_watermarks row
@@ -3515,6 +3535,7 @@ public sealed class DarlingWorker : BackgroundService
             if (_pgDeadlockWatermarkSeeded.TryAdd(key, true))
             {
                 var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                readClock.Restart();
                 if (seeded.HasValue)
                 {
                     _lastAlertedPgDeadlockCount[key] = seeded.Value;
@@ -3529,6 +3550,7 @@ public sealed class DarlingWorker : BackgroundService
                collection_time would put a report in the wrong window and move it every cycle. */
             var rows = await DarlingPgDeadlockReader.GetDeadlocksAsync(
                 _postgres, runtime.ServerId, windowStart, now, limit: 50, cancellationToken);
+            readClock.Restart();
             var count = rows.Count;
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
@@ -3545,6 +3567,7 @@ public sealed class DarlingWorker : BackgroundService
                    process even if the write is lost, same posture as every other watermark save
                    in this codebase. */
                 await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, decision.Watermark);
+                readClock.Restart();
             }
 
             var wasActive = _activePgDeadlockAlert.TryGetValue(key, out var activeBefore) && activeBefore;
@@ -3578,6 +3601,7 @@ public sealed class DarlingWorker : BackgroundService
                         Severity: null,
                         ShortMessage: $"{count} deadlock(s) in the last hour"),
                     cancellationToken);
+                readClock.Restart();
             }
             else if (!decision.Active && wasActive)
             {
@@ -3591,9 +3615,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL deadlock alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL deadlock alert read");
+            _logger.LogError("[{Server}] PostgreSQL deadlock alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL deadlock alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -3619,12 +3643,14 @@ public sealed class DarlingWorker : BackgroundService
         var key = snapshot.ServerKey;
         var stateStore = new PgAlertStateStore(_postgres, _logger);
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             /* #2716: same restart-survival seed as EvaluatePgDeadlocksAsync — see its comment. */
             if (_pgBlockingWatermarkSeeded.TryAdd(key, true))
             {
                 var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                readClock.Restart();
                 if (seeded.HasValue)
                 {
                     _lastAlertedPgBlockingCount[key] = seeded.Value;
@@ -3642,6 +3668,7 @@ public sealed class DarlingWorker : BackgroundService
                row per root — never the only thing standing between a real distinct root and an undercount. */
             var rows = await DarlingPgBlockingReader.GetPgBlockingChainsDedupedByRootAsync(
                 _postgres, runtime.ServerId, windowStart, now, limit: 100, cancellationToken);
+            readClock.Restart();
 
             var worstPerRoot = WorstPgBlockingChainPerRoot(rows);
             var count = worstPerRoot.Count;
@@ -3656,6 +3683,7 @@ public sealed class DarlingWorker : BackgroundService
             if (decision.Watermark != watermark)
             {
                 await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, decision.Watermark);
+                readClock.Restart();
             }
 
             var wasActive = _activePgBlockingAlert.TryGetValue(key, out var activeBefore) && activeBefore;
@@ -3689,6 +3717,7 @@ public sealed class DarlingWorker : BackgroundService
                         Severity: null,
                         ShortMessage: $"{count} blocking session(s)"),
                     cancellationToken);
+                readClock.Restart();
             }
             else if (!decision.Active && wasActive)
             {
@@ -3702,9 +3731,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL blocking alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read");
+            _logger.LogError("[{Server}] PostgreSQL blocking alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -3754,6 +3783,7 @@ public sealed class DarlingWorker : BackgroundService
         const string metricName = "Long-Running Query";
         var key = snapshot.ServerKey;
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var thresholdMinutes = alertSettings.LongRunningQueryThresholdMinutes;
@@ -3762,6 +3792,7 @@ public sealed class DarlingWorker : BackgroundService
             var rows = await DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync(
                 _postgres, runtime.ServerId, thresholdMs: thresholdMinutes * 60_000L, now,
                 PgLongRunningQueryRecencyMinutes, limit: alertSettings.LongRunningQueryMaxResults, cancellationToken);
+            readClock.Restart();
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
             var wasActive = _activePgLongRunningQueryAlert.TryGetValue(key, out var activeBefore) && activeBefore;
@@ -3806,6 +3837,7 @@ public sealed class DarlingWorker : BackgroundService
                         ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m — {worst.CommandTag ?? "(unknown)"}"
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
                     cancellationToken);
+                readClock.Restart();
             }
             else if (wasActive)
             {
@@ -3819,9 +3851,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL long-running-query alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL long-running-query alert read");
+            _logger.LogError("[{Server}] PostgreSQL long-running-query alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL long-running-query alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -3884,10 +3916,12 @@ public sealed class DarlingWorker : BackgroundService
         const string metricName = PostgresAlertEvaluator.PoisonWaitMetric;
         var serverKey = snapshot.ServerKey;
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
             var rows = await adapter.GetPoisonWaitPressureAsync(runtime.ServerId, cancellationToken);
+            readClock.Restart();
             var findings = PostgresAlertEvaluator.EvaluatePoisonWaits(rows);
 
             var now = DateTime.UtcNow;
@@ -3926,6 +3960,7 @@ public sealed class DarlingWorker : BackgroundService
                 {
                     var seeded = await _historyStore.GetLastAlertTimeAsync(
                         serverKey, finding.MetricName, dedupKey: finding.Subject);
+                    readClock.Restart();
                     if (seeded.HasValue)
                     {
                         _lastPgPoisonWaitAlert[cooldownKey] = seeded.Value;
@@ -3990,6 +4025,7 @@ public sealed class DarlingWorker : BackgroundService
                         finding.Severity,
                         finding.ShortMessage),
                     cancellationToken);
+                readClock.Restart();
             }
 
             /* The Cleared edge, per subject: previously active, no longer over the bar. Late by up to one
@@ -4014,6 +4050,7 @@ public sealed class DarlingWorker : BackgroundService
                 _activePgPoisonWaitAlert[entry.Key] = false;
                 await NotifyPgResolutionAsync(serverKey, snapshot.ServerName, metricName, "Poison Waits Cleared",
                     $"{snapshot.ServerName}: {subject} accumulated wait back below threshold");
+                readClock.Restart();
             }
         }
         catch (OperationCanceledException)
@@ -4022,9 +4059,9 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL poison wait alert evaluation failed: {Message}",
-                runtime.Config.DisplayName, ex.Message);
-            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL poison wait alert read");
+            _logger.LogError("[{Server}] PostgreSQL poison wait alert evaluation failed after {ElapsedMs} ms: {Message}",
+                runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL poison wait alert read", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -4349,9 +4386,11 @@ LIMIT 1";
     /// </summary>
     private async Task EvaluateCompressionJobHealthAsync(CancellationToken cancellationToken)
     {
+        var readClock = Stopwatch.StartNew();
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            readClock.Restart();
 
             /* #1778: report what compression is DOING before deciding whether anything is stuck. The field
                could see hours-long compressions only in hindsight, by their effect on disk; this puts a
@@ -4362,6 +4401,7 @@ LIMIT 1";
                 await TimescaleSupport.ReadCompressionActivityAsync(connection, _logger, cancellationToken),
                 DateTime.UtcNow,
                 _logger);
+            readClock.Restart();
 
             /* #3044: the heaviest hourly refresh's runtime against the SLOT it has to fit inside, which is a
                different bound from #2136's below and the one the compression phase grid rests on. The build-time
@@ -4375,13 +4415,16 @@ LIMIT 1";
             TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
                 await TimescaleSupport.ReadHeaviestRefreshRuntimeAsync(connection, _logger, cancellationToken),
                 _logger);
+            readClock.Restart();
 
             var stuckJobs = await TimescaleSupport.ReadStuckCompressionJobsAsync(
                 connection, DateTime.UtcNow, _logger, cancellationToken);
+            readClock.Restart();
             await _selfAlerts!.EvaluateCompressionJobsAsync(
                 stuckJobs,
                 jobId => TimescaleSupport.TryRearmJobAsync(connection, jobId, _logger, cancellationToken),
                 cancellationToken);
+            readClock.Restart();
 
             /* #2136: the Store Job Over Cadence check rides the same connection and hourly cadence — a
                background job whose last successful run reached the warning share of its own schedule
@@ -4390,7 +4433,9 @@ LIMIT 1";
                is the backstop. */
             var cadenceReadings = await TimescaleSupport.ReadJobCadenceReadingsAsync(
                 connection, _logger, cancellationToken);
+            readClock.Restart();
             await _selfAlerts!.EvaluateStoreJobCadenceAsync(cadenceReadings, cancellationToken);
+            readClock.Restart();
 
             /* #2813: the Retention Held check rides the same connection and hourly cadence. A retention
                policy the #1680/#1877 coverage gate has paused reports total_failures = 0 and a plausible
@@ -4400,6 +4445,7 @@ LIMIT 1";
                alone, which is the normal state of every freshly created policy. Same isolation posture. */
             var retentionHolds = await TimescaleSupport.ReadRetentionHoldReadingsAsync(
                 connection, _logger, cancellationToken);
+            readClock.Restart();
             await _selfAlerts!.EvaluateRetentionHoldsAsync(retentionHolds, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -4408,9 +4454,25 @@ LIMIT 1";
         }
         catch (Exception ex)
         {
-            _logger.LogError("Compression-job health check failed: {Message}", ex.Message);
+            /* WHAT THIS SITE'S ELAPSED CAN AND CANNOT CLAIM, stated because the shared finding sentence
+               frames every entry against the alert pass's own command deadline and this one does not fit
+               that frame.
+
+               Each TimescaleSupport.Read*Async above catches `Exception ex when (ex is not
+               OperationCanceledException)` internally, logs at Debug and returns an empty result, and so
+               do the _selfAlerts Evaluate* wrappers. So a timeout on one of the reads this entry is NAMED
+               for never reaches here — it is swallowed one level down. What reaches here is the connection
+               open, a cancellation, or a genuine bug. And those reads run on
+               TimescaleSupport.JobCatalogReadTimeoutSeconds (30 s), not
+               DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds (10 s), so even when one did surface
+               the 10 s bound would be the wrong thing to compare it to.
+
+               The measurement stays, because a figure for the operation that actually faulted is still
+               worth having and the clock boundaries above make it one operation's. What does not stay is
+               any claim that it discriminates a client cutoff from a store fault at this site. */
+            _logger.LogError("Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
-                null, "store background-job health reads (compression, job cadence, retention holds)");
+                null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
         }
     }
 

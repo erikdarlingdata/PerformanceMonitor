@@ -51,7 +51,11 @@ public sealed class CollectionOutputBesideCostTests
     private const long MeasuredSuccesses = 63_448;
     private const long MeasuredDenials = 15_885;
 
-    private static CollectorHealth Row(long rowsStored, long runsWithRows, bool denialIsNewest) => new()
+    private static CollectorHealth Row(
+        long rowsStored,
+        long runsWithRows,
+        bool denialIsNewest,
+        long noteCount = 0) => new()
     {
         CollectorName = "pg_deadlocks",
         TotalRuns = MeasuredRuns,
@@ -68,6 +72,25 @@ public sealed class CollectionOutputBesideCostTests
         AvgDurationMs = 620.9,
         P95DurationMs = 1_400,
         MaxDurationMs = 9_100,
+        /* note_count is COUNT(error_message) over SUCCESS runs and last_note is the newest of
+           them, ordered notes-first, so a positive count always has a note to point at. Kept
+           consistent here rather than set independently, because a row with a count and no note
+           is a state the read cannot produce.
+
+           The bound below is the TOTAL run count, not the success count, because note_count above
+           success_count is producible: success_count also excludes legacy abandoned-by-note rows
+           (AbandonedByNotePredicateSql), which carry a non-null error_message on a SUCCESS status
+           and so are counted by note_count. That those rows have aged out of retention makes the
+           tighter bound true of today's data, not structurally true - and a fixture guard that
+           encodes a retention artefact rejects a row production can emit. note_count <= total_runs
+           is the invariant FormatOutputFinding actually rests on: both come from one GROUP BY. */
+        NoteCount = noteCount <= MeasuredRuns
+            ? noteCount
+            : throw new ArgumentOutOfRangeException(
+                nameof(noteCount),
+                noteCount,
+                $"note_count cannot exceed the {MeasuredRuns} runs in the window."),
+        LastNote = noteCount > 0 ? "enumeration yielded 0 items - nothing to collect this cycle" : null,
     };
 
     /// <summary>
@@ -107,6 +130,95 @@ public sealed class CollectionOutputBesideCostTests
         Assert.Equal(correctlyEmpty.RowsStored, blind.RowsStored);
         Assert.Equal(correctlyEmpty.TotalRuns, blind.TotalRuns);
         Assert.NotEqual(correctlyEmpty.DeniedSinceLastSuccess, blind.DeniedSinceLastSuccess);
+    }
+
+    /// <summary>
+    /// A DELIBERATE zero and a BROKEN zero must be distinguishable, and the fourth term is what does it
+    /// (#3160). Both rows here are the same collector with the same spend and the same zero output; the ONLY
+    /// input that differs is how many runs recorded a note about what they found.
+    ///
+    /// <para><b>Same collector on both rows on purpose.</b> The mechanism is keyed on the row's counts and
+    /// never on the collector's NAME. A name list is what #2511 exists to refuse, because it goes stale in
+    /// the direction that makes it pass: the next periodic collector to break gets the event-collector
+    /// sentence until somebody remembers to add it. Driving both readings out of one name is the assertion
+    /// that no name list is consulted.</para>
+    ///
+    /// <para>The measured subject was <c>query_store</c>, which is not an event collector and stored zero
+    /// rows on 11,728 consecutive runs on a read-replica fleet, every one carrying an empty-enumeration
+    /// note. It got the event-collector sentence anyway — the right conclusion from a rationale that does
+    /// not hold, and the same sentence a <c>query_store</c> that had genuinely stopped would have got.</para>
+    /// </summary>
+    [Fact]
+    public void TheNotedZero_DefersToTheNote_AndTheUnnotedZeroKeepsTheCategoryReading()
+    {
+        var noted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: MeasuredSuccesses);
+        var unnoted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: 0);
+
+        Assert.NotNull(noted.OutputFinding);
+        Assert.NotNull(unnoted.OutputFinding);
+
+        /* The NOTED row must not assert the category. Both halves are named, because "needs no action" is
+           the clause that reads as reassurance over a collector that has actually stopped. */
+        Assert.DoesNotContain("correct resting state", noted.OutputFinding, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs no action", noted.OutputFinding, StringComparison.Ordinal);
+
+        /* It defers instead: how many runs said something, and where to read what they said. */
+        Assert.Contains("last_note", noted.OutputFinding, StringComparison.Ordinal);
+        Assert.Contains("note_count", noted.OutputFinding, StringComparison.Ordinal);
+
+        /* The UNNOTED row is the positive control for the two DoesNotContain assertions above - the same
+           tokens over a row that demonstrably carries them, so a check passing by matching nothing cannot
+           hide in the pair. */
+        Assert.Contains("correct resting state", unnoted.OutputFinding, StringComparison.Ordinal);
+        Assert.Contains("needs no action", unnoted.OutputFinding, StringComparison.Ordinal);
+
+        /* And that reading now states the precondition it rests on instead of asserting a category. */
+        Assert.Contains("No run recorded a note", unnoted.OutputFinding, StringComparison.Ordinal);
+
+        /* Neither is the denial reading, and both still report the spend and the zero. */
+        foreach (var finding in new[] { noted.OutputFinding, unnoted.OutputFinding })
+        {
+            Assert.DoesNotContain("grant", finding, StringComparison.Ordinal);
+            Assert.Contains("Stored 0 rows", finding, StringComparison.Ordinal);
+        }
+
+        /* Same spend, same output, one differing term - the shape this suite already uses for the third. */
+        Assert.Equal(noted.RowsStored, unnoted.RowsStored);
+        Assert.Equal(noted.TotalRuns, unnoted.TotalRuns);
+        Assert.NotEqual(noted.NoteCount, unnoted.NoteCount);
+    }
+
+    /// <summary>
+    /// The finding's signature read off the TYPE rather than asserted over a hand-written list, so a FIFTH
+    /// parameter reports itself here instead of passing unnoticed — the discipline
+    /// <see cref="TheBandingSignature_TakesNoOutputAndNoDenialCurrency"/> applies to the band, one method
+    /// over.
+    ///
+    /// <para><b>The load-bearing half is that none of it is a string.</b> The note's prose has exactly one
+    /// home, <see cref="CollectorHealthClassifier.FormatCollectionNote"/>. A finding that took the note TEXT
+    /// would be a second copy of a sentence whose whole value is being accurate about one server's answer,
+    /// and the copy that drifts is never the one being read. Taking the COUNT and pointing at the field is
+    /// what keeps that single copy, so the absence of a string parameter is the property, not an
+    /// accident.</para>
+    /// </summary>
+    [Fact]
+    public void TheFindingSignature_TakesTheNoteCount_AndNoNoteText()
+    {
+        var parameters = typeof(CollectorHealthClassifier)
+            .GetMethod(
+                nameof(CollectorHealthClassifier.FormatOutputFinding),
+                BindingFlags.Public | BindingFlags.Static)!
+            .GetParameters();
+
+        /* The precondition, named so a signature change reports itself rather than turning the assertions
+           below into a vacuous pass over a list that no longer means what this test thinks. */
+        Assert.Equal(4, parameters.Length);
+
+        Assert.Equal(
+            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount" },
+            parameters.Select(p => p.Name!).ToArray());
+
+        Assert.DoesNotContain(parameters, p => p.ParameterType == typeof(string));
     }
 
     /// <summary>
@@ -463,6 +575,7 @@ public sealed class CollectionOutputBesideCostTests
     [InlineData("RowsStored")]
     [InlineData("RunsWithRows")]
     [InlineData("ProductiveRunPercent")]
+    [InlineData("OutputFinding")]
     public void BothSkusRowTypes_DocumentTheOutputMembers_Identically(string member)
     {
         var darling = DocComment(
@@ -485,17 +598,22 @@ public sealed class CollectionOutputBesideCostTests
     {
         var source = ReadRepoFile(relativePath);
 
-        /* The declaration, in either of the two shapes these members take: a stored property or an
-           expression-bodied one. */
-        var declaration = new[] { $"public long {member} {{ get; set; }}", $"public double {member} =>" }
-            .Select(d => source.IndexOf(d, StringComparison.Ordinal))
-            .FirstOrDefault(i => i > 0);
-        Assert.True(declaration > 0, $"{relativePath}: no declaration of {member} - this pin needs re-anchoring");
+        /* The declaration, matched by SHAPE rather than against a list of the exact type spellings these
+           members happen to use. That list held `public long X { get; set; }` and `public double X =>`,
+           and OutputFinding is `public string? X =>`, so adding it to the theory above matched neither
+           entry, and the pin failed its own re-anchoring precondition instead of guarding the member. A
+           shape match grows with the row type, which is why OrdinalMap below is derived too: a pin that
+           needs hand-editing before it can cover a new member is one nobody extends. */
+        var declaration = Regex.Match(
+            source,
+            $@"^[ \t]*public [^\r\n]*\b{Regex.Escape(member)}\b\s*(?:\{{ get; set; \}}|=>)",
+            RegexOptions.Multiline);
+        Assert.True(declaration.Success, $"{relativePath}: no declaration of {member} - this pin needs re-anchoring");
 
-        var summary = source.LastIndexOf("/// <summary>", declaration, StringComparison.Ordinal);
+        var summary = source.LastIndexOf("/// <summary>", declaration.Index, StringComparison.Ordinal);
         Assert.True(summary > 0, $"{relativePath}: {member} has no doc comment - this pin needs re-anchoring");
 
-        return Regex.Replace(source[summary..declaration], @"\s+", " ").Trim();
+        return Regex.Replace(source[summary..declaration.Index], @"\s+", " ").Trim();
     }
 
     private static readonly string[] ToolSources =
