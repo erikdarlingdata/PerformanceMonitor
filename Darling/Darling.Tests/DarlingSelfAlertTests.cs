@@ -333,8 +333,9 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: false, "", Ct);
         var resumed = Assert.Single(h.History.Records);
         Assert.Equal("Collection Resumed", resumed.MetricName);
-        Assert.True(resumed.AlertSent);
-        Assert.Equal("tray", resumed.NotificationType);
+        /* #3169: a resolution has no send channel, and says so rather than claiming a delivery. */
+        Assert.False(resumed.AlertSent);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, resumed.NotificationType);
         Assert.Single(h.Deliverer.Outcomes); /* only the original fire went to the deliverer */
 
         /* Still healthy on the next sweep — no duplicate resumed row (resolution is edge-triggered too). */
@@ -430,8 +431,8 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct);
         var restarted = Assert.Single(h.History.Records);
         Assert.Equal("Agent Restarted", restarted.MetricName);
-        Assert.True(restarted.AlertSent);
-        Assert.Equal("tray", restarted.NotificationType);
+        Assert.False(restarted.AlertSent);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, restarted.NotificationType);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Still running on the next sweep — no duplicate resolution (edge-triggered). */
@@ -902,8 +903,8 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyDiskPressureAsync(50 * Gib, 100 * Gib, null, Ct);
         var resolved = Assert.Single(h.History.Records);
         Assert.Equal("Store Disk Pressure Resolved", resolved.MetricName);
-        Assert.True(resolved.AlertSent);
-        Assert.Equal("tray", resolved.NotificationType);
+        Assert.False(resolved.AlertSent);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, resolved.NotificationType);
         Assert.Single(h.Deliverer.Outcomes);   /* only the original fire went to the deliverer */
 
         /* Still healthy on the next sweep — no duplicate resolved row (resolution is edge-triggered too). */
@@ -1205,7 +1206,7 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyCompressionJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
         var resolved = Assert.Single(h.History.Records);
         Assert.Equal("Compression Job Recovered", resolved.MetricName);
-        Assert.True(resolved.AlertSent);
+        Assert.False(resolved.AlertSent); /* #3169: a resolution has no send channel to have used */
         Assert.Contains("running on schedule again", resolved.DetailText, StringComparison.Ordinal);
 
         /* Still healthy next check — no duplicate resolution (edge-triggered), and a re-stuck job would be a
@@ -1990,8 +1991,8 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(Name, record.ServerName);
         Assert.Equal("CPU Resolved", record.MetricName);           /* the "…Resolved/Cleared" title, Dashboard shape */
         Assert.Equal($"{Name}: Total CPU back to 12%", record.DetailText);
-        Assert.True(record.AlertSent);
-        Assert.Equal("tray", record.NotificationType);
+        Assert.False(record.AlertSent);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, record.NotificationType);
         Assert.Null(record.SendError);
         Assert.False(record.Muted);
     }
@@ -2025,7 +2026,7 @@ public sealed class DarlingSelfAlertTests
         await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false), Ct);
         var resolved = Assert.Single(history.Records);
         Assert.Equal("CPU Resolved", resolved.MetricName);
-        Assert.Equal("tray", resolved.NotificationType);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, resolved.NotificationType);
     }
 
     private sealed class StubReadAdapter : IAlertReadAdapter

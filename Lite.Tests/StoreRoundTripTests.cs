@@ -56,7 +56,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             ServerId: "7", ServerName: "Srv", MetricName: "CPU",
             CurrentValueText: "92.5%", ThresholdValueText: "80%",
             NumericCurrentValue: null, NumericThresholdValue: null,
-            AlertSent: true, NotificationType: "email", SendError: null,
+            Delivery: AlertDelivery.FromFanout(
+                new EmailFanoutResult(EmailAttempted: true, EmailSent: true, SendError: null,
+                                      WebhookSent: false, AnyChannelConfigured: true),
+                muted: false, trayChannelPresent: true),
             Muted: false, DetailText: "detail text", ContextJson: "{\"k\":1}"));
 
         var after = DateTime.UtcNow;
@@ -89,7 +92,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             ServerId: "7", ServerName: "Srv", MetricName: "High CPU",
             CurrentValueText: "87% (Total CPU)", ThresholdValueText: "80%",
             NumericCurrentValue: null, NumericThresholdValue: null,
-            AlertSent: true, NotificationType: "toast", SendError: null,
+            Delivery: AlertDelivery.FromFanout(
+                new EmailFanoutResult(EmailAttempted: true, EmailSent: true, SendError: null,
+                                      WebhookSent: false, AnyChannelConfigured: true),
+                muted: false, trayChannelPresent: true),
             Muted: false, DetailText: null, ContextJson: null));
 
         var row = await ReadSingleAlertRowAsync();
@@ -108,7 +114,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             ServerId: "1", ServerName: "Srv", MetricName: "Analysis",
             CurrentValueText: "not-a-number", ThresholdValueText: "also-bad",
             NumericCurrentValue: 1.8, NumericThresholdValue: 1.5,
-            AlertSent: false, NotificationType: "tray", SendError: null,
+            Delivery: AlertDelivery.FromFanout(
+                new EmailFanoutResult(EmailAttempted: false, EmailSent: false, SendError: null,
+                                      WebhookSent: false, AnyChannelConfigured: false),
+                muted: false, trayChannelPresent: true),
             Muted: false, DetailText: null, ContextJson: null));
 
         var row = await ReadSingleAlertRowAsync();
@@ -368,15 +377,20 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
         Assert.Equal("live-1", loaded[0].Id);
     }
 
+    /* These two exercise the cooldown-seed filters' notification_type predicates, so they need to store
+       an arbitrary column triple rather than one a producer would derive — the same reason the deprecated
+       SKU's hatch exists. */
+#pragma warning disable CS0618
     private static Task RecordAsync(IAlertHistoryStore store, string serverId, string metric, string type, string? error)
         => store.RecordAlertAsync(new AlertHistoryRecord(
             serverId, "Srv", metric, "90", "80", 90, 80,
-            true, type, error, false, null, null));
+            AlertDelivery.FromLegacyStoredColumns(true, type, error), false, null, null));
 
     private static Task RecordWithContextAsync(IAlertHistoryStore store, string serverId, string metric, string type, string? contextJson)
         => store.RecordAlertAsync(new AlertHistoryRecord(
             serverId, "Srv", metric, "90", "80", 90, 80,
-            true, type, null, false, null, contextJson));
+            AlertDelivery.FromLegacyStoredColumns(true, type, null), false, null, contextJson));
+#pragma warning restore CS0618
 
     /// <summary>Real serialized #1140 context carrying a single incident with the given dedup key.</summary>
     private static string JsonWith(string dedupKey)

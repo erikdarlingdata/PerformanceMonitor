@@ -20,7 +20,8 @@
  * every cell go through the shared builders; nothing touches innerHTML.
  */
 
-import { el, mount, apiGet, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, localTime, fmtNum } from "../util.js";
+import { el, mount, apiGet, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, localTime, fmtNum,
+         alertDeliveryState } from "../util.js";
 import { VIZ } from "../panels.js";
 import { suggestViz, deriveVizConfig } from "../derive.js";
 
@@ -31,12 +32,13 @@ import { suggestViz, deriveVizConfig } from "../derive.js";
 function alertStatusText(a) {
   if (a.muted) return "Muted";
   if (a.send_error) return "Delivery failed: " + a.send_error;
-  /* #2814: headless has no tray, so a "tray" alert was only logged, never delivered — a single neutral
-     "Logged", kept in lockstep with statusCell in alerts.js (see the note there). A real channel keeps
-     Sent/Not-sent below. */
-  if (a.notification_type === "tray") return "Logged";
-  const channel = a.notification_type && a.notification_type !== "tray" ? " (" + a.notification_type + ")" : "";
-  if (a.alert_sent) return "Sent" + channel;
+  /* #3169: a row that states a delivery STATE rather than naming a channel, including the one legacy
+     signature that decodes. Same shared lookup statusCell in alerts.js uses, which is what keeps the two
+     in lockstep now instead of a comment asking them to be. */
+  const state = alertDeliveryState(a);
+  if (state !== null) return state;
+  const channel = a.notification_type ? " (" + a.notification_type + ")" : "";
+  if (a.alert_sent) return "Delivered" + channel;
   return "Not sent";
 }
 

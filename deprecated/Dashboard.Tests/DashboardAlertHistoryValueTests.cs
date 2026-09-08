@@ -151,7 +151,7 @@ public class DashboardAlertHistoryValueTests
             serverId, "Srv", "Capture Down",
             CurrentValueText: "Blocking and Deadlock", ThresholdValueText: "session running",
             NumericCurrentValue: null, NumericThresholdValue: null,
-            AlertSent: true, NotificationType: "tray", SendError: null,
+            Delivery: LegacyTrayDelivery(),
             Muted: false, DetailText: null, ContextJson: null));
 
         var row = Assert.Single(store.GetAlertHistory(200), e => e.ServerId == serverId);
@@ -178,7 +178,7 @@ public class DashboardAlertHistoryValueTests
             CurrentValueText: "no collection in 47m", ThresholdValueText: "collecting",
             /* Numerics deliberately supplied AND deliberately expected to be ignored. */
             NumericCurrentValue: 47, NumericThresholdValue: 30,
-            AlertSent: true, NotificationType: "tray", SendError: null,
+            Delivery: LegacyTrayDelivery(),
             Muted: false, DetailText: null, ContextJson: null));
 
         var row = Assert.Single(store.GetAlertHistory(200), e => e.ServerId == serverId);
@@ -201,4 +201,11 @@ public class DashboardAlertHistoryValueTests
         var dashboardRow = new AlertLogEntry { MetricName = "Capture Down", CurrentValue = "Blocking and Deadlock" };
         Assert.IsType<string>(dashboardRow.CurrentValue);
     }
+
+    /* The deprecated SKU records a hand-decided disposition; its 26 production callers do the same, so its
+       tests state one too rather than deriving it. */
+#pragma warning disable CS0618
+    private static AlertDelivery LegacyTrayDelivery() =>
+        AlertDelivery.FromLegacyStoredColumns(true, "tray", null);
+#pragma warning restore CS0618
 }
