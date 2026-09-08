@@ -292,11 +292,24 @@ difference a cumulative counter, so the first read after startup legitimately sh
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_index_usage_stats` | 24 h | **24 h** | 48 h (a scan count is a difference) |
+| `pg_index_bloat` | 24 h | **24 h** | a full PASS, not one cycle (see below) |
 
-The three per-database collectors are the ones that surprise people. `pg_autovacuum_stats` and
-`pg_table_bloat_stats` take an hour before the first row and two before "growing or flat" can be answered;
-`pg_index_usage_stats` takes a **day**, and two before a windowed scan count exists at all. Those cadences
-are deliberate — a PostgreSQL connection is bound to one database for life, so per-database collection
+The per-database collectors are the ones that surprise people — seven of them at the time of writing,
+which is every collector whose `RunsPerDatabase` returns true, so count them from `CollectorCatalog`
+rather than from this sentence. `pg_autovacuum_stats` and `pg_table_bloat_stats` take an hour before the
+first row and two before "growing or flat" can be answered; `pg_index_usage_stats` takes a **day**, and
+two before a windowed scan count exists at all.
+
+`pg_index_bloat` is the one whose first-answer column needs reading carefully. A cycle measures a
+**bounded, rotating slice** rather than every index — the cursor resumes below wherever the previous
+cycle stopped and wraps at the end of a pass — so a day gets you rows, and a complete answer for the
+whole index population takes a full pass. It also needs the `pgstattuple` extension created in
+`public`, or it reports the function as missing rather than returning bloat. And it is the **complete
+btree census with no size floor**, while `pg_index_usage_stats` floors at 64 kB, which is why the two
+report row counts differing by roughly 65% on the same target: the gap is entirely indexes too small
+for usage statistics to be worth recording.
+
+Those cadences are deliberate — a PostgreSQL connection is bound to one database for life, so per-database collection
 costs one connection per database per cycle, and index usage is a structural question that an hourly
 sample would re-record 24 times a day for nothing.
 
@@ -320,6 +333,7 @@ Through MCP, one tool per collector:
 | `get_pg_blocking` | blocking chains that were SAMPLED, with the root attributed |
 | `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split |
 | `get_pg_index_usage` | which indexes nothing scans — **and whether each one can actually be dropped** |
+| `get_pg_index_bloat` | how much of each index is dead space — over a **rotating slice per cycle**, so read `measured_at` before treating a density as current |
 | `get_pg_table_bloat` | how much space the vacuum lag above has cost, as an **estimate** with its own error stated |
 | `get_pg_session_states` | who is holding a transaction open — **and whether they actually pin the xmin horizon** |
 
