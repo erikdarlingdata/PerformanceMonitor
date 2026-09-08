@@ -2337,25 +2337,23 @@ WITH NO DATA";
     /// includes it. Getting that backwards would report the grid's own sizing figure as a falsification of
     /// itself on the hour it was measured.</para>
     ///
-    /// <para>Negative and NaN readings answer <see cref="RefreshCeilingFreshness.CeilingHolds"/> rather
-    /// than throwing, the posture <see cref="ClassifyRefreshSlotHeadroom"/> and
-    /// <see cref="ClassifyCompressionClearance"/> both take: a catalog handing back something impossible
-    /// must cost the line, never the sweep that carries it. NaN needs the explicit test because
-    /// <c>NaN &gt; x</c> is false anyway — the guard is here so the answer is a DECISION rather than a
-    /// property of IEEE comparison that a later refactor could invert without noticing.</para>
+    /// <para><b>NO SPECIAL CASE for an impossible reading, and its ABSENCE is deliberate.</b> The siblings
+    /// need one because they compare against a WIDTH: a negative reading is under every band boundary and a
+    /// NaN is under none of them, so both have to be steered somewhere. This compares against a ceiling that
+    /// is positive by construction — both constants that feed it are — so a negative reading is not greater
+    /// than it and <c>NaN &gt; x</c> is false, and each of them answers
+    /// <see cref="RefreshCeilingFreshness.CeilingHolds"/> from the one comparison. A guard added here would
+    /// be unreachable by any value the product can produce, and an unreachable guard is not caution: it is a
+    /// line no test can distinguish from its own absence, so it reads as protection and certifies nothing.
+    /// Where a non-finite reading does real damage is the rate limiter's mark —
+    /// <see cref="RefreshCeilingStalenessWatch.ShouldReport"/> holds that, and holds it where a mutation can
+    /// reach it.</para>
     /// </summary>
     public static RefreshCeilingFreshness ClassifyRefreshCeilingFreshness(
-        double observedSeconds, double recordedCeilingSeconds)
-    {
-        if (double.IsNaN(observedSeconds) || observedSeconds < 0d)
-        {
-            return RefreshCeilingFreshness.CeilingHolds;
-        }
-
-        return observedSeconds > recordedCeilingSeconds
+        double observedSeconds, double recordedCeilingSeconds) =>
+        observedSeconds > recordedCeilingSeconds
             ? RefreshCeilingFreshness.CeilingFalsified
             : RefreshCeilingFreshness.CeilingHolds;
-    }
 
     /// <summary>
     /// The name <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> is reported under by
@@ -5884,12 +5882,25 @@ public sealed class RefreshCeilingStalenessWatch
     /// <paramref name="constantName"/> — true for the first falsifying reading and thereafter only for one
     /// larger than the largest already reported. Records the mark when it answers true, so a caller that
     /// asks twice about the same reading is told once.
+    ///
+    /// <para><b>A NON-FINITE reading is refused and NOT recorded, and this is the one place that guard does
+    /// work.</b> The comparison below is <c>observedSeconds &lt;= mark</c>, and every comparison against NaN
+    /// is false — so a NaN allowed through would answer true, become the mark, and then answer true for
+    /// EVERY later reading, because none of them is <c>&lt;= NaN</c> either. One impossible catalog reading
+    /// would disable the rate limit for the life of the process, silently and permanently. That is why the
+    /// guard is here rather than in <see cref="TimescaleSupport.ClassifyRefreshCeilingFreshness"/>, where the
+    /// comparison already answers correctly for a non-finite value and a guard would be unreachable.</para>
     /// </summary>
     public bool ShouldReport(string constantName, double observedSeconds)
     {
         if (constantName is null)
         {
             throw new ArgumentNullException(nameof(constantName));
+        }
+
+        if (!double.IsFinite(observedSeconds))
+        {
+            return false;
         }
 
         lock (_reportedHighWaterMark)

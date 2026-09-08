@@ -208,15 +208,21 @@ public sealed class RefreshCeilingStalenessTests
             new RefreshCeilingStalenessWatch(), log);
         Assert.Equal("(no log lines captured)", log.Joined);
 
-        /* And NaN is not silently recorded as a mark either, which would let a real falsification afterwards
-           be compared against a NaN and swallowed — every comparison against NaN is false, so a mark of NaN
-           would report EVERY later reading rather than none, and the rate limit would be gone in the one
-           case a catalog handed back nonsense. */
+        /* AND THE LOAD-BEARING HALF, which is the limiter rather than the classifier. Every comparison
+           against NaN is false, so a NaN allowed to become the high-water mark answers "report" for every
+           later reading too — one impossible catalog reading would disable the rate limit for the life of
+           the process. Asserted against ShouldReport DIRECTLY, because that is the surface where the value
+           can arrive: the classifier's own comparison already answers CeilingHolds for a non-finite reading,
+           so a guard there would be unreachable and a test on it would pass with the guard deleted. */
         var watch = new RefreshCeilingStalenessWatch();
-        TimescaleSupport.LogRefreshCeilingStaleness(
-            HeaviestConstant, Ceiling, TimescaleSupport.HeaviestHourlyRefreshView, double.NaN, watch,
-            new CapturingTestLogger());
+        Assert.False(watch.ShouldReport(HeaviestConstant, double.NaN));
+        Assert.False(watch.ShouldReport(HeaviestConstant, double.PositiveInfinity));
         Assert.Null(watch.ReportedHighWaterMark(HeaviestConstant));
+
+        /* And a real falsification afterwards behaves as though the nonsense never arrived. */
+        Assert.True(watch.ShouldReport(HeaviestConstant, Ceiling + 1));
+        Assert.Equal(Ceiling + 1, watch.ReportedHighWaterMark(HeaviestConstant));
+        Assert.False(watch.ShouldReport(HeaviestConstant, Ceiling + 1));
     }
 
     /// <summary>
