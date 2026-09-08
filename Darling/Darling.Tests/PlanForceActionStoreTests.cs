@@ -209,6 +209,42 @@ public sealed class PlanForceActionStoreTests
                 await store.GetPendingReviewsAsync(TestServerId, now, ct),
                 r => r.ActionId == orphanIntent);
 
+            /* 8. OWN-FORCES-ONLY, as a predicate rather than a circumstance (V113, #2138 phase 1).
+               Until an operator could write to this table, the property held because the bot was the
+               only writer; it does not hold by itself any more. An operator's succeeded live force is
+               shaped EXACTLY like a bot force the read would return — same action, same outcome, same
+               server, no closing row — so the only thing that can keep it out is the actor filter, and
+               nothing else in this scenario could make the assertion pass.
+
+               The bot-actored twin is journaled in the same breath as the discriminating control: without
+               it, an actor filter that matched NOTHING (a typo in the value, a filter on the wrong column)
+               would satisfy the first assertion perfectly. */
+            var operatorForce = await store.JournalAsync(Record(now.AddMinutes(-90),
+                action: PgPlanForceActionStore.ActionForce, decision: PgPlanForceActionStore.ActionForce,
+                reasons: "", outcome: PgPlanForceActionStore.OutcomeSucceeded,
+                mode: PgPlanForceActionStore.ModeLive,
+                actor: PgPlanForceActionStore.ActorOperator), ct);
+            var botForce = await store.JournalAsync(Record(now.AddMinutes(-90),
+                action: PgPlanForceActionStore.ActionForce, decision: PgPlanForceActionStore.ActionForce,
+                reasons: "", outcome: PgPlanForceActionStore.OutcomeSucceeded,
+                mode: PgPlanForceActionStore.ModeLive,
+                actor: PgPlanForceActionStore.ActorBot), ct);
+
+            var reviewable = await store.GetPendingReviewsAsync(TestServerId, now, ct);
+            Assert.DoesNotContain(reviewable, r => r.ActionId == operatorForce);
+            Assert.Contains(reviewable, r => r.ActionId == botForce);
+
+            /* And the actor round-trips on the read, so a consumer can tell the two apart in the audit
+               trail rather than only the review read being able to. A column written but never read back
+               is a column that drifts. */
+            var audited = await store.GetRecentActionsAsync(TestServerId, now.AddDays(-1), 200, ct);
+            Assert.Equal(
+                PgPlanForceActionStore.ActorOperator,
+                Assert.Single(audited.Where(r => r.ActionId == operatorForce)).Actor);
+            Assert.Equal(
+                PgPlanForceActionStore.ActorBot,
+                Assert.Single(audited.Where(r => r.ActionId == botForce)).Actor);
+
             bodySucceeded = true;
         }
         finally
