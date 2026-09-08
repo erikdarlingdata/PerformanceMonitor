@@ -39,7 +39,9 @@ public class JsonAlertHistoryStoreMutedFilterTests
     private static Task RecordAsync(JsonAlertHistoryStore store, string serverId, string metric, bool muted)
         => store.RecordAlertAsync(new AlertHistoryRecord(
             serverId, "Srv", metric, "4", "1", null, null,
-            AlertSent: !muted, NotificationType: muted ? "muted" : "tray", SendError: null,
+#pragma warning disable CS0618
+            Delivery: AlertDelivery.FromLegacyStoredColumns(!muted, muted ? "muted" : "tray", null),
+#pragma warning restore CS0618
             Muted: muted, DetailText: null, ContextJson: null));
 
     [Fact]
