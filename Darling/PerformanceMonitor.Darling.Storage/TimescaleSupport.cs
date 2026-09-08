@@ -1838,10 +1838,40 @@ WITH NO DATA";
     /// itself in the warning instead of taking the sweep down.</para>
     /// </summary>
     public static int RefreshPhaseMinutesFor(string view)
+        => RefreshPhaseMinutesFor(HourlyRefreshPhaseOrder, view);
+
+    /// <summary>
+    /// The phase map itself, over an EXPLICIT order — the seam that lets the injectivity claim be tested
+    /// against the shipped algorithm rather than against a copy of its rule.
+    ///
+    /// <para><b>Why this exists at all.</b> The claim the grid rests on is that no two hourly policies share
+    /// a minute <i>whatever the order</i>, and the public overload can only ever be called at the ONE order
+    /// <see cref="HourlyRefreshPhaseOrder"/> currently has. A test that permuted the list and re-implemented
+    /// the counting rule inline would prove the RULE injective and leave the shipped method untested at every
+    /// order but one — which is the "a test that agrees with any derivation" failure one layer down, and it
+    /// is the failure this whole grid exists to remove. So the order is a parameter and the product passes
+    /// its own list.</para>
+    ///
+    /// <para><b>Only the ORDER is a parameter, deliberately.</b> The GEOMETRY —
+    /// <see cref="HeaviestRefreshStartMinute"/> and <see cref="LightRefreshStepMinutes"/> — still comes from
+    /// the shipped registry, so this cannot be used to fabricate a different grid: handing it a permutation
+    /// asks "does the map still collide-free at this order", which is the question, and handing it a
+    /// different POPULATION would be asking something the caller has no business asking.</para>
+    ///
+    /// <para><c>internal</c> rather than public: the product must always reach the map through the overload
+    /// that supplies its own list, or a caller could phase a policy against an order the converge does not
+    /// share.</para>
+    /// </summary>
+    internal static int RefreshPhaseMinutesFor(IReadOnlyList<string> order, string view)
     {
+        if (order is null)
+        {
+            throw new ArgumentNullException(nameof(order));
+        }
+
         var lightIndex = 0;
 
-        foreach (var candidate in HourlyRefreshPhaseOrder)
+        foreach (var candidate in order)
         {
             var heaviest = string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal);
 

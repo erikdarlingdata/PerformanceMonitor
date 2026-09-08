@@ -385,7 +385,13 @@ public sealed class TimescaleContinuousAggregateTests
            and 9 — all congruent mod the slot count — and inserting one aggregate ahead of the last of them
            put two back on the same minute. Rotating the list is the same class of change, and the map has to
            survive it: every rotation of the phase order still yields as many distinct minutes as there are
-           policies. A modulus-based map fails this at once. */
+           policies. A modulus-based map fails this at once.
+
+           THROUGH THE SHIPPED MAP, via its order-taking overload, and that is the whole point of the
+           overload existing. Re-implementing the counting rule here would prove the RULE injective under
+           permutation and leave TimescaleSupport.RefreshPhaseMinutesFor exercised at exactly one order — the
+           "a test that agrees with any derivation" failure one layer down, and the same failure this grid
+           exists to remove. Raised by review. */
         for (var rotation = 1; rotation < TimescaleSupport.HourlyRefreshPhaseOrder.Count; rotation++)
         {
             var rotated = TimescaleSupport.HourlyRefreshPhaseOrder
@@ -393,23 +399,33 @@ public sealed class TimescaleContinuousAggregateTests
                 .Concat(TimescaleSupport.HourlyRefreshPhaseOrder.Take(rotation))
                 .ToArray();
 
-            var minutes = new List<int>(rotated.Length);
-            var lightIndex = 0;
-            foreach (var view in rotated)
-            {
-                if (string.Equals(view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
-                {
-                    minutes.Add(TimescaleSupport.HeaviestRefreshStartMinute);
-                }
-                else
-                {
-                    minutes.Add(lightIndex * TimescaleSupport.LightRefreshStepMinutes);
-                    lightIndex++;
-                }
-            }
+            var minutes = rotated
+                .Select(view => TimescaleSupport.RefreshPhaseMinutesFor(rotated, view))
+                .ToArray();
 
-            Assert.Equal(minutes.Count, minutes.Distinct().Count());
+            Assert.Equal(minutes.Length, minutes.Distinct().Count());
+
+            /* And the ROTATION actually moved something, or the loop would be re-asserting the unrotated
+               claim thirteen times: the heaviest refresh keeps its minute by identity, so the light views
+               are the ones that must have moved. */
+            Assert.NotEqual(
+                TimescaleSupport.HourlyRefreshPhaseOrder.Select(TimescaleSupport.RefreshPhaseMinutesFor).ToArray(),
+                rotated.Select(view => TimescaleSupport.RefreshPhaseMinutesFor(rotated, view)).ToArray());
         }
+
+        /* The two overloads agree at the shipped order, so the seam cannot drift from the map the product
+           actually uses. */
+        foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
+        {
+            Assert.Equal(
+                TimescaleSupport.RefreshPhaseMinutesFor(view),
+                TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HourlyRefreshPhaseOrder, view));
+        }
+
+        /* And the seam is as loud as the public overload for a view it does not hold. */
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TimescaleSupport.RefreshPhaseMinutesFor(
+                TimescaleSupport.HourlyRefreshPhaseOrder, TimescaleSupport.QueryStatsDailyView));
 
         /* view -> the relation its own CREATE selects FROM. */
         var sourceOf = new Dictionary<string, string>(StringComparer.Ordinal);
