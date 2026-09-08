@@ -2291,7 +2291,7 @@ LIMIT 1", connection))
            comment reads as unconditional to whoever finds it next. Raising the recorded ceiling past the
            slot width therefore has to FAIL here rather than be renumbered through, because past that
            point the refresh runs into its neighbour and the grid needs redesigning. */
-        Assert.Equal(594, TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
+        Assert.Equal(896, TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
         Assert.Equal(140, TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds);
         Assert.True(
             TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds < TimescaleSupport.RefreshPhaseStepMinutes * 60,
@@ -2472,7 +2472,15 @@ LIMIT 1", connection))
     /// and the watch line sits ABOVE it — so a live reading in the warning band is this job exceeding its own
     /// recorded range rather than a restatement of the figure the compression grid is sized against. The five
     /// readings taken during #3044's review all classify INSIDE too, which is the anti-crying-wolf half; the
-    /// largest of them, at 66.0% of the slot, IS the recorded ceiling.</para>
+    /// largest of them, at 66.0% of the slot, was the recorded ceiling when the record was sixteen runs
+    /// long.</para>
+    ///
+    /// <para><b>The ceiling assertion below now FAILS, on the census re-derivation of #3166, and it is left
+    /// exactly as written.</b> At 896 s the figure the grid is sized against classifies
+    /// <c>ApproachingSlot</c> and sits 146 s ABOVE the watch line, so the relationship this test is named
+    /// for has inverted. Restoring it means moving the watch line, moving the slot, or making the refresh
+    /// cheaper — a scheduling decision (#3035, #3044, #3107) — and re-typing the expected band here is the
+    /// one change that would hide it while deciding nothing.</para>
     ///
     /// <para>Both boundaries are pinned inclusive on purpose: the wall matches the build-time assertion's
     /// <c>&lt;</c>, so a value AT the slot width fails both.</para>
@@ -2610,10 +2618,14 @@ LIMIT 1", connection))
             TimescaleSupport.HeaviestHourlyRefreshView,
             TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
 
-        /* The recorded ceiling: 66.0% of the slot, 306 s clear, and inside the routine band. */
+        /* The recorded ceiling: 99.6% of the slot and 4 s clear (#3166's census re-derivation). The BAND
+           assertion below is left as it was written and now FAILS, which is the point of having it: a
+           sizing figure that classifies as a warning is the grid's precondition going, and renumbering the
+           expected band to match would be the one edit that makes the failure disappear without changing
+           anything about the store. */
         Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.InsideSlot, atTheCeiling.Headroom);
-        Assert.Equal(306, atTheCeiling.ClearOfSlotSeconds);
-        Assert.Equal(66.0, atTheCeiling.PercentOfSlot, 1);
+        Assert.Equal(4, atTheCeiling.ClearOfSlotSeconds);
+        Assert.Equal(99.6, atTheCeiling.PercentOfSlot, 1);
 
         /* The watch line, which is where APPROACHING starts: 83.3% of the slot, 150 s clear. */
         var atTheWatchLine = new HeaviestRefreshSlotReading(
@@ -2773,11 +2785,11 @@ LIMIT 1", connection))
             "the slot watch no longer fires before #2136's default cadence warning, so it adds no lead time");
 
         /* And the evidence that #2136 does not know this job's size, as a number rather than as prose:
-           the recorded ceiling is 16.5% of the same cadence, while the clamp in DarlingAlertSettings is
-           justified on "the production worst runs ~7% of cadence" — 252 s, under half of it. Pinned so the
-           doc comment's claim cannot quietly stop being true. */
+           the recorded ceiling is 24.9% of the same cadence, while the clamp in DarlingAlertSettings is
+           justified on "the production worst runs ~7% of cadence" — 252 s, well under half of it. Pinned so
+           the doc comment's claim cannot quietly stop being true. */
         Assert.Equal(
-            16.5,
+            24.9,
             100.0 * TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds / hourlyCadenceSeconds,
             1);
         Assert.True(
