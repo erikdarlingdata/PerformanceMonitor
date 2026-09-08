@@ -117,9 +117,10 @@ public sealed class AlertDeliveryChannelTests
             }
         }
 
-        /* The count IS the claim that the enumeration is the whole domain: 2^4 result bools x muted x
-           trayChannelPresent. A shrunken loop would otherwise pass by covering less. */
-        Assert.Equal(64, checked_);
+        /* The count IS the claim that the enumeration is the whole domain: 2^4 result bools x send_error
+           present-or-not x muted x trayChannelPresent. A shrunken loop would otherwise pass by covering
+           less. */
+        Assert.Equal(128, checked_);
     }
 
     /// <summary>
@@ -158,6 +159,37 @@ public sealed class AlertDeliveryChannelTests
             Assert.Equal(
                 result.EmailSent || result.WebhookSent,
                 AlertDelivery.FromFanout(result, muted, tray).Sent);
+        }
+    }
+
+    /// <summary>
+    /// <b>No state-carrying channel can carry a <c>send_error</c>.</b> Over the whole input domain, a
+    /// non-null error implies <see cref="AlertDelivery.DeliveringChannels"/> — because the error can only
+    /// come from the SMTP attempt, so its presence is itself email involvement.
+    ///
+    /// <para>This is what licenses two surfaces to check in different orders. The web dashboard tests
+    /// <c>send_error</c> before its state lookup; <see cref="AlertDeliveryStatus.Describe"/> tests the state
+    /// channels first. Equivalent, but only because the two cases can never co-occur — which the review of
+    /// this change correctly noted was true of the reachable subset rather than of the type. It is now true
+    /// of the type.</para>
+    ///
+    /// <para>Residual, stated rather than papered over: a row PERSISTED by an earlier version could still
+    /// hold a state channel beside an error, and the two surfaces would label it differently. No producer
+    /// can write one, and none of the 32,546 rows on the three live stores carries a non-null
+    /// <c>send_error</c> at all.</para>
+    /// </summary>
+    [Fact]
+    public void NoStateCarryingChannel_CanCarryASendError()
+    {
+        foreach (var (result, muted, tray) in EveryFanoutCase())
+        {
+            var delivery = AlertDelivery.FromFanout(result, muted, tray);
+
+            if (delivery.SendError is not null)
+            {
+                Assert.Contains(delivery.Channel, AlertDelivery.DeliveringChannels);
+                Assert.DoesNotContain(delivery.Channel, AlertDelivery.StateCarryingChannels);
+            }
         }
     }
 
@@ -494,9 +526,10 @@ public sealed class AlertDeliveryChannelTests
         => new(emailAttempted, emailSent, sendError, webhookSent, anyChannelConfigured);
 
     /// <summary>
-    /// Every representable <c>EmailFanoutResult</c> shape crossed with both callers' answers — 64 cases.
-    /// <c>SendError</c> is not part of the cross-product because no arm branches on it; the failure path is
-    /// covered by <see cref="AnAttemptThatFailed_KeepsItsErrorAndReadsAsFailed"/>.
+    /// Every representable <c>EmailFanoutResult</c> shape crossed with both callers' answers — 128 cases.
+    /// <c>SendError</c> is in the cross-product because an arm DOES branch on it: it counts as email
+    /// involvement, which is what makes
+    /// <see cref="NoStateCarryingChannel_CanCarryASendError"/> hold over the whole domain.
     /// </summary>
     private static IEnumerable<(EmailFanoutResult Result, bool Muted, bool Tray)> EveryFanoutCase()
     {
@@ -504,11 +537,12 @@ public sealed class AlertDeliveryChannelTests
         foreach (var emailSent in new[] { false, true })
         foreach (var webhookSent in new[] { false, true })
         foreach (var anyConfigured in new[] { false, true })
+        foreach (var sendError in new string?[] { null, "relay refused" })
         foreach (var muted in new[] { false, true })
         foreach (var tray in new[] { false, true })
         {
             yield return (
-                new EmailFanoutResult(emailAttempted, emailSent, null, webhookSent, anyConfigured),
+                new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyConfigured),
                 muted, tray);
         }
     }

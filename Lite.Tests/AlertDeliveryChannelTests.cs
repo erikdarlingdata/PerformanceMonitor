@@ -59,17 +59,29 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
-    /// The two <c>EmailFanoutResult</c> shapes <c>EmailSendCore</c> cannot emit: a send without an attempt,
-    /// and a muted alert carrying any channel outcome (the caller passes <c>attemptChannels: !muted</c>, so
-    /// every attempt is gated off). Both are representable, so the shared derivation must still be
-    /// well-defined on them and deliberately differs from the derivation it replaced there — the old one
-    /// would put a <c>Sent</c> row onto <c>tray</c> or <c>muted</c>, which is what
-    /// <c>Darling.Tests.AlertDeliveryChannelTests.EverySentDisposition_NamesADeliveringChannel</c> forbids.
-    /// Neither is reachable, so excluding them from the parity comparison costs nothing real.
+    /// The <c>EmailFanoutResult</c> shapes <c>EmailSendCore</c> cannot emit. All three come from the same
+    /// place — <c>attemptChannels: !muted</c> gates every attempt, and both <c>EmailSent</c> and
+    /// <c>SendError</c> are set only inside the branch that has already set <c>EmailAttempted</c>:
+    ///
+    /// <list type="bullet">
+    /// <item>a send without an attempt</item>
+    /// <item>an error without an attempt</item>
+    /// <item>a muted alert carrying any channel outcome or error</item>
+    /// </list>
+    ///
+    /// <para>All are representable, so the shared derivation must still be well-defined on them, and it
+    /// deliberately differs from the derivation it replaced there — the old one would put a <c>Sent</c> row
+    /// onto <c>tray</c> or <c>muted</c>, or an error onto a state-carrying channel, which
+    /// <c>Darling.Tests.AlertDeliveryChannelTests</c>'s domain-wide pins forbid. None is reachable, so
+    /// excluding them from the parity comparison costs nothing real, and
+    /// <see cref="EveryDisagreement_IsAnUnreachableCombination"/> holds the exclusion to exactly this
+    /// predicate.</para>
     /// </summary>
     private static bool Unreachable(EmailFanoutResult result, bool muted)
         => (result.EmailSent && !result.EmailAttempted)
-        || (muted && (result.EmailAttempted || result.EmailSent || result.WebhookSent));
+        || (result.SendError is not null && !result.EmailAttempted)
+        || (muted && (result.EmailAttempted || result.EmailSent || result.WebhookSent
+                      || result.SendError is not null));
 
     /// <summary>
     /// Over every send outcome the core can actually produce, Lite's shared derivation agrees with the
@@ -97,9 +109,10 @@ public sealed class AlertDeliveryChannelTests
             Assert.Equal(expected.NotificationType, actual.Channel);
         }
 
-        /* 2^4 result bools x muted = 32 representable, of which 14 are reachable: EmailSent implies
-           EmailAttempted (3 of the 4 email shapes), and muted forces every outcome false. */
-        Assert.Equal(14, compared);
+        /* 64 representable (2^4 result bools x send_error present-or-not x muted), of which 22 are
+           reachable. The figure is derived from Unreachable() rather than asserted independently — see
+           TheReachableCount_FollowsFromThePredicate, which is what stops it drifting into a magic number. */
+        Assert.Equal(ReachableCaseCount(), compared);
     }
 
     /// <summary>
@@ -266,10 +279,28 @@ public sealed class AlertDeliveryChannelTests
         foreach (var emailSent in new[] { false, true })
         foreach (var webhookSent in new[] { false, true })
         foreach (var anyConfigured in new[] { false, true })
+        foreach (var sendError in new string?[] { null, "relay refused" })
         foreach (var muted in new[] { false, true })
         {
-            yield return (new EmailFanoutResult(emailAttempted, emailSent, null, webhookSent, anyConfigured), muted);
+            yield return (
+                new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyConfigured),
+                muted);
         }
+    }
+
+    private static int ReachableCaseCount()
+        => EveryFanoutCase().Count(c => !Unreachable(c.Result, c.Muted));
+
+    /// <summary>
+    /// The reachable count is 22 of 64. Pinned separately from the parity comparison so a widened
+    /// <see cref="Unreachable"/> cannot make that comparison pass by excluding more: the parity test asserts
+    /// it compared <see cref="ReachableCaseCount"/> cases, and this asserts what that number is.
+    /// </summary>
+    [Fact]
+    public void TheReachableCount_FollowsFromThePredicate()
+    {
+        Assert.Equal(64, EveryFanoutCase().Count());
+        Assert.Equal(22, ReachableCaseCount());
     }
 
     private static string RepoPath(string relative) => Path.Combine(RepoRoot(), relative);

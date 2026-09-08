@@ -181,7 +181,14 @@ public sealed record AlertDelivery
            Below the delivering arms the order preserves the derivation this replaces: muted beats tray
            (Lite shows no toast for a muted alert), and tray beats the configuration arms so a Lite row's
            stored value is unchanged whether or not SMTP happens to be set up. */
-        var emailInvolved = result.EmailAttempted || result.EmailSent;
+        /* SendError counts as email involvement. It is only ever set by the SMTP attempt — the webhook
+           fan-out reports one bool for four channels and no error, which IAlertHistoryStore documents — so
+           its presence IS the email channel having been used. Reading it here is what makes "a non-null
+           send_error implies a delivering channel" hold over the whole input domain rather than over the
+           shapes the send core emits, and that is what lets the web dashboard test send_error BEFORE the
+           state lookup while AlertDeliveryStatus.Describe tests the state channels first: the orders differ
+           and are equivalent, because no state-carrying channel can carry an error. */
+        var emailInvolved = result.EmailAttempted || result.EmailSent || result.SendError is not null;
 
         var channel =
             result.WebhookSent && emailInvolved ? ChannelEmailAndWebhook
