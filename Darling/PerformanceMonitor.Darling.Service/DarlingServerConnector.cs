@@ -215,6 +215,18 @@ SELECT
 
         if (username && secret)
         {
+            /* "yet" is only true where the capability is coming. BuildRemediationConnectionString
+               throws for a PostgreSQL target, and plan-force remediation is a Query Store concept,
+               so on Postgres this credential is inert PERMANENTLY rather than pending. One message
+               for both would promise an operator a future that engine does not have. */
+            if (config.IsPostgres)
+            {
+                logger?.LogWarning(
+                    "Server '{Server}' has a remediation credential, but plan-force remediation is SQL Server-only (it forces a Query Store plan), so nothing on a PostgreSQL target will ever use it. Remove it, or move it to the SQL Server registration it was meant for.",
+                    config.DisplayName);
+                return;
+            }
+
             logger?.LogInformation(
                 "Server '{Server}' has a remediation credential, but this build ships no remediation write path (#2138 phase 1 is the credential seam, the journal's actor and the decision logic). Nothing will use it yet, and the monitoring credential remains read-only.",
                 config.DisplayName);
