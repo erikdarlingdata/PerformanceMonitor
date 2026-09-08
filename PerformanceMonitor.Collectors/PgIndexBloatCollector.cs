@@ -92,6 +92,17 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// Indexes at or above this many bytes are recorded but NEVER measured — permanently, not this cycle.
     /// The read is proportional to index size, so this bounds what any single index can cost.
     ///
+    /// <para><b>It is the DEADLINE that sets this figure, and that only became visible once the block rate
+    /// was measured (#3164).</b> One index just under this ceiling is the largest amount of work a single
+    /// statement can be asked to do, so the ceiling has to fit the deadline on its own — at
+    /// <see cref="MeasuredBlocksPerSecond"/>, 1 GiB is 131,072 blocks and about 129 s, inside the 150 s
+    /// that leaves half of <see cref="CommandTimeoutSecondsOverride"/> for everything else.
+    /// <c>ThePerIndexCeiling_FitsTheDeadline_OnItsOwn</c> asserts that directly rather than leaving it to
+    /// be inherited from the lockstep below, because the lockstep is exactly what a future decoupling
+    /// would remove. At the measured rate a 2 GiB ceiling is 259 s in one statement — past the whole
+    /// allowance on a single index — which is why this ceiling could not stay where it was whatever the
+    /// cycle budget did.</para>
+    ///
     /// <para>It moves in lockstep with <see cref="CycleMeasureBudgetBytes"/>, because the cycle budget may
     /// never sit below it: the band between the two would be indexes that are legitimate candidates,
     /// earn no "too large" reason, and yet exceed the whole cycle on their own first row every run.
@@ -99,20 +110,24 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// stall the ROTATION CURSOR rather than merely mislabel one index, which is a strictly worse
     /// failure. See <see cref="CycleMeasureBudgetBytes"/> for the argument in full.</para>
     ///
-    /// <para><b>Over-ceiling indexes are a terminal state, and the row says so.</b> On the first
-    /// production target 43 indexes sat above this ceiling, holding 311 GB — 68% of that instance's index
-    /// footprint, mean 7.4 GB, largest 27 GB. At the rate that target's own SUCCESS row measured, reading
-    /// that set is about 11 hours and its largest member alone is roughly an hour in one statement, so no
-    /// per-statement deadline this product could plausibly set reaches them: <c>pgstatindex</c> is the
-    /// wrong instrument for them rather than a mis-tuned one. Raising the ceiling does not help, and an
-    /// estimator is not available — <c>pg_stats</c> returns zero rows to a <c>pg_monitor</c>-only login
-    /// (see the type header). So their reason states PERMANENCE instead of implying a deferral, and points
-    /// at what does cover them: <see cref="PgIndexUsageStatsCollector"/> runs on the same target at the
-    /// same daily cadence with the same retention, needs no extension, records <c>index_bytes</c> and
-    /// <c>table_bytes</c> per index, and covers all 43 — an index growing while its table's row count does
-    /// not is itself a bloat signal, and it is already collected.</para>
+    /// <para><b>Over-ceiling indexes are a terminal state, and the row says so.</b> Measured on the first
+    /// production target AT A 2 GiB CEILING, 43 indexes sat above it holding 311 GB — 68% of that
+    /// instance's index footprint, mean 7.4 GB, largest 27 GB. That census belongs to the ceiling it was
+    /// taken at: this ceiling is lower, so the terminal set is LARGER by however many indexes fall between
+    /// the two, and that count has not been measured — the store holding that target was not reachable for
+    /// #3164. What is measured is the direction and the mechanism, not a new count. At
+    /// <see cref="MeasuredBlocksPerSecond"/> the 311 GB set is about 11 hours of reading and its largest
+    /// member alone is roughly an hour in one statement, so no per-statement deadline this product could
+    /// plausibly set reaches them: <c>pgstatindex</c> is the wrong instrument for them rather than a
+    /// mis-tuned one. Raising the ceiling does not help, and an estimator is not available —
+    /// <c>pg_stats</c> returns zero rows to a <c>pg_monitor</c>-only login (see the type header). So their
+    /// reason states PERMANENCE instead of implying a deferral, and points at what does cover them:
+    /// <see cref="PgIndexUsageStatsCollector"/> runs on the same target at the same daily cadence with the
+    /// same retention, needs no extension, records <c>index_bytes</c> and <c>table_bytes</c> per index, and
+    /// covers every one of them whatever this ceiling is — an index growing while its table's row count
+    /// does not is itself a bloat signal, and it is already collected.</para>
     /// </summary>
-    public const long MeasureCeilingBytes = 2L * 1024 * 1024 * 1024;
+    public const long MeasureCeilingBytes = 1L * 1024 * 1024 * 1024;
 
     /// <summary>
     /// PostgreSQL's block size. <c>pgstatindex</c> is charged per BLOCK rather than per byte, so this is
@@ -125,8 +140,8 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     public const int BlockSizeBytes = 8192;
 
     /// <summary>
-    /// The block rate <see cref="CycleMeasureBudgetBytes"/> is sized against, and the reason the budget is
-    /// a small number rather than a large one.
+    /// The block rate <see cref="CycleMeasureBudgetBytes"/> and <see cref="MeasureCeilingBytes"/> are both
+    /// sized against, and the reason each is a small number rather than a large one.
     ///
     /// <para><b>Why a block rate and not a byte throughput.</b> <c>pgstatindex</c> walks the index one
     /// block at a time through the buffer manager with no prefetch, so its cost is a count of
@@ -134,12 +149,50 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// each miss is a round trip, so per-block LATENCY sets the rate and a sequential-throughput figure
     /// overstates it by orders of magnitude.</para>
     ///
-    /// <para>This value is an assumption, not a measurement — no SUCCESS row has ever supplied a duration
-    /// for this collector — so it is deliberately pessimistic, and
-    /// <c>TheCycleBudget_FitsTheDeadline_AtThePessimisticBlockRate</c> pins the budget, the deadline and
-    /// this rate together so that raising any one of them has to argue against the other two.</para>
+    /// <para><b>This is now a MEASUREMENT, and it came in at roughly HALF the figure that preceded it
+    /// (#3164).</b> The figure here used to be an assumption of 2,000 blocks/s, named pessimistic and
+    /// carrying no measurement, because none existed. One does now: the first SUCCESS row this collector
+    /// has ever produced recorded <c>collection_log.sql_duration_ms</c> of <b>252,940 ms</b>, which is the
+    /// instrument <see cref="CycleMeasureBudgetBytes"/> pre-registered for exactly this decision. That run
+    /// executed under a 2 GiB cycle budget, and the gate admits an index only when the running total
+    /// THROUGH that index is still within budget, so the bytes it read cannot have exceeded the budget —
+    /// which bounds the rate from above at 262,144 blocks / 252.94 s = <b>1,036 blocks/s</b> using nothing
+    /// but that row's duration and the shipped gate. The rate derived from the bytes that run actually
+    /// measured is ~1,013 blocks/s, and it is the figure kept here.</para>
+    ///
+    /// <para><b>What the denominator actually contains, because the name says "blocks per second" and
+    /// this is not a pure I/O rate.</b> <c>sql_duration_ms</c> on a <see cref="RunsPerDatabase"/> collector
+    /// is the SUM across databases of connect + execute + drain, so the figure below is blocks divided by
+    /// everything the statement spent, not by <c>pgstatindex</c> time alone — and the run it comes from
+    /// swept two databases, one of which failed fast on a missing extension. Every one of those terms
+    /// inflates the denominator, so the true per-block read rate is FASTER than this. That is the right
+    /// direction and the right quantity: what this constant feeds is a comparison against a command
+    /// deadline, and the deadline covers connect and drain too. A pure I/O rate would understate the
+    /// budget's real cost by exactly the terms it left out.</para>
+    ///
+    /// <para><b>What this figure does NOT rest on.</b> n = 1 — one run, one target, one night. Two numbers
+    /// elsewhere in this type read like corroboration and are not: <see cref="MeasureCeilingBytes"/>' "about
+    /// 11 hours" for the over-ceiling set and "roughly an hour" for its largest member are this same rate
+    /// restated at coarse precision, not independent derivations. So the only independent check on the
+    /// figure below is the 1,036 blocks/s upper bound above, which agrees on the order and on the
+    /// direction. The three-significant-figure value is kept rather than rounded because rounding it would
+    /// invent a margin, and the margin belongs in ONE place — see the next paragraph.</para>
+    ///
+    /// <para><b>The safety margin is the half-deadline allowance, and it must not be double-counted here.</b>
+    /// <c>TheCycleBudget_FitsTheDeadline_AtTheMeasuredBlockRate</c> compares the budget against HALF of
+    /// <see cref="CommandTimeoutSecondsOverride"/>, so a run whose rate comes in materially below this
+    /// figure still has the other half of the deadline to finish in. Shading this constant below the
+    /// measurement as well would spend that headroom twice and make neither figure mean anything. One
+    /// number, one meaning: this one is what was measured, and the allowance is what pays for being wrong
+    /// about it.</para>
+    ///
+    /// <para><b>What would justify moving it.</b> A DISTRIBUTION rather than another single row — several
+    /// SUCCESS rows across cache states and instance load, because per-block latency on network-attached
+    /// storage is the rate-setter and a single sample of it is not a rate. A measurement LOWER than this
+    /// reds the deadline pins and brings the budget and the ceiling down again; that is the mechanism
+    /// working rather than a problem, and it is the same trigger that produced this change.</para>
     /// </summary>
-    public const int PessimisticBlocksPerSecond = 2_000;
+    public const int MeasuredBlocksPerSecond = 1_013;
 
     /// <summary>
     /// How many bytes of index ONE ATTEMPT will measure in total, largest first. Independent of
@@ -153,19 +206,25 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// The deadline is per statement, so that is the right granularity for the bound, but it is not a
     /// bound on a sweep.</para>
     ///
-    /// <para><b>Why 2 GB.</b> Not from a throughput measurement — none exists for this collector, and a
-    /// deadline-cut run bounds only its own duration, never a rate. It is derived instead from the cost
-    /// model in <see cref="PessimisticBlocksPerSecond"/>: 2 GB is 262,144 blocks, which at 2,000
-    /// blocks/s is about 131 seconds, inside half of
-    /// <see cref="CommandTimeoutSecondsOverride"/>. The remaining headroom pays for the catalog scan,
-    /// connection setup, and the tail index admitted while the running total was still just under
-    /// budget.</para>
+    /// <para><b>Why 1 GiB, and why it used to be 2.</b> Derived from the cost model in
+    /// <see cref="MeasuredBlocksPerSecond"/>: 1 GiB is 131,072 blocks, which at 1,013 blocks/s is about
+    /// 129 seconds, inside half of <see cref="CommandTimeoutSecondsOverride"/>. The remaining headroom
+    /// pays for the catalog scan, connection setup, and being wrong about the rate. The figure was 2 GiB
+    /// while the rate was an ASSUMED 2,000 blocks/s; the same arithmetic at the measured 1,013 puts 2 GiB
+    /// at 259 seconds, past the whole allowance, so the budget came down rather than the allowance going
+    /// up (#3164).</para>
     ///
-    /// <para><b>What would justify raising it.</b> A SUCCESS row's own
-    /// <c>collection_log.sql_duration_ms</c> (#2997), which is a measured rate for this instance and
-    /// this index population rather than the assumed one above. Until such a row exists, every value
-    /// here is an argument rather than a measurement, and the small end of the argument is the one that
-    /// produces the row.</para>
+    /// <para><b>The measurement that decided it is the one this comment used to ask for.</b> The line
+    /// here previously read "until a SUCCESS row exists, every value here is an argument rather than a
+    /// measurement, and the small end of the argument is the one that produces the row" — and that is
+    /// what happened: the small end produced a row, the row supplied a rate, and the rate argued the
+    /// budget DOWN. So the trigger fired as pre-registered rather than being overruled.</para>
+    ///
+    /// <para><b>What would justify raising it now.</b> Not another single SUCCESS row — a distribution of
+    /// them, for the reason given in <see cref="MeasuredBlocksPerSecond"/>: one sample of a
+    /// latency-bound rate is not a rate. Raising the command deadline is the other arithmetic route and
+    /// is deliberately not taken here; see <see cref="CommandTimeoutSecondsOverride"/> for what it
+    /// would and would not cost.</para>
     ///
     /// <para><b>It must never drop BELOW <see cref="MeasureCeilingBytes"/>, and that it equals it is a
     /// floor rather than a coincidence.</b> A cycle budget under the per-index ceiling opens a band
@@ -185,9 +244,22 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// sitting at the cursor is admitted by neither gate, so the cycle measures NOTHING, records the pass
     /// as complete, wraps to the largest index, and arrives back at the same band index — the collector
     /// stops measuring anything at all, on every index, permanently. The band used to mislabel one index;
-    /// it now stops the whole mechanism. Decoupling the two therefore needs an unconditional
-    /// first-admission rule and a deadline constraint restated as a SUM (<c>ceiling + budget</c>) rather
-    /// than an ordering, which is a separate change with its own arithmetic to argue.</para>
+    /// it now stops the whole mechanism.</para>
+    ///
+    /// <para><b>Decoupling the two would not have helped here, and the arithmetic is what says so
+    /// (#3164).</b> The route #3153 left open was an unconditional first-admission rule plus the deadline
+    /// constraint restated as a SUM (<c>ceiling + budget</c>) rather than an ordering, whose whole point
+    /// was to let the budget fall to fit a slower rate while the ceiling stayed at 2 GiB. At the measured
+    /// rate that goal is unreachable by any budget: 2 GiB is 262,144 blocks and about 259 s in ONE
+    /// statement, so the ceiling alone is already past the 150 s allowance before a budget is chosen, and
+    /// <c>ceiling + budget &lt;= allowance</c> has no solution at all. So the binding constraint was never
+    /// the ordering between these two figures — it was the ceiling's own deadline cost, which the lockstep
+    /// had been hiding by making the two numbers equal. Once the ceiling comes down to fit the deadline,
+    /// setting the budget equal to it satisfies everything with no new mechanism, and decoupling would
+    /// only permit the one direction (<c>budget &lt; ceiling</c>) that reopens the band. The transitive
+    /// coverage is also the reason <c>ThePerIndexCeiling_FitsTheDeadline_OnItsOwn</c> now exists: while
+    /// <c>budget &gt;= ceiling</c> holds, a deadline pin on the budget covers the ceiling for free, so a
+    /// decoupling would silently remove the only assertion the ceiling's cost had.</para>
     ///
     /// <para><b>Accepted consequence.</b> An index at or above the ceiling is reported at its size with
     /// the ceiling's own reason and is never measured — on a large target that includes the biggest and
@@ -198,12 +270,33 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     ///
     /// <para><b>What this bound does NOT buy.</b> Coverage is not budget-limited; before #3153 it was
     /// memory-limited, and now it is CADENCE-limited. A complete pass over the first production target's
-    /// 2,457 measurable indexes is a fixed ~19.6M blocks however it is spread, so at one statement per day
-    /// a full pass takes months. Rotation converts "never" into "eventually"; how long "eventually" is, is
-    /// set by how much <c>pgstatindex</c> time per day is acceptable on a production instance and by
-    /// nothing else. That is a scheduling decision, not a number this constant can express.</para>
+    /// 2,457 measurable indexes was a fixed ~19.6M blocks however it was spread, so at one statement per
+    /// day a full pass takes months. Rotation converts "never" into "eventually"; how long "eventually"
+    /// is, is set by how much <c>pgstatindex</c> time per day is acceptable on a production instance and
+    /// by nothing else. That is a scheduling decision, not a number this constant can express.</para>
+    ///
+    /// <para><b>What halving it cost, stated in the unit it is paid in (#3164).</b> Pass length is
+    /// measurable blocks divided by this budget, so halving the budget at most DOUBLES the pass: ~75
+    /// cycles became at most ~150, and at the 1,440-minute cadence in <c>CollectorScheduleDefaults</c>
+    /// that is at most ~150 days rather than ~75. "At most", because the same change lowered
+    /// <see cref="MeasureCeilingBytes"/>, which removes the indexes between the old and new ceilings from
+    /// the measurable set entirely — a smaller numerator against the halved denominator, so the true pass
+    /// length lands somewhere below the doubling. How far below depends on how much of that target's
+    /// ~150 GB of measurable index sits between 1 and 2 GiB, and that has not been measured. The cadence
+    /// is deliberately NOT touched in the same change: lowering the budget lengthens the pass, so moving
+    /// both at once would conflate two effects and leave neither figure meaning anything. It is re-derived
+    /// from whatever this budget is, separately.</para>
+    ///
+    /// <para><b>Why slower coverage is the right thing to pay.</b> A budget that overruns its deadline
+    /// produces NO ROW AT ALL — strictly worse than a smaller budget that completes, and it is also the
+    /// state that produces no <c>sql_duration_ms</c> to measure the next decision from. The one SUCCESS
+    /// row this collector has ever produced spent 84% of its deadline, so the margin being defended here
+    /// is real rather than theoretical. Before #3153 a smaller budget cost REACHABILITY — the same
+    /// largest indexes were re-selected every cycle and anything below the cut was never measured — and
+    /// rotation is what converted that cost into a rate. Paying in coverage rate is only an option at all
+    /// because rotation exists.</para>
     /// </summary>
-    public const long CycleMeasureBudgetBytes = 2L * 1024 * 1024 * 1024;
+    public const long CycleMeasureBudgetBytes = 1L * 1024 * 1024 * 1024;
 
     /// <summary>
     /// Prefix of the per-database rotation cursor key in <c>collector_state</c> (V44, primary key
@@ -575,7 +668,7 @@ ORDER BY k.index_bytes DESC";
         NULL::bigint                    AS cursor_bytes,
         NULL::bigint                    AS cursor_oid";
 
-    private const string CeilingLiteral = "2147483648";
+    private const string CeilingLiteral = "1073741824";
 
     /* The upper bound on how many indexes one attempt will MEASURE, largest first: 200 indexes OR
        CycleMeasureBudgetBytes, whichever comes first. The byte figure is the one that binds on any
@@ -584,7 +677,7 @@ ORDER BY k.index_bytes DESC";
 
     /* Kept in the C# type system as well as in the SQL literal so a reader has one authoritative
        figure and TheBudgetLiterals_AgreeWithTheirConstants can pin that the two agree. */
-    private const string CycleByteBudgetLiteral = "2147483648";
+    private const string CycleByteBudgetLiteral = "1073741824";
 
     /// <summary>
     /// Five minutes, because even a bounded cycle of pages is real work and a slow single index
@@ -602,6 +695,23 @@ ORDER BY k.index_bytes DESC";
     /// while it scans, so it gets no reprieve from that and the deadline does fire - which is why
     /// the failures arrive as <c>Exception while reading from stream</c>, the transport's own words
     /// for a read that ran out of time.</para>
+    ///
+    /// <para><b>Raising it is the other way to make the arithmetic work, and it is NOTHING to do with a
+    /// 120-second wall clock (#3164).</b> That objection was checked and does not apply: 120 s is not a
+    /// product-wide budget but the value three SQL Server collectors chose for
+    /// <see cref="PerItemWallClockBudget"/>, the opt-in per-item budget #2673 added, whose base default is
+    /// <c>null</c> and which <c>query_store</c> already sets to 600 s — longer than this deadline. This
+    /// collector does not override it, so no wall clock bounds it at all and this figure is its only
+    /// deadline. A per-collector budget above 300 s is therefore established rather than novel.</para>
+    ///
+    /// <para><b>It is still not the move, for reasons that are about cost rather than mechanism.</b> The
+    /// figure that would fit a 2 GiB ceiling at the measured rate is ~518 s, so this would sit at over
+    /// eight minutes of <c>pgstatindex</c> in one statement against a production instance — and because
+    /// this is a backstop rather than a bound, it is also eight minutes that a MIS-BUDGETED run spends
+    /// before reporting nothing. It would be sized to make one n=1 measurement fit rather than derived
+    /// from anything, which is the move the budget's own pin exists to prevent. And it would leave
+    /// <see cref="MeasuredBlocksPerSecond"/> wrong, which is the actual defect. Raising it needs its own
+    /// argument about acceptable occupancy of a production instance, made on its own terms.</para>
     /// </summary>
     public override int? CommandTimeoutSecondsOverride => 300;
 
