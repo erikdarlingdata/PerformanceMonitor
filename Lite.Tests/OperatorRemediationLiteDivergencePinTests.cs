@@ -119,22 +119,65 @@ public sealed class OperatorRemediationLiteDivergencePinTests
     }
 
     /// <summary>
-    /// Lite's DuckDB schema carries no plan-force journal. This is the half that matters most: a journal
-    /// table added to Lite while Lite cannot act would be a permanently-empty table, which reads to every
-    /// later consumer as "the feature is here and nothing has happened" rather than "the feature is not
-    /// here".
+    /// Lite's DuckDB schema carries no plan-force journal TABLE. This is the half that matters most: a
+    /// journal added to Lite while Lite cannot act would be a permanently-empty table, which reads to
+    /// every later consumer as "the feature is here and nothing has happened" rather than "the feature is
+    /// not here".
+    ///
+    /// <para><b>Asserted on table NAMES, not on substrings of the DDL</b> — and this is the second time
+    /// this file's first instinct was a scan too broad to survive its own subject. The DDL genuinely
+    /// contains <c>plan_force</c>: <c>plan_correction</c> carries a generated
+    /// <c>last_good_plan_force_failure_reason</c> column, which is the MONITORED SERVER'S own Query Store
+    /// forcing-failure reason — the opposite of a bot's audit trail of its own writes, and a column Lite
+    /// has read for a long time. A statement-substring scan reported that as a journal, which is a scan
+    /// that has to be relaxed to ship. The claim is about a table existing, so the test asks about
+    /// tables.</para>
     /// </summary>
     [Fact]
-    public void LitesSchemaHasNoPlanForceJournal()
+    public void LitesSchemaHasNoPlanForceJournalTable()
     {
-        var statements = PerformanceMonitorLite.Database.Schema.GetAllTableStatements().ToList();
+        var tableNames = PerformanceMonitorLite.Database.Schema.GetAllTableStatements()
+            .Select(TableNameOf)
+            .Where(name => name.Length > 0)
+            .ToList();
 
-        /* Positive control first: the enumeration produced a real schema, so the absence below is an
-           absence in the schema rather than in the read. */
-        Assert.Contains(statements, s => s.Contains("CREATE TABLE IF NOT EXISTS servers", StringComparison.Ordinal));
+        /* Two positive controls, because the assertion below is an absence. The enumeration produced a
+           real schema... */
+        Assert.Contains("servers", tableNames);
 
-        Assert.DoesNotContain(statements, s => s.Contains("plan_force", StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain(statements, s => s.Contains("remediation", StringComparison.OrdinalIgnoreCase));
+        /* ...and the NAME EXTRACTION works, rather than silently returning empty strings that would make
+           every absence assertion vacuous. plan_correction is the table whose COLUMN caused this test's
+           first version to fail, so its presence here is also the proof that the new form discriminates
+           the column from a table. */
+        Assert.Contains("plan_correction", tableNames);
+        Assert.True(tableNames.Count >= 40, $"only {tableNames.Count} table names parsed out of the schema");
+
+        var journals = tableNames
+            .Where(name =>
+                name.Contains("plan_force", StringComparison.OrdinalIgnoreCase) ||
+                name.Contains("remediation", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        Assert.True(
+            journals.Count == 0,
+            "Lite's schema gained a plan-force/remediation journal table: " + string.Join(", ", journals));
+    }
+
+    /// <summary>
+    /// The table name out of a <c>CREATE TABLE [IF NOT EXISTS] name (…)</c>, or empty when the statement
+    /// is not one. Empty rather than throwing so a future non-CREATE statement in the list does not fail
+    /// this test for an unrelated reason — the count control above is what stops an all-empty parse
+    /// reading as agreement.
+    /// </summary>
+    private static string TableNameOf(string statement)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            statement,
+            @"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?<name>[A-Za-z0-9_]+)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        return match.Success ? match.Groups["name"].Value : string.Empty;
     }
 
     /// <summary>

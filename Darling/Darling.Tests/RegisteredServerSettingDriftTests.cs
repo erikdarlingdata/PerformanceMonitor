@@ -875,7 +875,17 @@ public sealed class RegisteredServerSettingDriftTests
         /* The credential, and nothing else. A file entry legitimately carries a reference or a dev plaintext
            password against a store row holding a DPAPI blob, which is the supported shape rather than drift —
            and comparing a secret is how one reaches a log line. */
-        var excluded = new HashSet<string>(System.StringComparer.Ordinal) { "password", "encryptedPassword" };
+        /* V113 (#2138 phase 1) adds a SECOND credential, excluded for the same two reasons plus a third
+           that is specific to it. Same two: a file entry legitimately carries a reference against a store
+           row holding a blob, and comparing a secret is how one reaches a log line. The third: a drift
+           report is what triggers a disconnect-and-reconnect of the MONITORING connection, and the
+           remediation credential has nothing to do with that connection — reporting it would tear down
+           collection on a server because someone rotated a credential collection never uses. */
+        var excluded = new HashSet<string>(System.StringComparer.Ordinal)
+        {
+            "password", "encryptedPassword",
+            "remediationUsername", "remediationEncryptedPassword",
+        };
 
         var keys = typeof(MonitoredServer)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
