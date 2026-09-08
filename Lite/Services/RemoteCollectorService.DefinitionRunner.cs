@@ -876,7 +876,7 @@ public partial class RemoteCollectorService
            read (an AppliesTo miss, an enumeration that listed nothing) or that threw their read away (the
            wall-clock abandonment), and an empty list is their correct answer. Darling's twin is the single
            `context.Measurements` argument on DarlingCollectorRunner's success return; the argument there is
-           REQUIRED so its compiler names every sibling site, and this assignment is the reason Note is a
+           REQUIRED so the compiler names every sibling site, and this assignment is the reason Note is a
            computed property here rather than a settable one. */
         telemetry.Measurements.AddRange(context.Measurements);
 
