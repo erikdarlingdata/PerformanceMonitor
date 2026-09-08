@@ -1573,7 +1573,8 @@ WITH NO DATA";
     /// hypertable rather than with ingest. Measured on the production store: the heaviest hourly refresh
     /// (<see cref="QueryStoreStatsIntervalHourlyView"/>) ran 3,301-6,330 s against a 1-hour cadence —
     /// <b>118-175% of its own schedule interval</b> — while rows arriving per hour FELL ~3x over the same
-    /// period. Narrowed to 1 day the same refresh finishes <b>well inside one phase slot</b>, and the figure
+    /// period. Narrowed to 1 day the same refresh finishes <b>inside one phase slot</b> — by 4 s of 900 as of
+    /// #3166's census, so the margin is no longer part of the claim — and the figure
     /// with its derivation is on <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> rather than
     /// restated here — a percentage of cadence written twice goes stale in one of the two places. The
     /// direction of that measurement is the whole argument: duration tracking window size while ingest moves the other way is
@@ -1793,44 +1794,87 @@ WITH NO DATA";
     /// published below and TimescaleSupportTests holds the grid clear of it, so the value and the method
     /// cannot drift apart without a red test.</para>
     ///
+    /// <para><b>THE READ IS A CENSUS, and that is what changed (#3166).</b> Every run of this job since the
+    /// boundary, one row per run, from <c>timescaledb_information.job_history</c> — the read this comment
+    /// used to NAME as the one that would settle the sampling qualifier, now performed. That view carries a
+    /// <c>succeeded</c> column on this store because <c>DarlingManagedPostgres.BuildConfAppend</c> turns
+    /// <c>timescaledb.enable_job_execution_logging</c> on (#1681). Read at <c>2026-09-08 01:37Z</c>, so the
+    /// window is one that has ENDED and stays true rather than a scope read against a clock a doc comment
+    /// does not have. Each side of the boundary, since a bound is only as good as what it excludes: <b>304
+    /// runs</b> at or before it, median <b>1081.7 s</b>, maximum <b>13300.7 s</b>; <b>57 runs</b> after it,
+    /// median <b>418.3 s</b>, maximum <b>896.1 s</b>. Not one post-boundary run failed or was left without a
+    /// finish time, so the <c>succeeded</c> filter removes nothing from the span and the census is the whole
+    /// of it rather than a status-selected part.</para>
+    ///
     /// <para><b>THE POPULATION ITSELF, published so the estimator can be recomputed rather than taken on
     /// trust.</b> The boundary day's tail, every run that day after the boundary: <c>194, 222, 225, 335,
-    /// 594, 465, 359, 293, 355</c> seconds. The days after it: <c>219, 225, 299, 376, 418, 546, 515</c>
-    /// seconds. Together <b>16 runs</b> spanning <b>194 s to 594 s</b>, mean <b>352.5 s</b>, median
-    /// <b>345 s</b> — every one of them below <see cref="RefreshSlotWarningSeconds"/>.</para>
+    /// 594, 465, 359, 293, 355</c> seconds. The days after it: <c>347, 342, 348, 286, 368, 362, 320, 252,
+    /// 219, 225, 299, 376, 418, 546, 515, 473, 530, 523, 676, 778, 666, 705, 702, 599, 534, 479, 387, 373,
+    /// 391, 413, 356, 336, 395, 418, 386, 460, 591, 722, 570, 812, 641, 739, 830, 871, 786, 896, 815,
+    /// 681</c> seconds. Together <b>57 runs</b> spanning <b>194 s to 896 s</b>, totalling <b>27799 s</b>,
+    /// median <b>418 s</b> — and <b>7</b> of them at or past <see cref="RefreshSlotWarningSeconds"/>, where
+    /// the sixteen-run sample this population replaces had none.</para>
+    ///
+    /// <para><b>A TOTAL rather than a mean, and the reason is that a mean of this population is not
+    /// exactly stateable.</b> 27799 s over 57 runs is 487.7017… s, so any one-decimal figure for it would be
+    /// a rounded claim wearing an exact one's clothes — the same defect the occupancy figure below was
+    /// restated to avoid. The total is exact, it is checked against the published list, and it makes every
+    /// individual reading load-bearing in the same way the mean did: a single digit moved anywhere in the
+    /// list changes it.</para>
     ///
     /// <para><b>MAXIMUM, NOT A PERCENTILE PLUS MARGIN — decided rather than defaulted, and the trade stated
     /// because the two answers diverge as the population grows.</b> What this constant sizes is a SCHEDULING
     /// exclusion, and the cost of undersizing it is one lock convoy (#3012's measured harm) that no later
     /// run amortises. A percentile is a statement about an ACCEPTED RATE OF EXCEEDANCE, and the rate this
-    /// bound may accept over the record it is derived from is zero — so the estimator is the maximum. The
-    /// sample size says the same thing from the other end: by nearest rank over <b>16 readings</b> the 95th
-    /// percentile IS the largest of them, and the 90th is <b>546 s</b>, only <b>48 s</b> below it, so a
-    /// percentile buys no headroom here and only discards the readings the bound exists for. No margin is
-    /// added on top either: the clearance is <see cref="RefreshPhaseSlotSeconds"/> minus this value, stated
-    /// where it is used, so a reader sees a bound and its margin as two numbers instead of one padded
-    /// one.</para>
+    /// bound may accept over the record it is derived from is zero — so the estimator is the maximum. No
+    /// margin is added on top either: the clearance is <see cref="RefreshPhaseSlotSeconds"/> minus this
+    /// value, stated where it is used, so a reader sees a bound and its margin as two numbers instead of
+    /// one padded one.</para>
     ///
-    /// <para><b>What would change that answer, written down so it is not re-reasoned from scratch.</b> A
-    /// population large enough for a high percentile to sit meaningfully below the maximum — which this one
-    /// is not, and the pin on the 95th goes red when it becomes so — or this maximum ceasing to be a lower
-    /// bound on the truth. The second is the live limitation, and it is a property of the READ rather than
-    /// of the estimator: the boundary day's runs are a census of that day after the boundary, while the days
-    /// after it are a SAMPLE, because the sweep that reads this and the refresh that produces it tick on
-    /// independent anchors (see <see cref="HeaviestRefreshRuntimeSql"/>). So the figure bounds the runs that
-    /// were OBSERVED. The census read that would drop that qualifier exists and is named rather than left
-    /// implied: <c>timescaledb_information.job_history</c>, whose <c>succeeded</c> column this store has
-    /// because <c>DarlingManagedPostgres.BuildConfAppend</c> turns
-    /// <c>timescaledb.enable_job_execution_logging</c> on (#1681) — read as every run since the boundary
-    /// rather than sampled, giving count, median and maximum each side of it.</para>
+    /// <para><b>THE SAMPLE-SIZE HALF OF THAT ARGUMENT HAS EXPIRED, which is exactly what it was written to
+    /// do (#3101, #3166).</b> At sixteen readings the 95th percentile WAS the maximum by nearest rank, so a
+    /// percentile bought no headroom and the two answers agreed. They no longer do: by nearest rank over
+    /// <b>57 readings</b> the 95th percentile is <b>830 s</b> and the 90th is <b>786 s</b>, <b>66 s</b> and
+    /// <b>110 s</b> below the maximum. So the decision is RE-TAKEN rather than inherited, and it comes out
+    /// the same way on the half that never depended on the sample size: one lock convoy is not amortised by
+    /// the runs that did fit, so a bound on a scheduling exclusion may accept no exceedance over its own
+    /// record, and a 95th percentile is a promise to be wrong three times in every sixty runs. What is gone
+    /// with the sample-size half is its EXPIRY: a reason that does not reference the population's size has
+    /// nothing left to expire, so this paragraph now pins both percentiles and both gaps as readings that
+    /// TRACK the population instead of as a coincidence that ends.</para>
+    ///
+    /// <para><b>What would change that answer, written down so it is not re-reasoned from scratch — and
+    /// both of the things it named have now happened.</b> The two triggers recorded were a population large
+    /// enough for a high percentile to sit meaningfully below the maximum, and this maximum ceasing to be a
+    /// lower bound on the truth. The first fired at 57 readings and the estimator paragraph above re-takes
+    /// the decision it forced. The second fired too, and it was a property of the READ rather than of the
+    /// estimator: the sixteen-run record mixed a census of the boundary day's tail with a SAMPLE of the days
+    /// after it, because the sweep that read it and the refresh that produced it tick on independent anchors
+    /// (see <see cref="HeaviestRefreshRuntimeSql"/>), so that figure bounded the runs which happened to be
+    /// OBSERVED. The census read named as the fix has been done and its result is this constant, so the
+    /// qualifier is retired rather than restated.</para>
+    ///
+    /// <para><b>WHAT REPLACES IT IS A TREND, and that is a different kind of limitation from a sampling
+    /// one.</b> Per closed day, the maximum of this job's runs went <b>594 s</b> over the boundary day's
+    /// nine remaining runs, <b>778 s</b> over the twenty-two runs of the day after, and <b>896 s</b> over
+    /// the twenty-four runs of the day after that. A census removes the "as observed" caveat and puts
+    /// nothing in its place: the population is closed at a stated instant and it grows, so this maximum is
+    /// the largest run the job has been RECORDED to make and not a ceiling on what it will make next. What
+    /// that means for the grid is stated below and is deliberately not decided here — the value is a
+    /// measurement, and the slot it has to fit inside is a scheduling choice.</para>
     ///
     /// <para><b>THE RUN THE EXCLUSION RULE REMOVES, recorded because a figure that looks like a ceiling and
     /// is not one is how the wrong number gets cited.</b> One run, <c>13:30:00</c> to <c>13:44:24</c> on the
-    /// boundary day, 864 s, excluded for starting before the boundary — and disqualified independently of
-    /// any timestamp, by the durations alone: it is <b>3.8x</b> faster than the fastest run the 3-day window
-    /// ever produced (3,301 s, of a 3,301-6,330 s band) and <b>1.45x</b> slower than the largest reading in
-    /// the population above. Too fast for one regime and too slow for the other, so it is a sample of
-    /// neither and can bound neither. Why it is that fast is NOT established — the plausible candidate is
+    /// boundary day, 864 s, excluded for starting before the boundary. It is still <b>3.8x</b> faster than
+    /// the fastest run the 3-day window ever produced (3,301 s, of a 3,301-6,330 s band), so it remains no
+    /// sample of the pre-narrowing regime — but the other half of that argument is GONE. At <b>0.96x</b> of
+    /// the largest reading in the population above it now sits INSIDE the post-boundary range instead of
+    /// 1.45x past it, and an ordinary member of a distribution cannot be disqualified for belonging to
+    /// neither. Which is why the rule is POSITIONAL and always was: this run is out because it STARTED
+    /// before the boundary, and nothing about its duration does any of that work. The duration-based
+    /// disqualification the sixteen-run record leaned on was an artefact of a population whose maximum was
+    /// 302 s lower, and recording that it expired is the whole point of stating a rule rather than a
+    /// verdict. Why it is that fast is NOT established — the plausible candidate is
     /// that the 6,330 s run before it had already cleared most of the backlog — and it is recorded as
     /// unexplained precisely so the low figure is not read as evidence that the narrowing had partly taken
     /// effect.</para>
@@ -1845,8 +1889,11 @@ WITH NO DATA";
     /// run's own completion a fraction of a second later, in which case the boundary and that run's
     /// exclusion are ONE OBSERVATION and cannot corroborate each other. That is NOT asserted as settled in
     /// either direction. What would settle it is a record of the ALTER independent of the job history, and
-    /// none has been found — and nothing above needs one, because the exclusion rule is positional and the
-    /// excluded run is disqualified by its duration alone.</para>
+    /// none has been found — and nothing above needs one, because the exclusion rule is positional. It used
+    /// to say "and the excluded run is disqualified by its duration alone", which was the belt to the
+    /// boundary's braces; that belt is gone with the census, since 864 s is now an ordinary member of the
+    /// post-boundary range. The circularity is therefore no better corroborated than it was and no worse:
+    /// a positional rule needs no second reason, which is why it was chosen over one.</para>
     ///
     /// <para><b>And the rule that keeps a whole SERIES out of this constant, stated as a rule because the
     /// series keeps growing.</b> The hourly self-metrics snapshot
@@ -1857,11 +1904,18 @@ WITH NO DATA";
     /// reading from it may set this constant — a statement about the SOURCE, deliberately not about any
     /// particular reading, because that series gains one every hour this job runs and an enumeration of it
     /// would be stale within the hour. The complete set of snapshot readings up to <c>04:20Z</c>
-    /// (342 s, 348 s, 286 s) says the series stayed flat, which is corroboration and nothing more. Note the
-    /// scope has to CLOSE the population, not merely date it: "up to 04:20Z" is a window that has ended and
-    /// will still be true next year, where "the readings so far" carries a scope and rots anyway, because a
-    /// doc comment has no timestamp of its own to be read relative to. They are kept out of the population
-    /// above for the rule's sake rather than for tidiness.</para>
+    /// (342 s, 348 s, 286 s) says the series stayed flat, which is corroboration and nothing more — and
+    /// all three are now IN the census population above. <b>That is worth stating, because the sixteen-run
+    /// record held these three to being DISJOINT from it, and the reversal is not a defect in either
+    /// figure.</b> Disjointness held only while the published population was a SAMPLE of this job; against
+    /// a CENSUS of the same job it cannot hold at all, because a snapshot of a job's last run reports a
+    /// duration the census contains by construction. So the values were never what made these readings
+    /// inadmissible and a test on them was measuring the sample's incompleteness: the rule is about which
+    /// SOURCE may set this constant, and that is checked against the shipped SQL of all three reads. Note
+    /// the scope has to CLOSE the population, not merely date it: "up to 04:20Z" is a window that has ended
+    /// and will still be true next year, where "the readings so far" carries a scope and rots anyway,
+    /// because a doc comment has no timestamp of its own to be read relative to. They are kept out of the
+    /// population above for the rule's sake rather than for tidiness.</para>
     ///
     /// <para><b>Why the grid is sized against the high figure and not the low.</b> A slot chosen against the
     /// 194 s low would be correct only at the load it was chosen at, and before the narrowing this job ran
@@ -1881,29 +1935,45 @@ WITH NO DATA";
     /// overlap at all.</para>
     ///
     /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
-    /// invalidates it is that runtime approaching <see cref="RefreshPhaseStepMinutes"/> x 60.</b> At 594 s
-    /// against a 900-second slot the margin is 306 seconds — the clearance the population above carries, a
+    /// invalidates it is that runtime approaching <see cref="RefreshPhaseStepMinutes"/> x 60.</b> At 896 s
+    /// against a 900-second slot the margin is 4 seconds — the clearance the population above carries, a
     /// property of that closed record rather than of current load; the heaviest
     /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
     /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
     /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
     /// into its neighbour and the grid needs redesigning, not renumbering.</para>
     ///
-    /// <para><b>THE LIVE ENVELOPE, taken from the census read named above and stated apart from that
-    /// clearance because the two describe different populations (#3119).</b> Over <c>2026-09-06</c> — one
-    /// closed day, its 22 runs read from <c>timescaledb_information.job_history</c> at one row per run —
-    /// this job's maximum was <b>778.4 s</b>. That leaves <b>121.6 s</b> of the slot, <b>13.5%</b> of it,
-    /// and sits <b>28.4 s</b> PAST <see cref="RefreshSlotWarningSeconds"/>, which
-    /// <see cref="ClassifyRefreshSlotHeadroom"/> bands
-    /// <see cref="RefreshSlotHeadroom.ApproachingSlot"/>. Short of the slot width, so the grid's
-    /// precondition holds and this is not the failure the paragraph above asserts — but the residual is D
-    /// wide and D is that maximum, so "completes well inside its slot" is a description of the closed
-    /// population and not of that day. RefreshCeilingProvenancePinTests derives every figure stated against
-    /// that maximum from the grid's own constants and takes the band from the shipped classifier, so a
-    /// moved grid step moves them all and a reading that stopped classifying as a warning goes red rather
-    /// than sitting here as prose.</para>
+    /// <para><b>THE LIVE ENVELOPE, which the census has now COLLAPSED onto that clearance rather than
+    /// leaving beside it (#3119, #3166).</b> Over <c>2026-09-07</c> — one closed day, its 24 runs read from
+    /// <c>timescaledb_information.job_history</c> at one row per run — this job's maximum was
+    /// <b>896.1 s</b>. That leaves <b>3.9 s</b> of the slot, <b>0.4%</b> of it, and sits <b>146.1 s</b>
+    /// PAST <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
+    /// <see cref="RefreshSlotHeadroom.ApproachingSlot"/>. #3119 had to state these figures apart from the
+    /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it; now that the
+    /// constant IS the census maximum, the two describe the same population and agree to the second. What
+    /// remains is the reading itself: short of the slot width, so the grid's stated precondition still
+    /// holds and this is not yet the failure the paragraph above asserts — but the residual is D wide and D
+    /// is that maximum, so nothing here can be described as completing well inside its slot.
+    /// RefreshCeilingProvenancePinTests derives every figure stated against that maximum from the grid's own
+    /// constants and takes the band from the shipped classifier, so a moved grid step moves them all and a
+    /// reading that stopped classifying as a warning goes red rather than sitting here as prose.</para>
+    ///
+    /// <para><b>AND THE CONSEQUENCE THAT IS NOT THIS CONSTANT'S TO SETTLE, said here rather than left for a
+    /// reader to derive (#3166).</b> A sizing figure of 896 s is <b>ABOVE</b>
+    /// <see cref="RefreshSlotWarningSeconds"/>, so <see cref="ClassifyRefreshSlotHeadroom"/> bands the
+    /// grid's own sizing figure as <see cref="RefreshSlotHeadroom.ApproachingSlot"/> — a warning. Every
+    /// assertion that held the grid CLEAR of this constant is therefore false, in TimescaleSupportTests and
+    /// in the population clause of RefreshCeilingProvenancePinTests both, and those failures are the checks
+    /// doing their job rather than literals left behind: <see cref="RefreshSlotWarningSeconds"/>'s own
+    /// summary pre-registered this exact outcome. They are NOT widened here. What the arithmetic says and
+    /// where it stops: a 15-minute slot leaves 4 s of clearance against a measured maximum that rose 302 s
+    /// in two days, and restoring the five-sixths watch line's lead time above a 896 s figure needs a slot
+    /// of at least 1,076 s — 18 minutes, which 60 does not divide, so the grid would gain slots of unequal
+    /// width or lose one of its four. Which of those, or whether the refresh is made cheaper instead, is a
+    /// scheduling decision (#3035, #3044, #3107) and is deliberately not taken by re-deriving a
+    /// measurement.</para>
     /// </summary>
-    public const int HeaviestHourlyRefreshObservedCeilingSeconds = 594;
+    public const int HeaviestHourlyRefreshObservedCeilingSeconds = 896;
 
     /// <summary>
     /// The slot width in seconds — the bound
@@ -1948,15 +2018,22 @@ WITH NO DATA";
     /// out and is not offered as if it did: a line further below the slot warns EARLIER, so the comparison
     /// against the ceiling has to carry the decision on its own.</para>
     ///
-    /// <para><b>This line sits ABOVE <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>, and that is
-    /// what makes a crossing mean something.</b> 750 s is <b>26% above</b> the maximum of the closed
-    /// population that constant is derived from, so a reading in this band is not "approaching a known
-    /// ceiling" — it is past the whole of the record the compression grid is sized against, which is a
-    /// different signal calling for a different response. The band is reachable and not hypothetical: the
-    /// live envelope on <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> puts a measured run past
-    /// this line, stated there and not restated here so the figures have one home. The relationship is what
-    /// is pinned, not the two numbers: a ceiling that rose past this line would put the grid's own sizing
-    /// figure inside the warning band, and the pin says so rather than leaving a reader to notice.</para>
+    /// <para><b>This line was chosen to sit ABOVE <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>,
+    /// because that ordering is what makes a crossing mean something — and the ordering has now INVERTED
+    /// (#3166).</b> While the constant was the maximum of a sixteen-run sample, 750 s sat 26% above it, so a
+    /// reading in this band was not "approaching a known ceiling" but past the whole of the record the
+    /// compression grid was sized against: a different signal calling for a different response. Re-derived
+    /// from a census, that constant is <b>896 s</b>, which is 146 s ABOVE this line, so
+    /// <see cref="ClassifyRefreshSlotHeadroom"/> now bands the grid's own sizing figure a warning and this
+    /// line reports the sizing rather than anything new. That is precisely the case the previous version of
+    /// this paragraph pre-registered — "a ceiling that rose past this line would put the grid's own sizing
+    /// figure inside the warning band, and the pin says so rather than leaving a reader to notice" — and
+    /// the pins in TimescaleSupportTests say so now, in the only way that is any use: by going RED rather
+    /// than by being renumbered to agree. <b>Nothing here re-justifies the five sixths against the new
+    /// figure, and that is deliberate.</b> Restoring the ordering means moving this line up, moving
+    /// <see cref="RefreshPhaseSlotSeconds"/> up, or making the refresh cheaper; the first two are the same
+    /// grid decision (#3035, #3044, #3107) and the third is not a threshold at all. A measurement is not a
+    /// mandate to pick one, so the fraction is left where it was and the inversion is left visible.</para>
     /// </summary>
     public const int RefreshSlotWarningSeconds = RefreshPhaseSlotSeconds * 5 / 6;
 
@@ -2070,14 +2147,19 @@ WITH NO DATA";
     /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.</para>
     ///
     /// <para><b>Why the heaviest slot is excluded whole rather than guarded.</b>
-    /// <see cref="HeaviestHourlyRefreshView"/> occupies 9.9 of the 15 minutes in its slot and the
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 900 seconds in its slot and the
     /// <see cref="CompressionPhaseGuardMinutes"/> band is 7, so applying the ordinary band to this slot would
-    /// admit 3 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
+    /// admit 8 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
     /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
-    /// 5 minutes of the slot are past the refresh and are left on the table deliberately: recovering them
-    /// means sizing a band for one slot against a bound whose population is 16 readings and still moving
-    /// (194 s to 594 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen
-    /// and not a renumbering.
+    /// 0 minutes of the slot are past the refresh, so the exclusion no longer declines to recover anything:
+    /// there is nothing there to recover, and the question of sizing a band for one slot against a bound
+    /// whose population is 57 readings and still moving
+    /// (194 s to 896 s within the clean regime) has answered itself for as long as that stays true —
+    /// #3035's exclude-versus-guard decision is not reopened by it and is certainly not a renumbering.
+    /// Stated in SECONDS against the slot in seconds, because the occupancy is only exactly stateable to a
+    /// tenth of a minute while the ceiling happens to be a multiple of six seconds, and 896 is not: a
+    /// figure that has to be rounded to stay in its unit is a rounded claim wearing an exact one's
+    /// clothes.
     /// Excluding the slot is also what keeps the remaining minutes far from the only refresh that can reach
     /// forward: the nearest is a full slot past the heaviest one, and the furthest is 59 minutes past
     /// it.</para>
@@ -4304,9 +4386,9 @@ AND   js.last_run_status = 'Success'";
     /// <para><b>That the two lines coincide is a coincidence of two independent decisions, and the clearest
     /// evidence is that #2136 does not know this job's size.</b> Its clamp is justified in
     /// <c>DarlingAlertSettings</c> on the grounds that "the production worst runs ~7% of cadence" — 252 s —
-    /// while <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> here records 594 s, which is <b>16.5%
+    /// while <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> here records 896 s, which is <b>24.9%
     /// of the same 3,600 s cadence</b> — so the line #2136 lands on is calibrated as though this job ran
-    /// under half its actual length, and nothing connects the two numbers. #2136's own remedy text —
+    /// under a third of its actual length, and nothing connects the two numbers. #2136's own remedy text —
     /// "extend the job's schedule_interval" —
     /// is actively wrong for this one, because <see cref="HourlyRefreshScheduleInterval"/> is also the
     /// <c>end_offset</c> and widening it changes what the aggregate materializes without touching the slot.
@@ -4672,7 +4754,7 @@ public sealed record HeaviestRefreshSlotReading(string View, double LastRunSecon
     /// clamping would report every breach as a dead heat.</summary>
     public double ClearOfSlotSeconds => TimescaleSupport.RefreshPhaseSlotSeconds - LastRunSeconds;
 
-    /// <summary>This reading as a percentage of the slot — 66.0% for the recorded ceiling
+    /// <summary>This reading as a percentage of the slot — 99.6% for the recorded ceiling
     /// (<see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>), which is the margin the
     /// #3044 watch is stated against.</summary>
     public double PercentOfSlot => 100.0 * LastRunSeconds / TimescaleSupport.RefreshPhaseSlotSeconds;

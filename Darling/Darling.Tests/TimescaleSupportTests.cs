@@ -2291,7 +2291,7 @@ LIMIT 1", connection))
            comment reads as unconditional to whoever finds it next. Raising the recorded ceiling past the
            slot width therefore has to FAIL here rather than be renumbered through, because past that
            point the refresh runs into its neighbour and the grid needs redesigning. */
-        Assert.Equal(594, TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
+        Assert.Equal(896, TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
         Assert.Equal(140, TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds);
         Assert.True(
             TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds < TimescaleSupport.RefreshPhaseStepMinutes * 60,
@@ -2385,6 +2385,16 @@ LIMIT 1", connection))
     /// refresh by a wide margin is satisfied by almost anything, so the minute that WOULD violate it is
     /// computed and shown to violate it. Without that, a check that had stopped measuring the right quantity
     /// would still be green.</para>
+    ///
+    /// <para><b>The GRID half of this test still passes and the WATCH-LINE half now FAILS, on #3166's census
+    /// re-derivation, and the two conditions are left exactly as written.</b> The grid is genuinely clear: at
+    /// a 896 s ceiling the nearest compression minute is still 1,320 s past the heaviest refresh's start and
+    /// the discriminating minute is still excluded, so nothing overruns anything. What is false is
+    /// <c>ceiling &lt; RefreshSlotWarningSeconds</c>, and the 26%-gap literal derived from it — the sizing
+    /// figure is 146 s ABOVE the line, so the watch now reports the grid's own sizing rather than anything
+    /// new. Restoring the ordering means moving the line, moving the slot, or making the refresh cheaper,
+    /// which is a scheduling decision (#3035, #3044, #3107); re-typing either condition here is the only
+    /// edit that makes the failure go away while changing nothing about the store.</para>
     /// </summary>
     [Fact]
     public void NoCompressionMinuteStartsWhileTheHeaviestRefreshIsStillRunning()
@@ -2472,7 +2482,15 @@ LIMIT 1", connection))
     /// and the watch line sits ABOVE it — so a live reading in the warning band is this job exceeding its own
     /// recorded range rather than a restatement of the figure the compression grid is sized against. The five
     /// readings taken during #3044's review all classify INSIDE too, which is the anti-crying-wolf half; the
-    /// largest of them, at 66.0% of the slot, IS the recorded ceiling.</para>
+    /// largest of them, at 66.0% of the slot, was the recorded ceiling when the record was sixteen runs
+    /// long.</para>
+    ///
+    /// <para><b>The ceiling assertion below now FAILS, on the census re-derivation of #3166, and it is left
+    /// exactly as written.</b> At 896 s the figure the grid is sized against classifies
+    /// <c>ApproachingSlot</c> and sits 146 s ABOVE the watch line, so the relationship this test is named
+    /// for has inverted. Restoring it means moving the watch line, moving the slot, or making the refresh
+    /// cheaper — a scheduling decision (#3035, #3044, #3107) — and re-typing the expected band here is the
+    /// one change that would hide it while deciding nothing.</para>
     ///
     /// <para>Both boundaries are pinned inclusive on purpose: the wall matches the build-time assertion's
     /// <c>&lt;</c>, so a value AT the slot width fails both.</para>
@@ -2550,6 +2568,14 @@ LIMIT 1", connection))
     /// <para>The lead-time leg cuts the OTHER way and is asserted in that direction, because a reader
     /// checking the rejection is owed the fact that it does not help: the lower line leaves MORE room
     /// between itself and the slot, so it warns earlier rather than later.</para>
+    ///
+    /// <para><b>Half of that rejection now FAILS, on #3166's census re-derivation, and both conditions are
+    /// left exactly as written.</b> The recorded ceiling is still at or past the 480 s alternative, so the
+    /// alternative is still the lower of the two lines — but at 896 s the ceiling warns under the CHOSEN
+    /// line too, so the chosen line rejects the alternative on a property it has itself stopped having, and
+    /// the classifier no longer bands the ceiling <c>InsideSlot</c>. That is the ordering paragraph above
+    /// doing what it says: one of the two constants moved, so the five-sixths decision genuinely has to be
+    /// re-taken (#3044, #3107) rather than restated here.</para>
     /// </summary>
     [Fact]
     public void TheRejectedWatchLineAlternative_SitsBelowTheRecordedCeiling_WhileTheChosenLineSitsAbove()
@@ -2610,10 +2636,14 @@ LIMIT 1", connection))
             TimescaleSupport.HeaviestHourlyRefreshView,
             TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
 
-        /* The recorded ceiling: 66.0% of the slot, 306 s clear, and inside the routine band. */
+        /* The recorded ceiling: 99.6% of the slot and 4 s clear (#3166's census re-derivation). The BAND
+           assertion below is left as it was written and now FAILS, which is the point of having it: a
+           sizing figure that classifies as a warning is the grid's precondition going, and renumbering the
+           expected band to match would be the one edit that makes the failure disappear without changing
+           anything about the store. */
         Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.InsideSlot, atTheCeiling.Headroom);
-        Assert.Equal(306, atTheCeiling.ClearOfSlotSeconds);
-        Assert.Equal(66.0, atTheCeiling.PercentOfSlot, 1);
+        Assert.Equal(4, atTheCeiling.ClearOfSlotSeconds);
+        Assert.Equal(99.6, atTheCeiling.PercentOfSlot, 1);
 
         /* The watch line, which is where APPROACHING starts: 83.3% of the slot, 150 s clear. */
         var atTheWatchLine = new HeaviestRefreshSlotReading(
@@ -2640,6 +2670,13 @@ LIMIT 1", connection))
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(null, quiet);
         Assert.Equal("(no log lines captured)", quiet.Joined);
 
+        /* THE ROUTINE-BAND CASE IS FED THE RECORDED CEILING, and after #3166's census re-derivation that
+           reading logs Warning rather than Debug — so this assertion FAILS and is left exactly as written.
+           It is the same inversion as the band pins: a sizing figure the product's own watch line calls a
+           warning cannot also be the example of a routine reading. Re-pointing this case at a lower literal
+           would keep the level table covered while quietly dropping the claim that the grid's own figure is
+           routine, which is the claim worth losing loudly. The remedy is the slot or the fraction (#3035,
+           #3044, #3107). */
         var inside = new CapturingTestLogger();
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
             new HeaviestRefreshSlotReading(
@@ -2773,11 +2810,11 @@ LIMIT 1", connection))
             "the slot watch no longer fires before #2136's default cadence warning, so it adds no lead time");
 
         /* And the evidence that #2136 does not know this job's size, as a number rather than as prose:
-           the recorded ceiling is 16.5% of the same cadence, while the clamp in DarlingAlertSettings is
-           justified on "the production worst runs ~7% of cadence" — 252 s, under half of it. Pinned so the
-           doc comment's claim cannot quietly stop being true. */
+           the recorded ceiling is 24.9% of the same cadence, while the clamp in DarlingAlertSettings is
+           justified on "the production worst runs ~7% of cadence" — 252 s, well under half of it. Pinned so
+           the doc comment's claim cannot quietly stop being true. */
         Assert.Equal(
-            16.5,
+            24.9,
             100.0 * TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds / hourlyCadenceSeconds,
             1);
         Assert.True(
