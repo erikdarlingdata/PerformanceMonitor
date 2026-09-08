@@ -152,7 +152,7 @@ public sealed class CollectorContext
     ///
     /// <para>Throws on a label <see cref="CollectorMeasurementNote.IsValidLabel"/> rejects. Labels are
     /// first-party constants in definition source, so that is a build-and-test-time failure rather than
-    /// anything a monitored server can cause - and <c>MeasurementLabelSourceGuardTests</c> walks the source
+    /// anything a monitored server can cause - and <c>CollectorMeasurementSeamTests.EveryMeasurementLabelInTheCollectorsIsLegal</c> walks the source
     /// so it cannot reach a release either. The renderer counts rejects instead of throwing, for a list some
     /// caller assembled by hand.</para>
     /// </summary>
