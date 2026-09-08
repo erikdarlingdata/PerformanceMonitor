@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using Lite.Tests.Helpers;
@@ -478,8 +479,16 @@ public class PgIndexBloatCollectorDefinitionTests
     /// "unmeasured" and "healthy" that <c>skipped_reason</c> exists to prevent, reintroduced one level up.</para>
     ///
     /// <para>Pinned as an inequality rather than as equality: raising the cycle budget above the ceiling is
-    /// a legitimate tuning move once a SUCCESS row supplies a real duration, and this must not stand in the
-    /// way of it. Only the floor is load-bearing.</para>
+    /// a legitimate tuning move, and this must not stand in the way of it. Only the floor is
+    /// load-bearing.</para>
+    ///
+    /// <para><b>This pin is not sufficient on its own, which #3164 is what established.</b> While
+    /// <c>budget &gt;= ceiling</c> holds, <see cref="TheCycleBudget_FitsTheDeadline_AtTheMeasuredBlockRate"/>
+    /// covers the CEILING's deadline cost for free — a near-ceiling index cannot cost more than the budget
+    /// it sits under. That transitive coverage disappears the moment anyone decouples the two, and its
+    /// disappearance is silent, so the ceiling now carries its own deadline assertion in
+    /// <see cref="ThePerIndexCeiling_FitsTheDeadline_OnItsOwn"/> rather than inheriting one from this
+    /// inequality.</para>
     /// </summary>
     [Fact]
     public void TheCycleBudget_IsNeverBelowThePerIndexCeiling()
@@ -501,31 +510,167 @@ public class PgIndexBloatCollectorDefinitionTests
     /// orders of magnitude, and that is the arithmetic error that a per-byte argument cannot see.</para>
     ///
     /// <para><b>Half the deadline, not all of it.</b> The remainder pays for the catalog scan, connection
-    /// setup, and the tail index admitted while the running total was still just under budget — that index
-    /// is charged for itself, so the last admission can be almost a whole index past the point where the
-    /// budget was nearly spent.</para>
+    /// setup, and being wrong about the rate — which is the whole of the margin, deliberately, since
+    /// <see cref="PgIndexBloatCollector.MeasuredBlocksPerSecond"/> is now what was measured rather than a
+    /// figure shaded downwards. Spending the margin in two places would leave neither meaning anything.</para>
     ///
-    /// <para>The rate is an assumption and is named as one. This pin does not make it true; it makes
-    /// raising the budget state a rate, and makes raising the rate state why.</para>
+    /// <para><b>One thing this reserve does NOT cover, corrected rather than quietly rewritten (#3164).</b>
+    /// This paragraph used to say the remainder also paid for "the tail index admitted while the running
+    /// total was still just under budget — that index is charged for itself, so the last admission can be
+    /// almost a whole index past the point where the budget was nearly spent." That describes a gate of the
+    /// form <c>total BEFORE this row &lt;= budget</c>, and the shipped gate is not that one:
+    /// <c>measured_bytes_through_here</c> is a window sum over
+    /// <c>ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</c>, so it INCLUDES the row being tested, and
+    /// <c>measured_bytes_through_here &lt;= budget</c> admits the tail index only if it fits in the
+    /// headroom that is left. Prefix sums are non-decreasing, so the admitted set is a prefix and the total
+    /// read is bounded by the budget exactly — there is no overshoot to reserve against. Worth stating
+    /// because the wrong version made the reserve look like it was covering a 2x read, which would have
+    /// left the actual rate error uncovered; and because the same property is what lets a SUCCESS row's
+    /// duration bound the block rate from above at all.</para>
+    ///
+    /// <para><b>The rate is a measurement now, and this pin is what made the trigger fire (#3164).</b> The
+    /// figure was an assumed 2,000 blocks/s; the first SUCCESS row this collector ever produced put it at
+    /// ~1,013, and this assertion is what turned that into a required budget change rather than a note —
+    /// 2 GiB is 262,144 blocks, which at the measured rate is 259 s against a 150 s allowance. Its own
+    /// failure text named the two exits, "lower the budget, or argue the rate up and say on what
+    /// measurement", and the measurement argued it DOWN. The pin does not make the rate true; it makes the
+    /// budget answerable to it.</para>
     /// </summary>
     [Fact]
-    public void TheCycleBudget_FitsTheDeadline_AtThePessimisticBlockRate()
+    public void TheCycleBudget_FitsTheDeadline_AtTheMeasuredBlockRate()
     {
         var deadlineSeconds = PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride;
 
         Assert.NotNull(deadlineSeconds);
 
         var blocks = PgIndexBloatCollector.CycleMeasureBudgetBytes / PgIndexBloatCollector.BlockSizeBytes;
-        var seconds = blocks / (double)PgIndexBloatCollector.PessimisticBlocksPerSecond;
+        var seconds = blocks / (double)PgIndexBloatCollector.MeasuredBlocksPerSecond;
         var allowed = deadlineSeconds.Value / 2.0;
 
         Assert.True(
             seconds <= allowed,
             $"a full cycle budget of {PgIndexBloatCollector.CycleMeasureBudgetBytes} bytes is {blocks} "
-            + $"blocks, which at {PgIndexBloatCollector.PessimisticBlocksPerSecond} blocks/s takes "
+            + $"blocks, which at {PgIndexBloatCollector.MeasuredBlocksPerSecond} blocks/s takes "
             + $"{seconds:F0}s — past the {allowed:F0}s that leaves half of the {deadlineSeconds}s command "
             + "deadline for everything else. Lower the budget, or argue the rate up and say on what "
             + "measurement");
+    }
+
+    /// <summary>
+    /// The PER-INDEX CEILING has to fit the deadline on its own, because one index just under it is the
+    /// largest amount of work a single statement can be asked to do.
+    ///
+    /// <para><b>Why this is not redundant with
+    /// <see cref="TheCycleBudget_FitsTheDeadline_AtTheMeasuredBlockRate"/>.</b> Today the two are the same
+    /// arithmetic, because <see cref="TheCycleBudget_IsNeverBelowThePerIndexCeiling"/> forces
+    /// <c>budget &gt;= ceiling</c> and a near-ceiling index therefore cannot cost more than the budget it
+    /// sits under. That makes the ceiling's deadline cost covered TRANSITIVELY — and the transitive route
+    /// runs through an inequality whose own doc invites it to be relaxed. Decouple the two and the ceiling
+    /// silently loses the only assertion its cost ever had, with every other pin still green.</para>
+    ///
+    /// <para><b>It is also the assertion that decides the decoupling question, which is why #3164 added it
+    /// rather than filing it.</b> #3153 deferred decoupling the budget from the ceiling — an unconditional
+    /// first-admission rule plus a deadline constraint restated as a SUM — so that the budget could fall to
+    /// fit a slower rate while the ceiling stayed at 2 GiB. This pin is what shows that goal to be
+    /// unreachable: at the measured rate a 2 GiB ceiling is 259 s in one statement, so it fails this
+    /// assertion before a budget is chosen at all, and <c>ceiling + budget &lt;= allowance</c> has no
+    /// solution. The binding constraint was never the ordering between the two figures; it was the
+    /// ceiling's own deadline cost, which equal values had been hiding.</para>
+    ///
+    /// <para>Written against the ceiling and the deadline rather than against the budget, so it stays
+    /// meaningful under a decoupling instead of quietly becoming a second copy of the budget pin.</para>
+    /// </summary>
+    [Fact]
+    public void ThePerIndexCeiling_FitsTheDeadline_OnItsOwn()
+    {
+        var deadlineSeconds = PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride;
+
+        Assert.NotNull(deadlineSeconds);
+
+        var blocks = PgIndexBloatCollector.MeasureCeilingBytes / PgIndexBloatCollector.BlockSizeBytes;
+        var seconds = blocks / (double)PgIndexBloatCollector.MeasuredBlocksPerSecond;
+        var allowed = deadlineSeconds.Value / 2.0;
+
+        Assert.True(
+            seconds <= allowed,
+            $"one index just under the {PgIndexBloatCollector.MeasureCeilingBytes}-byte per-index ceiling "
+            + $"is {blocks} blocks, which at {PgIndexBloatCollector.MeasuredBlocksPerSecond} blocks/s takes "
+            + $"{seconds:F0}s in a SINGLE statement — past the {allowed:F0}s that leaves half of the "
+            + $"{deadlineSeconds}s command deadline for everything else. No cycle budget can fix this: the "
+            + "ceiling is what one statement can be asked to read. Lower the ceiling, or argue the rate up "
+            + "and say on what measurement");
+    }
+
+    /// <summary>
+    /// EVERY byte bound this collector declares fits the deadline, with the population of bounds CENSUSED
+    /// FROM THE TYPE rather than typed out here.
+    ///
+    /// <para><b>Why the census, when two pins above already do this arithmetic.</b> Because those two name
+    /// their subject inline, and a pin's subject is the one thing it cannot check about itself. Mutating
+    /// <see cref="ThePerIndexCeiling_FitsTheDeadline_OnItsOwn"/> to read
+    /// <c>CycleMeasureBudgetBytes</c> instead of <c>MeasureCeilingBytes</c> — one token — leaves all of
+    /// this file green while the ceiling's deadline cost goes unasserted, because the two figures are
+    /// currently EQUAL. That is not a hypothetical: equal values are precisely what
+    /// <see cref="TheCycleBudget_IsNeverBelowThePerIndexCeiling"/> is documented as preferring, so the two
+    /// pins are arithmetically indistinguishable for as long as this collector is correct, and become
+    /// distinguishable only in the decoupled state where one of them is supposed to fire.</para>
+    ///
+    /// <para>So the ceiling's coverage is made independent of any hand-typed subject: the bounds are read
+    /// off the type's own public constants, and each is required to fit the same allowance. A third byte
+    /// bound added later is covered without anyone remembering to add a pin, which is the case a
+    /// hand-written list gets wrong.</para>
+    ///
+    /// <para><b>It cannot pass vacuously.</b> An empty census is asserted against — if these constants ever
+    /// stop being <c>public const long</c> (made <c>static readonly</c>, moved to a settings type, renamed
+    /// out of the filter) the reflection returns nothing, and a reflection-driven check that silently
+    /// matches nothing is the shape that reports success for having looked. The two figures this change is
+    /// about are additionally required BY NAME, so the census shrinking to one of them is red rather than
+    /// quietly narrower.</para>
+    ///
+    /// <para><b>The filter is every <c>long</c> constant, not every one whose name ends in
+    /// <c>Bytes</c>.</b> The suffix would read more precisely and fails the wrong way: a byte bound added
+    /// under some other name escapes the census and is never checked, which is green and wrong. Taking
+    /// every <c>long</c> means an unrelated <c>long</c> constant added later gets asserted against the
+    /// deadline as well — noisy and wrong, which someone has to come and look at. Given the choice, fail
+    /// toward the label that costs attention rather than the one that costs coverage. The <c>int</c>
+    /// constants on this type (<c>BlockSizeBytes</c>, <c>MeasuredBlocksPerSecond</c>,
+    /// <c>MaxSplicedCursors</c>) are excluded by the type test, which is why the suffix is not needed to
+    /// keep <c>BlockSizeBytes</c> out of a census of byte BOUNDS.</para>
+    /// </summary>
+    [Fact]
+    public void EveryDeclaredByteBound_FitsTheDeadline_CensusedFromTheType()
+    {
+        var deadlineSeconds = PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride;
+
+        Assert.NotNull(deadlineSeconds);
+
+        var allowed = deadlineSeconds.Value / 2.0;
+
+        var bounds = typeof(PgIndexBloatCollector)
+            .GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+            .Where(f => f.IsLiteral && !f.IsInitOnly && f.FieldType == typeof(long))
+            .ToDictionary(f => f.Name, f => (long)f.GetRawConstantValue()!, StringComparer.Ordinal);
+
+        Assert.NotEmpty(bounds);
+
+        foreach (var required in new[] { "MeasureCeilingBytes", "CycleMeasureBudgetBytes" })
+        {
+            Assert.Contains(required, bounds.Keys);
+        }
+
+        foreach (var (name, bytes) in bounds)
+        {
+            var blocks = bytes / PgIndexBloatCollector.BlockSizeBytes;
+            var seconds = blocks / (double)PgIndexBloatCollector.MeasuredBlocksPerSecond;
+
+            Assert.True(
+                seconds <= allowed,
+                $"{name} is {bytes} bytes = {blocks} blocks, which at "
+                + $"{PgIndexBloatCollector.MeasuredBlocksPerSecond} blocks/s takes {seconds:F0}s — past "
+                + $"the {allowed:F0}s that leaves half of the {deadlineSeconds}s command deadline for "
+                + "everything else. Every byte bound here bounds work inside ONE statement under ONE "
+                + "deadline, so each has to fit it on its own");
+        }
     }
 
     /* ---------------- rotation (#3153) ---------------- */
