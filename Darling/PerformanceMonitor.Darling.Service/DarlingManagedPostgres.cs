@@ -287,7 +287,7 @@ public sealed class DarlingManagedPostgres
     /// <c>off</c> with <c>source = default</c>, and ONE history row for 110 jobs; the cluster initdb'd
     /// 2026-08-17 carried the line and 39,020 rows. Nothing in the first store's answer distinguished it
     /// from a clean one, which silently scoped every <c>job_history</c>-derived conclusion to the newer
-    /// store.
+    /// store.</para>
     ///
     /// <para><b>MOVED out of v1 rather than duplicated into v11.</b> Leaving a copy in
     /// <see cref="BuildConfAppend"/> would cost nothing at runtime (identical value, last occurrence wins)
