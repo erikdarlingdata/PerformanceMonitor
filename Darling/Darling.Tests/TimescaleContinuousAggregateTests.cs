@@ -133,11 +133,11 @@ public sealed class TimescaleContinuousAggregateTests
     /// retention re-materialized roughly three quarters of the hypertable every hour. Measured on the
     /// production store: the heaviest hourly refresh ran 3,301-6,330 s against its own 1-hour cadence — 118-175%
     /// of it, so each run started into the tail of the last — while rows arriving per hour FELL ~3x. On the
-    /// narrowed window the same refresh finishes inside one phase slot, which is what makes the overlap
-    /// structurally impossible rather than merely absent — by 4 s of a 900 s slot as of #3166's census, so
-    /// "inside" is now the whole of the claim and "well inside" is no longer available. The figure and its
-    /// derivation live on TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds rather than being
-    /// restated here.</para>
+    /// narrowed window the same refresh finishes inside its own phase window, which is what makes the
+    /// overlap structurally impossible rather than merely absent — by 364 s of a 1,260 s window against
+    /// #3166's census and #3174's re-derived grid. The figure and its derivation live on
+    /// TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds rather than being restated
+    /// here.</para>
     ///
     /// <para>Asserted for EVERY hourly view rather than the heavy one alone: the defect was a shared default,
     /// so a fix that reached only the aggregate named in the incident would leave twelve behind.</para>

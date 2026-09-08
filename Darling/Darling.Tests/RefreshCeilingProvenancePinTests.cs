@@ -621,16 +621,15 @@ public sealed class RefreshCeilingProvenancePinTests
         Assert.Equal(0, (sorted[(sorted.Length - 1) / 2] + sorted[sorted.Length / 2]) % 2);
 
         /* The relationship the grid depends on, over the WHOLE population rather than one true clause
-           standing in for it: every clean run fits inside the slot, and inside the routine band.
+           standing in for it: every clean run fits inside the window, and inside the routine band.
 
-           THE SECOND CLAUSE AND THE ORDERING BELOW NOW FAIL, on #3166's census re-derivation, and both are
-           left with their CONDITIONS exactly as written. Only their messages moved, because the reason the
-           old ones gave - "the doc comment claims otherwise" - is no longer why they matter: the comment now
-           states the crossings plainly, so what these clauses guard is the GRID, not the prose. Seven of the
-           57 census readings are in the warning band and the sizing figure is 146 s above the line. Fixing
-           that means moving the watch line, moving the slot, or making the refresh cheaper; re-typing either
-           condition is the only edit that makes the failure go away while changing nothing about the
-           store. */
+           THE SECOND CLAUSE AND THE ORDERING BELOW WENT RED on #3166's census, with both CONDITIONS left
+           exactly as written, and #3174 answered them with geometry rather than with a re-typed band. At the
+           750 s line a 15-minute slot produced, seven of the 57 census readings sat in the warning band and
+           the sizing figure sat 146 s above the line; against the window the hour can spare the line is
+           1,050 s and the whole population is below it. Only the messages moved, because the reason the old
+           ones gave - "the doc comment claims otherwise" - is no longer why they matter: the comment states
+           the crossings plainly, so what these clauses guard is the GRID, not the prose. */
         Assert.All(population, reading => Assert.True(reading < Slot,
             $"a clean post-boundary reading of {reading} s is at or past the {Slot} s refresh slot, so the "
             + "compression grid's stated precondition is false and #3035 has to be re-derived rather than "

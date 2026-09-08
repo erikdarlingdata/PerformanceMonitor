@@ -2069,7 +2069,7 @@ WITH NO DATA";
     /// as prose.</para>
     ///
     /// <para><b>THE CONSEQUENCE THIS CONSTANT DID NOT SETTLE, and where it was settled (#3166, #3174).</b>
-    /// Against the 900 s watch line a 15-minute slot produced, a sizing figure of 896 s was ABOVE it, so
+    /// Against the 750 s watch line a 15-minute slot produced, a sizing figure of 896 s was ABOVE it, so
     /// <see cref="ClassifyRefreshSlotHeadroom"/> banded the grid's own sizing figure a warning and six test
     /// methods went red on exactly that — the checks doing their job rather than literals left behind, and
     /// <see cref="RefreshSlotWarningSeconds"/>'s own summary had pre-registered it. They were not widened.
@@ -4970,8 +4970,9 @@ public sealed record HeaviestRefreshSlotReading(string View, double LastRunSecon
     /// clamping would report every breach as a dead heat.</summary>
     public double ClearOfSlotSeconds => TimescaleSupport.RefreshPhaseSlotSeconds - LastRunSeconds;
 
-    /// <summary>This reading as a percentage of the slot — 99.6% for the recorded ceiling
-    /// (<see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>), which is the margin the
+    /// <summary>This reading as a percentage of the slot — 71.1% for the recorded ceiling
+    /// (<see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>) against the window the
+    /// hour can spare (<see cref="TimescaleSupport.HeaviestRefreshWindowMinutes"/>), which is the margin the
     /// #3044 watch is stated against.</summary>
     public double PercentOfSlot => 100.0 * LastRunSeconds / TimescaleSupport.RefreshPhaseSlotSeconds;
 }
