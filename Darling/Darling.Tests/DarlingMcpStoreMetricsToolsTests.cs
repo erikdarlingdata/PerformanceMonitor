@@ -12,6 +12,7 @@ using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using Npgsql;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -152,6 +153,106 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("timescaledb_information.job_history", description!, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3175: the description's redirect to <c>timescaledb_information.job_history</c> must carry the
+    /// precondition that makes it a real route, and the response must carry a reading of it.
+    ///
+    /// <para><b>Asserted TOGETHER with the shipped read, for the reason the sibling test above states.</b>
+    /// The sentence is only honest while a caller can actually see the setting's state in the same
+    /// response. A description that named the precondition with no read behind it would be advice to go
+    /// look somewhere this tool declines to look, and a read with no sentence would sit in the JSON
+    /// unexplained. Either half disappearing lands here.</para>
+    ///
+    /// <para>The existing test one class-member up already required the description to NAME job_history —
+    /// and passed the whole time job_history was empty on every store older than the release that turned
+    /// logging on. Naming a route is not the same as the route working, which is why this is a second,
+    /// stricter claim rather than an edit to that one.</para>
+    /// </summary>
+    [Fact]
+    public void TheDescription_SaysJobHistoryNeedsItsGucOn_AndTheResponseReportsIt()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        /* The precondition, the default, and the consequence — in one ordered match, so a rewording that
+           kept the GUC's name but dropped WHY it matters goes red instead of passing on a substring. */
+        Assert.Matches(
+            @"timescaledb\.enable_job_execution_logging is on[^.]*defaults OFF",
+            description!);
+        Assert.Contains("zero rows", description!, StringComparison.Ordinal);
+
+        /* And the read that makes the sentence actionable, named in the description and present in the
+           shipped SQL. The probe counts pg_settings ROWS rather than calling current_setting, which is
+           what lets it separate "off" from "this server has no such setting". */
+        Assert.Contains("job_history block in every response", description!, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_settings", DarlingStoreMetricsReader.JobExecutionLoggingSql, StringComparison.Ordinal);
+        Assert.Contains("WHERE name = $1", DarlingStoreMetricsReader.JobExecutionLoggingSql, StringComparison.Ordinal);
+
+        /* The GUC name is NOT retyped into the SQL: it is bound from the one constant the managed conf
+           block also writes, so the name the probe asks for and the name the product sets cannot drift.
+           A drifted copy would not error — pg_settings would return no row, which this read reports as
+           "the server has no such setting", indistinguishable from a plain-PostgreSQL store. */
+        Assert.DoesNotContain(
+            StoreSelfMetrics.JobExecutionLoggingSetting,
+            DarlingStoreMetricsReader.JobExecutionLoggingSql,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3175: the four states of the <c>job_history</c> precondition produce four DIFFERENT notes, and the
+    /// two that are both "not recording" say different things about what to do.
+    ///
+    /// <para><b>Distinctness is the claim, not wording.</b> The defect being reported is one absence being
+    /// read as another, so a note that hedged across states — or two states sharing a note — would
+    /// reproduce it in prose. Comparing the notes to each other rather than to expected strings also means
+    /// the pin survives rewording while still failing if two states collapse.</para>
+    /// </summary>
+    [Fact]
+    public void TheJobHistoryNote_IsDifferentForEveryState_AndSplitsOffOnWhoSetIt()
+    {
+        var statuses = Enum.GetValues<DarlingStoreMetricsReader.JobExecutionLoggingStatus>();
+
+        /* A positive control on the enumeration: a shrunken enum would make the distinctness check below
+           vacuous, and the whole point of four states is that there are four. */
+        Assert.Equal(4, statuses.Length);
+
+        var notes = statuses
+            .Select(s => DarlingMcpStoreMetricsTools.JobHistoryNote(
+                new DarlingStoreMetricsReader.JobExecutionLoggingReading(s, null, null, null)))
+            .ToArray();
+
+        Assert.Equal(notes.Length, notes.Distinct(StringComparer.Ordinal).Count());
+        Assert.All(notes, n => Assert.False(string.IsNullOrWhiteSpace(n)));
+
+        /* Off splits again on provenance, because the two need different actions: a default-sourced off
+           heals itself on the next service-owned start, and an ALTER SYSTEM off cannot be healed by the
+           conf append at all (postgresql.auto.conf is read last) and needs the override removed. */
+        var offByDefault = new DarlingStoreMetricsReader.JobExecutionLoggingReading(
+            DarlingStoreMetricsReader.JobExecutionLoggingStatus.Off, "off", "default", null);
+        var offByOverride = new DarlingStoreMetricsReader.JobExecutionLoggingReading(
+            DarlingStoreMetricsReader.JobExecutionLoggingStatus.Off, "off", "configuration file", "postgresql.auto.conf");
+
+        Assert.False(offByDefault.OffByExplicitOverride);
+        Assert.True(offByOverride.OffByExplicitOverride);
+        Assert.NotEqual(
+            DarlingMcpStoreMetricsTools.JobHistoryNote(offByDefault),
+            DarlingMcpStoreMetricsTools.JobHistoryNote(offByOverride));
+
+        /* Only On is Recording. A precondition check whose "yes" leaked into any other state would put a
+           maximum question back on an instrument that is off. */
+        foreach (var status in statuses)
+        {
+            var reading = new DarlingStoreMetricsReader.JobExecutionLoggingReading(status, null, null, null);
+            Assert.Equal(status == DarlingStoreMetricsReader.JobExecutionLoggingStatus.On, reading.Recording);
+        }
+
+        /* OffByExplicitOverride is scoped to Off: an On with a non-default source is on, not overridden. */
+        Assert.False(
+            new DarlingStoreMetricsReader.JobExecutionLoggingReading(
+                DarlingStoreMetricsReader.JobExecutionLoggingStatus.On, "on", "configuration file", "postgresql.conf")
+                .OffByExplicitOverride);
+    }
+
     [Fact]
     public void GetStoreMetrics_IsInTheServerInstructions()
     {
@@ -233,5 +334,60 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     {
         Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(Array.Empty<DarlingStoreMetricsReader.StoreMetricDailyPoint>()));
         Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5) }));
+    }
+}
+
+/// <summary>
+/// The <c>job_history</c> precondition probe against a LIVE server (#3175). Two things no text assertion
+/// can reach: that the shipped SQL parses and binds its one positional parameter, and that the GUC name the
+/// product writes into postgresql.conf is a name PostgreSQL actually knows.
+///
+/// <para><b>A PAIRED control, because a zero-row result is the whole subject.</b> The reader maps "no
+/// pg_settings row" to <c>NotRegistered</c>, so a probe that only ever saw zero rows — because the name was
+/// misspelled, say — would report a clean, plausible "this server has no TimescaleDB" on every store
+/// forever. The two halves run the SAME shipped string against the same server: the real name must return a
+/// row, and a name nobody registered must return none. Neither alone distinguishes a working probe from a
+/// silently broken one.</para>
+///
+/// <para>Deliberately does NOT pin whether the setting is on or off here: that is a property of whatever
+/// cluster <c>DARLING_TEST_PG</c> points at, not of the product, and pinning it would make an environment
+/// change look like a defect. What is pinned is that the reading is INTERNALLY CONSISTENT — a registered
+/// state, a value PostgreSQL renders for a bool, and <c>Recording</c> true for exactly <c>on</c>.</para>
+/// </summary>
+/* #1776 own-store: this class reads only pg_settings — a server-scoped catalog view, no store tables, no
+   DDL, no rows written — but it takes [Collection("live-postgres")] anyway because it shares the cluster
+   whose GUCs it reads with every other class that has it, and a class reading the shared store must either
+   carry the attribute or record why not. */
+[Collection("live-postgres")]
+public sealed class DarlingStoreMetricsJobLoggingLivePostgresTests
+{
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task JobExecutionLoggingProbe_FindsTheRealGuc_AndFindsNothingForAnUnregisteredName()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live job-logging probe test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        /* The POSITIVE control: the shipped read, the shipped name. A registered state is the claim — the
+           name resolves — not which way the setting happens to be pointing on this cluster. */
+        var reading = await DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(postgres, ct);
+
+        Assert.NotEqual(DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered, reading.Status);
+        Assert.NotEqual(DarlingStoreMetricsReader.JobExecutionLoggingStatus.Unreadable, reading.Status);
+        Assert.Contains(reading.Setting, new[] { "on", "off" });
+        Assert.False(string.IsNullOrWhiteSpace(reading.Source));
+        Assert.Equal(reading.Setting == "on", reading.Recording);
+
+        /* The NEGATIVE control, through the same shipped string: a name nobody registered returns no row,
+           which is the shape the reader reports as NotRegistered. Run here rather than reasoned about,
+           because "the query returned nothing" is the answer this whole issue is about mis-reading. */
+        await using var command = postgres.CreateCommand(DarlingStoreMetricsReader.JobExecutionLoggingSql);
+        command.Parameters.AddWithValue(StoreSelfMetrics.JobExecutionLoggingSetting + "_not_a_real_guc");
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.False(await reader.ReadAsync(ct));
     }
 }
