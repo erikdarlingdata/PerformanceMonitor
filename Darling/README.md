@@ -662,14 +662,19 @@ Add `"engine": "postgres"` to a `servers` entry and that target is collected by 
 
 ### Permissions on a PostgreSQL target
 
-One role covers every collector:
+`pg_monitor` covers most collectors. Two further grants decide whether three of them return anything, and neither absence reports as a permission error:
 
 ```sql
 CREATE ROLE darling_monitor WITH LOGIN PASSWORD '<password>';
 GRANT pg_monitor TO darling_monitor;
+GRANT pg_read_all_data TO darling_monitor;   -- PostgreSQL 14+, see below
 ```
 
 `pg_monitor` is the standard PostgreSQL monitoring role — it bundles `pg_read_all_stats`, `pg_read_all_settings`, and `pg_stat_scan_tables`. Without it the statistics views still return rows, but only for the connecting user's own backends, which silently turns fleet monitoring into self-monitoring. On Amazon Aurora and RDS the same grant works: `GRANT pg_monitor TO darling_monitor;` as an `rds_superuser`. No superuser is needed, and nothing is created on the monitored server — unlike a SQL Server target, there are no Extended Events sessions to provision and no server setting to bootstrap.
+
+**`pg_read_all_data` is what makes the statistics-based reads work, and without it they succeed and store nothing.** `pg_stats` filters every row through `has_column_privilege`, and `pg_monitor` confers no `SELECT` on user tables — so a `pg_monitor`-only role reads `pg_stats` as EMPTY rather than as denied, which is why nothing logs a `PERMISSIONS` skip. Three collectors change behaviour: `pg_column_stats` stores zero rows on every run; `pg_table_bloat_stats` still collects sizes and dead-tuple counts but suppresses the bloat ESTIMATE that surface exists for (`estimate_unavailable`); and the statistics-based estimator for INDEX bloat is unavailable, leaving `pg_index_bloat` dependent on `pgstattuple` below. On Amazon Aurora and RDS the same grant works as an `rds_superuser`. The role is PostgreSQL 14+; on 13 and older, grant `SELECT` on the schemas whose statistics you want instead.
+
+**`pgstattuple` is what `pg_index_bloat` MEASURES with**, and it is a per-database extension rather than a grant: `CREATE EXTENSION pgstattuple;` in each database you want index bloat for. Without it the collector logs a `PERMISSIONS` skip naming the missing function (SQLSTATE 42883) and stores nothing for that database. The extension grants `EXECUTE` to `pg_stat_scan_tables`, which `pg_monitor` already carries, so no further grant is needed once it exists. It reads every page of each index it measures, so it is bounded by a per-cycle byte budget and a per-index ceiling — with `pg_read_all_data` present the cheaper estimator covers the whole database and this stays for confirming the indexes it flags.
 
 `pg_stat_statements` must be present for `pg_statement_stats`, which means the extension in `shared_preload_libraries` (a restart, or a parameter-group change plus reboot on Aurora/RDS) and `CREATE EXTENSION pg_stat_statements;` in the database Darling connects to. The extension tracks **all** databases in the cluster keyed by `dbid`, so one installation in the connect database covers the whole instance. The other six collectors need nothing installed — they read core catalogs and Aurora's built-in functions.
 
