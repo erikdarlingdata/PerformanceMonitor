@@ -19,10 +19,20 @@ namespace PerformanceMonitor.Analysis;
 /// query. Zero is a real and common answer: an evicted plan for a query nobody called back is not
 /// evidence of anything.</param>
 /// <param name="ElapsedSinceEvict">Wall-clock since the eviction.</param>
-/// <param name="ActivePlanHash">The <c>query_plan_hash</c> the query is compiling to now, or null when the
-/// server has not attributed one (no post-evict compile visible yet). Compared against the regressed
-/// plan's hash, NOT against the best plan's — the question evict-first asks is "did the optimizer make the
-/// same mistake again", and only the regressed hash answers that one.</param>
+/// <param name="ActivePlanHash">The <c>query_plan_hash</c> executions have been attributed to SINCE the
+/// eviction — read from post-eviction runtime-stats intervals, not from whether a plan row exists. Null
+/// when no post-eviction interval has attributed one yet, which is the normal reading for the first
+/// several minutes.
+///
+/// <para><b>The distinction is load-bearing, not pedantic.</b> A targeted
+/// <c>DBCC FREEPROCCACHE(plan_handle)</c> evicts from the PLAN CACHE; Query Store keeps its plan row —
+/// that is the whole difference between the two stores. So "is the regressed plan's hash present in Query
+/// Store" is always yes after an eviction and is evidence of nothing. Only "which plan did post-eviction
+/// executions run under" answers the question evict-first asks, and that fact does not exist until
+/// runtime stats for those executions have been flushed and attributed.</para>
+///
+/// <para>Compared against the regressed plan's hash, NOT the best plan's: the question is "did the
+/// optimizer make the same mistake again", and only the regressed hash answers that one.</para></param>
 /// <param name="ObservedCpuPerExecUs">Post-evict cpu/exec in microseconds, or null when the server has
 /// nothing to average yet.</param>
 public sealed record RemediationObservation(
@@ -161,11 +171,30 @@ public static class OperatorRemediationFlow
                 RemediationObservationVerdict.StillObserving, limb, ForceOffered: false);
         }
 
-        /* Plan IDENTITY first, and it is answered with a different evidence requirement from cost.
-           Which plan the optimizer chose is not a statistical quantity — one compile settles it — so this
-           arm is legitimate even when the elapsed limb closed the window with three executions. Cost is a
-           statistical quantity and gets the executions floor below. Collapsing the two would either refuse
-           to report a plan that demonstrably came back, or claim a cost improvement measured on nothing. */
+        /* Plan IDENTITY first, and it carries a LOWER evidence requirement than cost — but not a zero
+           one, and the difference between those two readings is why this sits below the window guard
+           rather than above it.
+
+           Lower: which plan the optimizer chose is not a statistical quantity, so a handful of attributed
+           post-eviction executions settle it, and this arm is legitimate on a window the timeout closed
+           with three. Cost is statistical and gets the executions floor below. Collapsing the two would
+           either refuse to report a plan that demonstrably came back, or claim a cost improvement measured
+           on nothing.
+
+           Not zero, which is the part worth stating because the code reads as though it could run on every
+           call: the fact this arm tests does not EXIST before some executions have been attributed.
+           FREEPROCCACHE evicts the plan cache and Query Store keeps its plan row, so the regressed hash is
+           present the instant after the eviction and stays present — see ActivePlanHash's remarks. Running
+           this arm while the window is still open would therefore not report an early recompile; it would
+           report the pre-eviction plan, on every first call, and offer a force on it. Query Store's own
+           flush interval (DATA_FLUSH_INTERVAL_SECONDS, 900 by default) is why the elapsed limb's 30
+           minutes is the right order of magnitude rather than a round number.
+
+           There is a second reason to keep both verdicts behind one window even if the instrument were
+           instantaneous: OptimizerRecovered needs the executions floor, so an identity arm that fired
+           earlier would make the FORCE the quick answer and "nothing here needs pinning" the slow one.
+           That is the wrong asymmetry for a lever whose premise is that the cheapest fix pins nothing.
+           Pinned by OperatorRemediationFlowTests' window-open-with-a-matching-hash cases. */
         if (SameHash(observation.ActivePlanHash, regressedPlanHash))
         {
             return new RemediationObservationResult(

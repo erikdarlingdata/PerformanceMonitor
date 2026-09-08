@@ -115,6 +115,97 @@ public sealed class OperatorRemediationFlowTests
         Assert.Equal(RemediationObservationVerdict.OptimizerRecovered, result.Verdict);
     }
 
+    /// <summary>
+    /// <b>An open window is not decided, even when the hash already matches.</b> This is the case review
+    /// asked about (#3170) and it was genuinely uncovered — the wait fell out of putting the window guard
+    /// first, not out of a decision — so it is pinned here with its reason rather than left to read as an
+    /// accident either way.
+    ///
+    /// <para>The reason the wait is right is the INSTRUMENT, not caution about transient recompiles. A
+    /// targeted <c>DBCC FREEPROCCACHE(plan_handle)</c> evicts the plan CACHE and Query Store keeps its plan
+    /// row, so the regressed hash is present the instant after the eviction and stays present.
+    /// <see cref="RemediationObservation.ActivePlanHash"/> is therefore only meaningful once post-eviction
+    /// executions have been attributed to a plan — before that, an identity arm would not be catching an
+    /// early recompile, it would be reading the pre-eviction plan and offering a force on it, on the first
+    /// call, every time.</para>
+    ///
+    /// <para>Cheap to get wrong in the direction that acts: firing early would make the force the quick
+    /// answer and <see cref="RemediationObservationVerdict.OptimizerRecovered"/> — which needs the
+    /// executions floor — the slow one, on a lever whose premise is that the cheapest fix pins nothing.</para>
+    /// </summary>
+    [Fact]
+    public void AMatchingHashWhileTheWindowIsStillOpen_IsNotYetAVerdict()
+    {
+        /* One execution, seconds after the eviction, already reporting the regressed hash — exactly the
+           shape review described as "the evidence arrived on compile #1". */
+        var result = Observe(1, TimeSpan.FromSeconds(5), RegressedHash, Baseline);
+
+        Assert.Equal(RemediationObservationVerdict.StillObserving, result.Verdict);
+        Assert.Equal(ObservationWindowLimb.Open, result.Limb);
+        Assert.False(
+            result.ForceOffered,
+            "a force must not be offered on a plan hash read before any post-eviction execution was "
+            + "attributed — after a plan-cache eviction that hash is the pre-eviction plan's");
+    }
+
+    /// <summary>
+    /// The discriminating control for the pin above, and the reason it is not just "everything returns
+    /// StillObserving while the window is open". The SAME matching hash, once a limb closes, does reach
+    /// <see cref="RemediationObservationVerdict.RegressedPlanReturned"/> and does offer the force — so the
+    /// pin above is about the WINDOW and not about the hash comparison being broken.
+    /// </summary>
+    [Fact]
+    public void TheSameMatchingHash_BecomesAVerdictOnceEitherLimbCloses()
+    {
+        var byExecutions = Observe(Floor, TimeSpan.FromSeconds(5), RegressedHash, Baseline);
+        Assert.Equal(ObservationWindowLimb.Executions, byExecutions.Limb);
+        Assert.Equal(RemediationObservationVerdict.RegressedPlanReturned, byExecutions.Verdict);
+        Assert.True(byExecutions.ForceOffered);
+
+        var byTimeout = Observe(1, Window, RegressedHash, Baseline);
+        Assert.Equal(ObservationWindowLimb.Elapsed, byTimeout.Limb);
+        Assert.Equal(RemediationObservationVerdict.RegressedPlanReturned, byTimeout.Verdict);
+        Assert.True(byTimeout.ForceOffered);
+    }
+
+    /// <summary>
+    /// No verdict of any kind escapes an open window — asserted over every observation shape that reaches
+    /// a verdict once a limb closes, rather than for the matching-hash case alone. Exhaustive because the
+    /// failure mode is an arm someone later hoists above the window guard for one verdict and not the
+    /// others, which is precisely what the review question proposed.
+    /// </summary>
+    [Fact]
+    public void NoVerdictEscapesAnOpenWindow()
+    {
+        var shapes = new[]
+        {
+            ("regressed plan back", RegressedHash, (double?)Baseline),
+            ("cheaper plan", OtherHash, Baseline * 0.2),
+            ("worse plan", OtherHash, Baseline * 2),
+            ("indistinguishable plan", OtherHash, Baseline),
+            ("no cost yet", OtherHash, null),
+        };
+
+        var checkedShapes = 0;
+        foreach (var (label, hash, cpu) in shapes)
+        {
+            /* Below both limbs: one execution, five seconds. */
+            var open = Observe(1, TimeSpan.FromSeconds(5), hash, cpu);
+            Assert.Equal(ObservationWindowLimb.Open, open.Limb);
+            Assert.Equal(RemediationObservationVerdict.StillObserving, open.Verdict);
+            Assert.False(open.ForceOffered, $"{label} offered a force on an open window");
+
+            /* Positive control per shape: the same inputs DO reach a real verdict once the window closes,
+               so the assertion above is about the window rather than about an input that never decides
+               anything. Without this the loop would pass for a shape that is inconclusive regardless. */
+            var closed = Observe(Floor, Window, hash, cpu);
+            Assert.NotEqual(RemediationObservationVerdict.StillObserving, closed.Verdict);
+            checkedShapes++;
+        }
+
+        Assert.Equal(shapes.Length, checkedShapes);
+    }
+
     /* ---------------- the four verdicts ---------------- */
 
     [Fact]
