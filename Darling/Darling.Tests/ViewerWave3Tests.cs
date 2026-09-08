@@ -298,15 +298,35 @@ public sealed class ViewerWave3DisplayTests
         Assert.Equal("0.00", AlertRow(metric: "Store Disk Pressure", current: 0).CurrentValueDisplay);
     }
 
+    /// <summary>
+    /// #3169: the status column no longer mirrors Lite's channel mapping, and the two <c>tray</c> rows are
+    /// why. This SKU's store is written by the HEADLESS service, which has no tray and no toast code, so a
+    /// stored <c>tray</c> claims a UI event that cannot have happened — the reading #2781/#2814 already
+    /// removed on the web surface and this grid still had. Both surfaces now share one description with the
+    /// SKU's tray answer passed in.
+    ///
+    /// <para><c>true</c> alongside <c>tray</c> reads "No channel": it is unreachable for a new row, so it
+    /// can only be the resolution builder's old hardcoded constant. <c>false</c> alongside <c>tray</c> gets
+    /// #2781's neutral "Logged", because it merges no-channel, throttled and failed-webhook and nothing in
+    /// the row separates them — decoding it would be asserting the new semantics over old rows.</para>
+    /// </summary>
     [Theory]
-    [InlineData("email", true, null, "Sent")]
+    [InlineData("email", true, null, "Delivered")]
     [InlineData("email", false, "smtp exploded", "Failed")]
     [InlineData("email", false, null, "Not sent")]
-    [InlineData("tray", true, null, "Delivered")]
-    [InlineData("tray", false, null, "Shown")]
-    public void StatusDisplay_MirrorsLitesChannelMapping(string notif, bool sent, string? error, string expected)
+    [InlineData("webhook", true, null, "Delivered")]
+    [InlineData("email+webhook", true, null, "Delivered")]
+    [InlineData("none", false, null, "No channel")]
+    [InlineData("unconfigured", false, null, "No channel configured")]
+    [InlineData("undelivered", false, null, "Not sent")]
+    [InlineData("muted", false, null, "Muted")]
+    [InlineData("tray", true, null, "No channel")]
+    [InlineData("tray", false, null, "Logged")]
+    public void StatusDisplay_NamesTheChannelState_AndNeverClaimsATrayThisSkuLacks(
+        string notif, bool sent, string? error, string expected)
     {
         Assert.Equal(expected, AlertRow(notificationType: notif, alertSent: sent, sendError: error).StatusDisplay);
+        Assert.NotEqual("Shown", AlertRow(notificationType: notif, alertSent: sent, sendError: error).StatusDisplay);
     }
 
     [Fact]
@@ -559,7 +579,9 @@ public sealed class ViewerWave3LivePostgresTests
             Assert.Equal("High CPU", row.MetricName);
             Assert.Equal("95.5%", row.CurrentValueDisplay);
             Assert.Equal("tray", row.NotificationType);
-            Assert.Equal("Shown", row.StatusDisplay);
+            /* #3169: a pre-change row on a headless store, read conservatively — #2781's neutral label,
+               not the "Shown" this grid used to render for a surface with no tray. */
+            Assert.Equal("Logged", row.StatusDisplay);
             /* The read carries the raw context_json (the #1140 dedup fingerprint) through unchanged. */
             Assert.NotNull(row.ContextJson);
             Assert.Contains("DedupKey", row.ContextJson, StringComparison.Ordinal);

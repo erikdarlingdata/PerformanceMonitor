@@ -481,13 +481,22 @@ public sealed class ServerPageTabsTests
         Assert.DoesNotContain("errorStrip(res.message)", serverTabs, StringComparison.Ordinal);
         Assert.DoesNotContain("errorStrip(trend.message)", serverTabs, StringComparison.Ordinal);
 
-        /* #2781 on BOTH surfaces that render the status cell. */
+        /* #2781 on BOTH surfaces that render the status cell, in the generalized form #3169 gave it: the
+           surface-less channel is no longer just "tray" but every value that carries a STATE rather than
+           naming a channel, and both pages route through the one shared lookup in util.js instead of each
+           testing a literal. Asserted as the claim rather than as the old `!== "tray"` text, because that
+           text is now absent while the behaviour it stood for is strictly wider. What the values ARE, and
+           that they agree with the desktop surfaces' constants, is Darling.Tests.AlertTrayStatusLoggedTests. */
         var alerts = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "alerts.js"));
-        Assert.Contains("a.notification_type !== \"tray\"", alerts, StringComparison.Ordinal);
+        Assert.Contains("!STATE_ONLY_CHANNELS.has(a.notification_type)", alerts, StringComparison.Ordinal);
+        Assert.Contains(
+            PerformanceMonitor.Notifications.AlertDelivery.ChannelTray,
+            PerformanceMonitor.Notifications.AlertDelivery.StateCarryingChannels);
+
         var triage = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "triage.js"));
-        Assert.Contains("a.notification_type !== \"tray\"", triage, StringComparison.Ordinal);
+        Assert.Contains("alertDeliveryState(a)", triage, StringComparison.Ordinal);
     }
 
     /// <summary>

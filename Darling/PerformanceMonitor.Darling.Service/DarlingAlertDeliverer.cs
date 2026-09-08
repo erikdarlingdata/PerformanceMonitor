@@ -21,9 +21,14 @@ namespace PerformanceMonitor.Darling.Service;
 /// (when SMTP is configured and outside the per-fingerprint cooldown) and fans out to the shared
 /// <see cref="WebhookAlertService"/> (Teams/Slack), then ONE combined <c>config_alert_log</c> row
 /// is written per fired alert regardless of channel outcome — including muted alerts (flagged
-/// muted, channels skipped) and alerts with no channel configured at all (recorded as 'tray',
-/// Lite's taxonomy for delivered-without-email; the headless smoke asserts this row exists).
+/// muted, channels skipped) and alerts with no channel configured at all, whose row states
+/// <see cref="AlertDelivery.ChannelNoneConfigured"/> (the headless smoke asserts the row exists).
 /// Never throws — a dead SMTP server or Postgres store must not abort the engine's sweep.
+///
+/// <para>The row's disposition comes from <see cref="AlertDelivery.FromFanout"/> with
+/// <c>trayChannelPresent: false</c>. This service is headless: it has no tray icon and no toast code, so
+/// Lite's <c>tray</c> fallback — which is truthful there, where the deliverer really does show a balloon —
+/// would assert a UI event that cannot occur here (#3169).</para>
 ///
 /// <para>Delivery-mode fan-out (Lite/Dashboard parity): the effective mode is the shared
 /// <see cref="AlertDeliveryModeResolver"/> of a per-server override (#1236,
@@ -143,21 +148,11 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             outcome.MetricName, outcome.ServerName, currentValue, outcome.ThresholdValue,
             outcome.ServerKey, context, attemptChannels: !outcome.Muted);
 
-        /* Lite's single-row notification_type taxonomy (EmailAlertService.cs:68-80):
-           muted → "muted"; email attempted → "email"; webhook delivery upgrades to
-           "email+webhook"/"webhook"; otherwise "tray". */
-        var notificationType = outcome.Muted ? "muted" : "tray";
-        if (result.EmailAttempted)
-        {
-            notificationType = "email";
-        }
-
-        var sent = result.EmailSent;
-        if (result.WebhookSent)
-        {
-            notificationType = notificationType == "email" ? "email+webhook" : "webhook";
-            sent = true;
-        }
+        /* trayChannelPresent: false — this is the HEADLESS service. It has no tray icon and no toast
+           code, so the taxonomy's "tray" fallback (which is Lite's, and truthful there) would assert a UI
+           event that cannot occur here. Without a channel configured a fired alert is reported as
+           "unconfigured", which is the state an operator can act on. */
+        var delivery = AlertDelivery.FromFanout(result, outcome.Muted, trayChannelPresent: false);
 
         /* Always log the alert, regardless of channel status (EmailAlertService.cs:82-94). */
         string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
@@ -165,7 +160,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             outcome.ServerKey, outcome.ServerName, outcome.MetricName,
             currentValue, outcome.ThresholdValue,
             numericCurrentValue, numericThresholdValue,
-            sent, notificationType, result.SendError,
+            delivery,
             outcome.Muted, detailText, contextJson));
     }
 }

@@ -65,19 +65,12 @@ public class EmailAlertService : IFindingAlertSender
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted);
 
-            /* Combine the channel outcomes into Lite's single-row notification_type taxonomy:
-               muted → "muted"; email attempted → "email"; webhook delivery upgrades to
-               "email+webhook"/"webhook"; otherwise "tray". */
-            var notificationType = muted ? "muted" : "tray";
-            if (result.EmailAttempted)
-                notificationType = "email";
-
-            var sent = result.EmailSent;
-            if (result.WebhookSent)
-            {
-                notificationType = notificationType == "email" ? "email+webhook" : "webhook";
-                sent = true;
-            }
+            /* trayChannelPresent: true — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
+               non-muted alert on the same call that reaches here, so a stored "tray" really does mean a
+               toast was shown. This is Lite's half of the deliberate per-SKU divergence; the headless
+               Darling service passes false because it has no tray at all. Lite's stored values are
+               unchanged by the shared derivation. */
+            var delivery = AlertDelivery.FromFanout(result, muted, trayChannelPresent: true);
 
             /* Always log the alert, regardless of email status. The numeric current/threshold
                resolution happens in the store (it owns the DuckDB DOUBLE columns); the record
@@ -90,7 +83,7 @@ public class EmailAlertService : IFindingAlertSender
                 serverId.ToString(), serverName, metricName,
                 currentValue, thresholdValue,
                 numericCurrentValue, numericThresholdValue,
-                sent, notificationType, result.SendError,
+                delivery,
                 muted, detailText, contextJson));
         }
         catch (Exception ex)
