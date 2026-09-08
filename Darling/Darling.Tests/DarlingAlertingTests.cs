@@ -292,7 +292,10 @@ WHERE server_id = $1 AND metric_name = 'Deadlocks Detected'", connection))
                 read.Parameters.AddWithValue(TestServerId);
                 using var reader = await read.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct), "config_alert_log row missing for the deadlock fire");
-                Assert.Equal("tray", reader.GetString(0)); /* Lite's taxonomy: no email/webhook attempted */
+                /* #3169: the state this assertion's own comment already described. The headless service has
+                   no tray, so a fired alert with nothing configured says "unconfigured" rather than borrowing
+                   Lite's tray fallback. */
+                Assert.Equal(AlertDelivery.ChannelNoneConfigured, reader.GetString(0));
                 Assert.False(reader.GetBoolean(1));
                 Assert.False(reader.GetBoolean(2));
                 Assert.Contains("DedupKey", reader.GetString(3), StringComparison.Ordinal);
@@ -381,7 +384,7 @@ WHERE server_id = $1 AND metric_name = $2", connection))
             await historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 TestServerKey, TestServerName, metricName,
                 "92%", "90%", 92, 90,
-                AlertSent: true, NotificationType: "tray", SendError: null,
+                Delivery: AlertDelivery.NoChannelApplies(),
                 Muted: false, DetailText: null, ContextJson: ContextFor("walnut")));
 
             await Task.Delay(TimeSpan.FromMilliseconds(50), ct); /* force a distinguishable alert_time */
@@ -389,7 +392,7 @@ WHERE server_id = $1 AND metric_name = $2", connection))
             await historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 TestServerKey, TestServerName, metricName,
                 "95%", "90%", 95, 90,
-                AlertSent: true, NotificationType: "tray", SendError: null,
+                Delivery: AlertDelivery.NoChannelApplies(),
                 Muted: false, DetailText: null, ContextJson: ContextFor("cashew")));
 
             var walnutSeed = await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName, dedupKey: "walnut");

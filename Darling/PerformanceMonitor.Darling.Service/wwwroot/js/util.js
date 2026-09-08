@@ -391,6 +391,40 @@ async function classifyResponse(resp) {
   return { kind: "data", data: body };
 }
 
+/* ── alert delivery state (#3169) ──────────────────────────────────────────────────────────────────
+ * A config_alert_log row's notification_type either NAMES A CHANNEL (email / webhook / email+webhook)
+ * or STATES A DELIVERY STATE. The state values are listed here once, with the label every surface owes
+ * them, because there are three surfaces: this web dashboard, the WPF Darling Viewer and Lite's grid.
+ * The other two share PerformanceMonitor.Notifications.AlertDeliveryStatus; JS cannot call it, so this is
+ * the restatement, and Darling.Tests.AlertTrayStatusLoggedTests parses THIS OBJECT and compares it to
+ * those constants rather than scanning the branch text it used to.
+ *
+ * "tray" is a state here rather than a channel because this surface is HEADLESS - no system tray, no toast
+ * code - so a stored tray row records nothing that happened. #2781/#2814 established that and chose
+ * "Logged"; #3169 stopped the service writing it at all, so only rows recorded before then reach it.
+ */
+export const ALERT_STATE_LABELS = {
+  none: "No channel",
+  unconfigured: "No channel configured",
+  muted: "Muted",
+  undelivered: "Not sent",
+  tray: "Logged",
+};
+
+/**
+ * The delivery state of an alert-history row, or null when its notification_type names a real channel and
+ * the caller should fall through to its own sent/failed handling.
+ *
+ * Carries the one legacy signature that decodes: alert_sent true alongside "tray" is unreachable for a row
+ * written after #3169 - a row that delivered names its channel - so it can only be the resolution builder's
+ * old hardcoded true, which meant "no send channel applies" and never meant a delivery.
+ */
+export function alertDeliveryState(a) {
+  if (a.alert_sent && a.notification_type === "tray") return ALERT_STATE_LABELS.none;
+  if (a.alert_sent) return null;
+  return ALERT_STATE_LABELS[a.notification_type] || null;
+}
+
 /** GET a read-only tool by its MCP name with query-string params. */
 export function readTool(tool, params) {
   return apiGet("/api/read/" + tool + buildQuery(params));

@@ -83,12 +83,19 @@ public sealed class EmailSendCore
         bool emailSent = false;
         string? sendError = null;
 
-        /* Attempt email delivery if SMTP is fully configured */
-        if (attemptChannels &&
+        /* The SMTP gate, hoisted so the same expression both decides whether email is attempted and
+           answers "is any channel configured at all". A restatement of it somewhere else would be free to
+           drift; a reader of the result needs the answer from the code that consults the settings. */
+        var smtpConfigured =
             _settings.SmtpEnabled &&
             !string.IsNullOrWhiteSpace(_settings.SmtpServer) &&
             !string.IsNullOrWhiteSpace(_settings.SmtpFromAddress) &&
-            !string.IsNullOrWhiteSpace(_settings.SmtpRecipients))
+            !string.IsNullOrWhiteSpace(_settings.SmtpRecipients);
+
+        var anyChannelConfigured = smtpConfigured || _webhookAlertService.AnyWebhookConfigured;
+
+        /* Attempt email delivery if SMTP is fully configured */
+        if (attemptChannels && smtpConfigured)
         {
             /* #1154: per-fingerprint cooldown. Send if any incident in this alert is outside its
                window (a distinct fingerprint is not throttled by an unrelated prior incident);
@@ -147,7 +154,7 @@ public sealed class EmailSendCore
                 metricName, serverName, currentValue, thresholdValue, serverId, context);
         }
 
-        return new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent);
+        return new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyChannelConfigured);
     }
 
     /// <summary>Gets email delivery health summary (consecutive failures + last error).</summary>
@@ -233,10 +240,20 @@ public sealed class EmailSendCore
 /// <summary>
 /// What <see cref="EmailSendCore.TrySendAsync"/> did, so the per-app shell can record its
 /// alert-history rows: whether email was attempted (configured + outside cooldown), whether
-/// it actually sent, any send error, and whether a webhook was delivered.
+/// it actually sent, any send error, whether a webhook was delivered, and whether any channel
+/// was configured to attempt in the first place.
 /// </summary>
+/// <param name="AnyChannelConfigured">
+/// Whether SMTP or at least one webhook is configured on this deployment. Reported by the send core
+/// rather than derived by the caller because it comes from the very gates that decide what gets
+/// attempted, and it is the only thing that separates "nothing is set up" from "something is set up and
+/// this alert did not go out" — two states that otherwise both arrive as an all-false result with a null
+/// error. Note it is answered from configuration, so <c>attemptChannels: false</c> (a muted alert) still
+/// reports it truthfully.
+/// </param>
 public readonly record struct EmailFanoutResult(
     bool EmailAttempted,
     bool EmailSent,
     string? SendError,
-    bool WebhookSent);
+    bool WebhookSent,
+    bool AnyChannelConfigured);
