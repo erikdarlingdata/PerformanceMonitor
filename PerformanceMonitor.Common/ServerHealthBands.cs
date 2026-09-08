@@ -1031,8 +1031,17 @@ namespace PerformanceMonitor.Common
             + "this surface measures that.";
 
         /// <summary>
-        /// The sentence a collector that SPENT and STORED NOTHING gets, and the two readings it has to keep
-        /// apart (#3017).
+        /// The closing sentence every ZERO-OUTPUT reading ends on. One copy, because the branches differ in
+        /// what they claim about the row and agree only here — and a sentence that exists twice is the one
+        /// that gets reworded once, which is why <see cref="OutputWindowNote"/> is a constant too.
+        /// </summary>
+        private const string ZeroOutputCaveat =
+            "What this cannot tell you is whether the source really was empty: it counts rows stored, never "
+            + "what the monitored engine counted.";
+
+        /// <summary>
+        /// The sentence a collector that SPENT and STORED NOTHING gets, and the readings it has to keep
+        /// apart (#3017, #3160).
         ///
         /// <para><b>Why this is a sentence and not a band.</b> <c>pg_deadlocks</c> was the dearest collector
         /// on a managed store — 49,258,335 ms over 79,333 runs in seven days — and stored zero rows. That
@@ -1057,38 +1066,86 @@ namespace PerformanceMonitor.Common
         /// the window and is being denied right now gets no finding from here — that is
         /// <c>denied_since_last_success</c>'s own job on the same row, and firing a second time for it
         /// would make this a duplicate denial alarm rather than a cost/output instrument.</para>
+        ///
+        /// <para><b>The fourth term, and why it is a COUNT rather than a collector name (#3160).</b> The
+        /// event-collector reading is the right one for <c>deadlocks</c> and <c>blocked_process_report</c>
+        /// and wrong for <c>query_store</c>, which is not an event collector and stored zero rows on 11,728
+        /// consecutive runs on a read-replica fleet — every one of them carrying an empty-enumeration note.
+        /// Asserting the category there reaches the right conclusion by a rationale that does not hold, and
+        /// the identical sentence over a <c>query_store</c> that had genuinely stopped would read as
+        /// reassurance. <paramref name="noteCount"/> answers it from the row: runs that recorded what they
+        /// found get a finding that DEFERS to the note, and runs that recorded nothing keep the category
+        /// reading with its precondition stated out loud.</para>
+        ///
+        /// <para>A name list was the other option and it is the one #2511 exists to refuse — it would go
+        /// stale in the direction that makes it pass, because the next periodic collector to break gets the
+        /// event-collector sentence until somebody remembers to add it. The property being kept is that a
+        /// deliberate zero and a broken zero stay DISTINGUISHABLE, and neither branch is quieter than the
+        /// text it replaces: the "SUCCESS with zero rows" sweep that surfaced #3030, #3109 and #3154 reads
+        /// <c>rows_stored</c>, which nothing here touches.</para>
         /// </summary>
         /// <param name="rowsStored">Rows the window's runs stored (<c>rows_stored</c>). Positive = silent.</param>
         /// <param name="totalRuns">Runs in the window (<c>total_runs</c>) — the spend this qualifies.</param>
         /// <param name="deniedSinceLastSuccess">
         /// <see cref="DeniedSinceLastSuccess"/> for the same row. The third term: it is what turns "stored
-        /// nothing" from an ambiguity into one of two named readings.
+        /// nothing" from an ambiguity into a named reading.
         /// </param>
-        public static string FormatOutputFinding(long rowsStored, long totalRuns, bool deniedSinceLastSuccess)
+        /// <param name="noteCount">
+        /// <c>note_count</c> for the same row — how many of these runs recorded a note about what the run
+        /// itself found. The FOURTH term, and the one that stops the event-collector reading being asserted
+        /// over a collector that already said why (#3160).
+        /// </param>
+        public static string FormatOutputFinding(
+            long rowsStored,
+            long totalRuns,
+            bool deniedSinceLastSuccess,
+            long noteCount)
         {
             if (rowsStored > 0 || totalRuns <= 0)
             {
                 return string.Empty;
             }
 
-            return deniedSinceLastSuccess
-                ? string.Format(
+            if (deniedSinceLastSuccess)
+            {
+                return string.Format(
                     CultureInfo.InvariantCulture,
                     "Stored 0 rows across {0:N0} runs, and denied_since_last_success is true - the newest "
                     + "denial postdates the newest success, so this collector is being refused NOW and the "
                     + "spend bought nothing because nothing could be read. That is a grant, not a collector "
                     + "repair.",
-                    totalRuns)
-                : string.Format(
+                    totalRuns);
+            }
+
+            /* #3160: the runs accounted for themselves, so this defers instead of categorising. It reports
+               the COUNT and names where the reason is; it does not restate the note, which
+               FormatCollectionNote already renders and which would then exist twice. */
+            if (noteCount > 0)
+            {
+                return string.Format(
                     CultureInfo.InvariantCulture,
                     "Stored 0 rows across {0:N0} runs with no current denial (denied_since_last_success is "
-                    + "false), so this collector read and found nothing rather than being unable to read. "
-                    + "For one that stores a row only when an event occurs - a deadlock, a blocked-process "
-                    + "report, a blocking chain, a held xmin - zero is the correct resting state on a "
-                    + "well-behaved target and needs no action. What this cannot tell you is whether the "
-                    + "source really was empty: it counts rows stored, never what the monitored engine "
-                    + "counted.",
-                    totalRuns);
+                    + "false), so this collector read rather than being unable to read. {1:N0} of those runs "
+                    + "recorded a note about what the run itself found - last_note carries what they said, "
+                    + "and note_count against total_runs says how many. Read that note for why this zero "
+                    + "happened. It is deliberately NOT claimed here that this is a collector storing a row "
+                    + "only when an event occurs, which is the reading that applies only when no run "
+                    + "recorded anything. "
+                    + ZeroOutputCaveat,
+                    totalRuns,
+                    noteCount);
+            }
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "Stored 0 rows across {0:N0} runs with no current denial (denied_since_last_success is "
+                + "false), so this collector read and found nothing rather than being unable to read. "
+                + "For one that stores a row only when an event occurs - a deadlock, a blocked-process "
+                + "report, a blocking chain, a held xmin - zero is the correct resting state on a "
+                + "well-behaved target and needs no action. No run recorded a note, which is what that "
+                + "reading rests on. "
+                + ZeroOutputCaveat,
+                totalRuns);
         }
     }
 
