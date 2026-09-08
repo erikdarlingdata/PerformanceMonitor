@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -108,7 +109,7 @@ public class CollectionLogPhaseSplitStoreTests
     public void ThePhaseTriple_IsAllOrNothing_AndAMeasuredZeroSurvives()
     {
         var measured = new CollectorRunResult(
-            Rows: 150, SqlMs: 4902, StorageMs: 300,
+            Rows: 150, SqlMs: 4902, StorageMs: 300, Measurements: CollectorContext.NoMeasurements,
             ServerPhasesMeasured: true, ServerOpenMs: 149, ServerDrainMs: 4724, ServerWatermarkMs: 51);
 
         var phases = measured.ServerPhases;
@@ -121,14 +122,14 @@ public class CollectionLogPhaseSplitStoreTests
            "this path emits no split", which is a different fact and the one #2851 added the flag to tell
            apart. */
         var instant = new CollectorRunResult(
-            Rows: 5, SqlMs: 100, StorageMs: 10,
+            Rows: 5, SqlMs: 100, StorageMs: 10, Measurements: CollectorContext.NoMeasurements,
             ServerPhasesMeasured: true, ServerOpenMs: 0, ServerDrainMs: 0, ServerWatermarkMs: 0);
 
         Assert.NotNull(instant.ServerPhases);
         Assert.Equal(0, instant.ServerPhases!.Value.OpenMs);
 
         /* Not measured - the enumerated and per-database paths - stores nothing rather than three zeros. */
-        var unmeasured = new CollectorRunResult(Rows: 10, SqlMs: 500, StorageMs: 20);
+        var unmeasured = new CollectorRunResult(Rows: 10, SqlMs: 500, StorageMs: 20, Measurements: CollectorContext.NoMeasurements);
         Assert.Null(unmeasured.ServerPhases);
     }
 

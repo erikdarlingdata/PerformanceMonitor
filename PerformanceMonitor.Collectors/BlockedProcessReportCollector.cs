@@ -802,12 +802,40 @@ OUTER APPLY
         new CollectorColumn("blocking_query_plan_xml", CollectorColumnType.Varchar),
     };
 
+    /* ── #3161: what this collector measured, for its own collection_log row ───────────────────────────
+       A quiet server and a server whose every captured report we failed to parse both used to arrive as
+       SUCCESS, zero rows, NULL note — and only the second is a fault. The ring buffer read is already
+       filtered to the watermark SERVER-side, so a zero EventsRead is genuinely "nothing new was captured",
+       and these four counts separate that from the two ways a captured event gets dropped in this method.
+
+       COUNTS, not a verdict: the read derives which situation it is looking at, every time it looks. A
+       stored conclusion would be a stale gate the moment somebody restarted the session or fixed the
+       capture — see CollectorMeasurement and CollectorRuntimePrecondition (#2546). Nothing here is computed
+       for the note: all four figures are the loop's own bookkeeping, so the cost is four increments and no
+       extra round trip. */
+
+    /// <summary>Events the ring-buffer read delivered — already watermark-filtered server-side.</summary>
+    public const string EventsReadMeasurement = "events_read";
+
+    /// <summary>Delivered events carrying no report XML at all.</summary>
+    public const string EmptyReportMeasurement = "report_xml_empty";
+
+    /// <summary>Delivered events whose report XML this collector could not parse.</summary>
+    public const string UnparsedReportMeasurement = "report_xml_unparsed";
+
+    /// <summary>Events that became stored rows.</summary>
+    public const string EventsStoredMeasurement = "events_stored";
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        var eventsRead = 0;
+        var emptyReports = 0;
+        var unparsedReports = 0;
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            eventsRead++;
             var eventTime = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0);
             var reportXml = reader.IsDBNull(1) ? null : reader.GetString(1);
             /* #1140: object_id/database_id are the event's own data fields and contentious_object
@@ -822,6 +850,7 @@ OUTER APPLY
 
             if (string.IsNullOrEmpty(reportXml))
             {
+                emptyReports++;
                 continue;
             }
 
@@ -829,6 +858,7 @@ OUTER APPLY
             var parsed = ParseReportXml(reportXml, eventTime);
             if (parsed == null)
             {
+                unparsedReports++;
                 continue;
             }
 
@@ -846,6 +876,14 @@ OUTER APPLY
             parsed.DatabaseName = context.CurrentDatabaseName ?? parsed.DatabaseName;
             rows.Add(parsed);
         }
+
+        /* Measure() ACCUMULATES a repeated label, which is what makes this correct on the per-database
+           shape: RunsPerDatabase is true on Azure SQL DB, so the host calls this method once per database
+           against the one context, and the cycle reports the sum rather than the last database's slice. */
+        context.Measure(EventsReadMeasurement, eventsRead);
+        context.Measure(EmptyReportMeasurement, emptyReports);
+        context.Measure(UnparsedReportMeasurement, unparsedReports);
+        context.Measure(EventsStoredMeasurement, rows.Count);
 
         return rows;
     }

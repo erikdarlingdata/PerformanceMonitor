@@ -185,10 +185,10 @@ public class CollectionLogDrainForensicsStoreTests
     [Fact]
     public void TheForensicsAreAbsentUnlessThePathMeasuredThem()
     {
-        Assert.Null(new CollectorRunResult(0, 0, 0).Drain);
+        Assert.Null(new CollectorRunResult(0, 0, 0, CollectorContext.NoMeasurements).Drain);
 
         var measured = new CollectorRunResult(
-            0, 120051, 0, Abandoned: true, ServerPhasesMeasured: true,
+            0, 120051, 0, CollectorContext.NoMeasurements, Abandoned: true, ServerPhasesMeasured: true,
             ServerOpenMs: 104, ServerDrainMs: 119945,
             ServerRowsRead: 0, ServerBytesRead: 0, ServerLastReadMs: -1, TargetSessionId: 77);
 
@@ -213,7 +213,7 @@ public class CollectionLogDrainForensicsStoreTests
     {
         /* Exactly the shape the abandon-during-open path produces. */
         var openStall = new CollectorRunResult(
-            0, 120051, 0, Abandoned: true, ServerPhasesMeasured: true,
+            0, 120051, 0, CollectorContext.NoMeasurements, Abandoned: true, ServerPhasesMeasured: true,
             ServerOpenMs: 120051, ServerDrainMs: 0);
 
         var drain = openStall.Drain!.Value;
