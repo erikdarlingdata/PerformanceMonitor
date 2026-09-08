@@ -465,21 +465,29 @@ public sealed class CompressionClearanceWatchTests
     }
 
     /// <summary>
-    /// The enum's declaration ORDER is its severity order, which <c>IsTighter</c> relies on to rank a band
-    /// against a band. Pinned rather than left as a property of how the members happen to be written: a
-    /// reordering would silently invert the summary's choice of which policy to name.
+    /// The property the per-tick summary's single ranking key rests on: both classifier boundaries fall at
+    /// the same SHARE of clearance on every minute in the band, so ranking by share is ranking by band.
+    ///
+    /// <para><b>Integer division is the thing that would break it</b>, which is why this is asserted as
+    /// exactness rather than as an inequality: <see cref="TimescaleSupport.CompressionClearanceWatchSeconds"/>
+    /// truncates, so a clearance that was not a multiple of the watch fraction's denominator would round the
+    /// line down and put that one minute's boundary at a different share from every other minute's. The
+    /// consequence would be silent — a summary naming a reading whose band is milder than one it passed
+    /// over.</para>
     /// </summary>
     [Fact]
-    public void TheClearanceBands_AreDeclaredInSeverityOrder()
+    public void BothClassifierBoundaries_FallAtTheSameShareOfClearanceOnEveryMinute()
     {
-        Assert.True(
-            TimescaleSupport.CompressionClearanceBand.InsideClearance
-                < TimescaleSupport.CompressionClearanceBand.ApproachingRefresh,
-            "InsideClearance no longer sorts below ApproachingRefresh");
-        Assert.True(
-            TimescaleSupport.CompressionClearanceBand.ApproachingRefresh
-                < TimescaleSupport.CompressionClearanceBand.RefreshOverrun,
-            "ApproachingRefresh no longer sorts below RefreshOverrun");
+        var numerator = TimescaleSupport.WindowWatchLeadNumerator;
+        var denominator = TimescaleSupport.WindowWatchLeadDenominator;
+
+        foreach (var minute in TimescaleSupport.CompressionPhaseMinutes)
+        {
+            var clearance = TimescaleSupport.CompressionMinuteClearanceSeconds(minute);
+            var watch = TimescaleSupport.CompressionClearanceWatchSeconds(minute);
+
+            Assert.Equal(clearance * numerator, watch * denominator);
+        }
     }
 
     /// <summary>

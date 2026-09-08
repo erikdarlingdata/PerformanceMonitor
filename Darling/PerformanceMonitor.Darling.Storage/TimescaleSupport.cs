@@ -5258,45 +5258,38 @@ WHERE j.proc_name LIKE '%compression%'
     }
 
     /// <summary>
-    /// Which of two clearance readings is the one worth naming in the per-tick summary: the more SEVERE band
-    /// first, and within a band the larger share of its own clearance.
+    /// Which of two clearance readings is the one worth naming in the per-tick summary: the larger share of
+    /// its own clearance.
     ///
-    /// <para><b>Band before share, because a share cannot rank a zero clearance.</b>
-    /// <see cref="CompressionActivity.PercentOfClearance"/> is null exactly when the clearance is ZERO, which
-    /// is reachable in production and is the worst geometry there is: a policy the converge could not put on
-    /// a fixed schedule, drifted onto a minute an hourly refresh also starts on.
+    /// <para><b>The share IS the severity, so this needs no second key — and that is a PROPERTY rather than
+    /// a coincidence.</b> <see cref="ClassifyCompressionClearance"/>'s two boundaries are the clearance and
+    /// five sixths of it, and every clearance the grid can produce is a whole number of minutes, so both
+    /// boundaries fall at the same SHARE on every minute in the band — 83.3% and 100%. Ranking by share is
+    /// therefore ranking by band, and a reading the line calls the tightest can never carry a milder band
+    /// than one it passed over. <c>CompressionClearanceWatchTests</c> pins that exactness, because integer
+    /// division is what would break it: a clearance that was not a multiple of six would round the watch
+    /// line down and the two orders would diverge on that minute alone.</para>
+    ///
+    /// <para><b>A missing share means a ZERO clearance, and its limit is infinity rather than zero.</b>
+    /// <see cref="CompressionActivity.PercentOfClearance"/> is null exactly there — inside this walk the
+    /// duration and the minute are both known, so a zero denominator is the only way to lose it — and zero
+    /// clearance is reachable in production and is the worst geometry there is: a policy the converge could
+    /// not put on a fixed schedule, drifted onto a minute an hourly refresh also starts on.
     /// <see cref="ClassifyCompressionClearance"/> already bands that
     /// <see cref="CompressionClearanceBand.RefreshOverrun"/> for any non-negative run. Defaulting the missing
-    /// share to zero would rank the worst case BELOW a routine reading and the summary would name the wrong
-    /// policy — the per-item Warning still fires, so the cost is the aggregate line pointing away from the
-    /// thing it exists to point at. Raised by review.</para>
+    /// share to zero ranked that policy BELOW a routine reading, so the summary named the wrong one — the
+    /// per-item Warning fires either way, so the cost was the aggregate line pointing away from the thing it
+    /// exists to point at. Raised by review.</para>
     ///
-    /// <para>The share defaults to <see cref="double.PositiveInfinity"/> rather than zero for the same
-    /// reason, as a second line of defence if the band ordering were ever the thing that failed: an
-    /// undefined ratio over a zero denominator with a positive numerator has that limit, not zero.</para>
-    ///
-    /// <para>The enum's declaration ORDER is the severity order this relies on, which is why
-    /// <c>CompressionClearanceWatchTests</c> pins it rather than leaving it as a property of how the members
-    /// happen to be written.</para>
+    /// <para><b>One key rather than a band key and a share key.</b> A severity key would be redundant given
+    /// the exactness above, and a redundant arm makes each arm individually unfalsifiable: with both present,
+    /// restoring the zero default changes no outcome and a mutation sweep reports the defect as unreachable.
+    /// So the property is pinned and the comparison is single.</para>
     /// </summary>
-    private static bool IsTighter(CompressionActivity candidate, CompressionActivity? incumbent)
-    {
-        if (incumbent is null)
-        {
-            return true;
-        }
-
-        var candidateBand = candidate.ClearanceBand ?? CompressionClearanceBand.InsideClearance;
-        var incumbentBand = incumbent.ClearanceBand ?? CompressionClearanceBand.InsideClearance;
-
-        if (candidateBand != incumbentBand)
-        {
-            return candidateBand > incumbentBand;
-        }
-
-        return (candidate.PercentOfClearance ?? double.PositiveInfinity)
+    private static bool IsTighter(CompressionActivity candidate, CompressionActivity? incumbent) =>
+        incumbent is null
+        || (candidate.PercentOfClearance ?? double.PositiveInfinity)
             > (incumbent.PercentOfClearance ?? double.PositiveInfinity);
-    }
 
     /// <summary>
     /// Re-arms one stuck background job via the parameterized <see cref="RearmJobSql"/> (job_id BOUND). Returns
