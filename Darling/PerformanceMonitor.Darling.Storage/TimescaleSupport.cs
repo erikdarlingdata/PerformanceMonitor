@@ -5230,21 +5230,48 @@ WHERE j.proc_name LIKE '%compression%'
                 tightest = item;
             }
 
+            /* DERIVED FROM THE MINUTE, not defaulted from a nullable. Both are non-null inside this walk -
+               the loop guard above has already skipped a reading with no minute or no duration - so taking
+               them off the minute removes the `?? 0` rather than hiding one, and a zero clearance below is a
+               REAL zero rather than a defaulted null. */
+            var clearance = CompressionMinuteClearanceSeconds(minute);
+            var clear = clearance - duration.TotalSeconds;
+
+            /* THE SHARE IS PATTERN-MATCHED, NEVER DEFAULTED, and that is the whole of this block's shape.
+               PercentOfClearance is null exactly when the clearance is ZERO - the sink case - and defaulting
+               it to 0d rendered that case as "0.0%", byte-identical to a near-instant run with the whole band
+               to spare. A reading that gets more alarming as it gets worse everywhere else wrapped around to
+               look BEST in the one case with no room at all, and 0.0% could not be told from "finished
+               instantly" by the operator reading it. So the two measurable bands take the share by pattern
+               and the null falls through to its own finding. Raised by review. */
             switch (band)
             {
-                case CompressionClearanceBand.RefreshOverrun:
+                case CompressionClearanceBand.RefreshOverrun when item.PercentOfClearance is not null:
                     logger.LogWarning(
                         "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, at or past the {Clearance}s it had before the next hourly refresh started ({Over:F0}s past it) — so it was still holding AccessExclusiveLock when a refresh wanted the table. This is the daily chunk close: every hypertable's newest {Days}d chunk becomes eligible at the same UTC midnight, so one tick a day carries a full day's rewrite while the other twenty-three find nothing (#3112). The grid's guard is one-sided by decision, so the tail of the compression band has one refresh step of clearance and this is that residual being spent. Widening it costs minutes the heaviest refresh's window is holding (#3174).",
-                        item.HypertableName, duration.TotalSeconds, minute, item.ClearanceSeconds ?? 0,
-                        -(item.ClearOfRefreshSeconds ?? 0d), CompressAfterDays);
+                        item.HypertableName, duration.TotalSeconds, minute, clearance, -clear, CompressAfterDays);
                     break;
 
-                case CompressionClearanceBand.ApproachingRefresh:
+                case CompressionClearanceBand.ApproachingRefresh when item.PercentOfClearance is double percent:
                     logger.LogInformation(
                         "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, {Percent:F1}% of the {Clearance}s it had before the next hourly refresh ({Clear:F0}s clear, watch line {Watch}s).",
-                        item.HypertableName, duration.TotalSeconds, minute, item.PercentOfClearance ?? 0d,
-                        item.ClearanceSeconds ?? 0, item.ClearOfRefreshSeconds ?? 0d,
-                        CompressionClearanceWatchSeconds(minute));
+                        item.HypertableName, duration.TotalSeconds, minute, percent,
+                        clearance, clear, CompressionClearanceWatchSeconds(minute));
+                    break;
+
+                /* THE SINK CASE, and it is a DIFFERENT FINDING rather than the same one with an awkward
+                   number. An ordinary overrun says the day's rewrite outgrew a tight minute, and its remedy
+                   is the band's width. A policy sitting on a refresh's OWN minute says the phase grid was
+                   never applied to it, and its remedy is the converge - so the chunk-close reasoning above
+                   would point an operator at the wrong lever. Reached from either band, so an
+                   ApproachingRefresh with no share - which the arithmetic does not currently allow, since a
+                   zero clearance makes both boundaries zero and every non-negative run an overrun - would
+                   land here rather than on a milder line. That is the direction to be wrong in. */
+                case CompressionClearanceBand.RefreshOverrun:
+                case CompressionClearanceBand.ApproachingRefresh:
+                    logger.LogWarning(
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, which is a minute an hourly refresh ALSO starts on — so it had NO CLEARANCE whatsoever, not a small amount, and was contending from the moment it began. Its share of clearance is UNDEFINED rather than low. A compression policy on a refresh's own minute means the phase grid was never applied to it, so the remedy is the phase converge and not the band's width (#3035/#3112).",
+                        item.HypertableName, duration.TotalSeconds, minute);
                     break;
 
                 default:
@@ -5275,14 +5302,27 @@ WHERE j.proc_name LIKE '%compression%'
                 driftExample.ObservedStartMinute ?? 0, driftExample.AssignedPhaseMinute ?? 0);
         }
 
-        if (tightest is not null)
+        /* The summary splits the same way and for the same reason: the policy SELECTED because it has no
+           clearance must not be REPORTED as a low share of it. Everything here is derived from the tightest
+           reading's own minute, so no rendered quantity is a defaulted null. */
+        if (tightest is not null && tightest.ClearanceMinute is int tightestMinute)
         {
-            logger.LogDebug(
-                "TimescaleDB: tightest compression clearance this tick is {Hypertable} at {Percent:F1}% of its {Clearance}s from :{Minute:00} ({Band}); the band runs {Widest}s down to {Narrowest}s of clearance.",
-                tightest.HypertableName, tightest.PercentOfClearance ?? 0d, tightest.ClearanceSeconds ?? 0,
-                tightest.ClearanceMinute ?? 0, tightest.ClearanceBand,
-                CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[0]),
-                CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[^1]));
+            var widest = CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[0]);
+            var narrowest = CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[^1]);
+
+            if (tightest.PercentOfClearance is double tightestShare)
+            {
+                logger.LogDebug(
+                    "TimescaleDB: tightest compression clearance this tick is {Hypertable} at {Percent:F1}% of its {Clearance}s from :{Minute:00} ({Band}); the band runs {Widest}s down to {Narrowest}s of clearance.",
+                    tightest.HypertableName, tightestShare, CompressionMinuteClearanceSeconds(tightestMinute),
+                    tightestMinute, tightest.ClearanceBand, widest, narrowest);
+            }
+            else
+            {
+                logger.LogDebug(
+                    "TimescaleDB: tightest compression clearance this tick is {Hypertable} with NO CLEARANCE at all — it ran from :{Minute:00}, a minute an hourly refresh also starts on, so its share of clearance is UNDEFINED rather than low ({Band}); the band runs {Widest}s down to {Narrowest}s of clearance.",
+                    tightest.HypertableName, tightestMinute, tightest.ClearanceBand, widest, narrowest);
+            }
         }
     }
 

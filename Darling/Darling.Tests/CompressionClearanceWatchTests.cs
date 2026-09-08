@@ -587,6 +587,93 @@ public sealed class CompressionClearanceWatchTests
         }
     }
 
+    /// <summary>
+    /// The RENDERED line for a zero-clearance reading cannot read as a low percentage, and cannot be confused
+    /// with a near-instant run that had the whole band to spare.
+    ///
+    /// <para><b>Why the pin is on the output and not on the selection.</b> The selection was already right —
+    /// <c>IsTighter</c> treats a missing share as maximally tight, and a test asserting it picks the
+    /// zero-clearance policy passes with the defect present. The defect was in the REPORTING: the share was
+    /// then printed with a zero default, so the one case with no room at all rendered "0.0%", byte-identical
+    /// to a 0.1 s run with eighteen minutes spare. Every other reading in this watch gets more alarming as it
+    /// gets worse; that one wrapped around to look best, and an operator scanning the share would skip it.
+    /// A pin on the selection cannot see any of that. Raised by review.</para>
+    ///
+    /// <para>The comparison is made on the SHARES extracted from each rendering rather than on the whole
+    /// text, because the two lines differ in their clearance figure anyway — under the defect they differed
+    /// there while agreeing on the number a reader actually scans.</para>
+    /// </summary>
+    [Fact]
+    public void AZeroClearanceReading_CannotRenderAsALowPercentage_AndDiffersFromANearInstantRun()
+    {
+        var refreshStart = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HourlyRefreshPhaseOrder[0]);
+        Assert.Equal(0, TimescaleSupport.CompressionMinuteClearanceSeconds(refreshStart));
+
+        var hypertable = ChunkCloseReadings[0].Hypertable;
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(hypertable, out var assigned));
+
+        var roomy = TimescaleSupport.CompressionMinuteClearanceSeconds(assigned);
+        Assert.True(roomy > 0, "the comparison minute has no clearance either, so this case cannot contrast");
+
+        /* THE PREMISE, asserted before anything is rendered: the share really is unavailable in one and
+           available in the other, so the two rendering rules genuinely differ here. */
+        var sinkReading = Reading(hypertable, refreshStart, seconds: 5d);
+        var nearInstantReading = Reading(hypertable, assigned, seconds: 0.1d);
+        Assert.Null(sinkReading.PercentOfClearance);
+        Assert.NotNull(nearInstantReading.PercentOfClearance);
+
+        var sink = Render(sinkReading);
+        var nearInstant = Render(nearInstantReading);
+
+        var sinkShares = Percentages(sink);
+        var nearInstantShares = Percentages(nearInstant);
+
+        /* The near-instant run DOES render a share. Without this the comparison below could pass because
+           neither side rendered one. */
+        Assert.NotEmpty(nearInstantShares);
+
+        /* No share the sink case renders may read as low. Vacuous on its own when the case renders none at
+           all, which is why the distinct token is required next. */
+        Assert.All(
+            sinkShares,
+            share => Assert.True(
+                share >= 100d,
+                $"a zero-clearance reading rendered {share}% — the one case with no room at all must not "
+                + "render as a low percentage, because that is the most reassuring thing the format can say"));
+
+        Assert.Contains("NO CLEARANCE", sink, StringComparison.Ordinal);
+        Assert.Contains("UNDEFINED rather than low", sink, StringComparison.Ordinal);
+
+        /* THE DISCRIMINATOR. Under the defect both renderings carried the same "0.0%" and this is what saw
+           it; the two clauses above would also have fired, so the pin is covered three ways. */
+        Assert.NotEqual(nearInstantShares, sinkShares);
+
+        /* It is a DIFFERENT FINDING, not the same one with an awkward number: a policy on a refresh's own
+           minute means the phase grid was never applied to it, so the chunk-close reasoning would point at
+           the wrong lever. */
+        Assert.Contains("Warning:", sink, StringComparison.Ordinal);
+        Assert.Contains("the phase grid was never applied", sink, StringComparison.Ordinal);
+        Assert.DoesNotContain("chunk close", sink, StringComparison.Ordinal);
+
+        /* And the ordinary overrun keeps that finding, so the two cases are not merged into one message. */
+        var ordinary = Render(Reading(hypertable, assigned, seconds: roomy + 1d));
+        Assert.Contains("chunk close", ordinary, StringComparison.Ordinal);
+        Assert.NotEmpty(Percentages(ordinary));
+    }
+
+    private static string Render(params CompressionActivity[] tick)
+    {
+        var logger = new CapturingTestLogger();
+        TimescaleSupport.LogCompressionActivity(tick, DateTime.UtcNow, logger);
+        return logger.Joined;
+    }
+
+    /// <summary>Every percentage the rendering states, as numbers — the figure a reader actually scans.</summary>
+    private static double[] Percentages(string rendered) =>
+        Regex.Matches(rendered, @"([0-9]+(?:\.[0-9]+)?)%")
+            .Select(match => double.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture))
+            .ToArray();
+
     private static CompressionActivity Reading(string hypertable, int startMinute, double seconds) =>
         new(
             hypertable,
