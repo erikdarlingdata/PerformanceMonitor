@@ -4422,7 +4422,6 @@ LIMIT 1";
             var heaviestRefresh = await TimescaleSupport.ReadHeaviestRefreshRuntimeAsync(
                 connection, _logger, cancellationToken);
             TimescaleSupport.LogHeaviestRefreshSlotHeadroom(heaviestRefresh, _logger);
-            readClock.Restart();
 
             /* #3182: whether either ceiling CONSTANT has been overtaken, which is a different finding from
                the band above and is levelled and rate-limited separately. The band answers "does this run
@@ -4442,6 +4441,9 @@ LIMIT 1";
                     _logger);
             }
 
+            /* One restart per I/O boundary, not per statement: the two log calls above are synchronous, so a
+               restart between them would hand the catch below a ~0 ms elapsed for the READ that actually
+               faulted. Raised by review. */
             readClock.Restart();
 
             /* And the same question for the OTHER twelve hourly refreshes, which had no live reading keyed
