@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
@@ -14,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
 namespace Darling.Tests;
@@ -101,9 +103,13 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
             !await PgstatindexResolvesInPublicAsync(connection, ct),
             "public.pgstatindex is not callable on this rig, so the collector's query cannot run at all.");
 
-        /* The SHIPPED string, from the collector the service dispatches - not a copy of it. Literals,
-           shape and all. */
-        var sql = PgIndexBloatCollector.Instance.BuildQuery(MakeContext()).Text;
+        /* The SHIPPED query, from the collector the service dispatches - not a copy of it. Literals,
+           shape and all. Since #3153 it also carries BOUND parameters when a rotation cursor exists, so
+           the plan travels rather than just its text: executing the text alone would fail with an
+           unsupplied parameter the moment a cursor is stored, which is the one state this suite must be
+           able to reach. */
+        var plan = PgIndexBloatCollector.Instance.BuildQuery(MakeContext());
+        var sql = plan.Text;
 
         var bodySucceeded = false;
         try
@@ -136,7 +142,7 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
                "this index was admitted", and it stays correct however pgstatindex renders an odd index
                (an empty one reports avg_leaf_density as NaN, which is not NULL and would count either
                way). */
-            var counts = await ReadCountsAsync(connection, sql, ct);
+            var counts = await ReadCountsAsync(connection, plan, ct);
 
             Assert.True(
                 counts.Candidates > counts.Measured,
@@ -151,7 +157,7 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
             Assert.Equal(0, counts.AdmittedButUnmeasured);
 
             /* And L: how many times the executor actually entered pgstatindex. This is the whole test. */
-            var loops = await ReadPgstatindexLoopsAsync(connection, sql, ct);
+            var loops = await ReadPgstatindexLoopsAsync(connection, plan, ct);
 
             Assert.Equal(counts.Measured, loops);
 
@@ -169,27 +175,230 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
         }
     }
 
+
+    /// <summary>
+    /// The measured set really does ROTATE, and a full pass really does cover every candidate — measured
+    /// by driving the shipped query through consecutive cycles and feeding each cycle's own cursor back in
+    /// exactly as the host does (#3153).
+    ///
+    /// <para><b>Why this executes rather than reading the query.</b> The pre-#3153 collector produced
+    /// correct-looking output on every cycle — right row count, a <c>skipped_reason</c> on every skipped
+    /// index — while measuring the SAME index forever, because the ordering was a pure function of the
+    /// target catalog and measuring an index does not change its size. No assertion on the text can tell
+    /// "rotates" from "does not": the two differ in what a SECOND cycle selects. So this asserts on the
+    /// union of what several cycles measured, which is the property the <c>skipped_reason</c> claims.</para>
+    ///
+    /// <para><b>The three things it pins, and why each can fail on its own.</b> Cycle 2 must measure a
+    /// DISJOINT set from cycle 1 — a cursor that did not advance re-measures the same rows. The union over
+    /// a pass must be EVERY candidate — a cursor that advanced too far skips rows, and a wrap that fired
+    /// early strands them. And no row, on any cycle, may carry a null measurement with a null reason —
+    /// which is what a gate conjunct without a matching <c>CASE</c> arm produces, silently.</para>
+    ///
+    /// <para>The COUNT bound is what is made to bind, as in the sibling test above and for the same
+    /// reason: pushing the candidate set past 200 costs a few hundred single-page indexes, while pushing
+    /// it past the byte budget would cost gigabytes. Both bounds are enforced by the same <c>WHERE</c> on
+    /// the same relation, so exercising either exercises the mechanism.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheMeasuredSetRotates_AndAFullPassCoversEveryCandidate_AgainstLivePostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the pg_index_bloat rotation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        await TryExecuteAsync(connection, "CREATE EXTENSION IF NOT EXISTS pgstattuple SCHEMA public", ct);
+
+        if (!await PgstatindexResolvesInPublicAsync(connection, ct))
+        {
+            await TryExecuteAsync(connection, "ALTER EXTENSION pgstattuple SET SCHEMA public", ct);
+        }
+
+        Assert.SkipWhen(
+            !await PgstatindexResolvesInPublicAsync(connection, ct),
+            "public.pgstatindex is not callable on this rig, so the collector's query cannot run at all.");
+
+        /* The connected database's real name, because the cursor is keyed by it and the statement selects
+           its own row with current_database(). Read from the server rather than parsed out of the
+           connection string, which may not name it at all. */
+        await using var whoami = new NpgsqlCommand("SELECT current_database()", connection);
+        var databaseName = (string)(await whoami.ExecuteScalarAsync(ct))!;
+
+        var bodySucceeded = false;
+        try
+        {
+            await ExecuteAsync(connection, $"DROP SCHEMA IF EXISTS {RotationSchema} CASCADE", ct);
+            await ExecuteAsync(connection, $"CREATE SCHEMA {RotationSchema}", ct);
+            await ExecuteAsync(
+                connection,
+                $"CREATE TABLE {RotationSchema}.candidates AS SELECT g AS id FROM generate_series(1, 200) AS g",
+                ct);
+            await ExecuteAsync(
+                connection,
+                $"""
+                 DO $$
+                 BEGIN
+                     FOR n IN 1..{ProbeIndexCount.ToString(CultureInfo.InvariantCulture)} LOOP
+                         EXECUTE format(
+                             'CREATE INDEX ix_rot_%s ON {RotationSchema}.candidates ((id + %s))',
+                             lpad(n::text, 4, '0'), n);
+                     END LOOP;
+                 END $$
+                 """,
+                ct);
+
+            /* The host's own loop, reduced to what this property needs: build from the stored state, read
+               through the definition, then land what the definition asked to persist. */
+            var state = new Dictionary<string, string>(StringComparer.Ordinal);
+            var perCycle = new List<HashSet<long>>();
+            var candidateCounts = new List<int>();
+            var cursors = new List<string>();
+
+            for (var cycle = 0; cycle < RotationCycles; cycle++)
+            {
+                var plan = PgIndexBloatCollector.Instance.BuildQuery(MakeContext(state, databaseName));
+                var context = MakeContext(state, databaseName);
+
+                List<PgIndexBloatCollector.Row> rows;
+                await using (var command = ProviderCommand(connection, plan, plan.Text))
+                await using (var reader = await command.ExecuteReaderAsync(ct))
+                {
+                    rows = await PgIndexBloatCollector.Instance.ReadAsync(reader, context, ct);
+                }
+
+                /* The invariant that holds on EVERY cycle: a row is measured or it says why. A gate
+                   conjunct with no matching CASE arm returns rows with neither, and an empty index really
+                   does report a null density — so "blank measurement" alone is not detectable at read
+                   time, which is what makes this the load-bearing check rather than a nicety. */
+                Assert.DoesNotContain(
+                    rows,
+                    r => r.SkippedReason is null && r.LeafPages is null && r.AvgLeafDensity is null);
+
+                /* And the complement, which is what makes the gate a BOUND rather than a label: no row may
+                   carry a reason AND a measurement. That shape means pgstatindex was pointed at an index
+                   this statement had already declared it was not going to read — the I/O is spent, the
+                   label denies it, and the output is otherwise indistinguishable from a working cycle.
+                   Measured with the rotation window removed from the gate on a 210-index probe: 200 of the
+                   210 rows came back saying "above the rotation cursor" with a tree_level on them. This is
+                   the same category as #2617 and #2997, where the bound sat on the nullable side of an
+                   outer join and read correctly while the statement read the whole instance.
+
+                   tree_level rather than a density: pgstatindex always returns a level, while an EMPTY
+                   index legitimately reports a null avg_leaf_density even though it was measured. */
+                Assert.DoesNotContain(rows, r => r.SkippedReason is not null && r.TreeLevel is not null);
+
+                candidateCounts.Add(rows.Count);
+                perCycle.Add(rows.Where(r => r.SkippedReason is null).Select(r => r.IndexOid).ToHashSet());
+
+                foreach (var entry in context.PendingState)
+                {
+                    state[entry.Key] = entry.Value;
+                }
+
+                cursors.Add(state[PgIndexBloatCollector.RotationCursorKeyPrefix + databaseName]);
+            }
+
+            /* The census never moves: rotation bounds what is MEASURED, never what is reported. */
+            Assert.Single(candidateCounts.Distinct());
+
+            /* The count bound has to have bitten, or nothing below distinguishes rotation from a database
+               that simply fits in one cycle. */
+            Assert.True(
+                perCycle[0].Count < candidateCounts[0],
+                $"cycle 1 measured all {candidateCounts[0]} candidates, so this run cannot tell a rotating "
+                + "cursor from a stationary one. Raise ProbeIndexCount above the collector's count bound");
+
+            /* THE assertion: cycle 2 measured different indexes. Against the pre-#3153 collector these two
+               sets are identical, because nothing carried the first cycle's position forward. */
+            Assert.NotEmpty(perCycle[1]);
+            Assert.Empty(perCycle[0].Intersect(perCycle[1]));
+
+            /* And the pass covers everything, which "measures something different" alone does not imply:
+               a cursor that jumped too far would also satisfy the check above while stranding rows. */
+            var covered = new HashSet<long>();
+            foreach (var cycleSet in perCycle)
+            {
+                covered.UnionWith(cycleSet);
+            }
+
+            Assert.Equal(candidateCounts[0], covered.Count);
+
+            /* The pass ENDS, and says so with the marker rather than by parking the cursor forever. */
+            Assert.Contains(PgIndexBloatCollector.RotationPassCompleteMarker, cursors);
+
+            /* And it starts again: the cycle after the marker measures a non-empty set, so a completed
+               pass is a wrap and not a stop. */
+            var wrappedAt = cursors.IndexOf(PgIndexBloatCollector.RotationPassCompleteMarker);
+            Assert.True(
+                wrappedAt < perCycle.Count - 1,
+                "the pass completed on the last cycle, so this run never observed it start over. Raise "
+                + "RotationCycles");
+            Assert.NotEmpty(perCycle[wrappedAt + 1]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await ExecuteAsync(cleanup, $"DROP SCHEMA IF EXISTS {RotationSchema} CASCADE", cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>Its own schema, so the two live tests in this file cannot see each other's indexes.</summary>
+    private const string RotationSchema = "darling_test_pg_index_bloat_rotation";
+
+    /// <summary>
+    /// Enough cycles to see a full pass END and the next one BEGIN, at 210 candidates against a 200-index
+    /// bound: 200, then 10, then the empty cycle that detects the pass is over and wraps, then the pass
+    /// again. Four would do; six leaves room for the store to hold an index or two of its own inside the
+    /// candidate set without the wrap sliding off the end of the run.
+    /// </summary>
+    private const int RotationCycles = 6;
+
     /// <summary>
     /// Wraps the shipped query so its own output supplies the expectations, rather than this test carrying
     /// a second copy of the budget arithmetic that could agree with a wrong answer.
     /// </summary>
     private static async Task<(int Candidates, int Measured, int AdmittedButUnmeasured)> ReadCountsAsync(
-        NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+        NpgsqlConnection connection, CollectorQuery plan, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(
+        await using var command = ProviderCommand(
+            connection,
+            plan,
             $"""
              SELECT count(*)::int                                                              AS candidates,
                     count(*) FILTER (WHERE q.skipped_reason IS NULL)::int                      AS measured,
                     count(*) FILTER (WHERE q.skipped_reason IS NULL
                                      AND q.avg_leaf_density IS NULL)::int                      AS admitted_unmeasured
-             FROM ({sql}) AS q
-             """,
-            connection);
+             FROM ({plan.Text}) AS q
+             """);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         Assert.True(await reader.ReadAsync(cancellationToken));
 
         return (reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2));
+    }
+
+    /// <summary>
+    /// Builds the command through the SAME provider the service dispatches with, then swaps in the
+    /// wrapper text. The parameter mapping is the shipped one rather than one retyped here — a test that
+    /// bound its own types could pass while <c>PostgresTargetProvider</c>'s mapping did not resolve,
+    /// which is precisely the class of failure this suite exists to catch.
+    /// </summary>
+    private static NpgsqlCommand ProviderCommand(
+        NpgsqlConnection connection, CollectorQuery plan, string wrappedText)
+    {
+        var command = (NpgsqlCommand)PostgresTargetProvider.Instance.CreateCommand(
+            plan, connection, PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride ?? 300);
+
+        command.CommandText = wrappedText;
+
+        return command;
     }
 
     /// <summary>
@@ -199,11 +408,12 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
     /// wrong node, or nothing.
     /// </summary>
     private static async Task<int> ReadPgstatindexLoopsAsync(
-        NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+        NpgsqlConnection connection, CollectorQuery plan, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(
-            $"EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, COSTS OFF, SUMMARY OFF)\n{sql}",
-            connection);
+        await using var command = ProviderCommand(
+            connection,
+            plan,
+            $"EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, COSTS OFF, SUMMARY OFF)\n{plan.Text}");
 
         var planJson = (string?)await command.ExecuteScalarAsync(cancellationToken);
         Assert.False(string.IsNullOrEmpty(planJson));
@@ -284,7 +494,8 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
         }
     }
 
-    private static CollectorContext MakeContext() => new()
+    private static CollectorContext MakeContext(
+        IReadOnlyDictionary<string, string>? state = null, string? currentDatabase = null) => new()
     {
         ServerId = 42,
         ServerName = "pg-target",
@@ -296,6 +507,8 @@ public sealed class PgIndexBloatBudgetLivePostgresTests
             PostgresMajorVersion = 17,
         },
         ExcludedDatabases = Array.Empty<string>(),
+        State = state ?? CollectorContext.NoState,
+        CurrentDatabaseName = currentDatabase,
     };
 
     private sealed class NoDeltas : ICollectorDeltaCalculator

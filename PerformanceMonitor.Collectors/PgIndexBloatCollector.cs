@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Globalization;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -54,6 +56,27 @@ namespace PerformanceMonitor.Collectors;
 /// <c>skipped_reason</c> populated, because a size cap that made indexes disappear would read as "no bloat
 /// here" on precisely the biggest ones.</para>
 ///
+/// <para><b>The measured set ROTATES, and that is what makes the deferral in a
+/// <c>skipped_reason</c> true.</b> The cycle budget admits roughly one near-ceiling index, and largest-first
+/// ordering picks the same one every time — so a stateless version of this collector measured index #1
+/// forever while stamping the other 2,456 with "not measured this cycle (work budget)", a claim of DEFERRAL
+/// that no mechanism could honour (#3153). A per-database cursor
+/// (<see cref="RotationCursorKeyPrefix"/>) records where the last cycle stopped; the next cycle resumes
+/// strictly below it and wraps to the largest index once nothing measurable is left beneath it. Largest-first
+/// is kept, because it is the right PRIOR for one cycle — the median index on the first production target is
+/// 216 kB and 70% of the census is under 1 MB, so smallest-first would maximise a row count over objects
+/// whose bloat is worth kilobytes. What was wrong was repeating a prior with no memory, which turns it into a
+/// permanent selection of one index.</para>
+///
+/// <para><b>This collector's census is the COMPLETE btree population — no size floor</b> — which is why it
+/// returns MORE rows than <see cref="PgIndexUsageStatsCollector"/> for the same target on the same day
+/// (2,500 against 1,517 measured on the first production target, a 65% difference; #3158). That collector
+/// applies a deliberate 64 kB floor and is the REPORTABLE SUBSET; this one applies none, because a bloat
+/// census has to be complete to be a census. Both are correct for their own purpose and the difference is
+/// entirely that one floor: every row in the gap was under 64 kB. The counter-intuitive direction — the
+/// btree-only collector returning more rows than the all-access-method one — is a red herring: every index
+/// on that target is a btree, so the access-method filter costs this collector nothing there.</para>
+///
 /// <para>Primaries only. A standby's index files are byte-identical to the primary's by replication, so
 /// measuring both spends the same full-index read twice for one answer.</para>
 /// </summary>
@@ -66,13 +89,28 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     }
 
     /// <summary>
-    /// Indexes at or above this many bytes are recorded but not measured. The read is proportional to
-    /// index size, so this bounds what any single index can cost.
+    /// Indexes at or above this many bytes are recorded but NEVER measured — permanently, not this cycle.
+    /// The read is proportional to index size, so this bounds what any single index can cost.
     ///
     /// <para>It moves in lockstep with <see cref="CycleMeasureBudgetBytes"/>, because the cycle budget may
     /// never sit below it: the band between the two would be indexes that are legitimate candidates,
     /// earn no "too large" reason, and yet exceed the whole cycle on their own first row every run.
-    /// Lowering one without the other manufactures exactly that band.</para>
+    /// Lowering one without the other manufactures exactly that band — and since #3153 that band would
+    /// stall the ROTATION CURSOR rather than merely mislabel one index, which is a strictly worse
+    /// failure. See <see cref="CycleMeasureBudgetBytes"/> for the argument in full.</para>
+    ///
+    /// <para><b>Over-ceiling indexes are a terminal state, and the row says so.</b> On the first
+    /// production target 43 indexes sat above this ceiling, holding 311 GB — 68% of that instance's index
+    /// footprint, mean 7.4 GB, largest 27 GB. At the rate that target's own SUCCESS row measured, reading
+    /// that set is about 11 hours and its largest member alone is roughly an hour in one statement, so no
+    /// per-statement deadline this product could plausibly set reaches them: <c>pgstatindex</c> is the
+    /// wrong instrument for them rather than a mis-tuned one. Raising the ceiling does not help, and an
+    /// estimator is not available — <c>pg_stats</c> returns zero rows to a <c>pg_monitor</c>-only login
+    /// (see the type header). So their reason states PERMANENCE instead of implying a deferral, and points
+    /// at what does cover them: <see cref="PgIndexUsageStatsCollector"/> runs on the same target at the
+    /// same daily cadence with the same retention, needs no extension, records <c>index_bytes</c> and
+    /// <c>table_bytes</c> per index, and covers all 43 — an index growing while its table's row count does
+    /// not is itself a bloat signal, and it is already collected.</para>
     /// </summary>
     public const long MeasureCeilingBytes = 2L * 1024 * 1024 * 1024;
 
@@ -138,14 +176,128 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// collector refuses to let stand for "never". Equal is the tightest value with no such band, and
     /// <c>TheCycleBudget_IsNeverBelowThePerIndexCeiling</c> pins it.</para>
     ///
+    /// <para><b>Rotation did not weaken that floor — it made it LOAD-BEARING for liveness (#3153).</b>
+    /// Because <c>budget &gt;= ceiling</c>, the first sub-ceiling candidate at or below the rotation cursor
+    /// is admitted unconditionally: its own size is under the ceiling, hence under the budget, so the
+    /// running total cannot already have excluded it. That single guarantee is what makes the cursor
+    /// advance by at least one index EVERY cycle, which is in turn what makes "a later run in this pass
+    /// reaches this index" a fact rather than a hope. Drop the budget below the ceiling and a band index
+    /// sitting at the cursor is admitted by neither gate, so the cycle measures NOTHING, records the pass
+    /// as complete, wraps to the largest index, and arrives back at the same band index — the collector
+    /// stops measuring anything at all, on every index, permanently. The band used to mislabel one index;
+    /// it now stops the whole mechanism. Decoupling the two therefore needs an unconditional
+    /// first-admission rule and a deadline constraint restated as a SUM (<c>ceiling + budget</c>) rather
+    /// than an ordering, which is a separate change with its own arithmetic to argue.</para>
+    ///
     /// <para><b>Accepted consequence.</b> An index at or above the ceiling is reported at its size with
     /// the ceiling's own reason and is never measured — on a large target that includes the biggest and
     /// most reclaimable indexes on the instance. That is a real gap, and it is stated in the row rather
     /// than hidden: the alternative on offer is not "measure them" but "measure nothing", which is what
-    /// an unbounded statement delivers. Coverage of the tail additionally depends on the measured set
-    /// rotating, which it does not do.</para>
+    /// an unbounded statement delivers. See <see cref="MeasureCeilingBytes"/> for why that set is terminal
+    /// at this geometry and which collector carries its size trend instead.</para>
+    ///
+    /// <para><b>What this bound does NOT buy.</b> Coverage is not budget-limited; before #3153 it was
+    /// memory-limited, and now it is CADENCE-limited. A complete pass over the first production target's
+    /// 2,457 measurable indexes is a fixed ~19.6M blocks however it is spread, so at one statement per day
+    /// a full pass takes months. Rotation converts "never" into "eventually"; how long "eventually" is, is
+    /// set by how much <c>pgstatindex</c> time per day is acceptable on a production instance and by
+    /// nothing else. That is a scheduling decision, not a number this constant can express.</para>
     /// </summary>
     public const long CycleMeasureBudgetBytes = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Prefix of the per-database rotation cursor key in <c>collector_state</c> (V44, primary key
+    /// <c>(server_id, collector_name, state_key)</c>) — the concrete key is
+    /// <c>RotationCursorKeyPrefix || database_name</c>, the same shape <c>query_store</c>'s per-database
+    /// keys use.
+    ///
+    /// <para><b>Why the key is per DATABASE while <see cref="CollectorContext.State"/> is per server.</b>
+    /// <see cref="RunsPerDatabase"/> is true, and a cursor shared across databases would advance one
+    /// database past indexes another database never measured — which is the false claim this whole change
+    /// exists to remove, reintroduced one level up. So each database carries its own, and
+    /// <see cref="BuildQuery"/> splices every loaded cursor into the statement with
+    /// <c>current_database()</c> choosing the right one, because the host builds this collector's query
+    /// ONCE for the whole per-database sweep.</para>
+    ///
+    /// <para><b>Why declaring the PREFIX in <see cref="StateKeys"/> is enough.</b> Both hosts use the
+    /// declared list only as a gate — <c>StateKeys.Count == 0</c> decides whether a state query runs at
+    /// all — and the query itself is <c>WHERE server_id = $1 AND collector_name = $2</c>, so it returns
+    /// every key stored under this collector's name, not only the declared ones.
+    /// <c>TheStateLoadIsByCollectorName_NotByDeclaredKey</c> pins that, because a future change that
+    /// filtered the load down to the declared keys would silently return nothing here: rotation would stop
+    /// and the collector would look exactly like it does today, measuring one index forever.</para>
+    ///
+    /// <para><b>Orphans are PRUNED, and "a few dozen bytes" was the wrong unit.</b> A dropped database's
+    /// cursor matches no <c>current_database()</c> again, so it changes no behaviour on its own — but
+    /// <see cref="BuildQuery"/> splices EVERY loaded cursor and the host reuses that one statement for each
+    /// live database, so the cost is
+    /// <c>O(databases ever seen) x O(live databases this cycle)</c> in query text and bound parameters,
+    /// every cycle, permanently. At three parameters per cursor that reaches PostgreSQL's 65,535-parameter
+    /// statement limit at 21,845 names ever having existed — verified against PostgreSQL 17 with this
+    /// query's own <c>resume</c> shape: 21,845 cursors execute (1.5 MB of SQL), and 21,846 throw
+    /// <c>A statement cannot have more than 65535 parameters</c> before the statement is sent, which fails
+    /// the cycle for EVERY database rather than degrading. So the host prunes them against the database
+    /// list its own sweep enumerated — see <see cref="PgPerDatabaseCollectorState"/>, and note that the
+    /// query_store prune cannot serve this prefix because its live-database source is a SQL Server
+    /// snapshot.</para>
+    ///
+    /// <para><b>A database that disappears and comes back starts at the LARGEST index, deliberately.</b>
+    /// The prune deletes its cursor, so it is indistinguishable from a database seen for the first time.
+    /// Resuming mid-pass instead would be actively wrong rather than merely wasteful: a recreated database
+    /// has a new catalog, so the stored <c>(bytes, oid)</c> coordinate names an oid that no longer exists,
+    /// and every index sorting above that coordinate in the NEW catalog would be stamped
+    /// <c>above the rotation cursor</c> — asserting that this pass already advanced past an index it has
+    /// never measured. That is the same false claim #3153 exists to remove, so the honest cost is at most
+    /// one pass of re-measurement.</para>
+    /// </summary>
+    public const string RotationCursorKeyPrefix = "rotate:";
+
+    /// <summary>
+    /// Stored in place of a cursor when a cycle measured nothing, which — given
+    /// <see cref="CycleMeasureBudgetBytes"/> is never below <see cref="MeasureCeilingBytes"/> — can only
+    /// mean no measurable candidate is left below the cursor: the pass is done and the next one starts at
+    /// the largest index again.
+    ///
+    /// <para>A sentinel rather than a deletion, because <see cref="CollectorContext.PendingState"/> is
+    /// upserted and never deletes: leaving the old value in place would park the cursor at the end of the
+    /// pass forever. It parses as "no cursor", so it lands on the same conservative path as an absent or
+    /// unreadable value.</para>
+    /// </summary>
+    public const string RotationPassCompleteMarker = "wrap";
+
+    /// <summary>
+    /// The most cursors <see cref="BuildQuery"/> will splice into one statement. Above this it splices
+    /// NONE, and every database starts its pass at the largest index.
+    ///
+    /// <para><b>A backstop, not the bound.</b> What bounds the cursor list is the host's prune
+    /// (<see cref="PgPerDatabaseCollectorState"/>), which holds it at the count of LIVE databases. This
+    /// exists because that prune has a realistic silent-no-op path — an enumeration that keeps coming back
+    /// empty is a permissions failure the prune must not act on, and a store written by a build that
+    /// predates the prune carries whatever it accumulated. Without a cap the accumulation ends at
+    /// PostgreSQL's 65,535-parameter limit, where the statement throws before being sent and the cycle
+    /// fails for every database; with one it degrades to the pre-#3153 selection instead.</para>
+    ///
+    /// <para><b>Why 1,024.</b> Twenty-one times below the parameter ceiling (1,024 x 3 = 3,072 of 65,535)
+    /// and about nine times the largest per-database fan-out this product has measured, so no real target
+    /// reaches it — measured on PostgreSQL 17, a 1,024-cursor <c>resume</c> is 69 KB of SQL and executes in
+    /// single-digit milliseconds, while 21,845 is 1.5 MB. A target that does reach it has already
+    /// accumulated a thousand orphans, which is the broken state this makes graceful.</para>
+    ///
+    /// <para><b>No row lies when it engages.</b> Splicing no cursor makes every candidate in-window, so the
+    /// reasons that remain are the ceiling and work-budget ones, which are true; nothing claims to be above
+    /// a cursor. Degraded and honest, which is the direction to fail in.</para>
+    /// </summary>
+    public const int MaxSplicedCursors = 1_024;
+
+    /// <summary>
+    /// Where one database's last cycle stopped: the coordinate, in this collector's own measurement order,
+    /// of the last index it measured.
+    /// </summary>
+    /// <param name="DatabaseName">The database the cursor belongs to, from the state key's suffix.</param>
+    /// <param name="IndexBytes">The measurement order's leading column, descending.</param>
+    /// <param name="IndexOid">The tiebreaker, ascending — unique per database, which
+    /// <c>index_name</c> is not.</param>
+    public readonly record struct RotationCursor(string DatabaseName, long IndexBytes, long IndexOid);
 
     /// <param name="AvgLeafDensity">The server's own figure, 0–100. NOT a bloat percentage — a healthy
     /// index sits near 90, so subtracting from 100 invents roughly 10 points of bloat that is not there.</param>
@@ -154,8 +306,13 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// <param name="EmptyPages">Pages holding nothing. Directly reclaimable by <c>REINDEX</c> and the most
     /// concrete number here.</param>
     /// <param name="DeletedPages">Pages marked deleted and awaiting reuse.</param>
-    /// <param name="SkippedReason">Null when measured. Populated when the index was too large to read, so a
-    /// cap can never masquerade as an absence of bloat.</param>
+    /// <param name="SkippedReason">Null when measured. Populated when the index was not measured — too
+    /// large for the ceiling, already passed by the rotation cursor, or past this cycle's work budget — so
+    /// a bound can never masquerade as an absence of bloat.</param>
+    /// <param name="IndexOid">NOT STORED, and deliberately absent from <see cref="PayloadColumns"/>: the
+    /// rotation cursor needs a coordinate that is unique per database and <c>index_name</c> is not, so the
+    /// oid is projected for <see cref="ReadAsync"/> to compute the next cursor from and then discarded.
+    /// Adding it to the payload would be a store rung for a value no read wants.</param>
     public readonly record struct Row(
         string? DatabaseName,
         string? SchemaName,
@@ -169,7 +326,8 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
         long? DeletedPages,
         double? AvgLeafDensity,
         double? LeafFragmentation,
-        string? SkippedReason);
+        string? SkippedReason,
+        long IndexOid);
 
     /* The candidate set is fenced with OFFSET 0 so the btree filter is applied BEFORE pgstatindex is
        called on anything. See the type header for why that matters more than usual here.
@@ -199,7 +357,7 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
        public.pg_buffercache.
 
        The oid is cast to regclass because that is the parameter type; an unqualified oid does not match. */
-    private const string QueryText = @"
+    private static string BuildQueryText(string resumeBody) => @"
 WITH candidates AS (
     SELECT
         n.nspname                       AS schema_name,
@@ -223,14 +381,58 @@ WITH candidates AS (
     AND   n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
     OFFSET 0
 ),
+/* WHERE THE LAST CYCLE STOPPED (#3153), for THIS database, and the only thing in this statement that is
+   not a pure function of the target catalog.
+
+   Exactly one row, always: an aggregate with no GROUP BY returns one row even over an empty input, so the
+   cross join below can never drop a candidate and an absent cursor arrives as NULL rather than as a
+   missing row. At most one VALUES row can match - the state dictionary is keyed by database name - so the
+   max() is picking a value, not combining several.
+
+   Every cursor the host loaded is spliced, not just this database's, because BuildQuery is called ONCE per
+   cycle for the whole per-database sweep: the collector declares no watermark, so the host builds the plan
+   before it opens the first database. current_database() is what selects this database's row, which is
+   also why the cursor coordinate is a SIZE and an OID rather than a row offset. */
+resume AS (
+" + resumeBody + @"
+),
+/* THE ROTATION WINDOW: the candidates at or below the cursor, in the statement's own measurement order.
+
+   Written once, here, because it is needed three times below - by both window aggregates FILTER clauses
+   and by the gate - and a predicate this shape retyped three times is three chances to disagree.
+
+   The comparison is the measurement order run backwards, and it has to match that order exactly or the
+   cursor is not a resume point: index_bytes DESCENDING, then index_oid ASCENDING. index_oid is the
+   tiebreaker precisely because it is UNIQUE per database, which index_name is not - pg_class is unique on
+   (relname, relnamespace), so two schemas can hold equally-sized indexes of the same name, and a cursor
+   parked on a non-unique coordinate would exclude a sibling it never measured while labelling it as
+   already passed. Measured on PostgreSQL 17.11: exactly that pair at 1,138,688 bytes each.
+
+   STRICTLY greater, never >=. Re-admitting the index the cursor names would look conservative and is the
+   one shape that can stall: an index just under the ceiling would be re-measured, exhaust the budget on
+   its own, leave the cursor unchanged, and be re-measured forever.
+
+   An index that GREW past the cursor, or was created above it, sits outside the window without having
+   been measured this pass - which is why the reason for those rows claims the cursor position and the
+   wrap, not that the index was measured. Bounded by one pass either way. */
+windowed AS (
+    SELECT
+        k.*,
+        (r.cursor_bytes IS NULL
+         OR k.index_bytes < r.cursor_bytes
+         OR (k.index_bytes = r.cursor_bytes
+             AND k.index_oid::bigint > r.cursor_oid)) AS in_rotation_window
+    FROM candidates AS k
+    CROSS JOIN resume AS r
+),
 /* THE ACCOUNTING for the work budget (#2617), and only the accounting - in_budget below is what
    enforces it. pgstatindex reads every page it is pointed at, so an unbounded statement reads the
    whole instance: measured on a live Aurora target, 1,517 indexes totalling 461 GB in a single
    statement, which never finished and dropped the connection mid-read.
 
-   Ranked by size and measured largest-first, because bloat that matters is concentrated in big
-   indexes - a small index at 40% density is worth kilobytes. Everything past the budget is still
-   RETURNED, with a reason, so the read never mistakes unmeasured for healthy.
+   Ranked by size and measured largest-first WITHIN THE ROTATION WINDOW, because bloat that matters is
+   concentrated in big indexes - a small index at 40% density is worth kilobytes. Everything past the
+   budget is still RETURNED, with a reason, so the read never mistakes unmeasured for healthy.
 
    TWO figures, and the BYTE one is what bounds the work (#2997). A count bounds pages only where
    count correlates with bytes; on the first production target it did not - at a 20 GB per-index
@@ -238,38 +440,57 @@ WITH candidates AS (
    ceiling it was measured at because the ceiling is what decides which indexes are sub-ceiling. The
    count survives because it is legible - an operator can predict the biggest N in a way they cannot
    predict a byte figure - not because it bounds anything: see CycleMeasureBudgetBytes for which of
-   the two is load-bearing. */
+   the two is load-bearing.
+
+   BOTH are now counted over the rows this cycle can actually measure, which is what makes them
+   compatible with rotation. A rank over the whole census would count the rows ALREADY passed and the
+   over-ceiling ones that are never handed to the function, so the count bound would stop admitting
+   anything at all once the cursor moved past its Nth row - a hard stop dressed as a budget. It also
+   fixes a latent miscount the count bound had while it was unreachable: size_rank counted over-ceiling
+   indexes, so up to 43 of its 200 slots went to indexes nothing ever measures. */
 ranked AS (
     SELECT
         k.*,
-        row_number() OVER (ORDER BY k.index_bytes DESC, k.index_name) AS size_rank,
+        /* 1-based position among the indexes this cycle will measure. count(*) FILTER rather than
+           row_number(), because row_number() takes no FILTER and the rank has to skip the rows the
+           gate skips; count over an empty frame is 0, never NULL. */
+        count(*) FILTER (WHERE k.index_bytes < " + CeilingLiteral + @" AND k.in_rotation_window)
+            OVER (ORDER BY k.index_bytes DESC, k.index_oid
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS measure_rank,
         /* The running total of what will actually be READ, so the cycle can stop at a byte figure
-           rather than a row count. FILTERed to sub-ceiling indexes because an over-ceiling one is
-           never handed to pgstatindex and therefore costs no pages; charging it to the budget would
-           spend the whole allowance on indexes nobody reads. Since the over-ceiling indexes sort
-           first and can total more than the budget between them, the unfiltered form would exhaust
-           the allowance before the first measurable index and measure nothing at all.
+           rather than a row count. FILTERed to sub-ceiling indexes IN THE WINDOW because those are
+           the only ones handed to pgstatindex and therefore the only ones that cost pages; charging
+           an over-ceiling or already-passed index to the budget would spend the whole allowance on
+           indexes nobody reads. Since the over-ceiling indexes sort first and can total more than the
+           budget between them, the unfiltered form would exhaust the allowance before the first
+           measurable index and measure nothing at all.
 
            coalesce because a FILTERed window sum is NULL until its frame contains a matching row,
-           and the over-ceiling indexes sort FIRST under size DESC. NULL <= budget is NULL rather
-           than false, so the raw form would leave the gate neither open nor closed. */
+           and the over-ceiling and already-passed indexes both sort FIRST under this ordering.
+           NULL <= budget is NULL rather than false, so the raw form would leave the gate neither
+           open nor closed. */
         coalesce(
-            sum(k.index_bytes) FILTER (WHERE k.index_bytes < " + CeilingLiteral + @")
-                OVER (ORDER BY k.index_bytes DESC, k.index_name
+            sum(k.index_bytes) FILTER (WHERE k.index_bytes < " + CeilingLiteral + @" AND k.in_rotation_window)
+                OVER (ORDER BY k.index_bytes DESC, k.index_oid
                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
             0)::bigint                      AS measured_bytes_through_here
-    FROM candidates AS k
+    FROM windowed AS k
 ),
-/* THE GATE, and the only place the three bounds are enforced. Selecting the relation pgstatindex is
+/* THE GATE, and the only place the four bounds are enforced. Selecting the relation pgstatindex is
    applied to is what makes them bounds; a qual on the function's join makes them labels. Fenced with
    OFFSET 0 on the same argument as the candidate set - when the failure mode is that the collector
-   returns nothing at all, the bound should not rest on the planner choosing to push a filter down. */
+   returns nothing at all, the bound should not rest on the planner choosing to push a filter down.
+
+   The rotation window is enforced HERE and not in candidates, because a candidate outside the window
+   must still be RETURNED with its size and a reason. Filtering the census would make an index the
+   cursor has passed indistinguishable from one that does not exist. */
 in_budget AS (
     SELECT
         k.index_oid                     AS index_oid
     FROM ranked AS k
     WHERE k.index_bytes < " + CeilingLiteral + @"
-    AND   k.size_rank  <= " + BudgetLiteral + @"
+    AND   k.in_rotation_window
+    AND   k.measure_rank <= " + BudgetLiteral + @"
     AND   k.measured_bytes_through_here <= " + CycleByteBudgetLiteral + @"
     OFFSET 0
 ),
@@ -302,22 +523,39 @@ SELECT
     m.deleted_pages::bigint             AS deleted_pages,
     m.avg_leaf_density::double precision   AS avg_leaf_density,
     m.leaf_fragmentation::double precision AS leaf_fragmentation,
+    /* Four arms, and the split between them is the whole point of #3153: exactly one of them describes a
+       PERMANENT outcome, and it is the one that says so. The other three are deferrals that a later cycle
+       in this pass really does honour, because the cursor advances by at least one index every cycle. */
     CASE
         WHEN k.index_bytes >= " + CeilingLiteral + @"
-            THEN 'index is larger than the measurement ceiling; pgstatindex reads every page, so it is '
-                 || 'recorded but not measured'
+            THEN 'larger than the measurement ceiling: pgstatindex reads every page, and no per-statement '
+                 || 'deadline this collector can set reaches an index this size. Recorded but NEVER '
+                 || 'measured - this is not a deferral. Its size trend is collected by pg_index_usage_stats.'
+        /* Already passed by the cursor. This arm exists because without it these rows would arrive with
+           every measurement NULL and NO reason - the one output shape this collector must never produce,
+           since a blank measurement with no reason is indistinguishable from a measured emptiness. It
+           claims the CURSOR POSITION and the wrap rather than claiming the index was measured, because an
+           index that grew into this range, or was created in it, was not. */
+        WHEN NOT k.in_rotation_window
+            THEN 'above the rotation cursor: this pass has already advanced past this position, and the '
+                 || 'cursor comes back to it when the pass wraps to the largest index. Recorded at its '
+                 || 'size so it is never mistaken for healthy.'
         /* The BYTE budget is reported ahead of the count one because it is the bound that actually
            binds on a large-index target, and an index past both is past this one first. */
         WHEN k.measured_bytes_through_here > " + CycleByteBudgetLiteral + @"
-            THEN 'not measured this cycle (work budget): pgstatindex reads every page, so a run '
-                 || 'stops once it has measured ' || pg_catalog.pg_size_pretty(" + CycleByteBudgetLiteral + @"::bigint)
-                 || ' of index, largest first. This one is recorded at its size so it is never '
-                 || 'mistaken for healthy.'
-        WHEN k.size_rank > " + BudgetLiteral + @"
-            THEN 'not measured this cycle (work budget): pgstatindex reads every page, so only the '
-                 || 'largest ' || " + BudgetLiteral + @" || ' indexes are measured per run. This one is '
-                 || 'recorded at its size so it is never mistaken for healthy.'
-    END::text                           AS skipped_reason
+            THEN 'not measured this cycle (work budget): pgstatindex reads every page, so a run measures '
+                 || 'at most ' || pg_catalog.pg_size_pretty(" + CycleByteBudgetLiteral + @"::bigint)
+                 || ' of index from the rotation cursor down. The cursor advances past what it measured, '
+                 || 'so a later run in this pass reaches this index - deferred, not skipped.'
+        WHEN k.measure_rank > " + BudgetLiteral + @"
+            THEN 'not measured this cycle (work budget): pgstatindex reads every page, so a run measures '
+                 || 'at most ' || " + BudgetLiteral + @" || ' indexes from the rotation cursor down. The '
+                 || 'cursor advances past what it measured, so a later run in this pass reaches this '
+                 || 'index - deferred, not skipped.'
+    END::text                           AS skipped_reason,
+    /* NOT a payload column - see Row.IndexOid. Projected last so every stored column keeps its ordinal,
+       and projected at all because the rotation cursor needs a coordinate that is unique per database. */
+    k.index_oid::bigint                 AS index_oid
 FROM ranked AS k
 /* Plain LEFT JOIN on the already-computed measurements, NOT a join to the function. Every candidate
    appears exactly once; the ones in_budget excluded arrive here with their measurement columns NULL,
@@ -325,6 +563,17 @@ FROM ranked AS k
 LEFT JOIN measured AS m
   ON m.index_oid = k.index_oid
 ORDER BY k.index_bytes DESC";
+
+    /// <summary>
+    /// The <c>resume</c> body for a cycle with no usable cursor for any database — a first run, a store
+    /// that has never been written, a state read that failed, a completed pass, or a value this build
+    /// cannot parse. All five collapse to the same conservative path deliberately: start at the LARGEST
+    /// index, which is byte-for-byte what this collector did before it had a cursor at all. Absent is what
+    /// a first run, a restarted host and a broken store all look like, so absent must not mean "skip".
+    /// </summary>
+    private const string NoCursorResumeBody = @"    SELECT
+        NULL::bigint                    AS cursor_bytes,
+        NULL::bigint                    AS cursor_oid";
 
     private const string CeilingLiteral = "2147483648";
 
@@ -370,7 +619,165 @@ ORDER BY k.index_bytes DESC";
     /// <summary>Per-database: indexes and their catalogs are per-database.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => true;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    /// <summary>
+    /// The one piece of per-server state this collector declares: the rotation cursor's key prefix.
+    ///
+    /// <para>The concrete keys are per DATABASE and therefore not knowable here — the database set is
+    /// discovered per cycle by the host. What this list has to be right about is only whether a state
+    /// query runs at all, which is all either host reads it for; see
+    /// <see cref="RotationCursorKeyPrefix"/> for why loading by collector name makes the prefix
+    /// sufficient, and for the pin that keeps it sufficient.</para>
+    /// </summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { RotationCursorKeyPrefix };
+
+    /// <summary>
+    /// Splices this server's rotation cursors into the statement (#3153). The returned text is a function
+    /// of <see cref="CollectorContext.State"/>, which is the whole difference between a collector that
+    /// rotates and one that re-measures its largest index forever.
+    ///
+    /// <para>The cursors are BOUND, not interpolated. Two of the three fields are integers and would be
+    /// safe either way, but the database name is a catalog identifier that may contain anything a quoted
+    /// identifier may contain, and <c>DatabaseExclusionFilter</c> already established parameter binding as
+    /// this repo's answer for names reaching a PostgreSQL statement.</para>
+    ///
+    /// <para>No cursors — a first run, an empty store, a failed state read, or every database's pass
+    /// complete — yields <see cref="NoCursorResumeBody"/> and NO parameters, so the emitted statement is
+    /// byte-identical to the pre-rotation one. That is the conservative direction: start at the largest
+    /// index.</para>
+    /// </summary>
+    public override CollectorQuery BuildQuery(CollectorContext context)
+    {
+        var cursors = ReadCursors(context.State);
+
+        /* No cursors, or so many that the statement itself is at risk: both take the conservative path of
+           starting every database at the largest index. See MaxSplicedCursors for why the cap is a backstop
+           behind the host's prune rather than the bound. */
+        if (cursors.Count == 0 || cursors.Count > MaxSplicedCursors)
+        {
+            return new CollectorQuery(BuildQueryText(NoCursorResumeBody));
+        }
+
+        var values = new StringBuilder();
+        var parameters = new List<CollectorParameter>(cursors.Count * 3);
+
+        for (var i = 0; i < cursors.Count; i++)
+        {
+            var cursor = cursors[i];
+            var index = i.ToString(CultureInfo.InvariantCulture);
+
+            if (i > 0)
+            {
+                values.Append(",\n        ");
+            }
+
+            /* Explicit casts on the two integers so PostgreSQL types the VALUES columns from the SQL
+               rather than from parameter inference, which is what lets max() and the comparisons below
+               resolve on a first execution. */
+            values.Append("(@rot_db_").Append(index)
+                  .Append(", @rot_bytes_").Append(index).Append("::bigint")
+                  .Append(", @rot_oid_").Append(index).Append("::bigint)");
+
+            parameters.Add(new CollectorParameter(
+                "@rot_db_" + index, cursor.DatabaseName, CollectorParameterType.NVarChar128));
+            parameters.Add(new CollectorParameter(
+                "@rot_bytes_" + index, cursor.IndexBytes, CollectorParameterType.BigInt));
+            parameters.Add(new CollectorParameter(
+                "@rot_oid_" + index, cursor.IndexOid, CollectorParameterType.BigInt));
+        }
+
+        var resumeBody =
+            "    SELECT\n"
+            + "        max(c.cursor_bytes)             AS cursor_bytes,\n"
+            + "        max(c.cursor_oid)               AS cursor_oid\n"
+            + "    FROM (VALUES\n        " + values + "\n"
+            + "    ) AS c(database_name, cursor_bytes, cursor_oid)\n"
+            + "    WHERE c.database_name = pg_catalog.current_database()";
+
+        return new CollectorQuery(BuildQueryText(resumeBody), parameters);
+    }
+
+    /// <summary>
+    /// The usable cursors in a loaded state dictionary, oldest-format-tolerant and ordered by database
+    /// name so the emitted text is a function of the STATE rather than of dictionary iteration order —
+    /// otherwise two cycles with identical state could emit different strings, and nothing about the
+    /// statement would be reproducible.
+    ///
+    /// <para>Anything unparseable is DROPPED rather than repaired: an unreadable cursor and an absent one
+    /// have the same right answer, which is to start this database's pass at the largest index.</para>
+    /// </summary>
+    public static List<RotationCursor> ReadCursors(IReadOnlyDictionary<string, string>? state)
+    {
+        var cursors = new List<RotationCursor>();
+
+        if (state is null)
+        {
+            return cursors;
+        }
+
+        foreach (var entry in state)
+        {
+            if (!entry.Key.StartsWith(RotationCursorKeyPrefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var databaseName = entry.Key[RotationCursorKeyPrefix.Length..];
+
+            if (databaseName.Length == 0 || !TryParseCursor(entry.Value, out var bytes, out var oid))
+            {
+                continue;
+            }
+
+            cursors.Add(new RotationCursor(databaseName, bytes, oid));
+        }
+
+        cursors.Sort(static (left, right) => string.CompareOrdinal(left.DatabaseName, right.DatabaseName));
+
+        return cursors;
+    }
+
+    /// <summary>
+    /// Parses a stored cursor value, <c>index_bytes|index_oid</c>. False for
+    /// <see cref="RotationPassCompleteMarker"/> and for anything else this build does not recognise, which
+    /// is what makes "pass complete", "never written" and "corrupt" one code path.
+    /// </summary>
+    public static bool TryParseCursor(string? value, out long indexBytes, out long indexOid)
+    {
+        indexBytes = 0;
+        indexOid = 0;
+
+        if (string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+
+        var separator = value.IndexOf('|', StringComparison.Ordinal);
+
+        if (separator <= 0 || separator == value.Length - 1)
+        {
+            return false;
+        }
+
+        if (!long.TryParse(
+                value.AsSpan(0, separator), NumberStyles.Integer, CultureInfo.InvariantCulture, out var bytes)
+            || !long.TryParse(
+                value.AsSpan(separator + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out var oid)
+            || bytes < 0
+            || oid < 0)
+        {
+            return false;
+        }
+
+        indexBytes = bytes;
+        indexOid = oid;
+        return true;
+    }
+
+    /// <summary>Formats one database's cursor for storage.</summary>
+    public static string FormatCursor(long indexBytes, long indexOid) =>
+        indexBytes.ToString(CultureInfo.InvariantCulture)
+        + "|"
+        + indexOid.ToString(CultureInfo.InvariantCulture);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -395,9 +802,45 @@ ORDER BY k.index_bytes DESC";
         new CollectorColumn("skipped_reason", CollectorColumnType.Varchar),
     };
 
+    /// <summary>
+    /// Drains the rows and, from the rows themselves, works out where the NEXT cycle should resume
+    /// (#3153).
+    ///
+    /// <para><b>Derived from the output rather than returned as a column</b>, because the cursor is not a
+    /// fact about any one index — it is the position of the LAST index this statement measured, in the
+    /// statement's own measurement order. Reading it off the rows keeps the SQL free of a second copy of
+    /// the ordering rule.</para>
+    ///
+    /// <para><b>Nothing measured means the pass is over</b>, not that the cycle failed. Because
+    /// <see cref="CycleMeasureBudgetBytes"/> is never below <see cref="MeasureCeilingBytes"/>, the first
+    /// sub-ceiling candidate at or below the cursor is always admitted — so an empty measured set can only
+    /// mean there was no such candidate, and the cursor wraps. A cycle that FAILS never reaches here at
+    /// all, leaves no pending key, and the older cursor is re-read next cycle: the conservative
+    /// direction.</para>
+    ///
+    /// <para><b>Accepted, and bounded:</b> the cursor is staged from the DRAIN, and the host lands
+    /// <see cref="CollectorContext.PendingState"/> after the cycle rather than after each database's
+    /// flush. A database whose rows are read and then fail to STORE therefore advances its cursor over
+    /// measurements nobody kept, and those indexes wait for the wrap instead of the next cycle — one pass,
+    /// on a cycle that already stored nothing. Landing it post-flush needs the per-item completion seam
+    /// (#2312) in both hosts, which this change deliberately leaves alone.</para>
+    /// </summary>
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+
+        /* The running "last measured" coordinate: smallest index_bytes, and among ties the largest
+           index_oid, which is the tail of ORDER BY index_bytes DESC, index_oid. Tracked as a scan rather
+           than taken from the last row, because the output ordering carries no tiebreaker and a row that
+           was SKIPPED can legitimately sort after one that was measured. */
+        var measuredAny = false;
+        var cursorBytes = 0L;
+        var cursorOid = 0L;
+
+        /* current_database() from the rows, which is what the payload stores, falling back to the name the
+           host is iterating for the case where a database has no btree indexes at all and therefore no
+           rows to read it from. */
+        string? databaseName = null;
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -416,7 +859,39 @@ ORDER BY k.index_bytes DESC";
                 DeletedPages: reader.IsDBNull(9) ? null : reader.GetInt64(9),
                 AvgLeafDensity: reader.IsDBNull(10) ? null : reader.GetDouble(10),
                 LeafFragmentation: reader.IsDBNull(11) ? null : reader.GetDouble(11),
-                SkippedReason: reader.IsDBNull(12) ? null : reader.GetString(12)));
+                SkippedReason: reader.IsDBNull(12) ? null : reader.GetString(12),
+                IndexOid: reader.IsDBNull(13) ? 0 : reader.GetInt64(13)));
+
+            var row = rows[^1];
+
+            databaseName ??= row.DatabaseName;
+
+            /* A reason IS the complement of the gate, so a null reason means this index was measured -
+               and it stays right however pgstatindex renders an odd index (an empty one reports
+               avg_leaf_density as NaN, and #3121 nulls it on the way out of the READ, so a measurement
+               column is not a reliable "was it measured"). */
+            if (row.SkippedReason is not null)
+            {
+                continue;
+            }
+
+            if (!measuredAny
+                || row.IndexBytes < cursorBytes
+                || (row.IndexBytes == cursorBytes && row.IndexOid > cursorOid))
+            {
+                cursorBytes = row.IndexBytes;
+                cursorOid = row.IndexOid;
+                measuredAny = true;
+            }
+        }
+
+        databaseName ??= context.CurrentDatabaseName;
+
+        if (!string.IsNullOrEmpty(databaseName))
+        {
+            context.PendingState[RotationCursorKeyPrefix + databaseName] = measuredAny
+                ? FormatCursor(cursorBytes, cursorOid)
+                : RotationPassCompleteMarker;
         }
 
         return rows;

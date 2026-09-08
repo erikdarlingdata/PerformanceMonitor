@@ -40,6 +40,21 @@ namespace PerformanceMonitor.Collectors;
 /// join could not be relied on, because <c>pg_database_stats</c> is a separate collector that can be
 /// disabled, gated off, or simply not have a sample in the same window.</para>
 ///
+/// <para><b>This collector's census is the REPORTABLE SUBSET, not the whole index population</b> — which
+/// is why it returns FEWER rows than <see cref="PgIndexBloatCollector"/> for the same target on the same
+/// day (1,517 against 2,500 measured on the first production target, a 65% difference; #3158). The gap is
+/// entirely <see cref="MinimumIndexBytes"/>: every row in it was under 64 kB, and nothing appears here that
+/// is missing from there, so this set is a strict subset. <c>pg_index_bloat</c> applies NO size floor and is
+/// the answer to "how many indexes does this instance have"; this one applies a deliberate floor because
+/// usage statistics for an 8 kB index are noise. Both censuses are correct for their own purpose — the
+/// defect #3158 recorded was that nothing said so from either end.</para>
+///
+/// <para>The counter-intuitive direction is a red herring worth naming, because it invites the wrong
+/// conclusion twice: <c>pg_index_bloat</c> is btree-ONLY and still returns 983 more rows than this
+/// all-access-method collector. On that target every index is a btree, so its access-method filter costs it
+/// nothing there. Not relkind, not partitioned parents versus partitions, not materialized views, not
+/// schema filtering — one floor accounts for the whole gap.</para>
+///
 /// <para>Runs once per database: <c>pg_stat_user_indexes</c> shows only the connected database's indexes,
 /// with no cross-database equivalent — the same constraint that makes
 /// <see cref="PgAutovacuumStatsCollector"/> a fan-out. The CADENCE, though, is inherited from
@@ -67,6 +82,20 @@ public sealed class PgIndexUsageStatsCollector : PostgresCollectorDefinitionBase
     /// already the expensive part (#2468 was this shape for query_store). An INVALID index is kept
     /// regardless of size — a failed <c>CREATE INDEX CONCURRENTLY</c> is a finding at any size, because the
     /// planner will not use it while writes still maintain it.</para>
+    ///
+    /// <para><b>This floor is the ENTIRE difference between this collector's census and
+    /// <see cref="PgIndexBloatCollector"/>'s</b> (#3158), and it is deliberately not aligned with it.
+    /// Measured on the first production target, same server, same day, anti-joined on
+    /// (database, schema, table, index): 1,517 rows in both, 983 in <c>pg_index_bloat</c> only, and ZERO
+    /// here only. Every one of the 983 was under this floor — the largest was 57,344 bytes against a floor
+    /// of 65,536 — so this census is a strict subset of that one. The floor earns its place here (usage
+    /// statistics for an 8 kB index are noise) and its absence earns its place there (a bloat census must
+    /// be complete to be a census). Anyone tempted to align the two should read #3158 first: the answer was
+    /// documentation, not a query change.</para>
+    ///
+    /// <para><b>The <c>OR NOT is_valid</c> escape is UNEXERCISED in production, and is recorded as such.</b>
+    /// It has produced zero rows on the one target measured — there are no invalid indexes there — so the
+    /// arm is reasoned rather than observed. Not a defect; worth knowing before anyone relies on it.</para>
     /// </summary>
     internal const long MinimumIndexBytes = 65536;
 

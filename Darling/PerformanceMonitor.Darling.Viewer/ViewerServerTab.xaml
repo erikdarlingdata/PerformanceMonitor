@@ -4574,6 +4574,12 @@
                         <DataGridTextColumn Header="Leaf Density %" Binding="{Binding AvgLeafDensity}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Fragmentation %" Binding="{Binding LeafFragmentation}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                         <DataGridTextColumn Header="Empty Pages" Binding="{Binding EmptyPages}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <!-- WHEN this index was measured, which under rotation (#3153) is not the last
+                             cycle: the collector measures a slice per cycle, so a density here can be
+                             most of a pass old. A density shown without its age is a claim about now
+                             that it is not making, so the column travels with it. Empty on a row the
+                             window holds no measurement of - the reason column says why. -->
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="150"/>
                         <DataGridTemplateColumn Header="Not Measured Because" Width="*">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>

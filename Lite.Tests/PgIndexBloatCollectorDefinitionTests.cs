@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using Lite.Tests.Helpers;
 using PerformanceMonitor.Collectors;
 using Xunit;
@@ -25,8 +27,9 @@ public class PgIndexBloatCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();
 
-    private static string Sql()
-        => PgIndexBloatCollector.Instance.BuildQuery(new CollectorContext
+    private static CollectorContext Context(
+        IReadOnlyDictionary<string, string>? state = null, string? currentDatabase = null)
+        => new()
         {
             ServerId = 42,
             ServerName = "pg-target",
@@ -38,7 +41,37 @@ public class PgIndexBloatCollectorDefinitionTests
                 PostgresMajorVersion = 17,
             },
             ExcludedDatabases = Array.Empty<string>(),
-        }).Text;
+            State = state ?? CollectorContext.NoState,
+            CurrentDatabaseName = currentDatabase,
+        };
+
+    private static CollectorQuery Plan(IReadOnlyDictionary<string, string>? state = null)
+        => PgIndexBloatCollector.Instance.BuildQuery(Context(state));
+
+    private static string Sql() => Plan().Text;
+
+    /// <summary>One stored cursor, in the shape the collector persists it in.</summary>
+    private static Dictionary<string, string> Cursor(string database, long indexBytes, long indexOid)
+        => new(StringComparer.Ordinal)
+        {
+            [PgIndexBloatCollector.RotationCursorKeyPrefix + database] =
+                PgIndexBloatCollector.FormatCursor(indexBytes, indexOid),
+        };
+
+    /// <summary>
+    /// One output row in the collector's own projection order, for driving <c>ReadAsync</c>. Only the
+    /// columns the rotation cursor is derived from carry real values; the measurement columns are the
+    /// nulls a skipped row really has.
+    /// </summary>
+    private static object[] OutputRow(string database, long indexBytes, long indexOid, string? skippedReason)
+        => new object[]
+        {
+            database, "public", "t", "ix_" + indexOid.ToString(CultureInfo.InvariantCulture),
+            indexBytes,
+            DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+            skippedReason is null ? DBNull.Value : skippedReason,
+            indexOid,
+        };
 
     /// <summary>
     /// The body of the <c>in_budget</c> CTE — the one relation the work bounds are allowed to filter, and
@@ -50,6 +83,20 @@ public class PgIndexBloatCollectorDefinitionTests
         var body = Regex.Match(sql, @"in_budget AS \((?<body>[\s\S]*?)\n\),");
 
         Assert.True(body.Success, "the query no longer has an in_budget relation for the work bounds to filter");
+
+        return body.Groups["body"].Value;
+    }
+
+    /// <summary>
+    /// The body of the <c>candidates</c> CTE — the CENSUS, which no bound may filter. Extracted the same
+    /// way as <see cref="InBudgetBody"/>, and for the same reason: a search of the whole query for the
+    /// absence of a predicate finds it in whichever CTE legitimately carries it.
+    /// </summary>
+    private static string CandidatesBody(string sql)
+    {
+        var body = Regex.Match(sql, @"WITH candidates AS \((?<body>[\s\S]*?)\n\),");
+
+        Assert.True(body.Success, "the query no longer has a candidates relation to read the census out of");
 
         return body.Groups["body"].Value;
     }
@@ -212,12 +259,21 @@ public class PgIndexBloatCollectorDefinitionTests
         var sql = Sql();
 
         /* Ranked by size so the measured ones are where bloat is worth reclaiming. */
-        Assert.Contains("row_number() OVER (ORDER BY k.index_bytes DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("OVER (ORDER BY k.index_bytes DESC", sql, StringComparison.Ordinal);
 
         /* And the count bound selects the relation handed to the function, which is the thing that costs
            pages. Bounding only the skipped_reason would label rows correctly while still reading every
            index. */
-        Assert.Matches(new Regex(@"size_rank\s*<=\s*\d+"), InBudgetBody(sql));
+        Assert.Matches(new Regex(@"measure_rank\s*<=\s*\d+"), InBudgetBody(sql));
+
+        /* The rank counts only the rows this cycle can MEASURE — a rank over the whole census would count
+           the rows the rotation cursor has passed and the over-ceiling ones the function never sees, so
+           the count bound would stop admitting anything once the cursor moved past its Nth row (#3153).
+           row_number() takes no FILTER, which is why this is a filtered count. */
+        Assert.Matches(
+            new Regex(@"count\(\*\) FILTER \(WHERE k\.index_bytes < \d+ AND k\.in_rotation_window\)\s+"
+                      + @"OVER \(ORDER BY k\.index_bytes DESC, k\.index_oid"),
+            sql);
     }
 
     /// <summary>
@@ -242,8 +298,10 @@ public class PgIndexBloatCollectorDefinitionTests
     {
         var sql = Sql();
 
-        /* The result is driven by ranked, which no bound has filtered. */
-        Assert.Matches(new Regex(@"END::text\s+AS skipped_reason\s*\nFROM ranked AS k"), sql);
+        /* The result is driven by ranked, which no bound has filtered. Only the cursor's own coordinate
+           may sit between the reason and that FROM, which the bounded span is what enforces. */
+        Assert.Matches(
+            new Regex(@"END::text\s+AS skipped_reason,[\s\S]{0,400}?\r?\nFROM ranked AS k"), sql);
 
         /* And the bounds live only in the gate relation, never in the final SELECT's own filters. */
         var gateEnd = sql.IndexOf("measured AS (", StringComparison.Ordinal);
@@ -251,8 +309,16 @@ public class PgIndexBloatCollectorDefinitionTests
         Assert.True(gateEnd >= 0, "the measurements are no longer computed in a relation of their own");
 
         var afterGate = sql[gateEnd..];
-        Assert.DoesNotMatch(new Regex(@"WHERE[\s\S]*?size_rank\s*<="), afterGate);
+        Assert.DoesNotMatch(new Regex(@"WHERE[\s\S]*?measure_rank\s*<="), afterGate);
         Assert.DoesNotMatch(new Regex(@"WHERE[\s\S]*?measured_bytes_through_here\s*<="), afterGate);
+
+        /* Same rule for the rotation window, and it is the one this collector is most likely to get wrong:
+           filtering the CENSUS by the cursor would make an index the cursor has already passed
+           indistinguishable from one that does not exist, which is the exact confusion skipped_reason
+           exists to prevent (#3153). */
+        Assert.DoesNotMatch(new Regex(@"WHERE[\s\S]*?in_rotation_window"), afterGate);
+        Assert.DoesNotContain("in_rotation_window", CandidatesBody(sql), StringComparison.Ordinal);
+        Assert.DoesNotContain("cursor_bytes", CandidatesBody(sql), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -270,7 +336,7 @@ public class PgIndexBloatCollectorDefinitionTests
         /* The bound is a WHERE, which is what makes it a bound — so what stops it removing rows from the
            RESULT is that it filters a relation of its own.
            EverySkippedIndexStillReturnsARow_ThroughTheOuterJoin is the pin on that. */
-        Assert.Matches(new Regex(@"in_budget AS \([\s\S]*?WHERE[\s\S]*?size_rank\s*<="), sql);
+        Assert.Matches(new Regex(@"in_budget AS \([\s\S]*?WHERE[\s\S]*?measure_rank\s*<="), sql);
     }
 
     /// <summary>
@@ -324,7 +390,8 @@ public class PgIndexBloatCollectorDefinitionTests
     [Fact]
     public void TheByteBudget_ChargesOnlyTheIndexesItWillActuallyRead()
         => Assert.Matches(
-            new Regex(@"sum\(k\.index_bytes\)\s*FILTER\s*\(WHERE\s+k\.index_bytes\s*<\s*\d+\)"), Sql());
+            new Regex(@"sum\(k\.index_bytes\)\s*FILTER\s*\(WHERE\s+k\.index_bytes\s*<\s*\d+"
+                      + @"\s+AND\s+k\.in_rotation_window\)"), Sql());
 
     /// <summary>
     /// The running total is a running total — ordered largest-first and framed by ROWS from the start of
@@ -345,11 +412,20 @@ public class PgIndexBloatCollectorDefinitionTests
     /// <para>Dropping the ORDER BY instead would make the sum the whole total on every row, so no row
     /// would ever be under budget and nothing would be measured; reversing it would spend the budget on
     /// small indexes and pass over the big ones, inverting the argument the ordering exists to make.</para>
+    ///
+    /// <para><b>The tiebreaker is <c>index_oid</c> since #3153, and that is not cosmetic.</b> The rotation
+    /// cursor is a coordinate in exactly this order, so the order has to be TOTAL or the cursor is not a
+    /// resume point: parked on a non-unique coordinate it excludes a tied sibling it never measured while
+    /// labelling it as already passed. <c>index_name</c> cannot serve — <c>pg_class</c> is unique on
+    /// (relname, relnamespace), so two schemas can hold equally-sized indexes of the same name, which is
+    /// the pair measured above. One honest consequence: with a unique tiebreaker the frame's peer group is
+    /// a singleton, so ROWS and RANGE now agree here. ROWS stays because it states what spending a budget
+    /// largest-first means, and because it is what keeps this right if the tiebreaker is ever dropped.</para>
     /// </summary>
     [Fact]
     public void TheByteBudget_AccumulatesLargestFirst()
         => Assert.Matches(
-            new Regex(@"OVER \(ORDER BY k\.index_bytes DESC, k\.index_name\s+"
+            new Regex(@"OVER \(ORDER BY k\.index_bytes DESC, k\.index_oid\s+"
                       + @"ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\)"), Sql());
 
     /// <summary>
@@ -380,7 +456,8 @@ public class PgIndexBloatCollectorDefinitionTests
             PgIndexBloatCollector.CycleMeasureBudgetBytes,
             long.Parse(byteGate.Groups[1].Value, CultureInfo.InvariantCulture));
 
-        var ceilingFilter = Regex.Match(sql, @"FILTER \(WHERE k\.index_bytes < (\d+)\)");
+        var ceilingFilter = Regex.Match(
+            sql, @"sum\(k\.index_bytes\) FILTER \(WHERE k\.index_bytes < (\d+) AND k\.in_rotation_window\)");
         Assert.True(ceilingFilter.Success, "the byte budget no longer filters on the per-index ceiling");
         Assert.Equal(
             PgIndexBloatCollector.MeasureCeilingBytes,
@@ -449,5 +526,392 @@ public class PgIndexBloatCollectorDefinitionTests
             + $"{seconds:F0}s — past the {allowed:F0}s that leaves half of the {deadlineSeconds}s command "
             + "deadline for everything else. Lower the budget, or argue the rate up and say on what "
             + "measurement");
+    }
+
+    /* ---------------- rotation (#3153) ---------------- */
+
+    /// <summary>
+    /// The statement this collector issues is a function of its STORED STATE, not only of the target
+    /// catalog. That single property is what separates a collector that rotates from one that re-measures
+    /// its largest index forever.
+    ///
+    /// <para><b>Why this is the load-bearing pin and not a numeric one.</b> Before #3153 the collector was
+    /// <c>BuildQuery(CollectorContext context) =&gt; new(QueryText)</c> with <c>context</c> unreferenced and
+    /// no declared <c>StateKeys</c>, so no state query ran at all. The ordering was
+    /// <c>index_bytes DESC</c> over the live catalog, and measuring an index does not change its size — so
+    /// the selection could not rotate, and the 2,456 rows stamped
+    /// <c>not measured this cycle (work budget)</c> asserted a DEFERRAL that no mechanism could honour.
+    /// No geometry fixes that: it is a claim about state flow, not about a number, which is why this
+    /// asserts on the state flow.</para>
+    ///
+    /// <para>Asserted over the whole <see cref="CollectorQuery"/> rather than over its text, because the
+    /// cursor is BOUND: the shape changes when a cursor appears at all, and the VALUES change with the
+    /// cursor. Checking text alone would pass while every cycle bound the same coordinate.</para>
+    /// </summary>
+    [Fact]
+    public void TheStatement_CarriesTheStoredCursor_SoTheMeasuredSetRotates()
+    {
+        var first = Plan();
+        var second = Plan(Cursor("appdb", 2_099_085_312, 16_384));
+        var third = Plan(Cursor("appdb", 57_344, 91_022));
+
+        /* A cursor changes the statement's SHAPE — no cursor binds nothing at all. */
+        Assert.Empty(first.Parameters);
+        Assert.NotEqual(first.Text, second.Text);
+
+        /* And two different cursors bind different coordinates. */
+        Assert.Equal(second.Text, third.Text);
+        Assert.NotEqual(
+            string.Join("|", second.Parameters.Select(p => $"{p.Name}={p.Value}")),
+            string.Join("|", third.Parameters.Select(p => $"{p.Name}={p.Value}")));
+
+        /* The stored coordinate really reaches the statement, in both of its components. */
+        Assert.Contains(second.Parameters, p => Equals(p.Value, 2_099_085_312L));
+        Assert.Contains(second.Parameters, p => Equals(p.Value, 16_384L));
+        Assert.Contains(second.Parameters, p => Equals(p.Value, "appdb"));
+
+        /* Names are BOUND, never interpolated: a database name is a catalog identifier and may contain
+           anything a quoted identifier may contain. */
+        Assert.DoesNotContain("appdb", second.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The cursor is scoped per DATABASE and selected inside the statement by
+    /// <c>current_database()</c>, because the host builds this collector's query ONCE for the whole
+    /// per-database sweep — it declares no watermark, so there is no per-database rebuild to hang a
+    /// scalar cursor on.
+    ///
+    /// <para>A cursor shared across databases would advance one database past indexes another database
+    /// never measured, which is the false "already passed" claim this change exists to remove,
+    /// reintroduced one level up.</para>
+    /// </summary>
+    [Fact]
+    public void TheCursorIsPerDatabase_AndTheStatementPicksItsOwn()
+    {
+        var state = Cursor("alpha", 100, 1);
+        state[PgIndexBloatCollector.RotationCursorKeyPrefix + "zeta"] =
+            PgIndexBloatCollector.FormatCursor(200, 2);
+
+        var plan = Plan(state);
+
+        Assert.Contains("current_database()", plan.Text, StringComparison.Ordinal);
+        Assert.Matches(new Regex(@"WHERE c\.database_name = pg_catalog\.current_database\(\)"), plan.Text);
+
+        /* Both databases' cursors travel, ordered by database name. */
+        Assert.Equal(6, plan.Parameters.Count);
+        Assert.Equal("alpha", plan.Parameters[0].Value);
+        Assert.Equal("zeta", plan.Parameters[3].Value);
+
+        /* And identical state binds identical VALUES whatever order the dictionary iterates, so one cycle's
+           statement is reproducible from its state alone.
+
+           Asserted over the bound values and NOT over the text, which is the correction that makes this
+           pin able to fail at all: the cursors are parameters, so two cursors always emit the same
+           @rot_db_0/@rot_db_1 placeholders and a text comparison passes however the values were ordered.
+           The first version of this assertion compared texts and was therefore vacuous. */
+        var reversed = Plan(new Dictionary<string, string>(
+            state.Reverse().ToDictionary(kv => kv.Key, kv => kv.Value), StringComparer.Ordinal));
+
+        Assert.Equal(
+            plan.Parameters.Select(p => $"{p.Name}={p.Value}").ToArray(),
+            reversed.Parameters.Select(p => $"{p.Name}={p.Value}").ToArray());
+    }
+
+    /// <summary>
+    /// A completed pass, an absent cursor, and a value this build cannot read all take the SAME path:
+    /// start at the largest index. Absent is what a first run, a restarted host and a broken store all
+    /// look like, so absent must never mean "skip" — the rule
+    /// <see cref="CollectorContext.State"/> states for every definition that carries state.
+    /// </summary>
+    [Fact]
+    public void AnUnusableCursor_StartsThePassAtTheLargestIndex()
+    {
+        var wrapped = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [PgIndexBloatCollector.RotationCursorKeyPrefix + "appdb"] = "wrap",
+            [PgIndexBloatCollector.RotationCursorKeyPrefix + "other"] = "not-a-cursor",
+            [PgIndexBloatCollector.RotationCursorKeyPrefix] = "1|2",
+            ["some_unrelated_key"] = "3|4",
+        };
+
+        var plan = Plan(wrapped);
+
+        Assert.Empty(plan.Parameters);
+        Assert.Equal(Plan().Text, plan.Text);
+
+        /* And the marker really is the one the collector writes, not a string this test invented. */
+        Assert.Equal("wrap", PgIndexBloatCollector.RotationPassCompleteMarker);
+        Assert.False(PgIndexBloatCollector.TryParseCursor(
+            PgIndexBloatCollector.RotationPassCompleteMarker, out _, out _));
+    }
+
+    /// <summary>
+    /// A stored cursor round-trips, and everything that is not a canonical cursor is REJECTED rather than
+    /// half-read. A partially-parsed coordinate would resume somewhere nobody chose.
+    /// </summary>
+    [Fact]
+    public void TheCursorFormat_RoundTripsAndRejectsEverythingElse()
+    {
+        Assert.True(PgIndexBloatCollector.TryParseCursor(
+            PgIndexBloatCollector.FormatCursor(2_099_085_312, 16_384), out var bytes, out var oid));
+        Assert.Equal(2_099_085_312, bytes);
+        Assert.Equal(16_384, oid);
+
+        foreach (var bad in new[] { null, "", "wrap", "|5", "5|", "abc|1", "1|abc", "-1|2", "1|-2", "12345" })
+        {
+            Assert.False(
+                PgIndexBloatCollector.TryParseCursor(bad, out var badBytes, out var badOid),
+                $"'{bad}' must not parse as a cursor");
+            Assert.Equal(0, badBytes);
+            Assert.Equal(0, badOid);
+        }
+    }
+
+    /// <summary>
+    /// The cursor for the next cycle is the LAST index this one measured, in the collector's own
+    /// measurement order — smallest bytes, and among ties the largest oid.
+    ///
+    /// <para><b>Scanned, not taken from the last row.</b> The output is ordered by size alone, with no
+    /// tiebreaker, and a SKIPPED row can legitimately sort after a measured one — so "the last row" and
+    /// "the last measured position" are different rows, and only one of them is a valid resume point.</para>
+    /// </summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheCursorAdvances_ToTheLastPositionItMeasured()
+    {
+        var context = Context(currentDatabase: "appdb");
+
+        using var reader = new FakeCollectorDataReader(
+            OutputRow("appdb", 5000, 10, null),
+            OutputRow("appdb", 3000, 12, null),
+            OutputRow("appdb", 3000, 99, null),
+            OutputRow("appdb", 2000, 13, "not measured this cycle (work budget): ..."));
+
+        var rows = await PgIndexBloatCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(4, rows.Count);
+        Assert.Equal(
+            PgIndexBloatCollector.FormatCursor(3000, 99),
+            Assert.Contains(PgIndexBloatCollector.RotationCursorKeyPrefix + "appdb", context.PendingState));
+    }
+
+    /// <summary>
+    /// A cycle that measured NOTHING ends the pass, because — given
+    /// <c>CycleMeasureBudgetBytes &gt;= MeasureCeilingBytes</c> — an empty measured set can only mean no
+    /// sub-ceiling candidate remained below the cursor.
+    ///
+    /// <para>Written as a marker rather than a deletion because <see cref="CollectorContext.PendingState"/>
+    /// only ever upserts: leaving the old value would park the cursor at the end of the pass forever, and
+    /// the collector would go back to measuring nothing — the #3153 failure with extra steps.</para>
+    /// </summary>
+    [Fact]
+    public async System.Threading.Tasks.Task ACycleThatMeasuredNothing_EndsThePass()
+    {
+        var context = Context(currentDatabase: "appdb");
+
+        using var reader = new FakeCollectorDataReader(
+            OutputRow("appdb", 5000, 10, "above the rotation cursor: ..."),
+            OutputRow("appdb", 4000, 11, "above the rotation cursor: ..."));
+
+        await PgIndexBloatCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(
+            PgIndexBloatCollector.RotationPassCompleteMarker,
+            Assert.Contains(PgIndexBloatCollector.RotationCursorKeyPrefix + "appdb", context.PendingState));
+    }
+
+    /// <summary>
+    /// A database with no b-tree indexes at all still records where it is, from the name the host is
+    /// iterating rather than from a row it never got. Without the fallback such a database would keep
+    /// whatever cursor it last had, forever, and a database whose indexes were all dropped would never
+    /// return to the top of a pass.
+    /// </summary>
+    [Fact]
+    public async System.Threading.Tasks.Task ADatabaseWithNoCandidates_StillRecordsThePassAsComplete()
+    {
+        var context = Context(currentDatabase: "emptydb");
+
+        using var reader = new FakeCollectorDataReader();
+
+        var rows = await PgIndexBloatCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        Assert.Equal(
+            PgIndexBloatCollector.RotationPassCompleteMarker,
+            Assert.Contains(PgIndexBloatCollector.RotationCursorKeyPrefix + "emptydb", context.PendingState));
+    }
+
+    /// <summary>
+    /// Every conjunct of the gate has a <c>skipped_reason</c> arm, and this is checked as a PAIRING rather
+    /// than as four present strings.
+    ///
+    /// <para><b>The failure it catches.</b> The rotation window was added to the gate first. Without a
+    /// matching CASE arm, every index the cursor had already passed came back with all its measurements
+    /// NULL and NO reason — the one output shape this collector must never produce, because a blank
+    /// measurement with no reason is indistinguishable from a measured emptiness (an empty index really
+    /// does report a null density). Four bounds, four arms, and a bound that grows a fifth has to grow a
+    /// fifth arm with it.</para>
+    /// </summary>
+    [Fact]
+    public void EveryGateConjunct_HasItsOwnReasonArm()
+    {
+        var sql = Sql();
+        var gate = InBudgetBody(sql);
+        var reasons = Regex.Match(sql, @"CASE(?<arms>[\s\S]*?)\r?\n    END::text");
+
+        Assert.True(reasons.Success, "the skipped_reason CASE is no longer where this pin can read it");
+
+        var arms = reasons.Groups["arms"].Value;
+
+        /* The four gate conjuncts, each paired with the arm that explains its exclusion. */
+        foreach (var (conjunct, arm) in new[]
+                 {
+                     ("k.index_bytes < ", "k.index_bytes >= "),
+                     ("k.in_rotation_window", "NOT k.in_rotation_window"),
+                     ("k.measured_bytes_through_here <= ", "k.measured_bytes_through_here > "),
+                     ("k.measure_rank <= ", "k.measure_rank > "),
+                 })
+        {
+            Assert.Contains(conjunct, gate, StringComparison.Ordinal);
+            Assert.Contains(arm, arms, StringComparison.Ordinal);
+        }
+
+        /* And nothing else gates: a fifth conjunct with no arm is the defect above. */
+        Assert.Equal(4, Regex.Matches(gate, @"\r?\n    (?:WHERE|AND) ").Count);
+        Assert.Equal(4, Regex.Matches(arms, @"\r?\n        WHEN ").Count);
+    }
+
+    /// <summary>
+    /// Exactly ONE reason claims a permanent outcome, and it is the ceiling's — the other three promise a
+    /// later cycle, which rotation is what makes true.
+    ///
+    /// <para>This is the wording half of #3153, and #3158 argued it is the higher priority of the two:
+    /// 983 sub-64 kB indexes on the first production target appear in NO other collector, so for those
+    /// objects the row carrying this text is the product's only record of them. A deferral claim on a row
+    /// nothing will ever return to is the whole defect.</para>
+    /// </summary>
+    [Fact]
+    public void OnlyTheCeilingReasonClaimsPermanence_AndTheOthersPromiseALaterCycle()
+    {
+        var sql = Sql();
+
+        /* The ceiling arm says NEVER, in as many words, and points at what does track those indexes —
+           43 of them held 68% of the first production target's index bytes, and pg_index_usage_stats
+           covers all 43 with a size trend. */
+        Assert.Matches(
+            new Regex(@"index_bytes >= \d+[\s\S]{0,400}?NEVER[\s\S]{0,200}?not a deferral"), sql);
+        Assert.Matches(
+            new Regex(@"index_bytes >= \d+[\s\S]{0,600}?pg_index_usage_stats"), sql);
+
+        /* And it is the only arm that does. */
+        Assert.Single(Regex.Matches(sql, @"NEVER"));
+
+        /* Each deferral arm states the mechanism that honours it. Three arms, three promises. */
+        Assert.Equal(
+            3,
+            Regex.Matches(sql, @"(?:comes back to it when the pass wraps"
+                               + @"|a later run in this pass reaches this)").Count);
+
+        /* The pre-#3153 wording promised a deferral with no mechanism behind it. Whatever the arms say
+           now, none of them may claim a run merely "stops" once it has measured its budget without
+           saying what happens next. */
+        Assert.DoesNotContain("This one is recorded at its size so it is never", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The declared state key is the cursor's PREFIX, and the concrete keys are per database — which is
+    /// only sound because both hosts load state by collector NAME rather than by declared key.
+    /// <c>CollectorStateContractTests</c> pins that half in both hosts; this pins the declaration.
+    /// </summary>
+    [Fact]
+    public void StateKeys_DeclaresTheRotationCursorPrefix()
+    {
+        Assert.Equal(
+            new[] { PgIndexBloatCollector.RotationCursorKeyPrefix },
+            PgIndexBloatCollector.Instance.StateKeys.ToArray());
+
+        Assert.Equal("rotate:", PgIndexBloatCollector.RotationCursorKeyPrefix);
+
+        /* Declaring nothing means no state query runs, which is exactly the pre-#3153 behaviour: the
+           cursor would never load and the collector would re-measure its largest index forever. */
+        Assert.NotEmpty(PgIndexBloatCollector.Instance.StateKeys);
+    }
+
+    /// <summary>
+    /// The cursor's coordinate is projected but NOT stored. Adding <c>index_oid</c> to the payload would
+    /// be a store rung for a value no read wants, and dropping it from the projection would leave the
+    /// cursor with no unique coordinate.
+    /// </summary>
+    [Fact]
+    public void TheCursorCoordinateIsProjected_ButNotAPayloadColumn()
+    {
+        Assert.DoesNotContain("index_oid", PgIndexBloatCollector.Instance.PayloadColumns.Select(c => c.Name));
+
+        /* Projected LAST, so every stored column keeps the ordinal ReadAsync reads it at. */
+        Assert.Matches(
+            new Regex(@"AS skipped_reason,[\s\S]*?k\.index_oid::bigint\s+AS index_oid\r?\nFROM ranked"),
+            Sql());
+
+        var writer = new RecordingCollectorRowWriter();
+        PgIndexBloatCollector.Instance.WritePayload(default, writer, Context());
+
+        Assert.Equal(PgIndexBloatCollector.Instance.PayloadColumns.Count, writer.Values.Count);
+    }
+
+    /// <summary>
+    /// The spliced cursor list is BOUNDED, and past the bound the statement carries none rather than
+    /// becoming one PostgreSQL refuses to execute.
+    ///
+    /// <para><b>The failure this stands under.</b> <see cref="PgIndexBloatCollector.BuildQuery"/> splices
+    /// every loaded cursor and the host reuses that one statement for each live database, so an unpruned
+    /// list grows with every database name the server has ever had. At three bound parameters per cursor
+    /// that ends at PostgreSQL's 65,535-parameter limit — measured against PostgreSQL 17 with this query's
+    /// own <c>resume</c> shape: 21,845 cursors execute, 21,846 throw
+    /// <c>A statement cannot have more than 65535 parameters</c> client-side, before the statement is
+    /// sent, so the cycle fails for EVERY database rather than degrading. The host's prune
+    /// (<c>PgPerDatabaseCollectorState</c>) is what holds the count at the live database set; this is the
+    /// floor under it, because that prune has a legitimate no-op path (an empty enumeration is a
+    /// permissions failure it must not act on).</para>
+    ///
+    /// <para><b>Degraded, and still honest.</b> With no cursor spliced every candidate is in-window, so the
+    /// only reasons that remain are the ceiling and work-budget ones — both true. Nothing claims to be
+    /// above a cursor that was not consulted.</para>
+    /// </summary>
+    [Fact]
+    public void TheSplicedCursorListIsBounded_AndFallsBackToNoCursorRatherThanAnUnexecutableStatement()
+    {
+        var cap = PgIndexBloatCollector.MaxSplicedCursors;
+
+        /* Far enough below the parameter ceiling that the statement is never the thing that breaks. */
+        Assert.True(
+            cap * 3 < 65_535 / 4,
+            $"the cap ({cap} cursors, {cap * 3} parameters) is not comfortably below PostgreSQL's "
+            + "65,535-parameter statement limit, so the backstop is close to the failure it exists to "
+            + "prevent");
+
+        var atCap = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var i = 0; i < cap; i++)
+        {
+            atCap[PgIndexBloatCollector.RotationCursorKeyPrefix + "db_" + i.ToString(CultureInfo.InvariantCulture)]
+                = PgIndexBloatCollector.FormatCursor(16_384 + i, 20_000 + i);
+        }
+
+        var spliced = Plan(atCap);
+
+        /* At the cap the cursors still travel: the bound must not be so eager that a real target loses
+           rotation. */
+        Assert.Equal(cap * 3, spliced.Parameters.Count);
+
+        var overCap = new Dictionary<string, string>(atCap, StringComparer.Ordinal)
+        {
+            [PgIndexBloatCollector.RotationCursorKeyPrefix + "one_too_many"] =
+                PgIndexBloatCollector.FormatCursor(1, 1),
+        };
+
+        var dropped = Plan(overCap);
+
+        /* One past it, nothing is bound and the text is the no-cursor form — byte-identical to a first
+           run, which is the documented conservative path rather than a new one. */
+        Assert.Empty(dropped.Parameters);
+        Assert.Equal(Plan().Text, dropped.Text);
     }
 }
