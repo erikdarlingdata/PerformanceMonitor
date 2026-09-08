@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -59,6 +60,27 @@ public sealed record AlertDelivery
     public const string ChannelEmail = "email";
     public const string ChannelWebhook = "webhook";
     public const string ChannelEmailAndWebhook = "email+webhook";
+
+    /// <summary>
+    /// The channel values that state a delivery STATE rather than naming a channel that carried the alert.
+    /// Declared rather than left implicit in the reading code, because three surfaces need the answer — the
+    /// two WPF grids through <see cref="AlertDeliveryStatus"/>, and the headless web dashboard, which
+    /// restates it in <c>util.js</c> and is pinned against this list.
+    /// </summary>
+    public static IReadOnlyList<string> StateCarryingChannels { get; } = new[]
+    {
+        ChannelNotApplicable, ChannelNoneConfigured, ChannelMuted, ChannelUndelivered, ChannelTray,
+    };
+
+    /// <summary>
+    /// The channel values that name a channel the alert actually went out on. <see cref="Sent"/> implies
+    /// one of these; the converse does not hold, because an attempted email that threw is
+    /// <see cref="ChannelEmail"/> with <see cref="Sent"/> false.
+    /// </summary>
+    public static IReadOnlyList<string> DeliveringChannels { get; } = new[]
+    {
+        ChannelEmail, ChannelWebhook, ChannelEmailAndWebhook,
+    };
 
     private AlertDelivery(bool sent, string channel, string? sendError)
     {
@@ -206,7 +228,7 @@ public static class AlertDeliveryStatus
     /// <para>A legacy <c>alert_sent = false</c> with <c>tray</c> is NOT decoded on a store whose SKU has no
     /// tray. It covers a store with no channel configured, a throttled send, and a failed webhook post, and
     /// nothing in the row separates them — the whole reason this change exists. It renders
-    /// <see cref="NotSent"/>, a statement about outcome that makes no claim about configuration. New rows
+    /// <see cref="Logged"/>, which is #2781's word for it and claims nothing in either direction. New rows
     /// say which of those they are.</para>
     /// </remarks>
     public static string Describe(bool sent, string? channel, string? sendError, bool trayChannelPresent)
@@ -243,11 +265,12 @@ public static class AlertDeliveryStatus
             return NoChannelConfigured;
         }
 
-        /* Lite's tray toast is a real delivery to a real channel; on a store written by a SKU with no
-           tray, the same stored value carries no information and gets the outcome-only label. */
-        if (channel == AlertDelivery.ChannelTray && trayChannelPresent)
+        /* Lite's tray toast is a real delivery to a real channel. On a store written by a SKU with no tray
+           the same stored value carries no information at all, so it gets #2781's neutral "Logged" — the
+           label the web surface already chose for this exact row, rather than a second word for it. */
+        if (channel == AlertDelivery.ChannelTray)
         {
-            return Shown;
+            return trayChannelPresent ? Shown : Logged;
         }
 
         return NotSent;
@@ -259,5 +282,11 @@ public static class AlertDeliveryStatus
     public const string Failed = "Failed";
     public const string Muted = "Muted";
     public const string Shown = "Shown";
+
+    /// <summary>#2781/#2814's label for a stored <c>tray</c> row on a surface with no tray: a history row
+    /// was written and no channel was involved, with no claim either way. Reached only by rows written
+    /// before this taxonomy, since a SKU without a tray no longer records one.</summary>
+    public const string Logged = "Logged";
+
     public const string NotSent = "Not sent";
 }

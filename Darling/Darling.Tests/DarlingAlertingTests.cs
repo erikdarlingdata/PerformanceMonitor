@@ -292,7 +292,10 @@ WHERE server_id = $1 AND metric_name = 'Deadlocks Detected'", connection))
                 read.Parameters.AddWithValue(TestServerId);
                 using var reader = await read.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct), "config_alert_log row missing for the deadlock fire");
-                Assert.Equal("tray", reader.GetString(0)); /* Lite's taxonomy: no email/webhook attempted */
+                /* #3169: the state this assertion's own comment already described. The headless service has
+                   no tray, so a fired alert with nothing configured says "unconfigured" rather than borrowing
+                   Lite's tray fallback. */
+                Assert.Equal(AlertDelivery.ChannelNoneConfigured, reader.GetString(0));
                 Assert.False(reader.GetBoolean(1));
                 Assert.False(reader.GetBoolean(2));
                 Assert.Contains("DedupKey", reader.GetString(3), StringComparison.Ordinal);

@@ -285,6 +285,8 @@ public sealed class AlertDeliveryChannelTests
     [InlineData(true, AlertDelivery.ChannelEmail, null, AlertDeliveryStatus.Delivered)]
     [InlineData(true, AlertDelivery.ChannelWebhook, null, AlertDeliveryStatus.Delivered)]
     [InlineData(true, AlertDelivery.ChannelEmailAndWebhook, null, AlertDeliveryStatus.Delivered)]
+    [InlineData(true, AlertDelivery.ChannelTray, null, AlertDeliveryStatus.NoChannel)]
+    [InlineData(false, AlertDelivery.ChannelTray, null, AlertDeliveryStatus.Logged)]
     public void Describe_OnADarlingStore_DiscriminatesEveryDisposition(
         bool sent, string channel, string? sendError, string expected)
         => Assert.Equal(expected, AlertDeliveryStatus.Describe(sent, channel, sendError, trayChannelPresent: false));
@@ -318,9 +320,12 @@ public sealed class AlertDeliveryChannelTests
     {
         var status = AlertDeliveryStatus.Describe(false, AlertDelivery.ChannelTray, null, trayChannelPresent: false);
 
-        Assert.Equal(AlertDeliveryStatus.NotSent, status);
+        /* #2781's word for it, adopted rather than replaced with a second one. It claims nothing in either
+           direction, which is the only honest reading of a row whose state cannot be recovered. */
+        Assert.Equal(AlertDeliveryStatus.Logged, status);
         Assert.NotEqual(AlertDeliveryStatus.NoChannelConfigured, status);
         Assert.NotEqual(AlertDeliveryStatus.Shown, status);
+        Assert.NotEqual(AlertDeliveryStatus.Delivered, status);
     }
 
     /// <summary>
