@@ -800,9 +800,15 @@ public sealed class ForcePlanBotFileConfig
     [JsonPropertyName("finalReviewMinutes")]
     public int FinalReviewMinutes { get; set; } = 1440;
 
-    /// <summary>Executions required before a checkpoint judges cost.</summary>
+    /// <summary>Executions required before a checkpoint judges cost, and the executions limb of the
+    /// operator flow's post-eviction observation window.</summary>
     [JsonPropertyName("minReviewExecutions")]
     public int MinReviewExecutions { get; set; } = 25;
+
+    /// <summary>The elapsed limb of the post-eviction observation window, in minutes — the operator flow
+    /// observes until whichever of the two limbs fires first.</summary>
+    [JsonPropertyName("observationWindowMinutes")]
+    public int ObservationWindowMinutes { get; set; } = 30;
 
     /// <summary>Post-force cpu/exec must be at or below this fraction of the baseline, or the review unforces.</summary>
     [JsonPropertyName("netBenefitRatio")]
@@ -822,6 +828,7 @@ public sealed class ForcePlanBotFileConfig
             FirstReviewMinutes = FirstReviewMinutes,
             FinalReviewMinutes = FinalReviewMinutes,
             MinReviewExecutions = MinReviewExecutions,
+            ObservationWindowMinutes = ObservationWindowMinutes,
             NetBenefitRatio = NetBenefitRatio,
         }.Normalize();
 }
@@ -1760,6 +1767,52 @@ public sealed class MonitoredServer
     /// </summary>
     [JsonIgnore]
     public bool PlanForceBotEnabled { get; set; }
+
+    /// <summary>
+    /// The REMEDIATION credential's login name (<c>config_monitored_servers.remediation_username</c>) — the
+    /// second, per-server, opt-in identity a #2138 phase-1 action runs as.
+    ///
+    /// <para><b>The monitoring credential is never used for a write, ever.</b> That promise is stated in
+    /// both READMEs and in the MCP instructions, and operators grant against it, so the write travels on
+    /// its own identity or it does not travel. There is no fallback: null here means this server has no
+    /// phase-1 surface at all, which is the whole arming model — see
+    /// <see cref="PerformanceMonitor.Analysis.OperatorRemediationGate.SurfaceFor"/> for why the absence is
+    /// a null credential rather than an <c>enabled</c> flag.</para>
+    ///
+    /// <para><b>Presence IS the auth mode.</b> Deliberately no <c>remediationAuth</c> sibling: an
+    /// integrated remediation identity would be the service account, which is the monitoring identity,
+    /// which is exactly what this exists to keep read-only. So a remediation credential is always SQL auth
+    /// when set, and there is no third state to resolve wrongly.</para>
+    ///
+    /// <para><b>Settable from the file</b>, unlike <see cref="PlanForceBotEnabled"/> — and the difference is
+    /// deliberate. That flag is an ARM STATE, so a file knob would be a silent no-op on a seeded box
+    /// (#2254). This is a CREDENTIAL, and the container/compose deploy has no viewer to type one into; the
+    /// <c>env:</c>/<c>file:</c> reference path is the only way to arm a Linux install at all. It is still
+    /// only read at seed time like every other credential field here.</para>
+    /// </summary>
+    [JsonPropertyName("remediationUsername")]
+    public string? RemediationUsername { get; set; }
+
+    /// <summary>
+    /// The remediation credential's DPAPI-LocalMachine blob, base64 — produced by the same
+    /// <c>--encrypt-password</c> as <see cref="EncryptedPassword"/>, and resolvable as an
+    /// <c>env:</c>/<c>file:</c> reference by the same <c>DarlingSecretSource</c>. There is deliberately no
+    /// plaintext sibling of this one (no counterpart to <see cref="Password"/>): the dev-convenience
+    /// plaintext slot exists because a wrong monitoring password fails a read, and a wrong remediation
+    /// password fails a write to a production server.
+    /// </summary>
+    [JsonPropertyName("remediationEncryptedPassword")]
+    public string? RemediationEncryptedPassword { get; set; }
+
+    /// <summary>
+    /// Whether this server is armed for operator-initiated remediation: BOTH halves of the credential are
+    /// present. A one-sided credential is not a weaker arm, it is a misconfiguration — so it reads as
+    /// unarmed rather than as something to attempt and fail at against a production server.
+    /// </summary>
+    [JsonIgnore]
+    public bool HasRemediationCredential =>
+        !string.IsNullOrWhiteSpace(RemediationUsername) &&
+        !string.IsNullOrWhiteSpace(RemediationEncryptedPassword);
 
     /// <summary>
     /// This server's <c>server_id</c>: the stored value when there is one, otherwise derived from

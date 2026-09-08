@@ -27,8 +27,9 @@ namespace PerformanceMonitorLite.Controls;
 /// Dashboard's Recommendations tab UX, but ADVISE-ONLY.
 ///
 /// <para>
-/// Lite is local-DuckDB and SQL-side remediation is Dashboard-only (per project scope), so there
-/// is NO Apply button and NO privileged execution path here. Each card offers "Ask AI" (copies an
+/// Lite is local-DuckDB, so there is NO Apply button and NO privileged execution path here, and there
+/// permanently will not be (#2138): a per-workstation store cannot hold a shared audit trail of writes
+/// to a server, which is what a remediation journal has to be. Each card offers "Ask AI" (copies an
 /// MCP investigation prompt); cards whose finding carries a derivable copy-paste statement also
 /// offer "Copy fix". The Dashboard's "Open in Active Queries" deep-link is omitted: the Lite
 /// surface is a shared tab with a server selector, not a per-server tab that owns an Active Queries

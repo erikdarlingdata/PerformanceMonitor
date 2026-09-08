@@ -31,13 +31,20 @@ public class CollectorStallProbeViewerGateTests
     /// <summary>The version a store one rung behind this one reports.</summary>
     private const int PreviousVersion = 111;
 
+    /// <summary>The rung this suite is about. Read from the store-side suite so the two cannot disagree.</summary>
+    private const int RungVersion = CollectorStallProbeStoreTests.RungVersion;
+
     /// <summary>The table the rung creates.</summary>
     private const string TableName = "collector_stall_probes";
 
     /// <summary>
-    /// The connect-time gate. A TABLE sentinel, because the table is the only object the rung creates. Being
-    /// the TOP rung, a fully-migrated store must map to exactly this version or the viewer refuses a store
-    /// that is perfectly current — permanently, because no later upgrade changes the answer.
+    /// The connect-time gate. A TABLE sentinel, because the table is the only object the rung creates.
+    ///
+    /// <para>This rung is no longer the top one — V113 (#2138 phase 1) is — so the "a fully-migrated store
+    /// maps to exactly THIS version" clause has moved to that rung's suite, where it is true. Two things
+    /// here had to stop assuming it: the sentinel's ordinal is no longer the last one, and the
+    /// one-rung-behind check has to switch off every LATER sentinel too, or it measures the newest rung
+    /// instead of this one.</para>
     /// </summary>
     [Fact]
     public void TheProbeAsksForTheTable_AndMapsAFullyMigratedStoreToThisRung()
@@ -56,22 +63,22 @@ public class CollectorStallProbeViewerGateTests
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The sentinel count and the ordinal have to agree, or the ordinal literal above is pinning a
-           position that no longer exists. */
-        Assert.Equal(arity - 1, ProbeOrdinal);
+        /* The ordinal has to be a position that exists. It was arity - 1 while this was the top rung; a
+           later rung appends a sentinel and that equality would fail for every rung but the newest, which
+           is a pin about the ladder's length rather than about this rung. */
+        Assert.True(
+            ProbeOrdinal < arity,
+            $"sentinel ordinal {ProbeOrdinal} is outside the probe's {arity} parameters");
 
-        /* Every sentinel true = a fully-migrated store, which must map to THIS rung. As the top rung this is
-           also the "and no more than that" guard: a later rung appending a sentinel without its own arm
-           would leave this returning 112 for a store that is actually further along. Built by reflection so
-           the arity tracks the signature — the literal-true form silently defaults a newly added sentinel to
-           false and maps one version low. */
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        /* A store migrated to exactly THIS rung: every sentinel up to and including this one true, every
+           later one false. Built by reflection so the arity tracks the signature — the literal-true form
+           silently defaults a newly added sentinel to false and maps one version low. */
+        var throughMine = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, throughMine)!);
 
-        /* One rung behind: every sentinel present EXCEPT this one must report 111, not 112. Without this the
+        /* One rung behind: this rung's sentinel absent as well must report 111, not 112. Without it the
            arm above could be satisfied by an unconditional return and nothing would notice. */
-        var allButMine = Enumerable.Repeat((object)true, arity).ToArray();
-        allButMine[ProbeOrdinal] = false;
+        var allButMine = Enumerable.Range(0, arity).Select(i => (object)(i < ProbeOrdinal)).ToArray();
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, allButMine)!);
     }
 

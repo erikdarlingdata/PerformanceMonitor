@@ -130,6 +130,21 @@
       "encryptedPassword": "<output of --encrypt-password>",
       "trustServerCertificate": false,
       "encryptMode": "Mandatory",
+      // OPTIONAL second credential, for #2138 operator-initiated remediation only. The monitoring
+      // credential above stays READ-ONLY forever and is never used for a write; a remediation action
+      // travels on this identity or it does not travel. Omit both keys (the default) and this server
+      // simply has no remediation surface -- there is nothing to disable and nothing to explain.
+      // Both halves are required; one alone counts as unarmed and the service says so at connect.
+      // Least privilege: ALTER on each database you intend to force a plan in, and -- only if you want
+      // evict-first -- ALTER SERVER STATE, which is what targeted DBCC FREEPROCCACHE(plan_handle) needs.
+      // That second grant is the expensive one and is genuinely optional: without it the flow degrades
+      // to force-only with a named reason rather than silently. The service PROBES for it with a
+      // read-only has_perms_by_name check instead of guessing per platform, and Azure SQL Database has
+      // no DBCC FREEPROCCACHE at all, which no grant changes.
+      // Same blob format as encryptedPassword (--encrypt-password on THIS machine, or an env:/file:
+      // reference). There is deliberately no plaintext variant of this one.
+      "remediationUsername": "",
+      "remediationEncryptedPassword": "",
       "excludedDatabases": [ "StageDb" ]
     }
   ],

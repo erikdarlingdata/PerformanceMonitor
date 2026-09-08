@@ -169,6 +169,7 @@ public static class PgMigrations
         new Migration(110, "collection-log-fetch-phase-sums", V110Sql),
         new Migration(111, "store-log-self-monitoring", V111Sql),
         new Migration(112, "collector-stall-wait-probes", V112Sql),
+        new Migration(113, "remediation-credential-and-actor", V113Sql),
     };
 
     /// <summary>
@@ -2787,6 +2788,62 @@ CREATE TABLE IF NOT EXISTS collect.collector_stall_probes
    the second sample - the one that proves the degradation is not confined to a single collector. */
 CREATE INDEX IF NOT EXISTS idx_collector_stall_probes_time
     ON collect.collector_stall_probes(server_id, probe_time);";
+
+    /// <summary>
+    /// V113 — the per-server REMEDIATION CREDENTIAL, and the journal's <c>actor</c> (#2138 phase 1).
+    ///
+    /// <para><b>The credential.</b> The monitoring credential stays read-only forever; that promise is
+    /// load-bearing (the MCP instructions and both READMEs state it, and operators grant against it), so a
+    /// write to a monitored server cannot travel on it. <c>remediation_username</c> /
+    /// <c>remediation_encrypted_password</c> are a SECOND, per-server, opt-in credential in the same shape
+    /// as <c>username</c> / <c>encrypted_password</c> beside them — same DPAPI-LocalMachine blob, same
+    /// <c>env:</c>/<c>file:</c> reference support, produced by the same <c>--encrypt-password</c>. Both
+    /// nullable with NO default and NO fallback: a server whose remediation columns are null has no
+    /// phase-1 surface at all, which is why the absence is expressed as a null credential rather than as an
+    /// <c>enabled</c> boolean — a boolean invites a disabled control, and a missing credential is supposed
+    /// to be unrenderable rather than explained.</para>
+    ///
+    /// <para>Deliberately NOT reusing the <c>auth</c> column's vocabulary: a remediation credential is
+    /// always SQL auth when present (an integrated remediation identity would be the service account,
+    /// which is the monitoring identity, which is the thing this exists to avoid). Presence of the username
+    /// IS the auth mode, so there is no third state to get wrong.</para>
+    ///
+    /// <para><b>The actor.</b> V107's journal was written when the bot was the only possible writer, and
+    /// <c>PgPlanForceActionStore.GetPendingReviewsAsync</c> rests on that: its own-forces-only property is
+    /// documented as structural because "the read starts from rows this bot journaled". Phase 1 makes an
+    /// OPERATOR a writer to the same table, and that sentence stops being true the moment it does — the
+    /// bot's self-review would pick up an operator's force and take it back, breaking the standing house
+    /// rule that operator-placed forces are never touched. <c>actor</c> restores the invariant as data: the
+    /// review read filters <c>actor = 'bot'</c>, so own-forces-only is a predicate on the table rather than
+    /// a property of who happened to be able to write to it.</para>
+    ///
+    /// <para><b>The DEFAULT is added and then dropped, and that is the point.</b> Every existing row was
+    /// written by the bot, so <c>DEFAULT 'bot'</c> backfills them correctly and is the only honest value
+    /// for rows that predate the column. Leaving the default in place afterwards would make an INSERT that
+    /// forgets <c>actor</c> silently claim to be the bot — the one direction that matters, because a bot row
+    /// is the kind the review is allowed to unforce. Dropping it makes that INSERT fail loudly instead. The
+    /// C# side reinforces it: <c>PlanForceActionRecord.Actor</c> is a required member, so a construction
+    /// site that omits it does not compile.</para>
+    /// </summary>
+    private const string V113Sql = @"
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS remediation_username text;
+
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS remediation_encrypted_password text;
+
+ALTER TABLE collect.plan_force_actions
+    ADD COLUMN IF NOT EXISTS actor text NOT NULL DEFAULT 'bot';
+
+ALTER TABLE collect.plan_force_actions
+    ALTER COLUMN actor DROP DEFAULT;
+
+/* The review read is (server_id, actor, action) with an ordering on action_time, and it is the read the
+   own-forces-only invariant rests on, so it gets its own index rather than riding
+   idx_plan_force_actions_time - which leads with server_id but knows nothing about the actor and would
+   make every pending-review scan read the operator's rows to discard them. */
+CREATE INDEX IF NOT EXISTS idx_plan_force_actions_actor
+    ON collect.plan_force_actions(server_id, actor, action, action_time);";
 
     /// <summary>
     /// V105 — <c>collect.collector_cost</c>, the tool's own per-collector cost on the monitored servers

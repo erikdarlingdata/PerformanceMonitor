@@ -40,7 +40,7 @@ public class CollectorStallProbeStoreTests
     private const string TableName = "collector_stall_probes";
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -49,7 +49,13 @@ public class CollectorStallProbeStoreTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* NOT "this rung is the top" any more: V113 (#2138 phase 1) is, and it carries that guard in its
+           own suite. A rung that was top when its test was written cannot keep asserting it — the claim
+           belongs to whichever rung actually is, or every new rung breaks every older rung's suite. What
+           stays here is that this rung is IN the ladder and no higher than its head. */
+        Assert.True(
+            RungVersion <= StorageVersion.SchemaVersion,
+            $"V{RungVersion} sits above StorageVersion.SchemaVersion ({StorageVersion.SchemaVersion}), so it can never apply");
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();

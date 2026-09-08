@@ -234,6 +234,10 @@ public sealed class PlanForceBot
             PlanId: target.PlanId,
             Action: action,
             Mode: _settings.DryRun ? PgPlanForceActionStore.ModeDryRun : PgPlanForceActionStore.ModeLive,
+            /* Always the bot: this class IS the bot, and it has no operator-driven arm. Stamped as a
+               constant rather than passed in so there is no argument to get wrong — and it is what makes
+               GetPendingReviewsAsync' actor filter meet rows it can actually match. */
+            Actor: PgPlanForceActionStore.ActorBot,
             Decision: action,
             Reasons: string.Join(",", reasons),
             RegressionFactor: target.RegressionFactor,

@@ -104,7 +104,10 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               -- V68: engine + port. Non-secret, exactly like host.
               engine, port,
               -- V107 (#2138): the force-plan bot's per-server arm state. Non-secret, exactly like is_enabled.
-              plan_force_bot_enabled)
+              plan_force_bot_enabled,
+              -- V113 (#2138 phase 1): the remediation credential's login name. Non-secret, exactly like
+              -- username; remediation_encrypted_password is deliberately NOT granted.
+              remediation_username)
     ON config.config_monitored_servers TO viewer;
 REVOKE SELECT ON config.config_command FROM viewer;
 GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_id, status, claimed_at,

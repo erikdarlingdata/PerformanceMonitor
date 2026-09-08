@@ -69,8 +69,28 @@ public sealed record ForcePlanBotSettings
     public int FinalReviewMinutes { get; init; } = 1440;
 
     /// <summary>Executions the forced query must accumulate before a checkpoint judges cost — the
-    /// same floor detection uses, so the review never rules on thinner evidence than the decision did.</summary>
+    /// same floor detection uses, so the review never rules on thinner evidence than the decision did.
+    /// <para>Also the executions limb of the operator flow's post-eviction observation window
+    /// (<see cref="OperatorRemediationFlow.Observe"/>), which takes it as a parameter rather than
+    /// restating the number: one floor, so an evict-then-observe verdict and the self-review that later
+    /// judges the same query cannot rule on different amounts of evidence.</para></summary>
     public int MinReviewExecutions { get; init; } = 25;
+
+    /// <summary>
+    /// The elapsed limb of the post-eviction observation window, in minutes — the operator flow observes
+    /// until whichever comes first of <see cref="MinReviewExecutions"/> executions or this.
+    ///
+    /// <para>A TIMEOUT rather than a second measurement, and the state machine treats it as one: a window
+    /// this limb closed cannot support a cost verdict, because it says the time is up and nothing about
+    /// how much ran inside it (<see cref="ObservationWindowLimb"/>). Its job is to stop an observation on
+    /// a query nobody called from waiting forever.</para>
+    ///
+    /// <para>Lives on the bot's settings rather than beside the operator flow because the design has the
+    /// bot reuse this exact sequence in phase 2. One window, one knob — a separate operator-side default
+    /// would let a human and the bot observe the same eviction for different lengths of time and reach
+    /// different verdicts about it.</para>
+    /// </summary>
+    public int ObservationWindowMinutes { get; init; } = 30;
 
     /// <summary>
     /// The net-benefit bar: post-force cpu/exec must be at or below this fraction of the regressed
@@ -97,6 +117,10 @@ public sealed record ForcePlanBotSettings
         FirstReviewMinutes = Math.Clamp(FirstReviewMinutes, 5, 1440),
         FinalReviewMinutes = Math.Clamp(FinalReviewMinutes, Math.Clamp(FirstReviewMinutes, 5, 1440), 10080),
         MinReviewExecutions = Math.Clamp(MinReviewExecutions, 1, 100000),
+        /* Floor of 1 minute: a zero or negative window would close the observation on the same pass the
+           eviction ran, so every eviction would be judged before the optimizer had compiled anything —
+           the elapsed limb's whole job is to be a bound, and an instant bound is not one. */
+        ObservationWindowMinutes = Math.Clamp(ObservationWindowMinutes, 1, 1440),
         NetBenefitRatio = double.IsFinite(NetBenefitRatio) ? Math.Clamp(NetBenefitRatio, 0.05, 1.0) : 0.75,
     };
 }

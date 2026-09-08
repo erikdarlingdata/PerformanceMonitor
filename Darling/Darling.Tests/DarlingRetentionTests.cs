@@ -471,9 +471,13 @@ public sealed class DarlingRetentionTests
             foreach (var (ageDays, decision) in new[] { (400, "would_force"), (100, "blocked") })
             {
                 using var insert = new NpgsqlCommand(
+                    /* actor is named because V113 (#2138 phase 1) dropped its DEFAULT: it is the column the
+                       bot's own-forces-only invariant reads, and an INSERT that omits it must fail rather
+                       than silently claim to be the bot. This raw INSERT is exactly the shape that would
+                       have — it did, with 23502, which is the guard working. */
                     "INSERT INTO collect.plan_force_actions"
-                    + " (action_time, server_id, server_name, database_name, query_id, plan_id, action, mode, decision, outcome)"
-                    + " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
+                    + " (action_time, server_id, server_name, database_name, query_id, plan_id, action, mode, actor, decision, outcome)"
+                    + " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection);
                 insert.Parameters.AddWithValue(utcNow.AddDays(-ageDays));
                 insert.Parameters.AddWithValue(TestServerId);
                 insert.Parameters.AddWithValue("retention-e2e");
@@ -482,6 +486,7 @@ public sealed class DarlingRetentionTests
                 insert.Parameters.AddWithValue(2L);
                 insert.Parameters.AddWithValue("force");
                 insert.Parameters.AddWithValue("dry_run");
+                insert.Parameters.AddWithValue("bot");
                 insert.Parameters.AddWithValue(decision);
                 insert.Parameters.AddWithValue("journaled");
                 await insert.ExecuteNonQueryAsync(ct);
