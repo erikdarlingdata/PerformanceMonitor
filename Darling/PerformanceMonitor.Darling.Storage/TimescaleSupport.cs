@@ -5051,6 +5051,35 @@ WHERE js.last_run_status = 'Success'";
     }
 
     /// <summary>
+    /// Everything <see cref="HeaviestRefreshRuntimeSql"/> and <see cref="OtherHourlyRefreshRuntimesSql"/>
+    /// have in common: the projection, the MEASURED OR-join, and the two filters that make the rows refresh
+    /// policies on this store's own aggregates. The two statements differ only in which views they keep.
+    ///
+    /// <para><b>Shared rather than copied, and the copy it replaces is the reason (#3182).</b> This join was
+    /// already carried in two places — here and
+    /// <see cref="ContinuousAggregateRefreshStateSql"/> — because the materialization-hypertable arm ALONE
+    /// was measured to find nothing, so both arms have to be present and a re-guessed join reads back empty
+    /// rather than wrong. A third copy would be a third chance to lose an arm, and it would be the copy with
+    /// the fewest readers. One text, two filters.</para>
+    ///
+    /// <para>Not a full statement on its own: it opens with the <c>FROM</c> and ends inside the
+    /// <c>WHERE</c>, so a caller appends its own <c>AND</c> clauses. That shape is what lets the composed
+    /// text be byte-identical to what each statement used to spell out, which is what keeps the pins on them
+    /// reading the statements rather than this fragment.</para>
+    /// </summary>
+    private const string RefreshPolicyRuntimeProjectionSql = @"
+SELECT
+    ca.view_name,
+    EXTRACT(EPOCH FROM js.last_run_duration)::double precision AS last_run_seconds
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+JOIN timescaledb_information.job_stats AS js USING (job_id)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'";
+
+    /// <summary>
     /// The last SUCCESSFUL run of <see cref="HeaviestHourlyRefreshView"/>'s refresh policy, in seconds — the
     /// live figure <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>'s envelope is about (#3044).
     ///
@@ -5081,35 +5110,6 @@ WHERE js.last_run_status = 'Success'";
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> and read there for the live envelope
     /// (#3119). This read supplies the BOUND, which is what was missing, not the history.</para>
     /// </summary>
-    /// <summary>
-    /// Everything <see cref="HeaviestRefreshRuntimeSql"/> and <see cref="OtherHourlyRefreshRuntimesSql"/>
-    /// have in common: the projection, the MEASURED OR-join, and the two filters that make the rows refresh
-    /// policies on this store's own aggregates. The two statements differ only in which views they keep.
-    ///
-    /// <para><b>Shared rather than copied, and the copy it replaces is the reason (#3182).</b> This join was
-    /// already carried in two places — here and
-    /// <see cref="ContinuousAggregateRefreshStateSql"/> — because the materialization-hypertable arm ALONE
-    /// was measured to find nothing, so both arms have to be present and a re-guessed join reads back empty
-    /// rather than wrong. A third copy would be a third chance to lose an arm, and it would be the copy with
-    /// the fewest readers. One text, two filters.</para>
-    ///
-    /// <para>Not a full statement on its own: it opens with the <c>FROM</c> and ends inside the
-    /// <c>WHERE</c>, so a caller appends its own <c>AND</c> clauses. That shape is what lets the composed
-    /// text be byte-identical to what each statement used to spell out, which is what keeps the pins on them
-    /// reading the statements rather than this fragment.</para>
-    /// </summary>
-    private const string RefreshPolicyRuntimeProjectionSql = @"
-SELECT
-    ca.view_name,
-    EXTRACT(EPOCH FROM js.last_run_duration)::double precision AS last_run_seconds
-FROM timescaledb_information.jobs AS j
-JOIN timescaledb_information.continuous_aggregates AS ca
-  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
-  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
-JOIN timescaledb_information.job_stats AS js USING (job_id)
-WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
-AND   ca.view_schema = 'collect'";
-
     public static string HeaviestRefreshRuntimeSql =>
         $@"{RefreshPolicyRuntimeProjectionSql}
 AND   ca.view_name = '{HeaviestHourlyRefreshView}'

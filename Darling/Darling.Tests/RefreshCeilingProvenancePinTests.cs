@@ -684,6 +684,44 @@ public sealed class RefreshCeilingProvenancePinTests
     }
 
     /// <summary>
+    /// Each ceiling constant's summary NAMES ITS OWN STATISTIC and names its own population, and neither
+    /// treats a single closed day and the constant's population as the same population (#3182).
+    ///
+    /// <para><b>Why this is a test.</b> The defect #3182 records is a summary that said "the census
+    /// maximum" while quoting one day's figure, with a sentence asserting that the two "describe the same
+    /// population". Nothing could fail on that: a statistic and a population stated in prose cannot be
+    /// derived from anything, so a constant whose summary does not name its own statistic can drift into
+    /// being a different one with nothing going red. Which is what happened — and the rest of this file,
+    /// which checks every FIGURE the prose draws, passed the whole time, because each figure was correct
+    /// arithmetic over a population the sentence above it mislabelled.</para>
+    ///
+    /// <para>Checked as a SHAPE rather than as a wording: the summary must declare a statistic and must
+    /// name a population, and the specific false identity claim must stay gone. A reworded but honest
+    /// summary passes; one that drops either half does not. Lives HERE rather than beside the staleness
+    /// finding's own cases because <see cref="DocProseFor"/> is the doc-run walker this file already
+    /// carries a stated bound for, and a second hand-rolled one is the shape
+    /// <c>CommentFilterAdoptionTests</c> exists to stop.</para>
+    /// </summary>
+    [Fact]
+    public void EachCeilingSummary_NamesItsStatisticAndItsPopulation()
+    {
+        var source = ReadTimescaleSupportSource();
+
+        foreach (var declaration in new[] { CeilingDeclaration, LightCeilingDeclaration })
+        {
+            var prose = DocProseFor(source, declaration);
+
+            Assert.Contains("This is a MAXIMUM.", prose, StringComparison.Ordinal);
+            Assert.Contains("Its population is", prose, StringComparison.Ordinal);
+        }
+
+        /* THE CLAIM THAT HAD TO GO, checked file-wide rather than in the paragraph that carried it: the
+           substitution of a day for a population has as many wordings as it has sites, and the one wording
+           that is known to have been made is the one worth being unable to restore. */
+        Assert.DoesNotContain("describe the same population", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Each shape the guard forbids, injected ONE AT A TIME into a copy of the source with the guard
     /// required to fail on it — a bundled mutation reports that something fired, not which clause did.
     ///

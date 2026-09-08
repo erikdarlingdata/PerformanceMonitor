@@ -438,44 +438,6 @@ public sealed class RefreshCeilingStalenessTests
     }
 
     /// <summary>
-    /// Each ceiling constant's summary NAMES ITS OWN STATISTIC and its own population, and the heaviest
-    /// one no longer claims a single day and its population are the same population.
-    ///
-    /// <para><b>Why this is a test and not a review note.</b> The defect #3182 records is a summary that
-    /// said "the census maximum" while quoting one day's figure, with a sentence asserting the two
-    /// "describe the same population". Nothing could fail on that: the statistic and the population are
-    /// prose, and prose cannot call into the product. A constant whose summary does not name its own
-    /// statistic can drift into being a different one with nothing going red — which is what happened.</para>
-    ///
-    /// <para>Checked as a SHAPE and not as a wording: the summary has to declare a statistic and has to
-    /// name a population, and the specific false identity claim has to stay gone. A reworded but still
-    /// honest summary passes; a summary that drops either half does not.</para>
-    /// </summary>
-    [Fact]
-    public void EachCeilingSummary_NamesItsStatisticAndItsPopulation()
-    {
-        var source = ReadTimescaleSupportSource();
-
-        foreach (var declaration in new[]
-        {
-            "public const int HeaviestHourlyRefreshObservedCeilingSeconds",
-            "public const double OtherHourlyRefreshObservedCeilingSeconds",
-        })
-        {
-            var prose = DocProseFor(source, declaration);
-
-            Assert.Contains("This is a MAXIMUM.", prose, StringComparison.Ordinal);
-            Assert.Contains("Its population is", prose, StringComparison.Ordinal);
-        }
-
-        /* THE CLAIM THAT HAD TO GO. The live-envelope paragraph said a single closed day and the constant's
-           population "describe the same population", which is what let one day's maximum carry a census's
-           authority. They coincide because the population's largest run fell inside that day, which is a
-           fact about where one run landed. */
-        Assert.DoesNotContain("describe the same population", source, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// A MEASURED reading, quoted as evidence rather than derived: the clean 17:00Z run of 2026-09-08, whose
     /// existence is the concrete demonstration that the recorded ceiling was overtaken from inside the
     /// routine band (#3182).
@@ -627,36 +589,6 @@ public sealed class RefreshCeilingStalenessTests
         logger.Joined == "(no log lines captured)"
             ? 0
             : logger.Joined.Split(" | ", StringSplitOptions.None).Length;
-
-    /// <summary>
-    /// One member's doc-comment run, joined to a single line — the same shape
-    /// <c>RefreshCeilingProvenancePinTests</c> parses, so a claim that wraps across <c>///</c> lines is one
-    /// string rather than a match a line-oriented search misses.
-    /// </summary>
-    private static string DocProseFor(string source, string declaration)
-    {
-        var lines = source.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
-        var index = Array.FindIndex(lines, l => l.Contains(declaration, StringComparison.Ordinal));
-        Assert.True(index >= 0, $"'{declaration}' was not found in TimescaleSupport.cs");
-
-        var run = new List<string>();
-        for (var i = index - 1; i >= 0; i--)
-        {
-            var line = lines[i].Trim();
-            if (!line.StartsWith("///", StringComparison.Ordinal))
-            {
-                break;
-            }
-
-            run.Insert(0, line[3..].Trim());
-        }
-
-        Assert.NotEmpty(run);
-        return string.Join(" ", run);
-    }
-
-    private static string ReadTimescaleSupportSource([CallerFilePath] string thisFile = "") =>
-        ReadSibling(thisFile, "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs");
 
     private static string ReadDarlingWorkerSource([CallerFilePath] string thisFile = "") =>
         ReadSibling(thisFile, "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
