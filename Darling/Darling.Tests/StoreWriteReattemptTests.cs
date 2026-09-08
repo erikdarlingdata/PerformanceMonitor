@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Linq;
 using System.Net.Sockets;
 using System.Threading;
@@ -557,10 +558,28 @@ public class StoreWriteReattemptTests
             "a write that faulted and then succeeded writes a row indistinguishable from one that never " +
             "faulted at all.");
 
-        var successReturn = source.IndexOf(
-            "rowsWritten, sqlMs, storageMs, collectionNote", StringComparison.Ordinal);
+        /* Whitespace collapsed before matching, and the anchor's EXISTENCE asserted separately from the
+           ordering. Both halves are #3161's lesson, learned the expensive way: that change added the
+           definition-supplied `context.Measurements` argument to this very call, the single-line literal
+           stopped matching, IndexOf returned -1, and `-1 > merge` failed with the ORDERING message — so the
+           pin reported a reordering that had not happened and said nothing about the anchor that had moved.
+           A pin whose failure names the wrong cause costs more than one that does not fire. */
+        var collapsed = Regex.Replace(source, @"\s+", " ");
+        const string successReturnArguments =
+            "rowsWritten, sqlMs, storageMs, context.Measurements, collectionNote";
+
+        var successReturn = collapsed.IndexOf(successReturnArguments, StringComparison.Ordinal);
         Assert.True(
-            successReturn > merge,
+            successReturn >= 0,
+            "the success return's argument list no longer matches \"" + successReturnArguments + "\". This " +
+            "pin has gone blind rather than caught anything: re-anchor it on the current argument list, " +
+            "then check the ordering below still holds.");
+
+        var collapsedMerge = collapsed.IndexOf(
+            "StoreWriteReattemptNote(context.StoreWriteReattempts)", StringComparison.Ordinal);
+
+        Assert.True(
+            successReturn > collapsedMerge,
             "the merge must happen BEFORE the success return that carries the note, and after every write " +
             "on all three dispatch paths.");
     }
