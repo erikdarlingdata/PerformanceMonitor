@@ -478,8 +478,16 @@ public class PgIndexBloatCollectorDefinitionTests
     /// "unmeasured" and "healthy" that <c>skipped_reason</c> exists to prevent, reintroduced one level up.</para>
     ///
     /// <para>Pinned as an inequality rather than as equality: raising the cycle budget above the ceiling is
-    /// a legitimate tuning move once a SUCCESS row supplies a real duration, and this must not stand in the
-    /// way of it. Only the floor is load-bearing.</para>
+    /// a legitimate tuning move, and this must not stand in the way of it. Only the floor is
+    /// load-bearing.</para>
+    ///
+    /// <para><b>This pin is not sufficient on its own, which #3164 is what established.</b> While
+    /// <c>budget &gt;= ceiling</c> holds, <see cref="TheCycleBudget_FitsTheDeadline_AtTheMeasuredBlockRate"/>
+    /// covers the CEILING's deadline cost for free — a near-ceiling index cannot cost more than the budget
+    /// it sits under. That transitive coverage disappears the moment anyone decouples the two, and its
+    /// disappearance is silent, so the ceiling now carries its own deadline assertion in
+    /// <see cref="ThePerIndexCeiling_FitsTheDeadline_OnItsOwn"/> rather than inheriting one from this
+    /// inequality.</para>
     /// </summary>
     [Fact]
     public void TheCycleBudget_IsNeverBelowThePerIndexCeiling()
@@ -501,31 +509,81 @@ public class PgIndexBloatCollectorDefinitionTests
     /// orders of magnitude, and that is the arithmetic error that a per-byte argument cannot see.</para>
     ///
     /// <para><b>Half the deadline, not all of it.</b> The remainder pays for the catalog scan, connection
-    /// setup, and the tail index admitted while the running total was still just under budget — that index
-    /// is charged for itself, so the last admission can be almost a whole index past the point where the
-    /// budget was nearly spent.</para>
+    /// setup, and being wrong about the rate — which is the whole of the margin, deliberately, since
+    /// <see cref="PgIndexBloatCollector.MeasuredBlocksPerSecond"/> is now what was measured rather than a
+    /// figure shaded downwards. Spending the margin in two places would leave neither meaning anything.</para>
     ///
-    /// <para>The rate is an assumption and is named as one. This pin does not make it true; it makes
-    /// raising the budget state a rate, and makes raising the rate state why.</para>
+    /// <para><b>The rate is a measurement now, and this pin is what made the trigger fire (#3164).</b> The
+    /// figure was an assumed 2,000 blocks/s; the first SUCCESS row this collector ever produced put it at
+    /// ~1,013, and this assertion is what turned that into a required budget change rather than a note —
+    /// 2 GiB is 262,144 blocks, which at the measured rate is 259 s against a 150 s allowance. Its own
+    /// failure text named the two exits, "lower the budget, or argue the rate up and say on what
+    /// measurement", and the measurement argued it DOWN. The pin does not make the rate true; it makes the
+    /// budget answerable to it.</para>
     /// </summary>
     [Fact]
-    public void TheCycleBudget_FitsTheDeadline_AtThePessimisticBlockRate()
+    public void TheCycleBudget_FitsTheDeadline_AtTheMeasuredBlockRate()
     {
         var deadlineSeconds = PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride;
 
         Assert.NotNull(deadlineSeconds);
 
         var blocks = PgIndexBloatCollector.CycleMeasureBudgetBytes / PgIndexBloatCollector.BlockSizeBytes;
-        var seconds = blocks / (double)PgIndexBloatCollector.PessimisticBlocksPerSecond;
+        var seconds = blocks / (double)PgIndexBloatCollector.MeasuredBlocksPerSecond;
         var allowed = deadlineSeconds.Value / 2.0;
 
         Assert.True(
             seconds <= allowed,
             $"a full cycle budget of {PgIndexBloatCollector.CycleMeasureBudgetBytes} bytes is {blocks} "
-            + $"blocks, which at {PgIndexBloatCollector.PessimisticBlocksPerSecond} blocks/s takes "
+            + $"blocks, which at {PgIndexBloatCollector.MeasuredBlocksPerSecond} blocks/s takes "
             + $"{seconds:F0}s — past the {allowed:F0}s that leaves half of the {deadlineSeconds}s command "
             + "deadline for everything else. Lower the budget, or argue the rate up and say on what "
             + "measurement");
+    }
+
+    /// <summary>
+    /// The PER-INDEX CEILING has to fit the deadline on its own, because one index just under it is the
+    /// largest amount of work a single statement can be asked to do.
+    ///
+    /// <para><b>Why this is not redundant with
+    /// <see cref="TheCycleBudget_FitsTheDeadline_AtTheMeasuredBlockRate"/>.</b> Today the two are the same
+    /// arithmetic, because <see cref="TheCycleBudget_IsNeverBelowThePerIndexCeiling"/> forces
+    /// <c>budget &gt;= ceiling</c> and a near-ceiling index therefore cannot cost more than the budget it
+    /// sits under. That makes the ceiling's deadline cost covered TRANSITIVELY — and the transitive route
+    /// runs through an inequality whose own doc invites it to be relaxed. Decouple the two and the ceiling
+    /// silently loses the only assertion its cost ever had, with every other pin still green.</para>
+    ///
+    /// <para><b>It is also the assertion that decides the decoupling question, which is why #3164 added it
+    /// rather than filing it.</b> #3153 deferred decoupling the budget from the ceiling — an unconditional
+    /// first-admission rule plus a deadline constraint restated as a SUM — so that the budget could fall to
+    /// fit a slower rate while the ceiling stayed at 2 GiB. This pin is what shows that goal to be
+    /// unreachable: at the measured rate a 2 GiB ceiling is 259 s in one statement, so it fails this
+    /// assertion before a budget is chosen at all, and <c>ceiling + budget &lt;= allowance</c> has no
+    /// solution. The binding constraint was never the ordering between the two figures; it was the
+    /// ceiling's own deadline cost, which equal values had been hiding.</para>
+    ///
+    /// <para>Written against the ceiling and the deadline rather than against the budget, so it stays
+    /// meaningful under a decoupling instead of quietly becoming a second copy of the budget pin.</para>
+    /// </summary>
+    [Fact]
+    public void ThePerIndexCeiling_FitsTheDeadline_OnItsOwn()
+    {
+        var deadlineSeconds = PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride;
+
+        Assert.NotNull(deadlineSeconds);
+
+        var blocks = PgIndexBloatCollector.MeasureCeilingBytes / PgIndexBloatCollector.BlockSizeBytes;
+        var seconds = blocks / (double)PgIndexBloatCollector.MeasuredBlocksPerSecond;
+        var allowed = deadlineSeconds.Value / 2.0;
+
+        Assert.True(
+            seconds <= allowed,
+            $"one index just under the {PgIndexBloatCollector.MeasureCeilingBytes}-byte per-index ceiling "
+            + $"is {blocks} blocks, which at {PgIndexBloatCollector.MeasuredBlocksPerSecond} blocks/s takes "
+            + $"{seconds:F0}s in a SINGLE statement — past the {allowed:F0}s that leaves half of the "
+            + $"{deadlineSeconds}s command deadline for everything else. No cycle budget can fix this: the "
+            + "ceiling is what one statement can be asked to read. Lower the ceiling, or argue the rate up "
+            + "and say on what measurement");
     }
 
     /* ---------------- rotation (#3153) ---------------- */
