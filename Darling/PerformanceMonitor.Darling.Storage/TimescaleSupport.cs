@@ -2144,6 +2144,36 @@ WITH NO DATA";
     public static int RefreshPhaseSlotSeconds => HeaviestRefreshWindowMinutes * 60;
 
     /// <summary>
+    /// The fraction of a window at which a runtime watch on that window speaks, as a numerator over
+    /// <see cref="WindowWatchLeadDenominator"/> — five sixths, so a watch line sits at 83.3% of whatever
+    /// space the thing being watched has.
+    ///
+    /// <para><b>Named because the grid now has TWO watches over it and one lead-time choice, not two.</b>
+    /// <see cref="RefreshSlotWarningSeconds"/> is this fraction of
+    /// <see cref="RefreshPhaseSlotSeconds"/> and <see cref="CompressionClearanceWatchSeconds"/> is the same
+    /// fraction of a compression minute's clearance. Both are re-derived over this pair rather than each
+    /// carrying its own <c>* 5 / 6</c>: a second literal would let the two lead times drift apart silently,
+    /// and this file's own <see cref="CompressScheduleSpan"/> remark states the rule that forbids it —
+    /// cross-check by DERIVING one side from the other, never by pinning each side to its own constant,
+    /// which forces the edit on whichever side the editor is looking at and forces nothing on the other.
+    /// The value of neither line moves by being expressed this way; the derivation is what changes.</para>
+    ///
+    /// <para><b>Why the same fraction is right for both, rather than a coincidence being institutionalised.</b>
+    /// The argument on <see cref="RefreshSlotWarningSeconds"/> is that the remaining sixth has to be usable
+    /// lead time against a runtime that grows with data volume — and the compression side is watched against
+    /// the same kind of quantity, a daily chunk rewrite whose cost scales with the day's ingest. What differs
+    /// between the two is the WIDTH each is a fraction of, and that is exactly what taking a fraction handles.
+    /// A compression minute at the tail of the band has one light-refresh step of clearance, so a sixth of it
+    /// is 10 s of lead — thin, and stated on
+    /// <see cref="CompressionMinuteClearanceMinutes"/> rather than hidden, because the answer to a thin lead
+    /// time there is a wider band and not a different fraction.</para>
+    /// </summary>
+    public const int WindowWatchLeadNumerator = 5;
+
+    /// <summary>The denominator of <see cref="WindowWatchLeadNumerator"/>'s fraction.</summary>
+    public const int WindowWatchLeadDenominator = 6;
+
+    /// <summary>
     /// The line at which the heaviest hourly refresh's LIVE runtime is worth a warning — five sixths of
     /// <see cref="RefreshPhaseSlotSeconds"/>, so 1,050 s against today's 1,260 s window.
     ///
@@ -2193,7 +2223,8 @@ WITH NO DATA";
     /// leaving a reader to notice. That pin has now fired once and been answered by re-deriving the geometry
     /// instead of by renumbering the band, which is the only answer that changes anything.</para>
     /// </summary>
-    public static int RefreshSlotWarningSeconds => RefreshPhaseSlotSeconds * 5 / 6;
+    public static int RefreshSlotWarningSeconds =>
+        RefreshPhaseSlotSeconds * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
 
     /// <summary>
     /// Where one live reading of <see cref="HeaviestHourlyRefreshView"/>'s runtime sits against the slot it
@@ -2416,7 +2447,21 @@ WITH NO DATA";
     /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.
     /// How thin the spread has to be is <see cref="CompressionPhaseMaxPerMinute"/>, and the band's width
     /// follows from it — so the re-derivation moves WHERE compression runs without changing how concentrated
-    /// it is, which is the one property #3112's midnight band is sensitive to.</para>
+    /// it is.</para>
+    ///
+    /// <para><b>Concentration is NOT the only property #3112's midnight band is sensitive to, and the
+    /// correction matters because the other one moved.</b> #3174 held the spread constant — <b>24</b> minutes
+    /// at <b>3</b> per minute before and after — and said so. What it did not hold constant, and did not
+    /// claim to, is each minute's CLEARANCE to the next refresh start
+    /// (<see cref="CompressionMinuteClearanceMinutes"/>): under the previous grid the three hypertables whose
+    /// chunk-close runs were measured sat on minutes with 240 s, 180 s and 120 s of clearance against runs of
+    /// 360 s, 198 s and 552 s, so every one of them ran past the refresh that followed it. On this grid the
+    /// same three hold minutes with <b>1,200 s</b>, <b>1,140 s</b> and <b>1,080 s</b>. A contiguous refresh
+    /// band followed by a contiguous compression band puts most of the compression minutes a long way from
+    /// the next refresh, where three chunks of a uniform grid put every compression minute within a guard
+    /// band of one — so the re-derivation changed the axis the band actually ran through, as a consequence of
+    /// its shape rather than as an aim. It remains true that NOTHING here reduces what midnight
+    /// carries.</para>
     ///
     /// <para>Declared HERE, after <see cref="HourlyRefreshPhaseOrder"/>, because a static field initializer
     /// runs in declaration order and this one reads that list through
@@ -2506,6 +2551,179 @@ WITH NO DATA";
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// How many minutes a compression policy starting on <paramref name="minute"/> has before the next hourly
+    /// refresh starts — the space that minute's run actually has, measured forward round the hour.
+    ///
+    /// <para><b>Why this quantity and not the cadence (#3112).</b> The compression band's WIDTH is derived
+    /// from a COUNT (<see cref="CompressionPhaseBandMinutes"/> over
+    /// <see cref="CompressionPhaseMaxPerMinute"/>), and nothing in the grid compares a compression run's
+    /// DURATION to anything. Both instruments that look as though they would catch it miss it, and one of
+    /// them misses by a factor rather than by a margin. #2136's Store Job Over Cadence judges a job against
+    /// its own <c>schedule_interval</c>, which for a compression policy is
+    /// <see cref="CompressScheduleInterval"/> — so its shipped warning share
+    /// (<see cref="RefreshSlotPercentOfHourlyCadence"/>) puts the line at 900 s of a 3,600 s hour, while the
+    /// wall a compression run actually faces is its own minute's clearance, as little as 60 s. That is
+    /// FIFTEEN times too high on the tightest minute in the band; the 552 s chunk-close run measured below
+    /// reads 15.3% of cadence and never approaches the knob at all. And #1778's
+    /// <see cref="LogCompressionActivity"/> reports a run that is STILL RUNNING and a chunk backlog, never a
+    /// completed run's duration against the space it had. So the compression band is the one band of this
+    /// grid with no runtime instrument over its own geometry, and the daily chunk close is precisely a
+    /// compression-runtime event.</para>
+    ///
+    /// <para><b>Relation-AGNOSTIC, deliberately, and it is a LOWER BOUND on the true clearance.</b> The lock
+    /// adjacency #3012 formed on is per-relation: a compression policy holds
+    /// <c>AccessExclusiveLock</c> on ONE hypertable and only a refresh reading THAT hypertable queues behind
+    /// it. This takes the minimum over EVERY refresh start, which is the same predicate
+    /// <see cref="CompressionPhaseMinutes"/> is built from — a minimum over a superset can only be smaller
+    /// than a minimum over the contending subset, so this figure is never larger than the true clearance and
+    /// the watch over it therefore speaks EARLIER than a relation-aware one, never later. Taken in that
+    /// direction on purpose: recovering each view's contended relation means parsing
+    /// <see cref="HourlyRefreshDefinitions"/>' CREATE text, which is a test-time capability here and not an
+    /// hourly-sweep one, and a watch that fails toward flagging a harmless overrun is worth more than one
+    /// that can miss a harmful one.</para>
+    ///
+    /// <para><b>The band's own range, which is what says where the residual is.</b> Clearance falls one
+    /// minute per minute across the band: 1,440 s on its first minute down to <b>60 s</b> on its last, that
+    /// last figure being exactly one <see cref="LightRefreshStepMinutes"/> step because the bands partition
+    /// the hour and the light band opens the next one. The tail minute is always OCCUPIED — the band is sized
+    /// to hold the whole catalog at <see cref="CompressionPhaseMaxPerMinute"/> per minute, so every minute in
+    /// it carries a policy — so a one-step clearance is a permanent feature of the grid rather than an
+    /// arrangement that happens to be tight today. That is the one-sidedness
+    /// <see cref="HeaviestRefreshStartMinute"/> accepted by DECISION, now carried as a number: which refresh
+    /// band opens the hour was chosen knowing something would still be compressing, and this is how much
+    /// space the something has.</para>
+    ///
+    /// <para><b>What the shipped grid puts where, so the residual is named rather than left to be found.</b>
+    /// <c>query_store_stats</c> — the largest hypertable this store has — sits at <b>:42</b> with
+    /// <b>1,080 s</b>, and <c>procedure_stats</c> sits at <b>:58</b> with <b>120 s</b>, the tightest placement
+    /// any of the large hypertables has. Both figures follow from the catalog's ORDER, so a collector
+    /// registered ahead of either moves them; they are pinned as derived values rather than stated as facts
+    /// about those two tables, and the prose going stale is what reddens the pin.</para>
+    ///
+    /// <para><b>The measurement this exists because of, scoped (#3112).</b> In the <c>2026-09-08 00:00Z</c>
+    /// hour on ONE store, three compression policies were read at <b>360 s</b> (<c>query_stats</c>),
+    /// <b>198 s</b> (<c>query_snapshots</c>) and <b>552 s</b> (<c>query_store_stats</c>) — stated in that
+    /// order throughout this paragraph, which is the order of the minutes they held. Those are
+    /// <c>collect.store_metrics</c>' hourly <c>background_job</c> snapshot — a LAST-RUN reading, so no
+    /// maximum question is answered by them (#3119) — and they are one store's and one night's. A far broader
+    /// population exists and is recorded on the change that added this member rather than restated here: a
+    /// multi-week <c>timescaledb_information.job_history</c> census of the same hypertables by hour of day,
+    /// which is maximum-capable where these readings are not. It puts <c>query_store_stats</c>' typical
+    /// midnight run INSIDE the clearance below and its upper tail PAST it. The readings quoted here are
+    /// therefore the weaker instrument, and they are kept because they are the ones the shares stated below
+    /// are computed from — a figure this file can be checked against beats a larger one it cannot. Under the
+    /// grid in force that night the three started at <c>00:26</c>, <c>00:27</c> and <c>00:28</c> with
+    /// <b>240 s</b>, <b>180 s</b> and <b>120 s</b> of clearance, so every one of them ran past the refresh
+    /// that followed it. The one whose hypertable that refresh also READ was <c>query_store_stats</c>, and it
+    /// is that refresh — not the other two — whose runtime went to 160.4 s and then 226.8 s against a
+    /// 20–58 s steady state. On the grid this file ships the same three hold <c>:40</c>, <c>:41</c> and
+    /// <c>:42</c>, where those readings are <b>30%</b>, <b>17%</b> and <b>51%</b> of their clearance.
+    /// <b>Nothing here reduces what midnight carries</b>, and the placement that absorbs it was not chosen
+    /// for that: it is a consequence of #3174's re-derivation, which claimed neutrality on CONCENTRATION and
+    /// was neutral on it. Clearance is a different axis and it moved.</para>
+    ///
+    /// <para>Modular in <paramref name="minute"/> rather than range-checked: minute-of-hour arithmetic is
+    /// modular anyway, and this feeds an observability line off a catalog timestamp, so an impossible value
+    /// must cost the line and never the sweep.</para>
+    /// </summary>
+    public static int CompressionMinuteClearanceMinutes(int minute)
+    {
+        var cadence = MinutesInHourlyCadence;
+        var start = ((minute % cadence) + cadence) % cadence;
+        var clearance = cadence;
+
+        foreach (var view in HourlyRefreshPhaseOrder)
+        {
+            var distance = (RefreshPhaseMinutesFor(view) - start + cadence) % cadence;
+
+            if (distance < clearance)
+            {
+                clearance = distance;
+            }
+        }
+
+        return clearance;
+    }
+
+    /// <summary><see cref="CompressionMinuteClearanceMinutes"/> in seconds — the wall a compression run
+    /// starting on that minute has to finish inside, named once so the watch line and the band boundary
+    /// cannot disagree about where it is (the same reason <see cref="RefreshPhaseSlotSeconds"/>
+    /// exists).</summary>
+    public static int CompressionMinuteClearanceSeconds(int minute) =>
+        CompressionMinuteClearanceMinutes(minute) * 60;
+
+    /// <summary>
+    /// The line at which a compression run on <paramref name="minute"/> is worth saying something about:
+    /// <see cref="WindowWatchLeadNumerator"/>/<see cref="WindowWatchLeadDenominator"/> of that minute's
+    /// clearance, the same lead-time fraction #3044 chose for the heaviest refresh's window.
+    ///
+    /// <para>Integer division, so the line is never ABOVE the fraction — a watch that rounded up would speak
+    /// later than its own stated lead time on some widths and not others.</para>
+    /// </summary>
+    public static int CompressionClearanceWatchSeconds(int minute) =>
+        CompressionMinuteClearanceSeconds(minute) * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
+
+    /// <summary>
+    /// Where one observed compression run sits against the clearance the minute it started on had. Produced by
+    /// <see cref="ClassifyCompressionClearance"/>; nothing here reads a clock or a catalog, so it pins
+    /// directly.
+    /// </summary>
+    public enum CompressionClearanceBand
+    {
+        /// <summary>Under <see cref="CompressionClearanceWatchSeconds"/> — the routine band. This is where
+        /// every hour but the daily chunk close sits, by a wide margin: an ordinary tick finds nothing
+        /// eligible and finishes in well under a second.</summary>
+        InsideClearance,
+
+        /// <summary>At or past <see cref="CompressionClearanceWatchSeconds"/> but still inside
+        /// <see cref="CompressionMinuteClearanceSeconds"/>: the run still finished before the next refresh
+        /// started, with less than the watch's lead fraction to spare.</summary>
+        ApproachingRefresh,
+
+        /// <summary>At or past <see cref="CompressionMinuteClearanceSeconds"/>. The run was still holding its
+        /// <c>AccessExclusiveLock</c> when AT LEAST ONE hourly refresh started, which is the queue
+        /// <see cref="HourlyRefreshPhaseOrder"/>'s stagger exists to keep empty.
+        ///
+        /// <para><b>At least one, and the band does not say how many.</b> A grid places a job's START; it
+        /// cannot bound its END, and no arrangement of a sixty-minute hour contains a run longer than an
+        /// hour. A long enough compression run passes several refresh starts in sequence — the light band
+        /// alone holds one per minute — so this band must not be read as "one refresh waited". How far past
+        /// the FIRST start the run went is reported (<see cref="CompressionActivity.ClearOfRefreshSeconds"/>);
+        /// how many starts it passed is not derived, because that needs each refresh's own runtime and not
+        /// just its minute.</para></summary>
+        RefreshOverrun,
+    }
+
+    /// <summary>
+    /// Classifies one observed compression runtime against the clearance of the minute it started on.
+    ///
+    /// <para><b>Both boundaries are inclusive</b>, for the reason
+    /// <see cref="ClassifyRefreshSlotHeadroom"/>'s are: a run that took exactly its clearance was still
+    /// running when the refresh started, so <see cref="CompressionClearanceBand.RefreshOverrun"/> has to
+    /// begin at <c>&gt;=</c> rather than past it.</para>
+    ///
+    /// <para>Negative and NaN readings classify <see cref="CompressionClearanceBand.InsideClearance"/> rather
+    /// than throwing — same posture as the refresh classifier, and the same reason: a catalog handing back
+    /// something impossible must cost the line, never the sweep that carries it.</para>
+    /// </summary>
+    public static CompressionClearanceBand ClassifyCompressionClearance(double observedSeconds, int startMinute)
+    {
+        if (double.IsNaN(observedSeconds) || observedSeconds < 0d)
+        {
+            return CompressionClearanceBand.InsideClearance;
+        }
+
+        if (observedSeconds >= CompressionMinuteClearanceSeconds(startMinute))
+        {
+            return CompressionClearanceBand.RefreshOverrun;
+        }
+
+        return observedSeconds >= CompressionClearanceWatchSeconds(startMinute)
+            ? CompressionClearanceBand.ApproachingRefresh
+            : CompressionClearanceBand.InsideClearance;
     }
 
     /// <summary>
@@ -4906,6 +5124,38 @@ WHERE j.proc_name LIKE '%compression%'
     /// operator actually needs to see: a compression that is RUNNING right now and how long it has been going
     /// (the field's hours-long runs were invisible while they happened), and a table whose eligible chunks are
     /// piling up. Everything else is one Debug summary line.</para>
+    ///
+    /// <para><b>The #3112 clearance watch rides the same reading, and adds no read, no timer and no per-policy
+    /// routine line.</b> Every term it needs is already in <see cref="CompressionActivity"/>: the hypertable
+    /// names the minute, the minute gives
+    /// <see cref="TimescaleSupport.CompressionMinuteClearanceSeconds"/>, and the last completed run's duration
+    /// is already projected. So the same discipline applies as above — nothing per-policy in the routine band,
+    /// because seventy Debug lines an hour is the burial this method's first paragraph is about. One Debug
+    /// summary carries the TIGHTEST reading in the band, which is the one figure that says how close the grid
+    /// is; a run at or past its watch line gets Information; an overrun gets Warning.</para>
+    ///
+    /// <para><b>Warning rather than Error for an overrun, unlike
+    /// <see cref="LogHeaviestRefreshSlotHeadroom"/>'s exceeded band.</b> There, past the window means a
+    /// documented precondition of the shipped grid is FALSE. Here it does not: the compression guard is
+    /// one-sided BY DECISION (<see cref="HeaviestRefreshStartMinute"/>), so a policy on the tail of the band
+    /// running past the hour is the accepted residual being consumed rather than an invariant breaking. It
+    /// still wants saying, because that residual is what #3112's midnight band ran through, and nothing said
+    /// it.</para>
+    ///
+    /// <para><b>Emitted unconditionally rather than folded into the existing all-clear summary.</b> That
+    /// summary only fires when nothing is running and no chunk is eligible, which is the routine hour — so
+    /// hanging the clearance figure off it would suppress it in exactly the hour the daily chunk close makes
+    /// interesting.</para>
+    ///
+    /// <para><b>The off-phase report is one line for the store too, and that branch is where the discipline
+    /// binds hardest rather than least.</b> A policy starting on a minute other than its assigned one is a
+    /// property of the store, not of the hypertable: the phased read either succeeds or it does not, so on a
+    /// job catalog too old to expose <c>fixed_schedule</c>/<c>initial_start</c> every policy is off phase at
+    /// once and stays that way, because that failure does not heal. Per-hypertable it would be one
+    /// Information line per hypertable per hour, indefinitely, on precisely the store where the least can be
+    /// done about it. It is Information rather than Debug because it is the PRECONDITION of every other
+    /// figure in this block — a clearance measured on a store whose grid was never applied describes where a
+    /// policy ran, not where this product placed it.</para>
     /// </summary>
     public static void LogCompressionActivity(
         IReadOnlyList<CompressionActivity> activity, DateTime nowUtc, ILogger? logger)
@@ -4949,7 +5199,166 @@ WHERE j.proc_name LIKE '%compression%'
                 "TimescaleDB: {Count} compression policies on a {Interval} tick, nothing running, no eligible chunk uncompressed.",
                 activity.Count, CompressScheduleInterval);
         }
+
+        LogCompressionClearance(activity, logger);
     }
+
+    /// <summary>
+    /// The #3112 half of <see cref="LogCompressionActivity"/>: every completed compression run against the
+    /// clearance the minute it started on had. Split out as its own method rather than threaded through the
+    /// loop above so the two concerns can be read, and tested, apart — #1778 asks "is compression keeping
+    /// up", this asks "did a run reach the next refresh".
+    /// </summary>
+    private static void LogCompressionClearance(IReadOnlyList<CompressionActivity> activity, ILogger logger)
+    {
+        CompressionActivity? tightest = null;
+        CompressionActivity? driftExample = null;
+        var offPhase = 0;
+        var onTheGrid = 0;
+
+        foreach (var item in activity)
+        {
+            if (item.ClearanceBand is not CompressionClearanceBand band
+                || item.ClearanceMinute is not int minute
+                || item.LastRunDuration is not TimeSpan duration)
+            {
+                continue;
+            }
+
+            if (IsTighter(item, tightest))
+            {
+                tightest = item;
+            }
+
+            /* DERIVED FROM THE MINUTE, not defaulted from a nullable. Both are non-null inside this walk -
+               the loop guard above has already skipped a reading with no minute or no duration - so taking
+               them off the minute removes the `?? 0` rather than hiding one, and a zero clearance below is a
+               REAL zero rather than a defaulted null. */
+            var clearance = CompressionMinuteClearanceSeconds(minute);
+            var clear = clearance - duration.TotalSeconds;
+
+            /* THE SHARE IS PATTERN-MATCHED, NEVER DEFAULTED, and that is the whole of this block's shape.
+               PercentOfClearance is null exactly when the clearance is ZERO - the sink case - and defaulting
+               it to 0d rendered that case as "0.0%", byte-identical to a near-instant run with the whole band
+               to spare. A reading that gets more alarming as it gets worse everywhere else wrapped around to
+               look BEST in the one case with no room at all, and 0.0% could not be told from "finished
+               instantly" by the operator reading it. So the two measurable bands take the share by pattern
+               and the null falls through to its own finding. Raised by review. */
+            switch (band)
+            {
+                case CompressionClearanceBand.RefreshOverrun when item.PercentOfClearance is not null:
+                    logger.LogWarning(
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, at or past the {Clearance}s it had before the next hourly refresh started ({Over:F0}s past it) — so it was still holding AccessExclusiveLock when a refresh wanted the table. This is the daily chunk close: every hypertable's newest {Days}d chunk becomes eligible at the same UTC midnight, so one tick a day carries a full day's rewrite while the other twenty-three find nothing (#3112). The grid's guard is one-sided by decision, so the tail of the compression band has one refresh step of clearance and this is that residual being spent. Widening it costs minutes the heaviest refresh's window is holding (#3174).",
+                        item.HypertableName, duration.TotalSeconds, minute, clearance, -clear, CompressAfterDays);
+                    break;
+
+                case CompressionClearanceBand.ApproachingRefresh when item.PercentOfClearance is double percent:
+                    logger.LogInformation(
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, {Percent:F1}% of the {Clearance}s it had before the next hourly refresh ({Clear:F0}s clear, watch line {Watch}s).",
+                        item.HypertableName, duration.TotalSeconds, minute, percent,
+                        clearance, clear, CompressionClearanceWatchSeconds(minute));
+                    break;
+
+                /* THE SINK CASE, and it is a DIFFERENT FINDING rather than the same one with an awkward
+                   number. An ordinary overrun says the day's rewrite outgrew a tight minute, and its remedy
+                   is the band's width. A policy sitting on a refresh's OWN minute says the phase grid was
+                   never applied to it, and its remedy is the converge - so the chunk-close reasoning above
+                   would point an operator at the wrong lever. Reached from either band, so an
+                   ApproachingRefresh with no share - which the arithmetic does not currently allow, since a
+                   zero clearance makes both boundaries zero and every non-negative run an overrun - would
+                   land here rather than on a milder line. That is the direction to be wrong in. */
+                case CompressionClearanceBand.RefreshOverrun:
+                case CompressionClearanceBand.ApproachingRefresh:
+                    logger.LogWarning(
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, which is a minute an hourly refresh ALSO starts on — so it had NO CLEARANCE whatsoever, not a small amount, and was contending from the moment it began. Its share of clearance is UNDEFINED rather than low. A compression policy on a refresh's own minute means the phase grid was never applied to it, so the remedy is the phase converge and not the band's width (#3035/#3112).",
+                        item.HypertableName, duration.TotalSeconds, minute);
+                    break;
+
+                default:
+                    break;
+            }
+
+            if (item.OffAssignedPhase)
+            {
+                offPhase++;
+                driftExample ??= item;
+            }
+
+            onTheGrid++;
+        }
+
+        /* ONE line for the whole store, not one per hypertable, and this is the branch where that matters
+           most rather than least. The condition is a property of the STORE - a job catalog too old to expose
+           fixed_schedule/initial_start fails the phased read on every start, which
+           ConvergeCompressionScheduleAsync documents - so it is true of every policy at once and it does not
+           heal. Per-hypertable, it would be seventy Information lines an hour forever on exactly the store
+           where the least can be done about it, which is the burial this method's own discipline forbids and
+           which the first version of this branch did. Raised by review. */
+        if (offPhase > 0 && driftExample is not null)
+        {
+            logger.LogInformation(
+                "TimescaleDB: {OffPhase} of {OnGrid} compression policies last started on a minute other than the one the phase grid assigns them (e.g. {Hypertable} on :{Observed:00} rather than :{Assigned:00}) — so every clearance figure in this block is measured from where those policies actually ran, not from where this product placed them. A policy that drifts by its own runtime each cycle is the finish-to-start scheduling #3035's fixed schedule replaces, which the converge cannot apply on a job catalog too old to expose initial_start.",
+                offPhase, onTheGrid, driftExample.HypertableName,
+                driftExample.ObservedStartMinute ?? 0, driftExample.AssignedPhaseMinute ?? 0);
+        }
+
+        /* The summary splits the same way and for the same reason: the policy SELECTED because it has no
+           clearance must not be REPORTED as a low share of it. Everything here is derived from the tightest
+           reading's own minute, so no rendered quantity is a defaulted null. */
+        if (tightest is not null && tightest.ClearanceMinute is int tightestMinute)
+        {
+            var widest = CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[0]);
+            var narrowest = CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[^1]);
+
+            if (tightest.PercentOfClearance is double tightestShare)
+            {
+                logger.LogDebug(
+                    "TimescaleDB: tightest compression clearance this tick is {Hypertable} at {Percent:F1}% of its {Clearance}s from :{Minute:00} ({Band}); the band runs {Widest}s down to {Narrowest}s of clearance.",
+                    tightest.HypertableName, tightestShare, CompressionMinuteClearanceSeconds(tightestMinute),
+                    tightestMinute, tightest.ClearanceBand, widest, narrowest);
+            }
+            else
+            {
+                logger.LogDebug(
+                    "TimescaleDB: tightest compression clearance this tick is {Hypertable} with NO CLEARANCE at all — it ran from :{Minute:00}, a minute an hourly refresh also starts on, so its share of clearance is UNDEFINED rather than low ({Band}); the band runs {Widest}s down to {Narrowest}s of clearance.",
+                    tightest.HypertableName, tightestMinute, tightest.ClearanceBand, widest, narrowest);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Which of two clearance readings is the one worth naming in the per-tick summary: the larger share of
+    /// its own clearance.
+    ///
+    /// <para><b>The share IS the severity, so this needs no second key — and that is a PROPERTY rather than
+    /// a coincidence.</b> <see cref="ClassifyCompressionClearance"/>'s two boundaries are the clearance and
+    /// five sixths of it, and every clearance the grid can produce is a whole number of minutes, so both
+    /// boundaries fall at the same SHARE on every minute in the band — 83.3% and 100%. Ranking by share is
+    /// therefore ranking by band, and a reading the line calls the tightest can never carry a milder band
+    /// than one it passed over. <c>CompressionClearanceWatchTests</c> pins that exactness, because integer
+    /// division is what would break it: a clearance that was not a multiple of six would round the watch
+    /// line down and the two orders would diverge on that minute alone.</para>
+    ///
+    /// <para><b>A missing share means a ZERO clearance, and its limit is infinity rather than zero.</b>
+    /// <see cref="CompressionActivity.PercentOfClearance"/> is null exactly there — inside this walk the
+    /// duration and the minute are both known, so a zero denominator is the only way to lose it — and zero
+    /// clearance is reachable in production and is the worst geometry there is: a policy the converge could
+    /// not put on a fixed schedule, drifted onto a minute an hourly refresh also starts on.
+    /// <see cref="ClassifyCompressionClearance"/> already bands that
+    /// <see cref="CompressionClearanceBand.RefreshOverrun"/> for any non-negative run. Defaulting the missing
+    /// share to zero ranked that policy BELOW a routine reading, so the summary named the wrong one — the
+    /// per-item Warning fires either way, so the cost was the aggregate line pointing away from the thing it
+    /// exists to point at. Raised by review.</para>
+    ///
+    /// <para><b>One key rather than a band key and a share key.</b> A severity key would be redundant given
+    /// the exactness above, and a redundant arm makes each arm individually unfalsifiable: with both present,
+    /// restoring the zero default changes no outcome and a mutation sweep reports the defect as unreachable.
+    /// So the property is pinned and the comparison is single.</para>
+    /// </summary>
+    private static bool IsTighter(CompressionActivity candidate, CompressionActivity? incumbent) =>
+        incumbent is null
+        || (candidate.PercentOfClearance ?? double.PositiveInfinity)
+            > (incumbent.PercentOfClearance ?? double.PositiveInfinity);
 
     /// <summary>
     /// Re-arms one stuck background job via the parameterized <see cref="RearmJobSql"/> (job_id BOUND). Returns
@@ -5096,6 +5505,77 @@ public sealed record CompressionActivity(
         var elapsed = nowUtc - startedUtc;
         return elapsed > TimeSpan.Zero ? elapsed : TimeSpan.Zero;
     }
+
+    /// <summary>
+    /// The minute of the hour this hypertable's compression policy is ASSIGNED by
+    /// <see cref="TimescaleSupport.CompressionPhaseMinutes"/>, or null when this product does not own the
+    /// hypertable — a bring-your-own store's own table, or a fixture table. Null is what keeps every
+    /// clearance figure below silent for a FOREIGN hypertable: this code chose no minute for it, so it has no
+    /// standing to say whether its run overran anything.
+    /// </summary>
+    public int? AssignedPhaseMinute =>
+        HypertableName is not null
+        && TimescaleSupport.TryCompressionPhaseMinutesFor(HypertableName, out var assigned)
+            ? assigned
+            : null;
+
+    /// <summary>
+    /// The minute of the hour the last run actually STARTED on, or null when the store recorded no start (or
+    /// recorded the never-ran sentinel, which <see cref="RunningFor"/> documents).
+    /// </summary>
+    public int? ObservedStartMinute =>
+        LastRunStartedAtUtc is DateTime startedUtc && startedUtc != DateTime.MinValue
+            ? startedUtc.Minute
+            : null;
+
+    /// <summary>
+    /// The minute the clearance is measured from: the OBSERVED start when there is one, otherwise the
+    /// assigned minute.
+    ///
+    /// <para><b>Observed first, and that ordering is the point (#3112).</b> The assigned minute is what this
+    /// product INTENDS; the observed minute is what happened. Those differ on exactly the store state
+    /// <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync"/> documents as its degraded path — a job
+    /// catalog too old to expose <c>fixed_schedule</c>/<c>initial_start</c> keeps TimescaleDB's
+    /// finish-to-start scheduling and drifts through the hour by its own runtime — and on that store the
+    /// intended clearance is a fiction while the observed one is the fact. Reading the intent would report the
+    /// grid working on a store where it had not been applied.</para>
+    /// </summary>
+    public int? ClearanceMinute =>
+        AssignedPhaseMinute is null ? null : ObservedStartMinute ?? AssignedPhaseMinute;
+
+    /// <summary>True when the last run started on a minute other than the one the grid assigns — the drift
+    /// condition above, worth reporting because it makes every other figure here a statement about a policy
+    /// this product has not actually placed.</summary>
+    public bool OffAssignedPhase =>
+        AssignedPhaseMinute is int assigned && ObservedStartMinute is int observed && assigned != observed;
+
+    /// <summary>How long the run had before the next hourly refresh started, from
+    /// <see cref="TimescaleSupport.CompressionMinuteClearanceSeconds"/>. Null for a foreign hypertable.</summary>
+    public int? ClearanceSeconds =>
+        ClearanceMinute is int minute ? TimescaleSupport.CompressionMinuteClearanceSeconds(minute) : null;
+
+    /// <summary>Where the last completed run sits against that clearance. Null when there is no completed run
+    /// to judge or the hypertable is foreign — never a synthesized <c>InsideClearance</c>, which would read as
+    /// "measured and fine" for something not measured at all.</summary>
+    public TimescaleSupport.CompressionClearanceBand? ClearanceBand =>
+        ClearanceMinute is int minute && LastRunDuration is TimeSpan duration
+            ? TimescaleSupport.ClassifyCompressionClearance(duration.TotalSeconds, minute)
+            : null;
+
+    /// <summary>Seconds of the clearance left unused. Goes NEGATIVE past it rather than clamping, for the
+    /// reason <see cref="HeaviestRefreshSlotReading.ClearOfSlotSeconds"/> does: how far THROUGH the next
+    /// refresh's start a run went is the number that sizes the repair, and clamping reports every overrun as
+    /// a dead heat.</summary>
+    public double? ClearOfRefreshSeconds =>
+        ClearanceSeconds is int clearance && LastRunDuration is TimeSpan duration
+            ? clearance - duration.TotalSeconds
+            : null;
+
+    /// <summary>The last completed run as a percentage of its minute's clearance.</summary>
+    public double? PercentOfClearance =>
+        ClearanceSeconds is int clearance and > 0 && LastRunDuration is TimeSpan duration
+            ? 100.0 * duration.TotalSeconds / clearance
+            : null;
 }
 
 /// <summary>
