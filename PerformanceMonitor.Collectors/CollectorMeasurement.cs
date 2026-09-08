@@ -77,6 +77,11 @@ public static class CollectorMeasurementNote
     /// seam exists to end. <see cref="CollectorContext.Measure"/> throws on the same condition, so a
     /// rejected label is a build-and-test-time failure and this counter is the backstop for a list some
     /// caller assembled by hand.
+    ///
+    /// <para>RESERVED: <see cref="CollectorContext.Measure"/> refuses it as a definition's own label. It is
+    /// a legal count name by the grammar, so without the reservation a collector could measure something it
+    /// called <c>invalid_labels</c> and the rendered note would carry that label twice with two different
+    /// meanings - one the collector's count and one this counter - which no reader could take apart.</para>
     /// </summary>
     public const string RejectedLabelCount = "invalid_labels";
 

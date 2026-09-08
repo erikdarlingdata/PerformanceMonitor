@@ -169,6 +169,15 @@ public sealed class CollectorContext
                 nameof(label));
         }
 
+        if (string.Equals(label, CollectorMeasurementNote.RejectedLabelCount, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Measurement label '" + label + "' is reserved for the renderer's own count of labels it "
+                + "rejected. A note carrying it twice, once as a collector's count and once as that "
+                + "counter, is not readable by anything.",
+                nameof(label));
+        }
+
         for (var i = 0; i < _measurements.Count; i++)
         {
             if (string.Equals(_measurements[i].Label, label, StringComparison.Ordinal))

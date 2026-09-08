@@ -185,6 +185,20 @@ public class CollectorMeasurementSeamTests
         Assert.Throws<ArgumentException>(() => Context().Measure(label!, 1));
     }
 
+    [Fact]
+    public void TheRejectCounterIsReservedAgainstADefinitionsOwnLabel()
+    {
+        /* It passes the grammar, so nothing else stops a collector using it - and then the note carries
+           `invalid_labels` twice with two different meanings, one the collector's count and one the
+           renderer's, which no reader can take apart. Refused at the chokepoint rather than de-duplicated
+           at render time: silently folding two different measurements into one figure is worse than
+           refusing one of them. */
+        Assert.True(CollectorMeasurementNote.IsValidLabel(CollectorMeasurementNote.RejectedLabelCount));
+
+        Assert.Throws<ArgumentException>(
+            () => Context().Measure(CollectorMeasurementNote.RejectedLabelCount, 1));
+    }
+
     [Theory]
     [InlineData("events_read")]
     [InlineData("candidates")]
