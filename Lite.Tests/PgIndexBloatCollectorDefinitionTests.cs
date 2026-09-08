@@ -514,6 +514,20 @@ public class PgIndexBloatCollectorDefinitionTests
     /// <see cref="PgIndexBloatCollector.MeasuredBlocksPerSecond"/> is now what was measured rather than a
     /// figure shaded downwards. Spending the margin in two places would leave neither meaning anything.</para>
     ///
+    /// <para><b>One thing this reserve does NOT cover, corrected rather than quietly rewritten (#3164).</b>
+    /// This paragraph used to say the remainder also paid for "the tail index admitted while the running
+    /// total was still just under budget — that index is charged for itself, so the last admission can be
+    /// almost a whole index past the point where the budget was nearly spent." That describes a gate of the
+    /// form <c>total BEFORE this row &lt;= budget</c>, and the shipped gate is not that one:
+    /// <c>measured_bytes_through_here</c> is a window sum over
+    /// <c>ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</c>, so it INCLUDES the row being tested, and
+    /// <c>measured_bytes_through_here &lt;= budget</c> admits the tail index only if it fits in the
+    /// headroom that is left. Prefix sums are non-decreasing, so the admitted set is a prefix and the total
+    /// read is bounded by the budget exactly — there is no overshoot to reserve against. Worth stating
+    /// because the wrong version made the reserve look like it was covering a 2x read, which would have
+    /// left the actual rate error uncovered; and because the same property is what lets a SUCCESS row's
+    /// duration bound the block rate from above at all.</para>
+    ///
     /// <para><b>The rate is a measurement now, and this pin is what made the trigger fire (#3164).</b> The
     /// figure was an assumed 2,000 blocks/s; the first SUCCESS row this collector ever produced put it at
     /// ~1,013, and this assertion is what turned that into a required budget change rather than a note —
@@ -612,6 +626,16 @@ public class PgIndexBloatCollectorDefinitionTests
     /// matches nothing is the shape that reports success for having looked. The two figures this change is
     /// about are additionally required BY NAME, so the census shrinking to one of them is red rather than
     /// quietly narrower.</para>
+    ///
+    /// <para><b>The filter is every <c>long</c> constant, not every one whose name ends in
+    /// <c>Bytes</c>.</b> The suffix would read more precisely and fails the wrong way: a byte bound added
+    /// under some other name escapes the census and is never checked, which is green and wrong. Taking
+    /// every <c>long</c> means an unrelated <c>long</c> constant added later gets asserted against the
+    /// deadline as well — noisy and wrong, which someone has to come and look at. Given the choice, fail
+    /// toward the label that costs attention rather than the one that costs coverage. The <c>int</c>
+    /// constants on this type (<c>BlockSizeBytes</c>, <c>MeasuredBlocksPerSecond</c>,
+    /// <c>MaxSplicedCursors</c>) are excluded by the type test, which is why the suffix is not needed to
+    /// keep <c>BlockSizeBytes</c> out of a census of byte BOUNDS.</para>
     /// </summary>
     [Fact]
     public void EveryDeclaredByteBound_FitsTheDeadline_CensusedFromTheType()
