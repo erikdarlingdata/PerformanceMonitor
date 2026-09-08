@@ -58,7 +58,7 @@ public class EmptyEnumerationNoteTests
            the whole enumeration read — items, probe failures, and the composed note — through the shared
            driver does, because there is then no host-side text at all. */
         Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken)", source);
-        Assert.Contains("telemetry.Note = enumeration.Note;", source);
+        Assert.Contains("telemetry.HostNote = enumeration.Note;", source);
 
         /* Via the shared driver, never a copy of the text — a literal here is exactly the drift this
            fix exists to prevent. */
@@ -75,7 +75,7 @@ public class EmptyEnumerationNoteTests
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")));
 
-        var assignment = source.IndexOf("telemetry.Note = enumeration.Note;", StringComparison.Ordinal);
+        var assignment = source.IndexOf("telemetry.HostNote = enumeration.Note;", StringComparison.Ordinal);
         var earlyReturn = source.IndexOf("if (items.Count == 0)", StringComparison.Ordinal);
 
         Assert.True(assignment >= 0 && earlyReturn >= 0, "both the note assignment and the zero-item branch must exist");
@@ -92,7 +92,7 @@ public class EmptyEnumerationNoteTests
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")));
 
-        Assert.Contains("telemetry.Note = null;", source);
+        Assert.Contains("telemetry.ResetNote();", source);
 
         var service = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "RemoteCollectorService.cs")));
@@ -113,11 +113,11 @@ public class EmptyEnumerationNoteTests
         var serverB = service.TelemetryFor(2);
         Assert.NotSame(serverA, serverB);
 
-        serverA.Note = EnumeratedCollectorDriver.EmptyEnumerationMessage;
+        serverA.HostNote = EnumeratedCollectorDriver.EmptyEnumerationMessage;
         serverA.SqlMs = 1234;
 
         /* Server B starting its own run resets ITS slot — the shape RunCollectorAsync uses. */
-        serverB.Note = null;
+        serverB.ResetNote();
         serverB.SqlMs = 0;
 
         Assert.Equal(EnumeratedCollectorDriver.EmptyEnumerationMessage, serverA.Note);

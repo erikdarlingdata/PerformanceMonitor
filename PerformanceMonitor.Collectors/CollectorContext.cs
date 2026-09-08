@@ -26,6 +26,15 @@ public sealed class CollectorContext
     public static readonly IReadOnlyDictionary<string, string> NoState =
         new Dictionary<string, string>(StringComparer.Ordinal);
 
+    /// <summary>
+    /// The empty <see cref="Measurements"/> — what a host passes for a run that never reached a
+    /// definition's read at all (the <c>AppliesTo</c> early-out, an enumeration that listed nothing, a
+    /// cycle the wall-clock budget abandoned). Named rather than an inline empty array so those sites read
+    /// as a deliberate "this run measured nothing" instead of a value somebody forgot.
+    /// </summary>
+    public static readonly IReadOnlyList<CollectorMeasurement> NoMeasurements =
+        Array.Empty<CollectorMeasurement>();
+
     public required int ServerId { get; init; }
 
     public required string ServerName { get; init; }
@@ -106,6 +115,80 @@ public sealed class CollectorContext
     /// <see cref="CatchupClampApplied"/>).
     /// </summary>
     public Dictionary<string, string> PendingState { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The labelled COUNTS this definition measured on the target during the round trip it had already
+    /// made, rendered onto this run's <c>collection_log.error_message</c> by whichever host is running it
+    /// (#3161). Empty for every collector that measures nothing, which leaves the column NULL exactly as
+    /// before. Written through <see cref="Measure"/>; the other context members a definition writes back to
+    /// the host are <see cref="PendingState"/>, <see cref="PerItemTextBudgetExceeded"/> and
+    /// <see cref="CatchupClampApplied"/>.
+    ///
+    /// <para><b>What this is for.</b> A definition previously had NO channel into that column - every value
+    /// <c>CollectorRunResult.Note</c> took was runner-authored - so a collector that could work out why it
+    /// returned nothing had nowhere to put it, and the run recorded SUCCESS with a NULL note. Five issues in
+    /// a row were that shape (#3030, #3109, #3114, #3153, #3154) and each had to be repaired at READ time,
+    /// because read time was the only seam that existed.</para>
+    ///
+    /// <para><b>Counts, never verdicts</b> - see <see cref="CollectorMeasurement"/> for why the value's type
+    /// is what enforces that rather than a convention. A stored conclusion is a stale gate the moment an
+    /// operator acts on it, which is the failure <c>CollectorRuntimePrecondition</c> (#2546) exists to
+    /// prevent; a stored count stays true and lets the read derive the verdict fresh on every call.</para>
+    /// </summary>
+    public IReadOnlyList<CollectorMeasurement> Measurements => _measurements;
+
+    private readonly List<CollectorMeasurement> _measurements = new();
+
+    /// <summary>
+    /// Records that this definition measured <paramref name="value"/> of <paramref name="label"/> - the only
+    /// supported way to add to <see cref="Measurements"/>.
+    ///
+    /// <para><b>A repeated label ACCUMULATES rather than appending a second entry</b>, because these are
+    /// counts and one context serves the whole cycle: the per-database and per-item loops call
+    /// <c>ReadAsync</c>/<c>ReadItemAsync</c> once each against this same object, so a definition measures
+    /// its own slice and the cycle reports the sum without every collector remembering to hold its own
+    /// totals. Appending instead would render <c>events_read=3 events_read=0 events_read=11</c>, which is
+    /// not a count of anything.</para>
+    ///
+    /// <para>Throws on a label <see cref="CollectorMeasurementNote.IsValidLabel"/> rejects. Labels are
+    /// first-party constants in definition source, so that is a build-and-test-time failure rather than
+    /// anything a monitored server can cause - and <c>CollectorMeasurementSeamTests.EveryMeasurementLabelInTheCollectorsIsLegal</c> walks the source
+    /// so it cannot reach a release either. The renderer counts rejects instead of throwing, for a list some
+    /// caller assembled by hand.</para>
+    /// </summary>
+    /// <exception cref="ArgumentException">The label is not a legal count name.</exception>
+    public void Measure(string label, long value)
+    {
+        if (!CollectorMeasurementNote.IsValidLabel(label))
+        {
+            throw new ArgumentException(
+                "Measurement label '" + label + "' is not lowercase snake_case within "
+                + CollectorMeasurementNote.MaxLabelLength.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " characters. Measurements carry counts, so a label must be a count NAME and never "
+                + "a sentence - see CollectorMeasurement.",
+                nameof(label));
+        }
+
+        if (string.Equals(label, CollectorMeasurementNote.RejectedLabelCount, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Measurement label '" + label + "' is reserved for the renderer's own count of labels it "
+                + "rejected. A note carrying it twice, once as a collector's count and once as that "
+                + "counter, is not readable by anything.",
+                nameof(label));
+        }
+
+        for (var i = 0; i < _measurements.Count; i++)
+        {
+            if (string.Equals(_measurements[i].Label, label, StringComparison.Ordinal))
+            {
+                _measurements[i] = new CollectorMeasurement(label, _measurements[i].Value + value);
+                return;
+            }
+        }
+
+        _measurements.Add(new CollectorMeasurement(label, value));
+    }
 
     /// <summary>Wait types excluded from collection (Lite: ignored_wait_types.json — #1240).</summary>
     public IReadOnlySet<string> IgnoredWaitTypes { get; init; } = s_emptySet;
