@@ -45,7 +45,9 @@ public class JsonAlertHistoryStoreDedupKeyTests
     private static Task RecordAsync(JsonAlertHistoryStore store, string serverId, string metric, string type, string? contextJson)
         => store.RecordAlertAsync(new AlertHistoryRecord(
             serverId, "Srv", metric, "4", "1", null, null,
-            AlertSent: true, NotificationType: type, SendError: null,
+#pragma warning disable CS0618
+            Delivery: AlertDelivery.FromLegacyStoredColumns(true, type, null),
+#pragma warning restore CS0618
             Muted: false, DetailText: null, ContextJson: contextJson));
 
     [Fact]
