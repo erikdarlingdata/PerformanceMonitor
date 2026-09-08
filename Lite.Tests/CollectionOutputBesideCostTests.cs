@@ -63,15 +63,21 @@ public sealed class CollectionOutputBesideCostTests
         /* note_count is COUNT(error_message) over SUCCESS runs and last_note is the newest of
            them, ordered notes-first, so a positive count always has a note to point at. Kept
            consistent here rather than set independently, because a row with a count and no note
-           is a state the read cannot produce. A count above the success count is the same kind of
-           unrepresentable row, and is rejected here because FormatOutputFinding does not validate
-           it - so such a fixture would pass while testing nothing. */
-        NoteCount = noteCount <= MeasuredSuccesses
+           is a state the read cannot produce.
+
+           The bound below is the TOTAL run count, not the success count, because note_count above
+           success_count is producible: success_count also excludes legacy abandoned-by-note rows
+           (AbandonedByNotePredicateSql), which carry a non-null error_message on a SUCCESS status
+           and so are counted by note_count. That those rows have aged out of retention makes the
+           tighter bound true of today's data, not structurally true - and a fixture guard that
+           encodes a retention artefact rejects a row production can emit. note_count <= total_runs
+           is the invariant FormatOutputFinding actually rests on: both come from one GROUP BY. */
+        NoteCount = noteCount <= MeasuredRuns
             ? noteCount
             : throw new ArgumentOutOfRangeException(
                 nameof(noteCount),
                 noteCount,
-                $"note_count cannot exceed the {MeasuredSuccesses} SUCCESS runs it is counted over."),
+                $"note_count cannot exceed the {MeasuredRuns} runs in the window."),
         LastNote = noteCount > 0 ? "enumeration yielded 0 items - nothing to collect this cycle" : null,
     };
 
