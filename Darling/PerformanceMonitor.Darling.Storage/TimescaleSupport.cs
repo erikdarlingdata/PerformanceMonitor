@@ -2204,31 +2204,48 @@ WITH NO DATA";
     /// and, since #3174, the number <see cref="CompressionPhaseGuardMinutes"/> is DERIVED from rather than
     /// merely characterised against.
     ///
-    /// <para><b>226.8 s, re-derived from a per-run census and no longer the 140 (#3174).</b> The old figure
+    /// <para><b>THE DERIVATION, recorded as a method rather than only as a value (#3174).</b> The old figure
     /// came from the first full staggered cycle — 26 s / 2 s / 864 s / 140 s — a cycle that STRADDLES the
     /// narrowing boundary, so its readings' regime membership was undetermined in exactly the way the run
     /// excluded from <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>'s population is. The
-    /// re-derivation is the same read that constant names — <c>timescaledb_information.job_history</c>, one
-    /// row per run, on the one store that carries this workload — applied to the twelve non-heaviest hourly
-    /// refresh policies instead of to the one. ESTIMATOR: the maximum, for the same reason it is the maximum
-    /// there. The population is NOT republished here, and that is a stated limitation rather than an
-    /// omission: this figure was read by #3174's census and the series is recorded on that issue, so
-    /// RefreshCeilingProvenancePinTests can hold the derived grid quantities to it but cannot recompute the
-    /// estimator from a listed population the way it can for the heaviest refresh. A population published
-    /// here that nobody in this file's history read would be worse than a cited one.</para>
+    /// re-derivation is the same read that constant names, pointed at the other twelve policies.
+    /// POPULATION: every run of <c>policy_refresh_continuous_aggregate</c> for the hourly views OTHER than
+    /// <see cref="HeaviestHourlyRefreshView"/>, read from <c>timescaledb_information.job_history</c> at one
+    /// row per run on the one store that carries this workload, at <c>2026-09-08 14:57Z</c>. EXCLUSION RULE:
+    /// the same positional one — every run starting at or before the narrowing boundary of <c>13:44:23</c> is
+    /// out, whatever its duration. ESTIMATOR: the maximum, for the same reason it is the maximum there — what
+    /// this sizes is a scheduling exclusion, and the exceedance rate it may accept over its own record is
+    /// zero.</para>
     ///
-    /// <para><b>THE MIDNIGHT REGIME IS IN, and its own doc is why (#3174).</b> Both of the two large values
-    /// occur at <c>00:30</c>, and the second is <b>41% above</b> the first night's — so the figure is a
-    /// midnight reading, and the obvious move is to exclude the midnight hour as unrepresentative. That is the
-    /// wrong move, and this paragraph used to contain the argument against it: <b>NOTHING WAS SIZED FROM
-    /// IT</b> — the guard was derived from the grid step, and this figure "only says how much margin that
-    /// derivation happens to leave". A readout of a margin has to include the runs where the margin was
-    /// consumed, or it stops being a readout of anything; removing the runs that fired a pin is the
-    /// re-type-a-band-to-pass move one constant over. The mechanism behind those two values is #3112's
-    /// midnight band — the daily chunk-close burst meeting the refresh grid at the shared midnight boundary,
-    /// where at every other hour the compression ticks find nothing eligible and finish in seconds. The grid
-    /// does not change how much work midnight carries, so this figure is the right one for the guard to be
-    /// derived from and the midnight band remains its own question.</para>
+    /// <para><b>THE CENSUS.</b> Post-boundary, the maximum is <b>226.8</b> s over <b>874</b> runs of
+    /// <b>12</b> views, with 95th percentile <b>42.2</b> s and median <b>0.8</b> s. Zero rows are removed by
+    /// the succeeded/finish filter (<b>874</b> of <b>874</b>), so this is the whole of the span rather than a
+    /// status-selected part of it, and the store's <c>job_history</c> is populated rather than silently empty
+    /// (#3175) — a maximum over an empty relation returns no rows and reads as "nothing exceeded the line".
+    /// The full 874-run list is NOT republished: unlike the heaviest refresh's 57, a list that long stops
+    /// being re-derivable by reading and starts being a wall of digits, and what bounds a maximum is its
+    /// tail. So the tail is what the mechanism paragraph below states, and the estimator is recomputable from
+    /// the named read rather than from a transcription of it. The distance between the maximum and the 95th
+    /// percentile — 184.6 s over a population where the median run finishes in under a second — is the whole
+    /// reason a percentile is not the estimator here: it would discard exactly the runs this bound exists
+    /// for.</para>
+    ///
+    /// <para><b>THE MIDNIGHT REGIME IS IN, and this constant's own doc is why (#3174).</b> The two largest
+    /// runs are both <see cref="QueryStoreStatsHourlyView"/> starting at <c>00:30</c>: <b>226.8</b> s on
+    /// <c>2026-09-08</c> against <b>160.4</b> s on <c>2026-09-07</c>, <b>41%</b> higher night over night. So
+    /// the figure is a midnight reading, and the obvious move is to exclude the midnight hour as
+    /// unrepresentative. That is the wrong move, and this paragraph used to carry the argument against it:
+    /// <b>NOTHING WAS SIZED FROM IT</b> — the guard was derived from the grid step, and this figure "only
+    /// says how much margin that derivation happens to leave". A readout of a margin has to include the runs
+    /// where the margin was consumed, or it stops being a readout of anything; removing the runs that fired a
+    /// pin is the re-type-a-band-to-pass move one constant over. The mechanism behind those two values is
+    /// #3112's midnight band — the daily chunk-close burst meeting the refresh grid at the shared midnight
+    /// boundary, where at every other hour the compression ticks find nothing eligible and finish in seconds.
+    /// The grid does not change how much work midnight carries, so this figure is the right one for the guard
+    /// to be derived from and the midnight band remains its own question. The third-largest run is
+    /// <b>140.1</b> s, at <c>13:45:00</c> on the boundary day — the same reading the old constant's 140 came
+    /// from, reproduced as an ordinary post-boundary member, which is what says the method is the same one
+    /// rather than a new one that happens to agree.</para>
     ///
     /// <para><b>What changed underneath it: it IS sized from now, so the old escape no longer applies.</b>
     /// <see cref="CompressionPhaseGuardMinutes"/> is this figure rounded up to a whole minute, which makes it

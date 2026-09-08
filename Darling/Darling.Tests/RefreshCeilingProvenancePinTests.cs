@@ -112,7 +112,21 @@ public sealed class RefreshCeilingProvenancePinTests
     private const string WarningLineDeclaration =
         "public static int RefreshSlotWarningSeconds";
 
+    private const string LightCeilingDeclaration =
+        "public const double OtherHourlyRefreshObservedCeilingSeconds";
+
+    private const string GuardBandDeclaration =
+        "public static int CompressionPhaseGuardMinutes";
+
     private static int Ceiling => TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
+
+    /// <summary>
+    /// The light-refresh ceiling in TENTHS of a second, because that constant is a <see cref="double"/> and
+    /// every figure stated against it is stated to one decimal. Integer tenths throughout, so no rounding
+    /// mode can move a comparison — the same reason the live-envelope clauses work in tenths.
+    /// </summary>
+    private static int LightCeilingTenths =>
+        (int)Math.Round(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds * 10);
 
     private static int Slot => TimescaleSupport.RefreshPhaseSlotSeconds;
 
@@ -293,6 +307,83 @@ public sealed class RefreshCeilingProvenancePinTests
             "the population size and range the exclusion defers to",
             CompressionMinutesDeclaration,
             @"population is ([0-9]+) readings and still moving \(([0-9]+) s to ([0-9]+) s within the clean regime\)",
+            true);
+
+        /* ---- the LIGHT refresh ceiling's own census (#3174) ---- */
+
+        /* The estimator and the population's shape. The maximum is held to the constant, the run count to
+           the exclusion clause below, and the view count to the product's own light-policy count - so all
+           four captured numbers are load-bearing and the drift sweep can reach every one of them. */
+        yield return (
+            "the light-refresh census",
+            LightCeilingDeclaration,
+            @"the maximum is ([0-9]+)\.([0-9]+) s over ([0-9]+) runs of ([0-9]+) views",
+            true);
+
+        /* The exclusion CONTROL, which is what says the succeeded/finish filter is not selecting the
+           population: both figures are the same number, and that number is the census count. A filter that
+           had quietly removed a status-selected part would state two different ones. */
+        yield return (
+            "the light-refresh census exclusion count",
+            LightCeilingDeclaration,
+            @"the succeeded/finish filter \(([0-9]+) of ([0-9]+)\)",
+            true);
+
+        /* NOT drift-swept: quoted quantiles of the named read, which derive from nothing here, so bumping a
+           digit only produces another reading the code cannot contradict - the same treatment the heaviest
+           ceiling's snapshot series gets. What IS checked is the ORDERING they are quoted for: the estimator
+           is the maximum precisely because the percentiles sit well below it. */
+        yield return (
+            "the light-refresh quantiles",
+            LightCeilingDeclaration,
+            @"95th percentile ([0-9]+)\.([0-9]+) s and median ([0-9]+)\.([0-9]+) s",
+            false);
+
+        /* The gap between them, which IS derived - from the two figures above - and is the sentence the
+           estimator choice actually rests on. */
+        yield return (
+            "the light-refresh percentile gap",
+            LightCeilingDeclaration,
+            @"the 95th percentile - ([0-9]+)\.([0-9]+) s over a population",
+            true);
+
+        yield return (
+            "the midnight maximum",
+            LightCeilingDeclaration,
+            @"([0-9]+)\.([0-9]+) s on <c>2026-09-08</c> against",
+            true);
+
+        /* NOT drift-swept, and the reason is arithmetic rather than a preference: the previous night's
+           reading is a quoted figure, and a one-tenth bump to it leaves the truncated percentage unchanged
+           (66.3 s over 160.5 s is still 41%), so a sweep case on it would report a caught drift the check
+           cannot see. The percentage itself IS checked against the two readings, which is the claim the
+           sentence makes. */
+        yield return (
+            "the midnight night-over-night growth",
+            LightCeilingDeclaration,
+            @"against ([0-9]+)\.([0-9]+) s on <c>2026-09-07</c>, ([0-9]+)% higher night over night",
+            false);
+
+        /* NOT drift-swept, for the same reason: a quoted reading whose only checkable property is its
+           position in the order the sentence claims for it. */
+        yield return (
+            "the third-largest light run",
+            LightCeilingDeclaration,
+            @"The third-largest run is ([0-9]+)\.([0-9]+) s",
+            false);
+
+        /* The guard band the light ceiling now SIZES, rather than merely characterises, and the whole of the
+           margin that sizing leaves. Both are derived, so both are swept. */
+        yield return (
+            "the guard band the light ceiling derives",
+            GuardBandDeclaration,
+            @"so ([0-9]+) minutes against a ([0-9]+)\.([0-9]+) s ceiling",
+            true);
+
+        yield return (
+            "the guard band's rounding margin",
+            GuardBandDeclaration,
+            @"rounding is the whole margin, and it is ([0-9]+)\.([0-9]+) s",
             true);
     }
 
@@ -919,6 +1010,97 @@ public sealed class RefreshCeilingProvenancePinTests
             $"the rejected alternative is stated as {alternative[0]} s against {derivedAlternative} s derived "
             + $"from the {Slot} s slot less one {TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard "
             + "band");
+
+        /* ---- the LIGHT refresh ceiling's own census (#3174) ---- */
+
+        /* THE DERIVATION for this constant, in the same shape as the heaviest one's: the value is the
+           maximum of the census the comment states, the population's own count is corroborated by the
+           exclusion control, and the view count is the product's own light-policy count rather than a
+           number someone typed. */
+        var lightCensus = Read("the light-refresh census");
+        var lightMax10 = (lightCensus[0] * 10) + lightCensus[1];
+        var lightRuns = lightCensus[2];
+
+        Require(lightMax10 == LightCeilingTenths,
+            $"the stated census maximum {lightCensus[0]}.{lightCensus[1]} s is not this constant's "
+            + $"{LightCeilingTenths / 10}.{LightCeilingTenths % 10} s - the comment says the estimator is "
+            + "the maximum, so one of the two is wrong");
+        Require(lightCensus[3] == TimescaleSupport.LightHourlyRefreshCount,
+            $"the census states {lightCensus[3]} views against the "
+            + $"{TimescaleSupport.LightHourlyRefreshCount} non-heaviest hourly policies the product "
+            + "registers, so it is a census of a different set of jobs than the one this constant bounds");
+
+        var lightKept = Read("the light-refresh census exclusion count");
+        Require(lightKept[0] == lightKept[1],
+            $"the succeeded/finish filter is stated as keeping {lightKept[0]} of {lightKept[1]}, so it DID "
+            + "remove rows - the population is status-selected and the census is a part of the span rather "
+            + "than the whole of it");
+        Require(lightKept[0] == lightRuns,
+            $"the filter clause counts {lightKept[0]} runs against the census's {lightRuns}, so the two "
+            + "sentences are about different reads");
+
+        /* The percentiles, and the GAP that is the estimator argument. A percentile here would discard the
+           runs the bound exists for, and the gap is the size of what it would discard. */
+        var lightQuantiles = Read("the light-refresh quantiles");
+        var light95Tenths = (lightQuantiles[0] * 10) + lightQuantiles[1];
+        var lightMedianTenths = (lightQuantiles[2] * 10) + lightQuantiles[3];
+
+        Require(light95Tenths < lightMax10,
+            $"the stated 95th percentile {lightQuantiles[0]}.{lightQuantiles[1]} s is at or above the "
+            + "census maximum, so the sentence about a percentile discarding the runs this bound exists for "
+            + "no longer describes this population");
+        Require(lightMedianTenths <= light95Tenths,
+            "the stated median is above the stated 95th percentile, so the two quantiles are transposed");
+
+        var lightGap = Read("the light-refresh percentile gap");
+        Require((lightGap[0] * 10) + lightGap[1] == lightMax10 - light95Tenths,
+            $"the stated gap {lightGap[0]}.{lightGap[1]} s is not "
+            + $"{(lightMax10 - light95Tenths) / 10}.{(lightMax10 - light95Tenths) % 10} s derived from the "
+            + "census maximum less the stated 95th percentile");
+
+        /* THE MIDNIGHT MECHANISM, which is the reason this constant deliberately does NOT exclude the
+           regime that produced it. The maximum is the later of the two nights, and the growth is derived
+           from both rather than restated. */
+        var midnightMax = Read("the midnight maximum");
+        Require((midnightMax[0] * 10) + midnightMax[1] == lightMax10,
+            $"the later midnight run is stated as {midnightMax[0]}.{midnightMax[1]} s against the census "
+            + $"maximum {lightMax10 / 10}.{lightMax10 % 10} s, so the paragraph is no longer quoting the run "
+            + "this constant IS");
+
+        var growth = Read("the midnight night-over-night growth");
+        var previousNight10 = (growth[0] * 10) + growth[1];
+        Require(previousNight10 < lightMax10,
+            $"the earlier midnight run is stated as {growth[0]}.{growth[1]} s, at or above the later one, so "
+            + "the night-over-night claim runs the wrong way");
+        Require(growth[2] == (lightMax10 - previousNight10) * 100 / previousNight10,
+            $"the stated growth {growth[2]}% is not "
+            + $"{(lightMax10 - previousNight10) * 100 / previousNight10}% derived from the two readings the "
+            + "same sentence states, truncated as the prose states it");
+
+        var thirdLargest = Read("the third-largest light run");
+        Require((thirdLargest[0] * 10) + thirdLargest[1] < previousNight10,
+            $"the run called third-largest, {thirdLargest[0]}.{thirdLargest[1]} s, is at or above the "
+            + "second-largest the same paragraph states, so the ordering the sentence claims is false");
+
+        /* And the guard band this constant SIZES, which is the whole of what changed about it at #3174: it
+           used to be characterised against a step-derived band, and now the band is derived from it. */
+        var guardBand = Read("the guard band the light ceiling derives");
+        Require(guardBand[0] == TimescaleSupport.CompressionPhaseGuardMinutes,
+            $"the guard band is stated as {guardBand[0]} minutes against "
+            + $"{TimescaleSupport.CompressionPhaseGuardMinutes} derived");
+        Require((guardBand[1] * 10) + guardBand[2] == LightCeilingTenths,
+            $"the ceiling the guard band is derived from is stated as {guardBand[1]}.{guardBand[2]} s "
+            + $"against this constant's {LightCeilingTenths / 10}.{LightCeilingTenths % 10} s");
+
+        var guardMargin = Read("the guard band's rounding margin");
+        Require(
+            (guardMargin[0] * 10) + guardMargin[1]
+                == (TimescaleSupport.CompressionPhaseGuardMinutes * 600) - LightCeilingTenths,
+            $"the rounding margin is stated as {guardMargin[0]}.{guardMargin[1]} s against "
+            + $"{((TimescaleSupport.CompressionPhaseGuardMinutes * 600) - LightCeilingTenths) / 10}."
+            + $"{((TimescaleSupport.CompressionPhaseGuardMinutes * 600) - LightCeilingTenths) % 10} s derived "
+            + "from the guard band less the ceiling it covers - if this reached zero or below, a compression "
+            + "policy could start while a light refresh still held AccessShareLock");
 
         /* And nothing in the pin list went unused: a pattern that is never asserted against reads, from the
            list, exactly like one that is. */
