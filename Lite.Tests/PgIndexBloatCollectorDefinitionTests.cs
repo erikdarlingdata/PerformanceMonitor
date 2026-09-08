@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using Lite.Tests.Helpers;
@@ -584,6 +585,68 @@ public class PgIndexBloatCollectorDefinitionTests
             + $"{deadlineSeconds}s command deadline for everything else. No cycle budget can fix this: the "
             + "ceiling is what one statement can be asked to read. Lower the ceiling, or argue the rate up "
             + "and say on what measurement");
+    }
+
+    /// <summary>
+    /// EVERY byte bound this collector declares fits the deadline, with the population of bounds CENSUSED
+    /// FROM THE TYPE rather than typed out here.
+    ///
+    /// <para><b>Why the census, when two pins above already do this arithmetic.</b> Because those two name
+    /// their subject inline, and a pin's subject is the one thing it cannot check about itself. Mutating
+    /// <see cref="ThePerIndexCeiling_FitsTheDeadline_OnItsOwn"/> to read
+    /// <c>CycleMeasureBudgetBytes</c> instead of <c>MeasureCeilingBytes</c> — one token — leaves all of
+    /// this file green while the ceiling's deadline cost goes unasserted, because the two figures are
+    /// currently EQUAL. That is not a hypothetical: equal values are precisely what
+    /// <see cref="TheCycleBudget_IsNeverBelowThePerIndexCeiling"/> is documented as preferring, so the two
+    /// pins are arithmetically indistinguishable for as long as this collector is correct, and become
+    /// distinguishable only in the decoupled state where one of them is supposed to fire.</para>
+    ///
+    /// <para>So the ceiling's coverage is made independent of any hand-typed subject: the bounds are read
+    /// off the type's own public constants, and each is required to fit the same allowance. A third byte
+    /// bound added later is covered without anyone remembering to add a pin, which is the case a
+    /// hand-written list gets wrong.</para>
+    ///
+    /// <para><b>It cannot pass vacuously.</b> An empty census is asserted against — if these constants ever
+    /// stop being <c>public const long</c> (made <c>static readonly</c>, moved to a settings type, renamed
+    /// out of the filter) the reflection returns nothing, and a reflection-driven check that silently
+    /// matches nothing is the shape that reports success for having looked. The two figures this change is
+    /// about are additionally required BY NAME, so the census shrinking to one of them is red rather than
+    /// quietly narrower.</para>
+    /// </summary>
+    [Fact]
+    public void EveryDeclaredByteBound_FitsTheDeadline_CensusedFromTheType()
+    {
+        var deadlineSeconds = PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride;
+
+        Assert.NotNull(deadlineSeconds);
+
+        var allowed = deadlineSeconds.Value / 2.0;
+
+        var bounds = typeof(PgIndexBloatCollector)
+            .GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+            .Where(f => f.IsLiteral && !f.IsInitOnly && f.FieldType == typeof(long))
+            .ToDictionary(f => f.Name, f => (long)f.GetRawConstantValue()!, StringComparer.Ordinal);
+
+        Assert.NotEmpty(bounds);
+
+        foreach (var required in new[] { "MeasureCeilingBytes", "CycleMeasureBudgetBytes" })
+        {
+            Assert.Contains(required, bounds.Keys);
+        }
+
+        foreach (var (name, bytes) in bounds)
+        {
+            var blocks = bytes / PgIndexBloatCollector.BlockSizeBytes;
+            var seconds = blocks / (double)PgIndexBloatCollector.MeasuredBlocksPerSecond;
+
+            Assert.True(
+                seconds <= allowed,
+                $"{name} is {bytes} bytes = {blocks} blocks, which at "
+                + $"{PgIndexBloatCollector.MeasuredBlocksPerSecond} blocks/s takes {seconds:F0}s — past "
+                + $"the {allowed:F0}s that leaves half of the {deadlineSeconds}s command deadline for "
+                + "everything else. Every byte bound here bounds work inside ONE statement under ONE "
+                + "deadline, so each has to fit it on its own");
+        }
     }
 
     /* ---------------- rotation (#3153) ---------------- */
