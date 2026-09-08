@@ -405,12 +405,16 @@ public sealed class TimescaleContinuousAggregateTests
 
             Assert.Equal(minutes.Length, minutes.Distinct().Count());
 
-            /* And the ROTATION actually moved something, or the loop would be re-asserting the unrotated
-               claim thirteen times: the heaviest refresh keeps its minute by identity, so the light views
-               are the ones that must have moved. */
-            Assert.NotEqual(
-                TimescaleSupport.HourlyRefreshPhaseOrder.Select(TimescaleSupport.RefreshPhaseMinutesFor).ToArray(),
-                rotated.Select(view => TimescaleSupport.RefreshPhaseMinutesFor(rotated, view)).ToArray());
+            /* And the map RESPONDED to the order, per VIEW — without this the loop re-asserts the unrotated
+               claim thirteen times and an overload that ignored its parameter would pass, which is the
+               defect the inline copy this replaced actually embodied. Comparing the two minute SEQUENCES is
+               not enough: an overload that ignored `rotated` still returns a permutation of the unrotated
+               minutes, so the sequences differ while nothing moved. What has to change is the minute a
+               NAMED view gets. */
+            Assert.Contains(
+                TimescaleSupport.HourlyRefreshPhaseOrder,
+                view => TimescaleSupport.RefreshPhaseMinutesFor(rotated, view)
+                    != TimescaleSupport.RefreshPhaseMinutesFor(view));
         }
 
         /* The two overloads agree at the shipped order, so the seam cannot drift from the map the product
