@@ -276,8 +276,12 @@ SELECT
     /// happened, and the state machine closes it either way (still forced → a real review;
     /// not forced → no_longer_forced).</item>
     /// </list>
-    /// OWN-FORCES-ONLY is structural here — the read starts from rows this bot journaled, so an
-    /// operator's hand-placed force can never surface as something to unforce.
+    /// OWN-FORCES-ONLY is a PREDICATE here, not a structural property — <c>actor = 'bot'</c> (V113).
+    /// It was structural while the bot was this table's only writer: the read started from rows the bot
+    /// journaled, so an operator's hand-placed force could not surface. #2138 phase 1 makes an operator a
+    /// writer to the same table, and an operator's succeeded live force is shaped exactly like a bot force
+    /// this read returns — same action, same outcome, no closing row. The filter is now the only thing
+    /// keeping the guarantee, so do not remove it for looking redundant.
     ///
     /// <para>Specced here, consumed by the write path (#2731): phase 1 places no live force, so this
     /// read is provably empty in this build. It lands with the journal rather than with the bot arm
