@@ -1932,6 +1932,20 @@ WITH NO DATA";
     /// statistic over THAT population, and a figure taken from a narrower slice of it — one day, one hour —
     /// is a DIFFERENT statistic even on the occasions when the two agree to the second.</para>
     ///
+    /// <para><b>AND IT IS NOT THE SAME POPULATION AS ITS SIBLING'S, which has to be said here because the
+    /// two constants read as a matched pair and are not one (#3182).</b>
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is scoped to the runs after the narrowing
+    /// boundary and grows with every hour its policies run; the LIVE ENVELOPE paragraph below is scoped to
+    /// ONE CLOSED DAY inside that span. So a maximum quoted from one of these constants is not comparable
+    /// with a maximum quoted from the other, and a figure swept over a wider span than either — the whole
+    /// of a store's job history, say — is comparable with neither, because the boundary exists precisely
+    /// because runs before it did structurally more work on an unnarrowed
+    /// <see cref="HourlyRefreshStartOffset"/>. <b>That comparison has been made and published as a defect
+    /// that was not one</b>, which is what this paragraph exists to stop: an all-span maximum measured
+    /// against a boundary-scoped constant reads as a constant understated by a factor when it is a
+    /// population mismatch. Whichever of the two spans a later reader wants, they have to take it from the
+    /// constant they are reading and not from its neighbour.</para>
+    ///
     /// <para><b>A maximum over a closed population is a LOWER BOUND on what the job does, and since #3182
     /// the product REPORTS when a live run falsifies it.</b> That is not a restatement of the slot watch and
     /// the two are not interchangeable: <see cref="ClassifyRefreshSlotHeadroom"/> asks whether a run fits
@@ -2449,6 +2463,16 @@ WITH NO DATA";
     /// percentile, not a per-view figure, and not a fleet reading: one number covers twelve policies, so a
     /// live run of ANY of them above it falsifies it. "Recorded" in the line above means recorded in that
     /// read, and nowhere else — the word carries no claim about runs the read did not see.</para>
+    ///
+    /// <para><b>AND IT IS NOT THE SAME POPULATION AS ITS SIBLING'S (#3182).</b> This one spans the whole of
+    /// the post-boundary record and grows; the live-envelope figures on
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> are scoped to one closed day inside that
+    /// span. The two constants sit next to each other, are derived by the same named read with the same
+    /// positional exclusion rule, and still answer to different spans — so a maximum from one is not
+    /// comparable with a maximum from the other, and neither is comparable with a sweep over a store's
+    /// whole job history, because the boundary is there because runs before it worked an unnarrowed
+    /// <see cref="HourlyRefreshStartOffset"/>. The direction that mismatch fails in is stated on the
+    /// sibling: it makes a boundary-scoped constant read as understated by a factor.</para>
     ///
     /// <para><b>And since #3182 the product reports when a live run of one of those twelve falsifies it,
     /// which it previously could not because nothing read them.</b> The heaviest refresh had

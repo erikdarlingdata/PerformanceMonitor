@@ -719,6 +719,27 @@ public sealed class RefreshCeilingProvenancePinTests
            substitution of a day for a population has as many wordings as it has sites, and the one wording
            that is known to have been made is the one worth being unable to restore. */
         Assert.DoesNotContain("describe the same population", source, StringComparison.Ordinal);
+
+        /* AND EACH ONE DISCLAIMS THE OTHER'S POPULATION, which is the half naming your own statistic does
+           not cover. These two constants sit next to each other, are derived by the same named read with
+           the same positional exclusion rule, and answer to DIFFERENT spans - one to the whole
+           post-boundary record, one to a closed day inside it. A reader who takes the pair as matched and
+           compares a maximum from one against a maximum from the other, or against a sweep over a store's
+           whole job history, concludes that a constant is understated by a FACTOR when what they have is a
+           population mismatch. That conclusion has been reached and published, so the disclaimer is not
+           hypothetical tidiness: each summary has to name the other constant and say the populations are
+           not the same, or the pair goes on inviting the comparison. */
+        foreach (var (declaration, sibling) in new[]
+        {
+            (CeilingDeclaration, nameof(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds)),
+            (LightCeilingDeclaration, nameof(TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds)),
+        })
+        {
+            var prose = DocProseFor(source, declaration);
+
+            Assert.Contains(sibling, prose, StringComparison.Ordinal);
+            Assert.Contains("NOT THE SAME POPULATION AS ITS SIBLING'S", prose, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>
