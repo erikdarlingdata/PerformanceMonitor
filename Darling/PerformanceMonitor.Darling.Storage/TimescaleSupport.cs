@@ -1889,8 +1889,11 @@ WITH NO DATA";
     /// run's own completion a fraction of a second later, in which case the boundary and that run's
     /// exclusion are ONE OBSERVATION and cannot corroborate each other. That is NOT asserted as settled in
     /// either direction. What would settle it is a record of the ALTER independent of the job history, and
-    /// none has been found — and nothing above needs one, because the exclusion rule is positional and the
-    /// excluded run is disqualified by its duration alone.</para>
+    /// none has been found — and nothing above needs one, because the exclusion rule is positional. It used
+    /// to say "and the excluded run is disqualified by its duration alone", which was the belt to the
+    /// boundary's braces; that belt is gone with the census, since 864 s is now an ordinary member of the
+    /// post-boundary range. The circularity is therefore no better corroborated than it was and no worse:
+    /// a positional rule needs no second reason, which is why it was chosen over one.</para>
     ///
     /// <para><b>And the rule that keeps a whole SERIES out of this constant, stated as a rule because the
     /// series keeps growing.</b> The hourly self-metrics snapshot
