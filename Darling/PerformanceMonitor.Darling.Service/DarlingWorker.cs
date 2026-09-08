@@ -551,6 +551,13 @@ public sealed class DarlingWorker : BackgroundService
     /// self-alert evaluator are constructed with.</summary>
     private readonly AlertReadFailureCounter _readFailures = AlertReadFailureCounter.Shared;
 
+    /// <summary>#3182: the process-lifetime high-water mark behind the refresh-ceiling staleness finding.
+    /// Held HERE rather than inside TimescaleSupport because the lifetime the rate limit needs is this
+    /// process — a store whose recorded ceiling has drifted overtakes it on a large share of hourly sweeps,
+    /// so a limiter recreated per sweep would limit nothing — and static state would buy that lifetime at
+    /// the price of tests that cannot arrange a sequence of readings without leaking it to each other.</summary>
+    private readonly RefreshCeilingStalenessWatch _refreshCeilingStaleness = new();
+
     /* #2953: the collector's own startup verdict, published to the web host so /api/ping can report whether
        collection is actually running WITHOUT reading the store. The other three seams carry control-plane
        values the store is the authority for; this one carries the one fact the store cannot be asked about,
@@ -4412,9 +4419,49 @@ LIMIT 1";
                in collect.store_metrics. A log line rather than a band or an alert: see
                TimescaleSupport.LogHeaviestRefreshSlotHeadroom for why, including why #2136's knob happening to
                equal one slot today is not a substitute. */
-            TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
-                await TimescaleSupport.ReadHeaviestRefreshRuntimeAsync(connection, _logger, cancellationToken),
-                _logger);
+            var heaviestRefresh = await TimescaleSupport.ReadHeaviestRefreshRuntimeAsync(
+                connection, _logger, cancellationToken);
+            TimescaleSupport.LogHeaviestRefreshSlotHeadroom(heaviestRefresh, _logger);
+            readClock.Restart();
+
+            /* #3182: whether either ceiling CONSTANT has been overtaken, which is a different finding from
+               the band above and is levelled and rate-limited separately. The band answers "does this run
+               fit in the window the grid gives it"; this answers "is the number the grid was DERIVED from
+               still a maximum". The defect it exists for is that the answer to the second can be NO while
+               the first says InsideSlot and logs at Debug — a recorded ceiling was overtaken on roughly half
+               the runs of its own job and nothing anywhere said so. Called BESIDE the band watch rather than
+               inside its switch precisely so it is reachable from every band. */
+            if (heaviestRefresh is not null)
+            {
+                TimescaleSupport.LogRefreshCeilingStaleness(
+                    TimescaleSupport.HeaviestRefreshCeilingConstantName,
+                    TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
+                    heaviestRefresh.View,
+                    heaviestRefresh.LastRunSeconds,
+                    _refreshCeilingStaleness,
+                    _logger);
+            }
+
+            readClock.Restart();
+
+            /* And the same question for the OTHER twelve hourly refreshes, which had no live reading keyed
+               to a view anywhere in the product before #3182. Their ceiling is not merely asserted against:
+               CompressionPhaseGuardMinutes IS that constant rounded up to a whole minute, so a light refresh
+               running past it leaves a compression policy able to start while the refresh still holds
+               AccessShareLock — #3012's convoy. One constant covers all twelve, so the rate limit is keyed
+               on the constant and the loop cannot make it twelve times looser than it reads. */
+            foreach (var lightRefresh in await TimescaleSupport.ReadOtherHourlyRefreshRuntimesAsync(
+                connection, _logger, cancellationToken))
+            {
+                TimescaleSupport.LogRefreshCeilingStaleness(
+                    TimescaleSupport.OtherRefreshCeilingConstantName,
+                    TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
+                    lightRefresh.View,
+                    lightRefresh.LastRunSeconds,
+                    _refreshCeilingStaleness,
+                    _logger);
+            }
+
             readClock.Restart();
 
             var stuckJobs = await TimescaleSupport.ReadStuckCompressionJobsAsync(

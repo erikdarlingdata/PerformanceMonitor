@@ -1923,6 +1923,26 @@ WITH NO DATA";
     /// The runtime the compression grid is sized against for <see cref="HeaviestHourlyRefreshView"/>: the
     /// LARGEST run in the clean narrowed-window population, on the one store that carries this workload.
     ///
+    /// <para><b>WHICH STATISTIC, OVER WHICH POPULATION — stated at the top because that is the sentence a
+    /// later reader cites, and its absence is what let a narrower slice pass as the whole (#3182).</b> This
+    /// is a MAXIMUM. Its population is the runs of this job's refresh policy that started AFTER the
+    /// narrowing boundary named below, on one store, up to the instant named below. It is not a maximum over
+    /// this job's whole recorded history, not a fleet figure, and not a percentile — the estimator paragraph
+    /// re-takes that choice rather than assuming it. Every figure this comment draws is drawn against THAT
+    /// statistic over THAT population, and a figure taken from a narrower slice of it — one day, one hour —
+    /// is a DIFFERENT statistic even on the occasions when the two agree to the second.</para>
+    ///
+    /// <para><b>A maximum over a closed population is a LOWER BOUND on what the job does, and since #3182
+    /// the product REPORTS when a live run falsifies it.</b> That is not a restatement of the slot watch and
+    /// the two are not interchangeable: <see cref="ClassifyRefreshSlotHeadroom"/> asks whether a run fits
+    /// the window the grid gives it and its remedy is re-deriving the grid, while
+    /// <see cref="ClassifyRefreshCeilingFreshness"/> asks whether THIS NUMBER is still a maximum and its
+    /// remedy is re-deriving this number. A run can be above this constant and comfortably inside the slot,
+    /// which is exactly the state that carried the defect: the recorded ceiling was overtaken from inside
+    /// the routine band, where the slot watch logs at Debug, so nothing anywhere said the constant had gone
+    /// stale. <see cref="LogRefreshCeilingStaleness"/> is called beside that watch rather than inside its
+    /// band switch, so the finding is reachable from the routine band too.</para>
+    ///
     /// <para><b>THE DERIVATION, recorded as a method and not only as a value, because a value cannot be
     /// re-derived by the next reader and a method can (#3101).</b> POPULATION: runs of this job's refresh
     /// policy under the narrowed <see cref="HourlyRefreshStartOffset"/> window, each read from that store's
@@ -2103,8 +2123,14 @@ WITH NO DATA";
     /// <b>896.1 s</b>. That leaves <b>363.9 s</b> of the slot, <b>28.8%</b> of it, and sits <b>153.9 s</b>
     /// BELOW <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
     /// <see cref="RefreshSlotHeadroom.InsideSlot"/>. #3119 had to state these figures apart from the
-    /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it; now that the
-    /// constant IS the census maximum, the two describe the same population and agree to the second. What
+    /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it. They agree to
+    /// the second — and that agreement is a COINCIDENCE ABOUT WHERE ONE RUN LANDED rather than an identity
+    /// of populations (#3182). This day's runs are a SUBSET of the population above, not the whole of it:
+    /// the two figures coincide because the population's largest run falls inside this day, which is a fact
+    /// about that run's position and no evidence that a day is a census. <b>A day is not a population for
+    /// this constant and no sentence here may treat it as one</b>, because that is precisely the substitution
+    /// that lets one day's figure carry a census's authority. What one day is worth is what any single
+    /// reading is worth: it is a lower bound, and the classifier can be run against it. What
     /// remains is the reading itself: short of the window width, so the grid's stated precondition holds —
     /// but the residual is D wide and D is that maximum, so nothing here can be described as completing well
     /// inside its slot. RefreshCeilingProvenancePinTests derives every figure stated against that maximum
@@ -2275,9 +2301,170 @@ WITH NO DATA";
     }
 
     /// <summary>
+    /// Whether a live reading has FALSIFIED a recorded ceiling — the #3182 finding, and a different fact
+    /// from <see cref="RefreshSlotHeadroom"/> with a different remedy.
+    ///
+    /// <para><b>Why this is not a fourth slot band.</b> The slot bands answer "does this run fit in the
+    /// window the grid gives it", and their remedy is re-deriving the grid. This answers "is the number the
+    /// grid was DERIVED FROM still the maximum it claims to be", and its remedy is re-deriving that number.
+    /// Both can be true of one reading and neither implies the other: a run past the slot may be under a
+    /// ceiling that was measured on a worse day, and a run that falsifies the ceiling may sit comfortably
+    /// inside the slot. The second case is the one that had no signal at all, which is what #3182 is
+    /// about — a recorded maximum can be overtaken from inside the routine band, where the slot watch logs
+    /// at Debug and says nothing is happening.</para>
+    /// </summary>
+    public enum RefreshCeilingFreshness
+    {
+        /// <summary>The reading is at or under the recorded ceiling, so the constant is still a bound on
+        /// what has been seen.</summary>
+        CeilingHolds,
+
+        /// <summary>The reading is ABOVE the recorded ceiling. The constant is not the maximum of the job's
+        /// behaviour any more — whatever population it was derived from has been overtaken, and the value
+        /// has to be re-derived rather than the grid re-dimensioned.</summary>
+        CeilingFalsified,
+    }
+
+    /// <summary>
+    /// Classifies one observed runtime against a constant that claims to be a MAXIMUM.
+    ///
+    /// <para><b>STRICTLY greater, and that is the opposite inclusivity from
+    /// <see cref="ClassifyRefreshSlotHeadroom"/> — deliberately.</b> The slot bands open at <c>&gt;=</c>
+    /// because a run that took exactly its window was already colliding with its neighbour, so the wall is
+    /// inclusive. A recorded maximum is a different kind of claim: a reading EQUAL to it is the reading it
+    /// was derived from and confirms the constant rather than contradicting it. Only a value above it is
+    /// evidence the constant is wrong, so this boundary has to exclude equality where the other one
+    /// includes it. Getting that backwards would report the grid's own sizing figure as a falsification of
+    /// itself on the hour it was measured.</para>
+    ///
+    /// <para>Negative and NaN readings answer <see cref="RefreshCeilingFreshness.CeilingHolds"/> rather
+    /// than throwing, the posture <see cref="ClassifyRefreshSlotHeadroom"/> and
+    /// <see cref="ClassifyCompressionClearance"/> both take: a catalog handing back something impossible
+    /// must cost the line, never the sweep that carries it. NaN needs the explicit test because
+    /// <c>NaN &gt; x</c> is false anyway — the guard is here so the answer is a DECISION rather than a
+    /// property of IEEE comparison that a later refactor could invert without noticing.</para>
+    /// </summary>
+    public static RefreshCeilingFreshness ClassifyRefreshCeilingFreshness(
+        double observedSeconds, double recordedCeilingSeconds)
+    {
+        if (double.IsNaN(observedSeconds) || observedSeconds < 0d)
+        {
+            return RefreshCeilingFreshness.CeilingHolds;
+        }
+
+        return observedSeconds > recordedCeilingSeconds
+            ? RefreshCeilingFreshness.CeilingFalsified
+            : RefreshCeilingFreshness.CeilingHolds;
+    }
+
+    /// <summary>
+    /// The name <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> is reported under by
+    /// <see cref="LogRefreshCeilingStaleness"/>, taken from the member rather than typed — an operator
+    /// reading the line has to be able to grep the constant it names.
+    /// </summary>
+    public const string HeaviestRefreshCeilingConstantName =
+        nameof(HeaviestHourlyRefreshObservedCeilingSeconds);
+
+    /// <summary>
+    /// The name <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is reported under, for the reason
+    /// <see cref="HeaviestRefreshCeilingConstantName"/> exists.
+    /// </summary>
+    public const string OtherRefreshCeilingConstantName =
+        nameof(OtherHourlyRefreshObservedCeilingSeconds);
+
+    /// <summary>
+    /// Reports that a live reading has overtaken a ceiling constant — the #3182 finding, kept SEPARATE from
+    /// <see cref="LogHeaviestRefreshSlotHeadroom"/> so it is reachable from every slot band.
+    ///
+    /// <para><b>Why a separate call and not a fourth case in that switch.</b> The defect #3182 records is
+    /// that a constant claiming to be a census maximum was overtaken while the runs that overtook it
+    /// classified <see cref="RefreshSlotHeadroom.InsideSlot"/> and logged at Debug. A branch inside the
+    /// band switch can only speak in the band it is written in; this is called beside it, so a falsified
+    /// ceiling is reported in the routine band, the warning band and the breach band alike. The two
+    /// findings are also worded so they cannot be mistaken for each other: this one names the CONSTANT and
+    /// asks for it to be re-derived, the slot line names the GRID and asks for that to be.</para>
+    ///
+    /// <para><b>WARNING, and the level is a decision rather than a default.</b> Debug is where the defect
+    /// lived, so it is not available. Error is reserved by
+    /// <see cref="LogHeaviestRefreshSlotHeadroom"/> for a stated precondition of the shipped grid being
+    /// FALSE, which a falsified ceiling does NOT make: the precondition is that a run fits inside its slot,
+    /// and a reading can be past the ceiling and still well inside the window. Levelling this Error too
+    /// would collapse the distinction the finding exists to draw. Warning is the level that says "still
+    /// true, still time to act deliberately", which is exactly the state a stale sizing constant is in.</para>
+    ///
+    /// <para><b>RATE-LIMITED BY A HIGH-WATER MARK, because a constant that has drifted trips this often.</b>
+    /// A ceiling overtaken by ordinary load is overtaken on a large share of runs, and an hourly Warning
+    /// that repeats the same fact is how a signal becomes furniture — the discipline
+    /// <see cref="LogCompressionActivity"/> states for Information. So
+    /// <see cref="RefreshCeilingStalenessWatch"/> reports the first falsifying reading for a constant and
+    /// thereafter only one that exceeds the largest already reported. That shape is chosen over a
+    /// once-per-process latch and over a time window for one reason: what this finding asks for is a
+    /// constant re-derived to at least the largest run on record, so a NEW record changes the answer and a
+    /// repeat does not. A time window would re-report the same value on a timer, and a plain latch would
+    /// hide the reading that actually sizes the re-derivation behind the first one that happened to
+    /// arrive.</para>
+    /// </summary>
+    public static void LogRefreshCeilingStaleness(
+        string constantName,
+        double recordedCeilingSeconds,
+        string view,
+        double observedSeconds,
+        RefreshCeilingStalenessWatch watch,
+        ILogger? logger)
+    {
+        if (watch is null)
+        {
+            throw new ArgumentNullException(nameof(watch));
+        }
+
+        if (logger is null)
+        {
+            return;
+        }
+
+        if (ClassifyRefreshCeilingFreshness(observedSeconds, recordedCeilingSeconds)
+            != RefreshCeilingFreshness.CeilingFalsified)
+        {
+            return;
+        }
+
+        if (!watch.ShouldReport(constantName, observedSeconds))
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "TimescaleDB: {View}'s refresh policy last ran {Seconds:F1}s, which is {Over:F1}s ABOVE {Constant} = {Ceiling:F1}s — a constant recorded as the MAXIMUM of a closed population. So that population has been overtaken and the constant is stale: it has to be RE-DERIVED over a population that includes this run (#3182), which is a different repair from re-deriving the compression phase grid (#3035) and is needed whatever band the slot watch puts this reading in. Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default and a store provisioned before that GUC gained its own conf marker reports nothing there until it heals, so an empty result is that gap and not a quiet hour (#3175/#3177). Reported once per constant and then only for a larger run, because what the re-derivation needs is the LARGEST reading and a repeat of one already reported adds nothing.",
+            view, observedSeconds, observedSeconds - recordedCeilingSeconds, constantName,
+            recordedCeilingSeconds);
+    }
+
+    /// <summary>
     /// The longest run recorded for any hourly refresh OTHER than <see cref="HeaviestHourlyRefreshView"/> —
     /// and, since #3174, the number <see cref="CompressionPhaseGuardMinutes"/> is DERIVED from rather than
     /// merely characterised against.
+    ///
+    /// <para><b>WHICH STATISTIC, OVER WHICH POPULATION — stated at the top for the reason
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states it there (#3182).</b> This is a
+    /// MAXIMUM. Its population is the runs of the twelve other hourly views' refresh policies that started
+    /// AFTER the narrowing boundary named below, on one store, up to the instant named below. Not a
+    /// percentile, not a per-view figure, and not a fleet reading: one number covers twelve policies, so a
+    /// live run of ANY of them above it falsifies it. "Recorded" in the line above means recorded in that
+    /// read, and nowhere else — the word carries no claim about runs the read did not see.</para>
+    ///
+    /// <para><b>And since #3182 the product reports when a live run of one of those twelve falsifies it,
+    /// which it previously could not because nothing read them.</b> The heaviest refresh had
+    /// <see cref="HeaviestRefreshRuntimeSql"/>; these twelve had no live reading attributable to a view
+    /// anywhere in the product, because #2136's <see cref="JobCadenceReadSql"/> keys on
+    /// <c>proc_name || hypertable_name</c> and a refresh policy's <c>hypertable_name</c> is the
+    /// MATERIALIZATION hypertable rather than the view. So a check that looks like it covers these jobs
+    /// cannot attribute what it reads to the constant that bounds them.
+    /// <see cref="OtherHourlyRefreshRuntimesSql"/> is the read that can, and
+    /// <see cref="LogRefreshCeilingStaleness"/> is what it feeds. <b>The direction of the harm is why this
+    /// one matters more than a stale assertion:</b> this constant is arithmetic input, so a light refresh
+    /// past it means <see cref="CompressionPhaseGuardMinutes"/> no longer covers the refresh it exists to
+    /// cover, and a compression policy can start while that refresh still holds
+    /// <c>AccessShareLock</c> — #3012's convoy, by construction rather than by chance.</para>
     ///
     /// <para><b>THE DERIVATION, recorded as a method rather than only as a value (#3174).</b> The old figure
     /// came from the first full staggered cycle — 26 s / 2 s / 864 s / 140 s — a cycle that STRADDLES the
@@ -2372,6 +2559,106 @@ WITH NO DATA";
     /// </summary>
     public static int CompressionPhaseGuardMinutes =>
         (int)Math.Ceiling(OtherHourlyRefreshObservedCeilingSeconds / 60.0);
+
+    /// <summary>
+    /// The minutes <see cref="CompressionPhaseGuardMinutes"/> and
+    /// <see cref="HeaviestRefreshWindowMinutes"/> SHARE — what the hour has left once the light band and the
+    /// compression band are at the widths their own measurements ask for.
+    ///
+    /// <para>Named because it is the budget the two of them compete for, and because it is the term that
+    /// makes that competition arithmetic rather than prose: every minute the guard takes is a minute the
+    /// heaviest refresh's window loses, and this is the total there is to divide. Derived from the same
+    /// expressions <see cref="HeaviestRefreshStartMinute"/> and
+    /// <see cref="HeaviestRefreshWindowMinutes"/> are built from, so a re-derived grid moves it rather than
+    /// leaving it behind as a second opinion.</para>
+    /// </summary>
+    public static int GuardAndWindowSharedMinutes =>
+        MinutesInHourlyCadence
+        - ((LightHourlyRefreshCount - 1) * LightRefreshStepMinutes)
+        - CompressionPhaseBandMinutes;
+
+    /// <summary>
+    /// The watch line a guard of <paramref name="guardMinutes"/> would leave — the same chain
+    /// <see cref="RefreshSlotWarningSeconds"/> is, evaluated at a hypothetical guard instead of the shipped
+    /// one.
+    ///
+    /// <para><b>It exists so the feasibility question can be ASKED, which the shipped chain cannot do.</b>
+    /// <see cref="HeaviestRefreshWindowMinutes"/> reads <see cref="CompressionPhaseGuardMinutes"/>, so the
+    /// live chain answers for exactly one guard and there is no way to find out what a WIDER guard would
+    /// cost without re-spelling the arithmetic. This is that arithmetic in one place, and
+    /// TimescaleSupportTests requires it to agree with the shipped chain at the live guard — so it cannot
+    /// drift into being a second, kinder model of the grid.</para>
+    ///
+    /// <para>Integer division throughout, matching <see cref="RefreshSlotWarningSeconds"/>: a line computed
+    /// with rounding would sit above the shipped one on some widths and the two would disagree about
+    /// feasibility at exactly the boundary the question is about.</para>
+    /// </summary>
+    public static int RefreshSlotWarningSecondsForGuardMinutes(int guardMinutes) =>
+        (GuardAndWindowSharedMinutes - guardMinutes) * 60
+        * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
+
+    /// <summary>
+    /// The WIDEST <see cref="CompressionPhaseGuardMinutes"/> the hour can carry while the grid's own stated
+    /// precondition still holds at <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> — negative when
+    /// no guard at all leaves a wide enough window.
+    ///
+    /// <para><b>Why this is stated rather than discovered (#3182).</b> The guard is
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> rounded up to a whole minute, and that ceiling
+    /// is a MAXIMUM over a series with a long tail — so the derivation has no upper bound of its own, while
+    /// the hour does. Nothing in the derivation notices when the two conflict: the conflict surfaces as a
+    /// grid that has already been widened past what the hour contains, and then as an argument about which
+    /// number to bend. This term is the bound the derivation is missing, and
+    /// <see cref="WidestFeasibleOtherRefreshCeilingSeconds"/> converts it back into the units the constant is
+    /// measured in, so a re-derivation that does not fit is red AT THE CONSTANT rather than after the grid
+    /// has been re-dimensioned around it.</para>
+    ///
+    /// <para><b>Searched downward rather than solved, so it is the SHIPPED comparison that decides.</b> The
+    /// precondition is <c>HeaviestHourlyRefreshObservedCeilingSeconds &lt; RefreshSlotWarningSeconds</c>, and
+    /// that line is an integer-divided fraction of an integer window. A closed form would have to reproduce
+    /// two truncations, and a closed form that reproduced them slightly differently would answer feasible
+    /// where the build answers infeasible — the one disagreement this term must not be capable of. The walk
+    /// evaluates the same expression the grid does, at most
+    /// <see cref="GuardAndWindowSharedMinutes"/> times, once.</para>
+    ///
+    /// <para><b>Negative is a real answer, not an error code.</b> A heaviest ceiling large enough that even a
+    /// zero-minute guard leaves too narrow a window is a grid the hour cannot contain at ANY guard, which is
+    /// a different fact from "the guard is too wide" and calls for a different repair — a cheaper refresh or
+    /// a longer cadence for that one aggregate, neither of which is a constant to re-derive. Returning a
+    /// negative says so; throwing would make the caller decide what it meant.</para>
+    /// </summary>
+    public static int WidestFeasibleCompressionPhaseGuardMinutes
+    {
+        get
+        {
+            for (var guard = GuardAndWindowSharedMinutes; guard >= 0; guard--)
+            {
+                if (HeaviestHourlyRefreshObservedCeilingSeconds
+                    < RefreshSlotWarningSecondsForGuardMinutes(guard))
+                {
+                    return guard;
+                }
+            }
+
+            return -1;
+        }
+    }
+
+    /// <summary>
+    /// The largest value <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> may take before the grid
+    /// stops fitting in the hour — <see cref="WidestFeasibleCompressionPhaseGuardMinutes"/> back in seconds,
+    /// so the bound is stated in the unit the constant is measured in.
+    ///
+    /// <para>This is the number a re-derivation of that constant has to be read against. A light-refresh
+    /// census whose maximum lands above it is not a constant to update: it is a statement that the guard the
+    /// measurement asks for and the window the heaviest refresh needs cannot both be had, and that is a
+    /// SCHEDULING decision rather than a renumbering — the same distinction
+    /// <see cref="RefreshSlotHeadroom.SlotExceeded"/> draws for the other constant.</para>
+    ///
+    /// <para>Zero when no guard is feasible at all, because a negative ceiling is not a value the constant
+    /// can take and a bound expressed as one would read as a wider allowance than it is.</para>
+    /// </summary>
+    public static int WidestFeasibleOtherRefreshCeilingSeconds =>
+        Math.Max(0, WidestFeasibleCompressionPhaseGuardMinutes) * 60;
 
     /// <summary>
     /// The most compression policies the grid will put on one minute — the input the compression band's WIDTH
@@ -4796,8 +5083,24 @@ WHERE js.last_run_status = 'Success'";
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> and read there for the live envelope
     /// (#3119). This read supplies the BOUND, which is what was missing, not the history.</para>
     /// </summary>
-    public static string HeaviestRefreshRuntimeSql =>
-        $@"
+    /// <summary>
+    /// Everything <see cref="HeaviestRefreshRuntimeSql"/> and <see cref="OtherHourlyRefreshRuntimesSql"/>
+    /// have in common: the projection, the MEASURED OR-join, and the two filters that make the rows refresh
+    /// policies on this store's own aggregates. The two statements differ only in which views they keep.
+    ///
+    /// <para><b>Shared rather than copied, and the copy it replaces is the reason (#3182).</b> This join was
+    /// already carried in two places — here and
+    /// <see cref="ContinuousAggregateRefreshStateSql"/> — because the materialization-hypertable arm ALONE
+    /// was measured to find nothing, so both arms have to be present and a re-guessed join reads back empty
+    /// rather than wrong. A third copy would be a third chance to lose an arm, and it would be the copy with
+    /// the fewest readers. One text, two filters.</para>
+    ///
+    /// <para>Not a full statement on its own: it opens with the <c>FROM</c> and ends inside the
+    /// <c>WHERE</c>, so a caller appends its own <c>AND</c> clauses. That shape is what lets the composed
+    /// text be byte-identical to what each statement used to spell out, which is what keeps the pins on them
+    /// reading the statements rather than this fragment.</para>
+    /// </summary>
+    private const string RefreshPolicyRuntimeProjectionSql = @"
 SELECT
     ca.view_name,
     EXTRACT(EPOCH FROM js.last_run_duration)::double precision AS last_run_seconds
@@ -4807,8 +5110,43 @@ JOIN timescaledb_information.continuous_aggregates AS ca
   OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
 JOIN timescaledb_information.job_stats AS js USING (job_id)
 WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
-AND   ca.view_schema = 'collect'
+AND   ca.view_schema = 'collect'";
+
+    public static string HeaviestRefreshRuntimeSql =>
+        $@"{RefreshPolicyRuntimeProjectionSql}
 AND   ca.view_name = '{HeaviestHourlyRefreshView}'
+AND   js.last_run_status = 'Success'";
+
+    /// <summary>
+    /// The same read pointed at every OTHER continuous aggregate refresh policy — the live feed
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> did not have (#3182).
+    ///
+    /// <para><b>Why this exists at all.</b> That constant is not merely asserted against; it is ARITHMETIC
+    /// INPUT — <see cref="CompressionPhaseGuardMinutes"/> is it rounded up to a whole minute, so a light
+    /// refresh running longer than the constant records leaves a compression policy able to start while that
+    /// refresh still holds <c>AccessShareLock</c>, which is #3012's convoy. Until #3182 nothing read a light
+    /// refresh's runtime back at all: the heaviest one had <see cref="HeaviestRefreshRuntimeSql"/> and the
+    /// other twelve had no live reading keyed to a view anywhere in the product. #2136's
+    /// <see cref="JobCadenceReadSql"/> does read their durations, but it keys on
+    /// <c>proc_name || hypertable_name</c> and a refresh policy's <c>hypertable_name</c> is the
+    /// MATERIALIZATION hypertable, so those readings cannot be attributed to a view without this join —
+    /// which is why the gap survived a check that looks like it covers them.</para>
+    ///
+    /// <para><b>Filtered to "not the heaviest" in SQL and to "hourly" in C#, which is a split rather than an
+    /// inconsistency.</b> Excluding one named view is a compile-time constant and belongs in the statement.
+    /// Deciding which views are HOURLY is <see cref="HourlyRefreshPhaseOrder"/>'s job — it is the registry
+    /// this whole grid is keyed on, a view missing from it is already a stated defect
+    /// (<see cref="RefreshPhaseMinutesFor(string)"/> throws for one), and interpolating a runtime list into a
+    /// statement would put a second copy of that registry in SQL text where nothing checks it against the
+    /// first. So the daily tier's policies come back from the read and are dropped by
+    /// <see cref="ReadOtherHourlyRefreshRuntimesAsync"/> against the registry.</para>
+    ///
+    /// <para><c>last_run_status = 'Success'</c> for the reason every sibling read has it: a failed run's
+    /// duration is not a runtime reading, and job failures are their own condition.</para>
+    /// </summary>
+    public static string OtherHourlyRefreshRuntimesSql =>
+        $@"{RefreshPolicyRuntimeProjectionSql}
+AND   ca.view_name <> '{HeaviestHourlyRefreshView}'
 AND   js.last_run_status = 'Success'";
 
     /// <summary>
@@ -4844,6 +5182,63 @@ AND   js.last_run_status = 'Success'";
             logger?.LogDebug("Heaviest-refresh slot headroom: could not read job stats: {Message}", ex.Message);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Reads <see cref="OtherHourlyRefreshRuntimesSql"/> and keeps the rows whose view is on
+    /// <see cref="HourlyRefreshPhaseOrder"/> — one reading per OTHER hourly refresh policy that has
+    /// completed a successful run (#3182).
+    ///
+    /// <para>Failure-isolated to an EMPTY LIST, the posture <see cref="ReadCompressionActivityAsync"/> and
+    /// <see cref="ReadJobCadenceReadingsAsync"/> take, rather than to a null the way the single-row heaviest
+    /// read is: a list read that found nothing and a list read that failed are the same absence of readings
+    /// to the caller, and the honest-empty rule is that neither is allowed to become a synthesized zero.</para>
+    ///
+    /// <para><b>A DAILY policy's row is dropped rather than logged.</b> The statement cannot tell the tiers
+    /// apart — both use <see cref="RefreshPolicyProcName"/> — and a daily aggregate's runtime is not
+    /// something <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> bounds, so measuring it against that
+    /// constant would manufacture a finding out of a tier mismatch. Dropped silently because it is the
+    /// EXPECTED shape of the result rather than an anomaly: the daily tier is supposed to be there.</para>
+    /// </summary>
+    public static async Task<IReadOnlyList<HourlyRefreshRuntimeReading>> ReadOtherHourlyRefreshRuntimesAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var readings = new List<HourlyRefreshRuntimeReading>();
+        var hourly = new HashSet<string>(HourlyRefreshPhaseOrder, StringComparer.Ordinal);
+
+        try
+        {
+            using var command = new NpgsqlCommand(OtherHourlyRefreshRuntimesSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (reader.IsDBNull(0) || reader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                var view = reader.GetString(0);
+                if (!hourly.Contains(view))
+                {
+                    continue;
+                }
+
+                readings.Add(new HourlyRefreshRuntimeReading(
+                    view, Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(
+                "Light-refresh ceiling freshness: could not read job stats: {Message}", ex.Message);
+        }
+
+        return readings;
     }
 
     /// <summary>
@@ -5433,6 +5828,100 @@ public sealed record HeaviestRefreshSlotReading(string View, double LastRunSecon
     /// hour can spare (<see cref="TimescaleSupport.HeaviestRefreshWindowMinutes"/>), which is the margin the
     /// #3044 watch is stated against.</summary>
     public double PercentOfSlot => 100.0 * LastRunSeconds / TimescaleSupport.RefreshPhaseSlotSeconds;
+}
+
+/// <summary>
+/// One live reading of an hourly refresh policy's runtime, keyed on the CAGG's user-view name (#3182) —
+/// what <see cref="TimescaleSupport.ReadOtherHourlyRefreshRuntimesAsync"/> returns for the twelve hourly
+/// views that are not <see cref="TimescaleSupport.HeaviestHourlyRefreshView"/>.
+///
+/// <para>Deliberately carries NO derived verdict, which is the difference from
+/// <see cref="HeaviestRefreshSlotReading"/>. The heaviest refresh has a slot of its own, so a reading of it
+/// has a band; a light refresh has only the guard band after its start, which is not a per-view quantity —
+/// so the only question asked of these readings is whether one has overtaken
+/// <see cref="TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds"/>, and that is asked by the
+/// classifier rather than answered here. Inventing a per-view band would be a verdict the grid does not
+/// have.</para>
+/// </summary>
+public sealed record HourlyRefreshRuntimeReading(string View, double LastRunSeconds);
+
+/// <summary>
+/// The rate limiter for <see cref="TimescaleSupport.LogRefreshCeilingStaleness"/> (#3182): a HIGH-WATER
+/// MARK per ceiling constant, held for the lifetime of the instance the caller keeps.
+///
+/// <para><b>Why an object the caller owns rather than static state.</b> The lifetime this limiter needs is
+/// the PROCESS — a store whose ceiling has drifted trips the finding on a large share of hourly sweeps, and
+/// a limiter reset per sweep would limit nothing. Static state would give that lifetime for free and take
+/// testability with it: two test cases sharing a static latch are order-dependent, and the interesting
+/// property here is a SEQUENCE of readings, which cannot be tested at all if the sequence leaks between
+/// cases. So the service holds one instance and the tests hold their own.</para>
+///
+/// <para><b>What it reports, stated as the rule rather than left to the implementation.</b> The first
+/// falsifying reading for a constant reports. After that, only a reading strictly greater than the largest
+/// already reported for that constant reports. Nothing ever lowers the mark, so the finding cannot start
+/// repeating because load fell — and that asymmetry is deliberate rather than an oversight: the mark is not
+/// a measure of current load, it is a record of the largest value already SAID OUT LOUD, and a value
+/// already said out loud stays said. A run below it changes nothing about what the constant has to be
+/// re-derived to.</para>
+///
+/// <para><b>Keyed on the constant's NAME, and the two names are
+/// <see cref="TimescaleSupport.HeaviestRefreshCeilingConstantName"/> and
+/// <see cref="TimescaleSupport.OtherRefreshCeilingConstantName"/>.</b> Not on the view: the light ceiling is
+/// ONE constant covering twelve views, so keying on the view would let each of them report the same
+/// constant's staleness independently and the rate limit would be twelve times looser than it reads. What
+/// is being reported is a constant being wrong, so the constant is the key.</para>
+///
+/// <para>Locked, because the sweep that calls it is one of several the worker runs and nothing in the type
+/// system says it stays single-threaded. A missed report is a lost finding and a double report is noise;
+/// neither costs anything worth an interlocked-compare loop at one call an hour.</para>
+/// </summary>
+public sealed class RefreshCeilingStalenessWatch
+{
+    private readonly Dictionary<string, double> _reportedHighWaterMark = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Whether <paramref name="observedSeconds"/> should be REPORTED for
+    /// <paramref name="constantName"/> — true for the first falsifying reading and thereafter only for one
+    /// larger than the largest already reported. Records the mark when it answers true, so a caller that
+    /// asks twice about the same reading is told once.
+    /// </summary>
+    public bool ShouldReport(string constantName, double observedSeconds)
+    {
+        if (constantName is null)
+        {
+            throw new ArgumentNullException(nameof(constantName));
+        }
+
+        lock (_reportedHighWaterMark)
+        {
+            if (_reportedHighWaterMark.TryGetValue(constantName, out var mark)
+                && observedSeconds <= mark)
+            {
+                return false;
+            }
+
+            _reportedHighWaterMark[constantName] = observedSeconds;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The largest reading already reported for <paramref name="constantName"/>, or null when none has
+    /// been. Exists so the sequence property can be asserted directly instead of inferred from log lines —
+    /// a test that could only read the log would be testing the message, not the limiter.
+    /// </summary>
+    public double? ReportedHighWaterMark(string constantName)
+    {
+        if (constantName is null)
+        {
+            throw new ArgumentNullException(nameof(constantName));
+        }
+
+        lock (_reportedHighWaterMark)
+        {
+            return _reportedHighWaterMark.TryGetValue(constantName, out var mark) ? mark : null;
+        }
+    }
 }
 
 /// <summary>
