@@ -1696,6 +1696,27 @@ WITH NO DATA";
     /// compression policy's queued <c>AccessExclusiveLock</c> arriving while a refresh held
     /// <c>AccessShareLock</c>, and two refreshes hold mutually compatible locks — and it is strictly stronger
     /// than the old grid delivered, where four policies including the heaviest all started on :00.</para>
+    ///
+    /// <para><b>This step is sized by member COUNT and cannot be sized by member DURATION, which is why the
+    /// duration question is answered by a different term (#3185).</b> One minute delivers distinct starts at
+    /// any length the band can hold and guarantees nothing at all about overlap: a member running past
+    /// <c>LightRefreshStepMinutes * 60</c> overlaps its successor for the remainder of its run, and two
+    /// members past it overlap each other for essentially their whole runs. Widening this step is not the
+    /// repair, and that is DERIVED rather than argued —
+    /// <see cref="WidestFeasibleLightRefreshStepMinutes"/> searches the shipped comparison and returns this
+    /// same value, so the band is already as wide as the hour can carry. The binding constraint is not the
+    /// hour's sixty minutes but <see cref="HeaviestRefreshWindowMinutes"/>: eleven gaps at two minutes take
+    /// eleven minutes from <see cref="GuardAndWindowSharedMinutes"/>, which drops the watch line under
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at every guard, so no step above one is
+    /// reachable at any guard rather than merely at today's.</para>
+    ///
+    /// <para><b>So the members that can consume a wider gap are separated INSIDE this band, and the band's
+    /// width does not move.</b> The gap goes between the members that need it and the ones that do not fill
+    /// it in — see <see cref="UnboundedLightRefreshSeparationMinutes"/> for the width,
+    /// <see cref="IsUnboundedCardinalityRefresh"/> for which members those are, and
+    /// <see cref="RefreshPhaseMinutesFor(IReadOnlyList{string}, string)"/> for the layout. A per-member step —
+    /// the obvious generalization of this constant — is what does NOT fit: giving each member a gap sized to
+    /// its own class widens the band to nineteen minutes, and the band cannot grow at all.</para>
     /// </summary>
     public const int LightRefreshStepMinutes = 1;
 
@@ -1705,6 +1726,20 @@ WITH NO DATA";
     /// registering an aggregate moves the grid instead of leaving a stale count beside it.
     /// </summary>
     public static int LightHourlyRefreshCount => HourlyRefreshPhaseOrder.Count - 1;
+
+    /// <summary>
+    /// How many minutes of the hour the light band SPANS — the distance from the first light refresh's
+    /// minute to the last one's, which is one fewer gap than there are members.
+    ///
+    /// <para>Named because three separate expressions were spelling it out —
+    /// <see cref="HeaviestRefreshStartMinute"/>, <see cref="GuardAndWindowSharedMinutes"/> and the watch
+    /// line's feasibility walk — and a band whose width is written three times can be widened in two of
+    /// them. It is a SPAN and not a count of minutes occupied: the band holds
+    /// <see cref="LightHourlyRefreshCount"/> starts and this is the last one's offset, so it is what the
+    /// guard sits after and what the rest of the hour is measured from.</para>
+    /// </summary>
+    public static int LightBandSpanMinutes =>
+        (LightHourlyRefreshCount - 1) * LightRefreshStepMinutes;
 
     /// <summary>
     /// The minute <see cref="HeaviestHourlyRefreshView"/>'s refresh starts on: past the last light refresh,
@@ -1721,7 +1756,7 @@ WITH NO DATA";
     /// compression.</para>
     /// </summary>
     public static int HeaviestRefreshStartMinute =>
-        ((LightHourlyRefreshCount - 1) * LightRefreshStepMinutes) + CompressionPhaseGuardMinutes;
+        LightBandSpanMinutes + CompressionPhaseGuardMinutes;
 
     /// <summary>
     /// The heaviest hourly refresh's window: what the hour has LEFT once the light band, its guard and the
@@ -1820,15 +1855,270 @@ WITH NO DATA";
         HourlyAggregates.Concat(BaselineAggregates).ToArray();
 
     /// <summary>
+    /// The grouping columns that identify an individual STATEMENT or PLAN, as opposed to a server, a
+    /// database, a schema object or a time bucket — the columns whose distinct count is a property of the
+    /// monitored workload rather than of the deployment.
+    ///
+    /// <para><b>This is the list the light band's spacing is decided by, and it is a list of COLUMNS rather
+    /// than of views for a reason (#3185).</b> A list of heavy views is a frozen enumeration: it is correct
+    /// until the next aggregate is registered and then silently wrong, which is exactly the failure the
+    /// phase grid's positional coupling was. A view's cost is decided by how many output groups one bucket
+    /// produces, and that is decided by its own GROUP BY — so the membership question is answered by reading
+    /// the shipped CREATE text through <see cref="HourlyRefreshDefinitions"/>, and a new aggregate is
+    /// classified the moment it is registered.</para>
+    ///
+    /// <para><b>The mechanism is measured, with source volume held constant, which is what makes this the
+    /// group key rather than a proxy for something else.</b> Two same-source pairs isolate it.
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/> and <see cref="QueryStoreStatsHourlyView"/> read the
+    /// IDENTICAL rows for a given hour and reduce them 1.30:1 and 2.62:1, for refresh medians of 894.5 s and
+    /// 105.5 s. <see cref="QueryStatsHourlyView"/> and <see cref="QueryStatsDbHourlyView"/> read an identical
+    /// ~311,000 rows and reduce them 29:1 and 1,481:1, for 11.2 s and 1.8 s. In both pairs the only thing
+    /// that differs is how far the group key resolves, and the cost follows it.</para>
+    ///
+    /// <para><b>And the partition it produces matches the measured one.</b> #3183's scoped post-boundary
+    /// re-measurement recorded three light views above 3 s — <see cref="QueryStatsHourlyView"/> at 23.3 s,
+    /// <see cref="QueryStoreStatsHourlyView"/> at 263.9 s and
+    /// <see cref="QueryStoreStatsCorrectedHourlyView"/> at 265.5 s — and the other nine at 0.6 s to under
+    /// 3 s. Those three are exactly the light views whose group key reaches a column named here. The rule is
+    /// not fitted to that result: it is fitted to the pairs above, and the split is what it predicts.</para>
+    ///
+    /// <para><b>What is NOT here is the safeguard.</b> A view can be slow for a reason its group key does
+    /// not show, and no build-time rule can see that. <see cref="LogLightRefreshSpacingBreach"/> is the live
+    /// half — a light refresh that runs past the minutes its class was given is reported, whichever class
+    /// the rule put it in, so a rule that has stopped predicting says so rather than going quiet.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> PerStatementGroupingColumns = new[]
+    {
+        "query_hash",
+        "sql_handle",
+        "query_id",
+        "plan_id",
+        "runtime_stats_interval_id",
+        "first_execution_time",
+    };
+
+    /// <summary>
+    /// The GROUP BY terms of one aggregate's CREATE, recovered from the shipped text — the seam
+    /// <see cref="IsUnboundedCardinalityRefresh"/> reads and the seam a test can check the parse against.
+    ///
+    /// <para>Split at PARENTHESIS DEPTH ZERO, so <c>time_bucket('1 hour', bucket)</c> comes back as one term
+    /// rather than as two halves of one — a comma split would produce a term of <c>time_bucket('1 hour'</c>
+    /// and one of <c>bucket)</c>, and the second of those matches a real column name.</para>
+    ///
+    /// <para><b>Case-insensitive on the keywords, deliberately.</b> A parse that found no GROUP BY would
+    /// return nothing, and nothing contains no per-statement column — so a missed clause classifies a view
+    /// as deployment-bounded, which is the label that gives it LESS room. The failure has to be loud in the
+    /// safe direction from both ends: matching regardless of case is one end, and a test asserting that
+    /// every shipped definition yields at least one term is the other.</para>
+    /// </summary>
+    internal static IReadOnlyList<string> RefreshGroupingTermsFor(string createSql)
+    {
+        if (createSql is null)
+        {
+            throw new ArgumentNullException(nameof(createSql));
+        }
+
+        var start = createSql.LastIndexOf("GROUP BY", StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        start += "GROUP BY".Length;
+        var end = createSql.IndexOf("WITH NO DATA", start, StringComparison.OrdinalIgnoreCase);
+        var clause = end < 0 ? createSql[start..] : createSql[start..end];
+
+        var terms = new List<string>();
+        var depth = 0;
+        var termStart = 0;
+
+        for (var index = 0; index <= clause.Length; index++)
+        {
+            if (index == clause.Length || (clause[index] == ',' && depth == 0))
+            {
+                var term = string.Join(
+                    " ",
+                    clause[termStart..index].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+                if (term.Length > 0)
+                {
+                    terms.Add(term);
+                }
+
+                termStart = index + 1;
+                continue;
+            }
+
+            if (clause[index] == '(')
+            {
+                depth++;
+            }
+            else if (clause[index] == ')')
+            {
+                depth--;
+            }
+        }
+
+        return terms;
+    }
+
+    /// <summary>
+    /// The hourly views whose one-bucket output cardinality is UNBOUNDED by the deployment — the ones whose
+    /// GROUP BY reaches a <see cref="PerStatementGroupingColumns"/> column.
+    ///
+    /// <para><b>MUST stay declared after <see cref="HourlyRefreshDefinitions"/> and before
+    /// <see cref="CompressionPhaseMinutes"/>.</b> Static field initializers run in declaration order, and
+    /// this one reads the definitions while the compression grid's initializer reaches
+    /// <see cref="RefreshPhaseMinutesFor(string)"/>, which reads this. Declared out of order it is an empty
+    /// set at the moment the compression grid is built, and every hourly view is placed as
+    /// deployment-bounded once, permanently, with nothing red.</para>
+    ///
+    /// </summary>
+    private static readonly IReadOnlySet<string> UnboundedCardinalityRefreshViews =
+        HourlyRefreshDefinitions
+            .Where(definition => GroupKeyIsUnboundedCardinality(definition.CreateSql))
+            .Select(definition => definition.View)
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// THE RULE, over one CREATE — whether its group key reaches a
+    /// <see cref="PerStatementGroupingColumns"/> column.
+    ///
+    /// <para><b>A CREATE whose GROUP BY cannot be recovered answers TRUE</b>, which is the label that asks
+    /// for more of the band. Read the other way an unparseable definition would quietly take a one-minute
+    /// step — the state #3185 recorded — and nothing would say so; this way it takes band positions and
+    /// <see cref="LightBandHoldsUnboundedRefreshCount"/> is what reports that the hour no longer holds.</para>
+    ///
+    /// <para><b>Declared as its own function so that branch is REACHABLE.</b> No shipped definition is
+    /// unparseable, so folded into the field initializer above the empty-terms arm would be a line no value
+    /// the registry can produce reaches: protection that certifies nothing and that no mutation can
+    /// distinguish from its own absence. Here a test hands it a CREATE with no GROUP BY and gets an
+    /// answer.</para>
+    /// </summary>
+    internal static bool GroupKeyIsUnboundedCardinality(string createSql)
+    {
+        var terms = RefreshGroupingTermsFor(createSql);
+
+        return terms.Count == 0
+            || terms.Any(term => PerStatementGroupingColumns.Contains(term, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Whether <paramref name="view"/>'s refresh cost grows with the monitored workload's distinct statement
+    /// population rather than with the size of the deployment.
+    ///
+    /// <para>Throws for a view that is not a registered hourly aggregate, for
+    /// <see cref="RefreshPhaseMinutesFor(string)"/>'s reason: a defaulted answer here decides how much of
+    /// the hour that view is given, and the quiet answer is the one that gives it the least.</para>
+    /// </summary>
+    public static bool IsUnboundedCardinalityRefresh(string view)
+    {
+        if (!HourlyRefreshDefinitions.Any(definition =>
+                string.Equals(definition.View, view, StringComparison.Ordinal)))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(view),
+                view,
+                "not a registered hourly continuous aggregate — its refresh cost class cannot be recovered from a CREATE that TimescaleSupport.HourlyRefreshDefinitions does not hold");
+        }
+
+        return UnboundedCardinalityRefreshViews.Contains(view);
+    }
+
+    /// <summary>
+    /// How many of the LIGHT band's members are unbounded-cardinality — counted through
+    /// <see cref="IsUnboundedCardinalityRefresh"/> over the shipped registry rather than written down, so
+    /// registering an aggregate moves the layout instead of leaving a stale count beside it.
+    /// </summary>
+    public static int UnboundedLightRefreshCount =>
+        HourlyRefreshPhaseOrder.Count(view =>
+            !string.Equals(view, HeaviestHourlyRefreshView, StringComparison.Ordinal)
+            && UnboundedCardinalityRefreshViews.Contains(view));
+
+    /// <summary>
+    /// The minutes the grid keeps between two consecutive unbounded-cardinality light refreshes — the same
+    /// expression <see cref="CompressionPhaseGuardMinutes"/> is, because it is the same question.
+    ///
+    /// <para><b>One number, two jobs, and they cannot disagree because they are one expression.</b> The
+    /// guard asks how long after a light refresh starts something else may safely start; so does this. The
+    /// guard's answer clears the band's last member from
+    /// <see cref="HeaviestRefreshStartMinute"/> and this one clears one heavy light member from the next.
+    /// Deriving them separately from the same constant would leave two places to update and one of them
+    /// behind.</para>
+    ///
+    /// <para><b>It is a bound against the RECORDED ceiling, which is the honest scope of the guarantee.</b>
+    /// <c>UnboundedLightRefreshSeparationMinutes * 60</c> exceeds
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> by the guard's own rounding margin, so two
+    /// unbounded light refreshes provably cannot overlap AS LONG AS that constant is still a maximum. The
+    /// one way it can be insufficient is the constant being stale, and that is a reported finding with a
+    /// named remedy rather than a silent condition — <see cref="LogRefreshCeilingStaleness"/> (#3182).</para>
+    ///
+    /// <para><b>Why the constant is not re-derived to tonight's readings first.</b> The 263.9 s and 265.5 s
+    /// runs #3185 measured are runs of two aggregations that overlapped for essentially their whole
+    /// duration; the same two ran ~47 s each when the previous grid held them fifteen minutes apart. A
+    /// ceiling taken from the overlapping population would size the separation from the defect the
+    /// separation exists to remove, which is why #3182 holds both ceiling values until the grid is
+    /// stable.</para>
+    /// </summary>
+    public static int UnboundedLightRefreshSeparationMinutes => CompressionPhaseGuardMinutes;
+
+    /// <summary>
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/> expressed in band POSITIONS, which is the unit
+    /// the layout places members in — rounded UP, so a separation that does not divide the step still
+    /// clears it.
+    /// </summary>
+    public static int UnboundedLightRefreshSeparationIndexes =>
+        (int)Math.Ceiling(UnboundedLightRefreshSeparationMinutes / (double)LightRefreshStepMinutes);
+
+    /// <summary>
+    /// Which position in the light band the <paramref name="ordinal"/>-th unbounded-cardinality light
+    /// refresh takes, counting unbounded members only and from zero — exactly the shape a bounded member's
+    /// own position has, with the separation in place of the step.
+    /// </summary>
+    public static int LightBandIndexForUnboundedRefresh(int ordinal) =>
+        ordinal * UnboundedLightRefreshSeparationIndexes;
+
+    /// <summary>
+    /// Whether the light band still holds <paramref name="count"/> unbounded-cardinality members once each
+    /// is <see cref="UnboundedLightRefreshSeparationMinutes"/> clear of the last.
+    ///
+    /// <para><b>This is the feasibility bound the spacing needs, and it reads two ways at once.</b> The last
+    /// unbounded member's position landing inside the band is the same inequality as that member finishing
+    /// before <see cref="HeaviestRefreshStartMinute"/> opens: the start minute is
+    /// <see cref="LightBandSpanMinutes"/> plus the guard, the guard IS the separation, so
+    /// "the last one fits in the band" and "the last one clears the heaviest refresh's window" cancel to the
+    /// same statement. One condition covers both, which is why there is not a second one.</para>
+    ///
+    /// <para><b>False is the answer that matters.</b> A registry that grew past what the band can separate
+    /// is not a wider band — <see cref="WidestFeasibleLightRefreshStepMinutes"/> says the band is already as
+    /// wide as the hour carries. It is a scheduling decision: a cheaper aggregate, a longer cadence for one
+    /// of them, or fewer compression minutes. <see cref="RefreshPhaseMinutesFor(string)"/> throws rather
+    /// than placing a member it cannot separate, so the answer arrives per aggregate and named.</para>
+    /// </summary>
+    public static bool LightBandHoldsUnboundedRefreshCount(int count) =>
+        count <= 0
+        || LightBandIndexForUnboundedRefresh(count - 1) <= LightHourlyRefreshCount - 1;
+
+    /// <summary>
     /// Which minute of the hour <paramref name="view"/>'s hourly refresh policy starts on.
     ///
     /// <para><b>INJECTIVE, and that is the whole of the contention guarantee.</b>
     /// <see cref="HeaviestHourlyRefreshView"/> is answered by IDENTITY, not by position, and gets
-    /// <see cref="HeaviestRefreshStartMinute"/> alone. Every other view gets its own consecutive minute in
-    /// the light band, counted over the light views only. There is no modulus anywhere, so two policies
-    /// cannot share a residue — the map has no collisions to have, at any list length the band can hold, in
-    /// any order, with anything inserted anywhere. That is what makes contention structurally impossible
-    /// instead of a property of where a view happens to sit in a list, which is the state #3174 replaced.</para>
+    /// <see cref="HeaviestRefreshStartMinute"/> alone. Every other view gets its own minute in the light
+    /// band. There is no modulus anywhere, so two policies cannot share a residue — the map has no
+    /// collisions to have, at any list length the band can hold, in any order, with anything inserted
+    /// anywhere. That is what makes contention structurally impossible instead of a property of where a view
+    /// happens to sit in a list, which is the state #3174 replaced.</para>
+    ///
+    /// <para><b>Distinct minutes are a LOCK guarantee and were read as a cost guarantee, which is the defect
+    /// #3185 recorded.</b> Two refreshes hold mutually compatible <c>AccessShareLock</c>s, so overlapping
+    /// light refreshes cannot convoy and the band was sized on that alone. They still contend for CPU and
+    /// I/O: measured across the install, two ~265 s aggregations placed two minutes apart ran at
+    /// <b>5.4x</b> the per-output-group cost the same view had at fifteen minutes apart, with cardinality
+    /// flat to 1.4%. So the band separates the members whose runs are long enough for that to matter —
+    /// <see cref="IsUnboundedCardinalityRefresh"/> — and leaves the rest at
+    /// <see cref="LightRefreshStepMinutes"/>, where distinct starts is the whole of what is needed and the
+    /// measured runs are 0.6 s to under 3 s against a 60 s step.</para>
     ///
     /// <para>Throws for a view that is not on <see cref="HourlyRefreshPhaseOrder"/> — including every DAILY
     /// view, which must not be dragged onto the grid. That is deliberately loud rather than defaulted: a new
@@ -1853,10 +2143,35 @@ WITH NO DATA";
     /// its own list.</para>
     ///
     /// <para><b>Only the ORDER is a parameter, deliberately.</b> The GEOMETRY —
-    /// <see cref="HeaviestRefreshStartMinute"/> and <see cref="LightRefreshStepMinutes"/> — still comes from
-    /// the shipped registry, so this cannot be used to fabricate a different grid: handing it a permutation
-    /// asks "does the map still collide-free at this order", which is the question, and handing it a
-    /// different POPULATION would be asking something the caller has no business asking.</para>
+    /// <see cref="HeaviestRefreshStartMinute"/>, <see cref="LightRefreshStepMinutes"/> and
+    /// <see cref="UnboundedLightRefreshSeparationIndexes"/> — still comes from the shipped registry, so this
+    /// cannot be used to fabricate a different grid: handing it a permutation asks "does the map still
+    /// collide-free at this order", which is the question, and handing it a different POPULATION would be
+    /// asking something the caller has no business asking.</para>
+    ///
+    /// <para><b>THE LIGHT BAND'S LAYOUT, which is what #3185 changed.</b> The band is a fixed set of
+    /// positions — <see cref="LightHourlyRefreshCount"/> of them, <see cref="LightRefreshStepMinutes"/>
+    /// apart, spanning <see cref="LightBandSpanMinutes"/>. The unbounded-cardinality members take every
+    /// <see cref="UnboundedLightRefreshSeparationIndexes"/>-th position from the first
+    /// (<see cref="LightBandIndexForUnboundedRefresh"/>); the deployment-bounded members take the positions
+    /// those leave, in registry order. So the gap the long runs need is filled by the short ones instead of
+    /// being added to the band, and <see cref="LightBandSpanMinutes"/> does not move — the guard, the
+    /// heaviest refresh's window and the compression band are all exactly what they were.</para>
+    ///
+    /// <para><b>The alternative shape, priced and rejected.</b> Walking the registry in order and jumping
+    /// forward whenever a member has to clear the last unbounded one widens the band to thirteen minutes at
+    /// today's two-per-hour spacing and to fifteen at three, which drops the watch line to 850 s against an
+    /// 896 s <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>. That shape is red at today's
+    /// registry and red again the moment
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is re-derived upward. Interleaving is what
+    /// makes the separation free rather than a trade, and free is why it does not have to be argued
+    /// against <see cref="HeaviestRefreshWindowMinutes"/>.</para>
+    ///
+    /// <para><b>Still injective, and for a stronger reason than before.</b> The two classes draw from one
+    /// pool of positions and the bounded members are handed the positions the unbounded members did not
+    /// take, so no position can be issued twice by construction rather than by arithmetic. It survives any
+    /// permutation of the order for the same reason the consecutive form did: which member gets which
+    /// position moves, how many positions exist does not.</para>
     ///
     /// <para><c>internal</c> rather than public: the product must always reach the map through the overload
     /// that supplies its own list, or a caller could phase a policy against an order the converge does not
@@ -1869,22 +2184,59 @@ WITH NO DATA";
             throw new ArgumentNullException(nameof(order));
         }
 
-        var lightIndex = 0;
+        var lightCount = order.Count(candidate =>
+            !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal));
+
+        var unboundedIndexes = order
+            .Where(candidate =>
+                !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal)
+                && UnboundedCardinalityRefreshViews.Contains(candidate))
+            .Select((_, ordinal) => LightBandIndexForUnboundedRefresh(ordinal))
+            .ToArray();
+
+        if (unboundedIndexes.Length > 0 && unboundedIndexes[^1] > lightCount - 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(view),
+                view,
+                $"the light band holds {lightCount} positions and cannot separate {unboundedIndexes.Length} unbounded-cardinality refreshes by {UnboundedLightRefreshSeparationMinutes} minutes each — see TimescaleSupport.LightBandHoldsUnboundedRefreshCount; the repair is a cheaper aggregate, a longer cadence for one of them, or fewer compression minutes, not a wider light band (#3185)");
+        }
+
+        var taken = new HashSet<int>(unboundedIndexes);
+        var boundedIndexes = Enumerable
+            .Range(0, lightCount)
+            .Where(index => !taken.Contains(index))
+            .ToArray();
+
+        var unboundedOrdinal = 0;
+        var boundedOrdinal = 0;
 
         foreach (var candidate in order)
         {
             var heaviest = string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal);
+            var unbounded = !heaviest && UnboundedCardinalityRefreshViews.Contains(candidate);
 
             if (string.Equals(candidate, view, StringComparison.Ordinal))
             {
-                return heaviest
-                    ? HeaviestRefreshStartMinute
-                    : lightIndex * LightRefreshStepMinutes;
+                if (heaviest)
+                {
+                    return HeaviestRefreshStartMinute;
+                }
+
+                var index = unbounded
+                    ? unboundedIndexes[unboundedOrdinal]
+                    : boundedIndexes[boundedOrdinal];
+
+                return index * LightRefreshStepMinutes;
             }
 
-            if (!heaviest)
+            if (unbounded)
             {
-                lightIndex++;
+                unboundedOrdinal++;
+            }
+            else if (!heaviest)
+            {
+                boundedOrdinal++;
             }
         }
 
@@ -2452,6 +2804,121 @@ WITH NO DATA";
     }
 
     /// <summary>
+    /// The minutes the light band guarantees between <paramref name="view"/>'s start and the next start of a
+    /// view in its own class — <see cref="UnboundedLightRefreshSeparationMinutes"/> for an
+    /// unbounded-cardinality member and <see cref="LightRefreshStepMinutes"/> for a deployment-bounded one.
+    ///
+    /// <para>Read off the same two terms
+    /// <see cref="RefreshPhaseMinutesFor(IReadOnlyList{string}, string)"/> lays the band out with, so what
+    /// this reports a run against is the room the grid actually gave it rather than a second opinion about
+    /// what it should have had.</para>
+    /// </summary>
+    public static int LightRefreshSpacingMinutesFor(string view) =>
+        IsUnboundedCardinalityRefresh(view)
+            ? UnboundedLightRefreshSeparationMinutes
+            : LightRefreshStepMinutes;
+
+    /// <summary>
+    /// The name <see cref="LogLightRefreshSpacingBreach"/> reports <paramref name="view"/>'s breach under,
+    /// which is the constant the reading falsified — <see cref="LightRefreshStepMinutes"/> for a
+    /// deployment-bounded member and <see cref="UnboundedLightRefreshSeparationMinutes"/> for an unbounded
+    /// one.
+    ///
+    /// <para><b>Two names rather than one, because the two breaches ask for different repairs.</b> A bounded
+    /// member past its step means the CLASSIFICATION is wrong for that view —
+    /// <see cref="IsUnboundedCardinalityRefresh"/> read its group key and predicted a short run. An unbounded
+    /// member past its separation means the SEPARATION is too narrow, which is
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> being stale. Sharing one name would let the
+    /// larger of the two suppress the other through the rate limiter's high-water mark, which is the one
+    /// thing a shared key must not do when the findings are not the same finding.</para>
+    /// </summary>
+    public static string LightRefreshSpacingConstantNameFor(string view) =>
+        IsUnboundedCardinalityRefresh(view)
+            ? nameof(UnboundedLightRefreshSeparationMinutes)
+            : nameof(LightRefreshStepMinutes);
+
+    /// <summary>
+    /// Whether one observed light-refresh runtime is longer than the minutes its class was given on the
+    /// band — the comparison <see cref="LogLightRefreshSpacingBreach"/> reports, separated out so it can be
+    /// asked without a logger.
+    ///
+    /// <para><b>STRICTLY greater, matching <see cref="ClassifyRefreshCeilingFreshness"/>.</b> The spacing is
+    /// a claim that the next start is this many minutes away; a run that took exactly that long finished as
+    /// the next one began and did not overlap it. Only a longer run did.</para>
+    /// </summary>
+    public static bool LightRefreshRunExceedsItsSpacing(string view, double observedSeconds) =>
+        observedSeconds > LightRefreshSpacingMinutesFor(view) * 60;
+
+    /// <summary>
+    /// Reports that a light refresh ran past the minutes its class was given on the band, so it overlapped
+    /// the next start in its class — the #3185 finding, and the LIVE half of a membership rule that is
+    /// otherwise a build-time prediction.
+    ///
+    /// <para><b>Why the classifier needs a live half at all.</b>
+    /// <see cref="IsUnboundedCardinalityRefresh"/> decides how much of the band a view gets by reading its
+    /// GROUP BY, and a view can be slow for a reason its group key does not show — an expensive aggregate
+    /// expression, a source hypertable that grew, a store under pressure. No build-time rule sees that, and
+    /// a membership rule that has stopped predicting is exactly the failure the rule was written to avoid: a
+    /// hand-kept list of heavy views goes stale loudly, on the next registration, while a rule that has
+    /// stopped matching reality goes stale quietly, forever. This is what makes it loud.</para>
+    ///
+    /// <para><b>A different finding from <see cref="LogRefreshCeilingStaleness"/>, and the difference is the
+    /// remedy.</b> That one says a constant recorded as a maximum has been overtaken and asks for the
+    /// constant to be re-derived. This one says the run overlapped a sibling, and asks either for the view
+    /// to be separated — a CLASS question — or for the separation to be widened. They are also not nested:
+    /// a bounded member at 100 s breaches its 60 s step while sitting far under
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, so the ceiling watch is silent on precisely
+    /// the case this exists for.</para>
+    ///
+    /// <para><b>WARNING, on <see cref="LogRefreshCeilingStaleness"/>'s argument.</b> Debug is where a
+    /// silently-inapplicable mechanism lives, so it is unavailable. Error is reserved for a stated
+    /// precondition of the grid being false, and an overlap between two light refreshes does not make one
+    /// false — the band's guarantee for the bounded class is distinct STARTS, which holds, and the cost of
+    /// two short runs overlapping is seconds. What is true is that the layout's reason for giving this view
+    /// one minute no longer holds, which is a deliberate-action finding.</para>
+    ///
+    /// <para><b>Rate-limited through <see cref="RefreshCeilingStalenessWatch"/> on the constant the reading
+    /// falsified</b> (<see cref="LightRefreshSpacingConstantNameFor"/>), so the same instance the ceiling
+    /// findings use carries this one: a high-water mark per constant is the shape this needs for the same
+    /// reason — what the repair wants is the LARGEST overrun, and a repeat of one already reported adds
+    /// nothing. One key per class rather than per view, because the repair is a change to the class's
+    /// spacing rule and not to one view's minute.</para>
+    /// </summary>
+    public static void LogLightRefreshSpacingBreach(
+        string view,
+        double observedSeconds,
+        RefreshCeilingStalenessWatch watch,
+        ILogger? logger)
+    {
+        if (watch is null)
+        {
+            throw new ArgumentNullException(nameof(watch));
+        }
+
+        if (logger is null)
+        {
+            return;
+        }
+
+        if (!LightRefreshRunExceedsItsSpacing(view, observedSeconds))
+        {
+            return;
+        }
+
+        var spacingMinutes = LightRefreshSpacingMinutesFor(view);
+        var constantName = LightRefreshSpacingConstantNameFor(view);
+
+        if (!watch.ShouldReport(constantName, observedSeconds))
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "TimescaleDB: {View}'s refresh policy last ran {Seconds:F1}s against the {Minutes}-minute gap the phase grid gives its cost class ({Constant}), so it overlapped the next refresh in that class for {Over:F1}s. Two refreshes hold mutually compatible AccessShareLocks and cannot convoy, so this is not #3012 — it is CPU and I/O contention, measured at 5.4x the per-output-group cost when two ~265s aggregations were placed two minutes apart (#3185). The repair depends on which constant is named: LightRefreshStepMinutes means TimescaleSupport.IsUnboundedCardinalityRefresh read this view's GROUP BY and predicted a short run, so the CLASSIFICATION is wrong for it; UnboundedLightRefreshSeparationMinutes means the separation itself is too narrow, which is OtherHourlyRefreshObservedCeilingSeconds being stale (#3182). Reported once per class and then only for a larger run, because what the repair needs is the largest overrun.",
+            view, observedSeconds, spacingMinutes, constantName, observedSeconds - (spacingMinutes * 60));
+    }
+
+    /// <summary>
     /// The longest run recorded for any hourly refresh OTHER than <see cref="HeaviestHourlyRefreshView"/> —
     /// and, since #3174, the number <see cref="CompressionPhaseGuardMinutes"/> is DERIVED from rather than
     /// merely characterised against.
@@ -2578,6 +3045,15 @@ WITH NO DATA";
     /// expressed over it: widening the guard moves the heaviest refresh later and narrows its window rather
     /// than overrunning a neighbour. TimescaleContinuousAggregateTests holds the three bands to tiling the
     /// hour exactly, so a guard wide enough to leave no window at all is red rather than silent.</para>
+    ///
+    /// <para><b>It answers a SECOND question, and the same number answers both (#3185).</b>
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/> IS this member: "how long after a light refresh
+    /// starts is it safe to start something else" is the question the guard asks about a compression policy
+    /// and the light band asks about the next long-running refresh. Two derivations from one constant would
+    /// be two places to update; one expression cannot disagree with itself. So re-deriving
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> moves the light band's internal spacing as
+    /// well as this band's width, which is the coupling that makes the constant worth getting right rather
+    /// than a number two grids each keep a copy of.</para>
     /// </summary>
     public static int CompressionPhaseGuardMinutes =>
         (int)Math.Ceiling(OtherHourlyRefreshObservedCeilingSeconds / 60.0);
@@ -2596,7 +3072,7 @@ WITH NO DATA";
     /// </summary>
     public static int GuardAndWindowSharedMinutes =>
         MinutesInHourlyCadence
-        - ((LightHourlyRefreshCount - 1) * LightRefreshStepMinutes)
+        - LightBandSpanMinutes
         - CompressionPhaseBandMinutes;
 
     /// <summary>
@@ -2614,9 +3090,34 @@ WITH NO DATA";
     /// <para>Integer division throughout, matching <see cref="RefreshSlotWarningSeconds"/>: a line computed
     /// with rounding would sit above the shipped one on some widths and the two would disagree about
     /// feasibility at exactly the boundary the question is about.</para>
+    ///
+    /// <para>Delegates to <see cref="RefreshSlotWarningSecondsForLightBandAndGuard"/> at the shipped band
+    /// span rather than carrying its own copy of the arithmetic, so the two feasibility questions the hour
+    /// admits — a wider guard and a wider light band — are asked of ONE expression.</para>
     /// </summary>
     public static int RefreshSlotWarningSecondsForGuardMinutes(int guardMinutes) =>
-        (GuardAndWindowSharedMinutes - guardMinutes) * 60
+        RefreshSlotWarningSecondsForLightBandAndGuard(LightBandSpanMinutes, guardMinutes);
+
+    /// <summary>
+    /// The watch line a light band spanning <paramref name="lightBandSpanMinutes"/> and a guard of
+    /// <paramref name="guardMinutes"/> would leave — the shipped chain with BOTH of the terms that compete
+    /// for the hour opened up (#3185).
+    ///
+    /// <para><b>Why the band span had to become a parameter too.</b> #3182 opened the guard because the
+    /// guard's derivation had no upper bound and the hour does. The light band's width has exactly the same
+    /// shape: it is <see cref="LightHourlyRefreshCount"/> minus one times
+    /// <see cref="LightRefreshStepMinutes"/>, neither of which consults what the hour has left, and the
+    /// obvious repair for #3185 was to widen the step. Nothing could ask what that would cost without
+    /// re-spelling the arithmetic, and re-spelled arithmetic is how a second and kinder model of the grid
+    /// gets built. <see cref="WidestFeasibleLightRefreshStepMinutes"/> asks it here instead.</para>
+    ///
+    /// <para>The hour is <see cref="MinutesInHourlyCadence"/> and
+    /// <see cref="CompressionPhaseBandMinutes"/> comes from the catalog, so those two stay closed: what is
+    /// open is the two terms a re-derivation can actually move.</para>
+    /// </summary>
+    public static int RefreshSlotWarningSecondsForLightBandAndGuard(
+        int lightBandSpanMinutes, int guardMinutes) =>
+        (MinutesInHourlyCadence - lightBandSpanMinutes - CompressionPhaseBandMinutes - guardMinutes) * 60
         * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
 
     /// <summary>
@@ -2681,6 +3182,45 @@ WITH NO DATA";
     /// </summary>
     public static int WidestFeasibleOtherRefreshCeilingSeconds =>
         Math.Max(0, WidestFeasibleCompressionPhaseGuardMinutes) * 60;
+
+    /// <summary>
+    /// The WIDEST <see cref="LightRefreshStepMinutes"/> the hour can carry while the grid's own stated
+    /// precondition still holds at <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> — zero when
+    /// even a one-minute step leaves too narrow a window.
+    ///
+    /// <para><b>This exists to answer #3185's first candidate repair in the build rather than in a
+    /// discussion.</b> "Give the light band a step that respects member duration" is the obvious reading of
+    /// a band that overlaps its own members, and it sounds like a trade against
+    /// <see cref="HeaviestRefreshWindowMinutes"/> that someone could choose to make. It is not a trade: this
+    /// returns <see cref="LightRefreshStepMinutes"/> itself, so the shipped step is already the widest the
+    /// hour carries and every duration-derived step is red. A member's duration is answered by
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/> INSIDE the band because outside it there is
+    /// nothing to spend.</para>
+    ///
+    /// <para><b>Searched downward through the shipped comparison</b>, for
+    /// <see cref="WidestFeasibleCompressionPhaseGuardMinutes"/>'s reason: the line is an integer-divided
+    /// fraction of an integer window, and a closed form that reproduced the two truncations slightly
+    /// differently would answer feasible where the build answers red. Evaluated at the SHIPPED guard, since
+    /// widening the step and widening the guard are alternatives rather than a pair — each is measured
+    /// against the hour with the other where it is.</para>
+    /// </summary>
+    public static int WidestFeasibleLightRefreshStepMinutes
+    {
+        get
+        {
+            for (var step = MinutesInHourlyCadence; step >= 1; step--)
+            {
+                if (HeaviestHourlyRefreshObservedCeilingSeconds
+                    < RefreshSlotWarningSecondsForLightBandAndGuard(
+                        (LightHourlyRefreshCount - 1) * step, CompressionPhaseGuardMinutes))
+                {
+                    return step;
+                }
+            }
+
+            return 0;
+        }
+    }
 
     /// <summary>
     /// The most compression policies the grid will put on one minute — the input the compression band's WIDTH

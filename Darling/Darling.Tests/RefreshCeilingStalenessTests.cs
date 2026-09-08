@@ -585,6 +585,165 @@ public sealed class RefreshCeilingStalenessTests
             + "minute and the grid is giving up guard width nobody decided to give up");
     }
 
+    /// <summary>
+    /// THE LIVE HALF OF #3185's MEMBERSHIP RULE: a light refresh that outran the gap its cost class was
+    /// given is reported, whichever class the rule put it in.
+    ///
+    /// <para><b>The defect this exists for is one no build-time test can reach.</b>
+    /// <see cref="TimescaleSupport.IsUnboundedCardinalityRefresh"/> decides how much of the light band a
+    /// view gets by reading its GROUP BY, and a view can be slow for a reason its group key does not show.
+    /// A hand-kept list of heavy views goes stale LOUDLY — on the next registration, where a reviewer sees
+    /// it. A rule that has stopped predicting goes stale QUIETLY, forever, which is strictly worse and is
+    /// why the rule needs a live falsifier rather than only a build-time one.</para>
+    ///
+    /// <para><b>And it is not covered by the ceiling finding above.</b> A deployment-bounded member at
+    /// 100 s outran its 60 s step while sitting a long way under
+    /// <see cref="TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds"/>, so
+    /// <see cref="TimescaleSupport.LogRefreshCeilingStaleness"/> is silent on precisely the reading this is
+    /// for. Both probes here are derived from
+    /// <see cref="TimescaleSupport.LightRefreshSpacingMinutesFor"/> so they follow the shipped gap at any
+    /// width it takes.</para>
+    /// </summary>
+    [Fact]
+    public void ALightRefreshPastItsClassGap_IsReported_AndOneAtTheGapIsNot()
+    {
+        var bounded = TimescaleSupport.MemoryBaselineView;
+        var unbounded = TimescaleSupport.QueryStoreStatsHourlyView;
+
+        Assert.False(TimescaleSupport.IsUnboundedCardinalityRefresh(bounded));
+        Assert.True(TimescaleSupport.IsUnboundedCardinalityRefresh(unbounded));
+
+        var boundedGap = TimescaleSupport.LightRefreshSpacingMinutesFor(bounded) * 60;
+        var unboundedGap = TimescaleSupport.LightRefreshSpacingMinutesFor(unbounded) * 60;
+
+        /* The two classes get DIFFERENT gaps, or the finding cannot tell the two remedies apart and the
+           layout it reports against is not the layout that shipped. */
+        Assert.True(
+            unboundedGap > boundedGap,
+            "the two cost classes are given the same gap, so separating the unbounded members bought "
+            + "nothing and every assertion below reduces to one case (#3185)");
+
+        /* AT the gap says nothing: a run that took exactly its gap finished as the next one began. */
+        Assert.False(TimescaleSupport.LightRefreshRunExceedsItsSpacing(bounded, boundedGap));
+        var quiet = new CapturingTestLogger();
+        TimescaleSupport.LogLightRefreshSpacingBreach(
+            bounded, boundedGap, new RefreshCeilingStalenessWatch(), quiet);
+        Assert.Equal("(no log lines captured)", quiet.Joined);
+
+        /* One second past it reports, at Warning, naming the constant whose repair is the CLASSIFICATION. */
+        Assert.True(TimescaleSupport.LightRefreshRunExceedsItsSpacing(bounded, boundedGap + 1));
+        var boundedLog = new CapturingTestLogger();
+        TimescaleSupport.LogLightRefreshSpacingBreach(
+            bounded, boundedGap + 1, new RefreshCeilingStalenessWatch(), boundedLog);
+        Assert.StartsWith("Warning:", boundedLog.Joined, StringComparison.Ordinal);
+        Assert.Contains(bounded, boundedLog.Joined, StringComparison.Ordinal);
+        Assert.Contains(
+            nameof(TimescaleSupport.LightRefreshStepMinutes), boundedLog.Joined, StringComparison.Ordinal);
+
+        /* AND THE READING THE CEILING FINDING CANNOT SEE, which is the whole reason this is a second
+           finding: the same run is a long way under the recorded light ceiling, so that watch says nothing
+           about it. */
+        Assert.True(boundedGap + 1 < TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds);
+        var ceilingSilent = new CapturingTestLogger();
+        TimescaleSupport.LogRefreshCeilingStaleness(
+            TimescaleSupport.OtherRefreshCeilingConstantName,
+            TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
+            bounded, boundedGap + 1, new RefreshCeilingStalenessWatch(), ceilingSilent);
+        Assert.Equal("(no log lines captured)", ceilingSilent.Joined);
+
+        /* An unbounded member's own gap is wider, so the bounded probe is silent for it — the classes are
+           judged against their own room and not against a single line. */
+        Assert.False(TimescaleSupport.LightRefreshRunExceedsItsSpacing(unbounded, boundedGap + 1));
+
+        /* Past ITS gap it reports, naming the constant whose repair is the SEPARATION. */
+        var unboundedLog = new CapturingTestLogger();
+        TimescaleSupport.LogLightRefreshSpacingBreach(
+            unbounded, unboundedGap + 1, new RefreshCeilingStalenessWatch(), unboundedLog);
+        Assert.StartsWith("Warning:", unboundedLog.Joined, StringComparison.Ordinal);
+        Assert.Contains(
+            nameof(TimescaleSupport.UnboundedLightRefreshSeparationMinutes),
+            unboundedLog.Joined,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The two cost classes are rate-limited under DIFFERENT keys, so the larger breach cannot suppress the
+    /// smaller one.
+    ///
+    /// <para><b>This is the one thing a shared high-water mark must not do when the findings are not the
+    /// same finding.</b> An unbounded member's breach is reported in hundreds of seconds and a bounded
+    /// member's in tens, so one key would mean the first unbounded breach permanently silences every
+    /// bounded one — and the bounded one is the finding that says the CLASSIFICATION is wrong, which is the
+    /// half no build-time rule covers. Asserted in that order deliberately: the large reading first, so a
+    /// single shared mark would already be above the small one when it arrives.</para>
+    /// </summary>
+    [Fact]
+    public void TheTwoCostClasses_DoNotSuppressEachOther_UnderOneWatch()
+    {
+        var bounded = TimescaleSupport.MemoryBaselineView;
+        var unbounded = TimescaleSupport.QueryStoreStatsHourlyView;
+
+        Assert.NotEqual(
+            TimescaleSupport.LightRefreshSpacingConstantNameFor(bounded),
+            TimescaleSupport.LightRefreshSpacingConstantNameFor(unbounded));
+
+        var watch = new RefreshCeilingStalenessWatch();
+        var log = new CapturingTestLogger();
+
+        var large = (TimescaleSupport.LightRefreshSpacingMinutesFor(unbounded) * 60) + 100;
+        var small = (TimescaleSupport.LightRefreshSpacingMinutesFor(bounded) * 60) + 1;
+
+        Assert.True(large > small, "the large probe is not larger, so a shared mark would not suppress");
+
+        TimescaleSupport.LogLightRefreshSpacingBreach(unbounded, large, watch, log);
+        TimescaleSupport.LogLightRefreshSpacingBreach(bounded, small, watch, log);
+
+        Assert.Equal(2, CountLines(log));
+
+        /* And WITHIN one class the mark still holds, so the split did not cost the rate limit. */
+        var repeat = new CapturingTestLogger();
+        var again = new RefreshCeilingStalenessWatch();
+        TimescaleSupport.LogLightRefreshSpacingBreach(bounded, small + 10, again, repeat);
+        TimescaleSupport.LogLightRefreshSpacingBreach(bounded, small, again, repeat);
+        Assert.Equal(1, CountLines(repeat));
+    }
+
+    /// <summary>
+    /// The service sweep CALLS the spacing finding on the same per-view feed it calls the ceiling finding
+    /// on, and passes the same watch instance.
+    ///
+    /// <para>Parsed out of the real <c>DarlingWorker.cs</c> for the reason the sibling guards in this file
+    /// are: a finding that exists and is never reached is the defect it was written to remove. Asserted
+    /// inside the light-refresh loop rather than merely present in the file, because the finding is
+    /// per-view and a call outside that loop would report one reading an hour.</para>
+    /// </summary>
+    [Fact]
+    public void TheSpacingFinding_IsCalledPerLightRefresh_OnTheSameWatch()
+    {
+        var worker = ReadDarlingWorkerSource();
+
+        var loop = worker.IndexOf(
+            nameof(TimescaleSupport.ReadOtherHourlyRefreshRuntimesAsync), StringComparison.Ordinal);
+        Assert.True(loop > 0, "the light-refresh runtime loop is gone from DarlingWorker");
+
+        var call = worker.IndexOf(
+            nameof(TimescaleSupport.LogLightRefreshSpacingBreach), StringComparison.Ordinal);
+        Assert.True(
+            call > loop,
+            "TimescaleSupport.LogLightRefreshSpacingBreach is not called after the per-view light-refresh "
+            + "read, so the spacing finding either does not run or runs on something other than a per-view "
+            + "reading (#3185)");
+
+        /* The tail of that loop, so "inside it" is a claim about the loop and not about the file. */
+        var body = worker[loop..];
+        var close = body.IndexOf("\r\n            }", StringComparison.Ordinal);
+        Assert.True(close > 0, "could not find the end of the light-refresh loop");
+        Assert.Contains(
+            nameof(TimescaleSupport.LogLightRefreshSpacingBreach),
+            body[..close],
+            StringComparison.Ordinal);
+    }
+
     private static int CountLines(CapturingTestLogger logger) =>
         logger.Joined == "(no log lines captured)"
             ? 0

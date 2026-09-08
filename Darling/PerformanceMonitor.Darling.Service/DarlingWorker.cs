@@ -4462,6 +4462,21 @@ LIMIT 1";
                     lightRefresh.LastRunSeconds,
                     _refreshCeilingStaleness,
                     _logger);
+
+                /* #3185: and whether the run outran the gap the band gave its own COST CLASS, which is a
+                   third fact with a third remedy. The band separates the members whose runs are long enough
+                   for CPU and I/O contention to matter and leaves the rest one minute apart, and which
+                   members those are is derived from each view's GROUP BY rather than listed — so the one
+                   thing that can go silently wrong is a view being slow for a reason its group key does not
+                   show. That is not visible to any build-time rule, and it is not visible to the ceiling
+                   watch above either: a bounded member at 100 s outran its 60 s step while sitting a long
+                   way under the 226.8 s ceiling. Same read, same reading, same rate limiter — keyed on the
+                   constant the reading falsified, so the class questions do not suppress each other. */
+                TimescaleSupport.LogLightRefreshSpacingBreach(
+                    lightRefresh.View,
+                    lightRefresh.LastRunSeconds,
+                    _refreshCeilingStaleness,
+                    _logger);
             }
 
             readClock.Restart();
