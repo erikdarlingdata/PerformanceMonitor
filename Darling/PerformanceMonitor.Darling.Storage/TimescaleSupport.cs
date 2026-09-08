@@ -1905,6 +1905,15 @@ WITH NO DATA";
     /// rather than as two halves of one — a comma split would produce a term of <c>time_bucket('1 hour'</c>
     /// and one of <c>bucket)</c>, and the second of those matches a real column name.</para>
     ///
+    /// <para><b>It takes the LAST <c>GROUP BY</c> in the text, which is an assumption rather than a
+    /// parse.</b> Every registered aggregate has exactly one, so the two readings agree today. A future
+    /// CREATE that grouped inside a subquery would break one of them and which one depends on where that
+    /// subquery sat — so this is not a choice that generalizes, it is a statement about the shipped set. A
+    /// definition whose inner terms did not all resolve to classified columns is caught by
+    /// <c>EveryGroupingTerm_IsClassified_AndTheParseIsControlledPerView</c>; one whose inner terms happened
+    /// to resolve would be misclassified silently, and the repair then is a real parse rather than a
+    /// different index. Raised by review.</para>
+    ///
     /// <para><b>Case-insensitive on the keywords, deliberately.</b> A parse that found no GROUP BY would
     /// return nothing, and nothing contains no per-statement column — so a missed clause classifies a view
     /// as deployment-bounded, which is the label that gives it LESS room. The failure has to be loud in the
@@ -2056,6 +2065,20 @@ WITH NO DATA";
     /// <see cref="UnboundedLightRefreshSeparationMinutes"/> expressed in band POSITIONS, which is the unit
     /// the layout places members in — rounded UP, so a separation that does not divide the step still
     /// clears it.
+    ///
+    /// <para><b>AT LEAST ONE, which is what the injectivity claim rests on, and it is worth writing down
+    /// because the implication is three members long.</b> A value of zero would give every
+    /// unbounded member band position zero — every one of them on the same minute, which is #3012's
+    /// adjacency exactly — and
+    /// <see cref="LightBandHoldsUnboundedRefreshCount(int, int)"/> would still answer true, because zero
+    /// fits in any band. It cannot be zero: <see cref="CompressionPhaseGuardMinutes"/> is asserted STRICTLY
+    /// POSITIVE by TimescaleContinuousAggregateTests' tiling case, this is that value over a positive step,
+    /// and the ceiling of a positive quotient is at least one. Raised by review. No assertion is added here
+    /// for it — the positivity is already asserted at the constant, and the collapse is caught twice over on
+    /// the map's own output, by that file's whole-set distinctness claim and by
+    /// <c>TheLightBand_SeparatesEveryUnboundedCardinalityRefresh_WithoutWidening</c>'s set identity. Both
+    /// are red under a mutation that zeroes the separation, which is how that is known rather than
+    /// argued.</para>
     /// </summary>
     public static int UnboundedLightRefreshSeparationIndexes =>
         (int)Math.Ceiling(UnboundedLightRefreshSeparationMinutes / (double)LightRefreshStepMinutes);
