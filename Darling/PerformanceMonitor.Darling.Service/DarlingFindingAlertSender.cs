@@ -80,21 +80,8 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
                 alert.ServerId, alert.Context, attemptChannels: true);
 
-            /* Lite's single-row notification_type taxonomy (EmailAlertService.cs): email
-               attempted → "email"; webhook delivery upgrades to "email+webhook"/"webhook";
-               otherwise "tray". */
-            var notificationType = "tray";
-            if (result.EmailAttempted)
-            {
-                notificationType = "email";
-            }
-
-            var sent = result.EmailSent;
-            if (result.WebhookSent)
-            {
-                notificationType = notificationType == "email" ? "email+webhook" : "webhook";
-                sent = true;
-            }
+            /* trayChannelPresent: false — the headless service has no tray; see DarlingAlertDeliverer. */
+            var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);
 
             /* Always log the alert, regardless of channel status — the structured context
                persists as JSON alongside the flat detail_text, the numeric severity/threshold
@@ -104,7 +91,7 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 alert.ServerId, alert.ServerName, alert.MetricName,
                 alert.CurrentValue, alert.ThresholdValue,
                 alert.Severity, alert.NotifyThreshold,
-                sent, notificationType, result.SendError,
+                delivery,
                 false, alert.DetailText, contextJson));
         }
         catch (Exception ex)

@@ -381,7 +381,7 @@ WHERE server_id = $1 AND metric_name = $2", connection))
             await historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 TestServerKey, TestServerName, metricName,
                 "92%", "90%", 92, 90,
-                AlertSent: true, NotificationType: "tray", SendError: null,
+                Delivery: AlertDelivery.NoChannelApplies(),
                 Muted: false, DetailText: null, ContextJson: ContextFor("walnut")));
 
             await Task.Delay(TimeSpan.FromMilliseconds(50), ct); /* force a distinguishable alert_time */
@@ -389,7 +389,7 @@ WHERE server_id = $1 AND metric_name = $2", connection))
             await historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 TestServerKey, TestServerName, metricName,
                 "95%", "90%", 95, 90,
-                AlertSent: true, NotificationType: "tray", SendError: null,
+                Delivery: AlertDelivery.NoChannelApplies(),
                 Muted: false, DetailText: null, ContextJson: ContextFor("cashew")));
 
             var walnutSeed = await historyStore.GetLastAlertTimeAsync(TestServerKey, metricName, dedupKey: "walnut");

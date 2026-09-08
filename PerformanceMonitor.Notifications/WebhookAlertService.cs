@@ -111,6 +111,30 @@ public class WebhookAlertService
     /// Sends webhook alerts to all configured channels (Teams and/or Slack).
     /// Respects the email cooldown setting for throttling. Never throws.
     /// </summary>
+    /* The four per-channel configuration gates, named so the fan-out's own if-conditions and
+       AnyWebhookConfigured are the SAME expressions rather than two lists that have to be kept in step.
+       Adding a channel and forgetting the disjunction would otherwise report "nothing configured" for a
+       deployment that has one. */
+    private bool TeamsConfigured =>
+        _settings.TeamsWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.TeamsWebhookUrl);
+
+    private bool SlackConfigured =>
+        _settings.SlackWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.SlackWebhookUrl);
+
+    private bool GenericConfigured =>
+        _settings.GenericWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.GenericWebhookUrl);
+
+    private bool PagerDutyConfigured =>
+        _settings.PagerDutyEnabled && !string.IsNullOrWhiteSpace(_settings.PagerDutyRoutingKey);
+
+    /// <summary>
+    /// Whether any webhook channel is configured, so a caller can tell "no channel is set up" from "a
+    /// channel is set up and this alert did not go out". Answers from configuration only — it never
+    /// consults a cooldown and never attempts anything.
+    /// </summary>
+    public bool AnyWebhookConfigured =>
+        TeamsConfigured || SlackConfigured || GenericConfigured || PagerDutyConfigured;
+
     public async Task<bool> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
@@ -147,22 +171,22 @@ public class WebhookAlertService
                 _settings.TriageBaseUrl, serverName, metricName, DateTime.UtcNow,
                 DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context));
 
-            if (_settings.TeamsWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.TeamsWebhookUrl))
+            if (TeamsConfigured)
             {
                 sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl);
             }
 
-            if (_settings.SlackWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.SlackWebhookUrl))
+            if (SlackConfigured)
             {
                 sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl);
             }
 
-            if (_settings.GenericWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.GenericWebhookUrl))
+            if (GenericConfigured)
             {
                 sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl);
             }
 
-            if (_settings.PagerDutyEnabled && !string.IsNullOrWhiteSpace(_settings.PagerDutyRoutingKey))
+            if (PagerDutyConfigured)
             {
                 sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl);
             }

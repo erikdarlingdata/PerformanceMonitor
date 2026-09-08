@@ -2326,14 +2326,21 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// Dashboard's explicit "…Cleared/Resolved/Restored" <c>RecordAlert</c> rows. Used by BOTH this
     /// evaluator's self-alert recoveries (Collection Resumed / Capture Restored) and the shared alert
     /// engine's resolution callback (CPU Resolved, Blocking Cleared, …) so an operator reviewing alert
-    /// history sees the paired "Detected" then "Cleared" entries. Never email/webhook (a resolution has no
-    /// send channel — the deliverer's fire path is untouched): recorded as a delivered tray/history row.
+    /// history sees the paired "Detected" then "Cleared" entries. Never email/webhook: a resolution has no
+    /// send channel, and the deliverer's fire path is untouched.
+    ///
+    /// <para>That "no send channel" is stated by <see cref="AlertDelivery.NoChannelApplies"/> rather than
+    /// spelled as a delivered row. Saying it with <c>AlertSent: true</c> made <c>alert_sent</c> mean
+    /// "delivered" on a fired row and "no channel applies" here, so a reader could not tell the two senses
+    /// apart and no aggregate over the column meant anything — the delivered fraction rose with the number
+    /// of resolutions. The pairing this method exists for is unaffected: the row is still written, still
+    /// carries the resolution title, and still reads as resolved.</para>
     /// </summary>
     public static AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution) => new(
         resolution.ServerKey, resolution.ServerName, resolution.Title,
         CurrentValueText: "resolved", ThresholdValueText: "",
         NumericCurrentValue: null, NumericThresholdValue: null,
-        AlertSent: true, NotificationType: "tray", SendError: null,
+        Delivery: AlertDelivery.NoChannelApplies(),
         Muted: false, DetailText: resolution.Message, ContextJson: null);
 
     /// <summary>
