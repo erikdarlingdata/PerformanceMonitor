@@ -175,8 +175,8 @@ public sealed record AlertDelivery
            domain and not merely over the shapes the send core emits. Ordering muted ahead of them read
            naturally — a muted alert attempts nothing — but it let a Sent row be labelled "muted", which
            puts a true back onto a non-delivering channel and breaks the legacy decode. Both routes to that
-           are unreachable in practice (attemptChannels: !muted gates every attempt), and neither is
-           unrepresentable, which is the difference that matters.
+           are unreachable in practice (attemptChannels: !muted gates every attempt), and both are
+           representable in the type, which is the difference that matters.
 
            Below the delivering arms the order preserves the derivation this replaces: muted beats tray
            (Lite shows no toast for a muted alert), and tray beats the configuration arms so a Lite row's

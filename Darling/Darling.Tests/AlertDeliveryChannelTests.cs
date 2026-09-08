@@ -37,9 +37,12 @@ public sealed class AlertDeliveryChannelTests
     /// <summary>
     /// The defect itself. <c>BuildResolutionRecord</c> was the only construction site in non-test code that
     /// named <c>AlertSent:</c> explicitly, and it said <c>true</c> — documented as meaning "a resolution has
-    /// no send channel", not "something was delivered". Measured on three live stores on 2026-09-08: every
-    /// one of 5,683 <c>alert_sent = true</c> rows carried a resolution title, and no channel was configured
-    /// on any of them, so not one of those <c>true</c>s was a delivery.
+    /// no send channel", not "something was delivered". Measured across three live stores on 2026-09-08:
+    /// 32,546 stored rows, 5,246 of them <c>alert_sent = true</c>, and no send channel configured on any of
+    /// the three — so not one of those <c>true</c>s was a delivery. In the seven-day window where the census
+    /// was broken down per metric (11,521 rows, 2,391 of them <c>true</c>), every single <c>true</c> row
+    /// carried a resolution title. The per-metric breakdown is what supports that last claim, so it is
+    /// stated for the window it was measured in rather than for all 5,246.
     /// </summary>
     [Fact]
     public void TheResolutionRecord_StatesNoChannel_RatherThanClaimingDelivery()
@@ -239,7 +242,7 @@ public sealed class AlertDeliveryChannelTests
     /// <summary>
     /// Both Darling producers state <c>trayChannelPresent: false</c>. The named argument is what makes a
     /// transposition a compile error rather than a silent flip, and this is what makes ADDING a producer
-    /// that forgets the answer a red test rather than 32,000 more untrue rows.
+    /// that forgets the answer a red test rather than another storeful of untrue rows.
     /// </summary>
     [Fact]
     public void BothDarlingProducers_DeclareNoTrayChannel()
@@ -312,8 +315,8 @@ public sealed class AlertDeliveryChannelTests
     /// throttled and failed-webhook alike, and nothing in the row separates them, so it gets an
     /// outcome-only label that makes no claim about configuration. Reading it as
     /// <see cref="AlertDeliveryStatus.NoChannelConfigured"/> would be asserting the new semantics over rows
-    /// written before them — every existing row on all three stores predates this change, and 8,085 of them
-    /// in one seven-day window are exactly this shape.
+    /// written before them — every existing row on all three stores predates this change, and on the busiest
+    /// of them 8,085 rows in a single seven-day window are exactly this shape.
     /// </summary>
     [Fact]
     public void TheLegacyDetectedSignature_IsNotReinterpreted()
