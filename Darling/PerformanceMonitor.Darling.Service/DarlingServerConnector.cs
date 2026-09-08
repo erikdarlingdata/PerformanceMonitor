@@ -179,7 +179,46 @@ SELECT
             }
         }
 
+        WarnIfRemediationCredentialIsInert(config, logger);
+
         return MonitoredServerConnection.BuildConnectionString(config, password);
+    }
+
+    /// <summary>
+    /// Says out loud that an armed remediation credential does nothing in this build (#2138 phase 1).
+    ///
+    /// <para><b>Why this exists.</b> V113 accepts a per-server remediation credential and nothing in this
+    /// build consumes it — the write path is its own change. An operator who has entered one believes the
+    /// server is armed, and the failure mode of a knob that silently does nothing is at its worst when what
+    /// it claims to gate is a write to a production server. So the same discipline #2745 applied to its
+    /// all-gates-open force (journal it as WITHHELD rather than quietly downgrading it) applies here: the
+    /// credential is accepted, stored, resolvable, and announced as inert.</para>
+    ///
+    /// <para>Once per connect rather than once per sweep: connects are rare, so this cannot become the
+    /// every-60-seconds log line #2255 was about. A one-sided credential is reported separately, because
+    /// "you configured half of one" and "this build cannot use it yet" send an operator to different
+    /// places — the first is a mistake to fix now, the second is a wait.</para>
+    /// </summary>
+    private static void WarnIfRemediationCredentialIsInert(MonitoredServer config, ILogger? logger)
+    {
+        var username = !string.IsNullOrWhiteSpace(config.RemediationUsername);
+        var secret = !string.IsNullOrWhiteSpace(config.RemediationEncryptedPassword);
+
+        if (username ^ secret)
+        {
+            logger?.LogWarning(
+                "Server '{Server}' has only one half of a remediation credential ({Half} is set, the other is not), so it counts as unarmed. Both remediationUsername and remediationEncryptedPassword are required.",
+                config.DisplayName,
+                username ? "remediationUsername" : "remediationEncryptedPassword");
+            return;
+        }
+
+        if (username && secret)
+        {
+            logger?.LogInformation(
+                "Server '{Server}' has a remediation credential, but this build ships no remediation write path (#2138 phase 1 is the credential seam, the journal's actor and the decision logic). Nothing will use it yet, and the monitoring credential remains read-only.",
+                config.DisplayName);
+        }
     }
 
     /* The PostgreSQL detection query. Deliberately built only from surfaces a pg_monitor-grade login
