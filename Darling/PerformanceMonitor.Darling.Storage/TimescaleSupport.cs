@@ -2094,9 +2094,16 @@ WITH NO DATA";
     /// <see cref="WidestFeasibleLightRefreshStepMinutes"/> says the band is already as wide as the hour
     /// carries. It is a scheduling decision: a cheaper aggregate, a longer cadence for one of them, or
     /// fewer compression minutes. What the MAP does meanwhile is fall back to consecutive positions, which
-    /// is #3174's grid — distinct starts, no separation — and the two things that report it are this
-    /// predicate, asserted by TimescaleContinuousAggregateTests, and
-    /// <see cref="LogLightRefreshSpacingBreach"/> on the live readings.</para>
+    /// is #3174's grid — distinct starts, no separation.</para>
+    ///
+    /// <para><b>THIS PREDICATE is what reports that, and it is the only reporter the condition needs.</b>
+    /// TimescaleContinuousAggregateTests asserts it over the shipped registry, and the classification it
+    /// counts is recovered from compile-time CREATE constants — so a degraded layout cannot differ between
+    /// CI and a running store, and a build in which the band degrades is red before it ships.
+    /// <see cref="LogLightRefreshSpacingBreach"/> is NOT a second reporter for this: it judges a live run
+    /// against the gap its class is given, and a state that cannot ship is a state no live run arrives in.
+    /// What that finding covers is the failure this predicate cannot see — a view slow for a reason its
+    /// group key does not show — which is reachable on every shipped build.</para>
     ///
     /// <para><b>Why a throw would be worse than a degraded grid, which is measured rather than assumed.</b>
     /// <see cref="CompressionPhaseMinutes"/> is a static field whose initializer reaches
@@ -2200,8 +2207,8 @@ WITH NO DATA";
     /// <para><b>A band that cannot separate its unbounded members degrades to consecutive positions rather
     /// than refusing</b> (<see cref="LightBandHoldsUnboundedRefreshCount(int)"/>), because this condition
     /// is reachable from a static field initializer and a throw there costs the whole type rather than one
-    /// aggregate. The condition is reported by a build assertion and by
-    /// <see cref="LogLightRefreshSpacingBreach"/>, not by an exception.</para>
+    /// aggregate. It is reported by that predicate at build time rather than by an exception at run time,
+    /// and a build it is false on does not ship.</para>
     ///
     /// <para><c>internal</c> rather than public: the product must always reach the map through the overload
     /// that supplies its own list, or a caller could phase a policy against an order the converge does not
@@ -2845,7 +2852,17 @@ WITH NO DATA";
     /// <para>Read off the same two terms
     /// <see cref="RefreshPhaseMinutesFor(IReadOnlyList{string}, string)"/> lays the band out with, so what
     /// this reports a run against is the room the grid actually gave it rather than a second opinion about
-    /// what it should have had.</para>
+    /// what it should have had. TimescaleContinuousAggregateTests holds that to the MEASURED gap — the
+    /// smallest distance between two of that class's minutes on the shipped map — so a layout change that
+    /// stopped delivering the gap this names is red rather than reported against a promise nothing
+    /// keeps.</para>
+    ///
+    /// <para><b>It does not consult <see cref="LightBandHoldsUnboundedRefreshCount(int)"/>, and the reason
+    /// is that a branch for the degraded band would be unreachable.</b> That predicate is asserted over the
+    /// shipped registry at build time and its input is recovered from compile-time constants, so a build in
+    /// which the band degrades does not ship — there is no live reading to judge against a consecutive gap
+    /// an unbounded member was given. A branch for it would read as care and certify nothing, which is what
+    /// <see cref="ClassifyRefreshCeilingFreshness"/>'s summary says about the guard it does not have.</para>
     /// </summary>
     public static int LightRefreshSpacingMinutesFor(string view) =>
         IsUnboundedCardinalityRefresh(view)

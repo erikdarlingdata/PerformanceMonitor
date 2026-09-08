@@ -616,6 +616,30 @@ public sealed class TimescaleContinuousAggregateTests
         /* Distinct starts survive the degradation, which is the guarantee #3012 needed and the one the
            separation is built on top of rather than in place of. */
         Assert.Equal(degraded.Length, degraded.Distinct().Count());
+
+        /* AND THE GAP THE LIVE FINDING JUDGES AGAINST IS THE GAP THE MAP PRODUCED, per class. Raised by
+           review: LightRefreshSpacingMinutesFor reads two constants, so on its own it states a PROMISE, and
+           a promise nothing measures is what a doc comment says while the code does something else. This
+           measures the smallest distance between two of a class's minutes on the shipped map and holds the
+           member to it, so a layout change that stopped delivering the gap that member names is red here
+           rather than reported against a figure the band never honoured. */
+        foreach (var isUnbounded in new[] { true, false })
+        {
+            var minutes = lightViews
+                .Where(view => TimescaleSupport.IsUnboundedCardinalityRefresh(view) == isUnbounded)
+                .Select(TimescaleSupport.RefreshPhaseMinutesFor)
+                .OrderBy(minute => minute)
+                .ToArray();
+
+            Assert.True(minutes.Length > 1, $"the {(isUnbounded ? "unbounded" : "bounded")} class has "
+                + "fewer than two members on the band, so it has no gap to measure and this claim is vacuous");
+
+            var achieved = minutes.Zip(minutes.Skip(1), (earlier, later) => later - earlier).Min();
+            var member = lightViews.First(view =>
+                TimescaleSupport.IsUnboundedCardinalityRefresh(view) == isUnbounded);
+
+            Assert.Equal(TimescaleSupport.LightRefreshSpacingMinutesFor(member), achieved);
+        }
     }
 
     /// <summary>
