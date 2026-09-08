@@ -147,8 +147,11 @@ WHERE name = $1";
         /// never reported as off, which would be an answer this read did not obtain.</summary>
         Unreadable,
 
-        /// <summary>No <c>pg_settings</c> row: the TimescaleDB library is not loaded, so the GUC does not
-        /// exist and neither does <c>timescaledb_information.job_history</c>.</summary>
+        /// <summary>No <c>pg_settings</c> row. TWO causes, one consequence: the TimescaleDB library is not
+        /// loaded at all, or it is loaded and the connected database has no <c>timescaledb</c> extension, so
+        /// the versioned library defining this GUC was never pulled in. Either way
+        /// <c>timescaledb_information.job_history</c> does not exist on this connection. See the
+        /// zero-rows paragraph on <see cref="JobExecutionLoggingSql"/> for the measurement.</summary>
         NotRegistered,
 
         /// <summary>Registered and off. <c>job_history</c> is not recording; an empty result from it means
