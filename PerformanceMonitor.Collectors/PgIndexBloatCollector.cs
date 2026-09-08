@@ -227,12 +227,28 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// filtered the load down to the declared keys would silently return nothing here: rotation would stop
     /// and the collector would look exactly like it does today, measuring one index forever.</para>
     ///
-    /// <para><b>Orphans are inert rather than pruned.</b> A dropped database leaves one cursor row that no
-    /// <c>current_database()</c> ever matches again, so it costs a few dozen bytes of store and a few dozen
-    /// bytes of query text and changes no behaviour — unlike <c>query_store</c>'s per-database watermarks,
-    /// whose staleness is behavioural and which is why #2188 gave those a prune pass. A database dropped
-    /// and RECREATED under the same name resumes mid-pass on a fresh catalog, which self-corrects within
-    /// one pass.</para>
+    /// <para><b>Orphans are PRUNED, and "a few dozen bytes" was the wrong unit.</b> A dropped database's
+    /// cursor matches no <c>current_database()</c> again, so it changes no behaviour on its own — but
+    /// <see cref="BuildQuery"/> splices EVERY loaded cursor and the host reuses that one statement for each
+    /// live database, so the cost is
+    /// <c>O(databases ever seen) x O(live databases this cycle)</c> in query text and bound parameters,
+    /// every cycle, permanently. At three parameters per cursor that reaches PostgreSQL's 65,535-parameter
+    /// statement limit at 21,845 names ever having existed — verified against PostgreSQL 17 with this
+    /// query's own <c>resume</c> shape: 21,845 cursors execute (1.5 MB of SQL), and 21,846 throw
+    /// <c>A statement cannot have more than 65535 parameters</c> before the statement is sent, which fails
+    /// the cycle for EVERY database rather than degrading. So the host prunes them against the database
+    /// list its own sweep enumerated — see <see cref="PgPerDatabaseCollectorState"/>, and note that the
+    /// query_store prune cannot serve this prefix because its live-database source is a SQL Server
+    /// snapshot.</para>
+    ///
+    /// <para><b>A database that disappears and comes back starts at the LARGEST index, deliberately.</b>
+    /// The prune deletes its cursor, so it is indistinguishable from a database seen for the first time.
+    /// Resuming mid-pass instead would be actively wrong rather than merely wasteful: a recreated database
+    /// has a new catalog, so the stored <c>(bytes, oid)</c> coordinate names an oid that no longer exists,
+    /// and every index sorting above that coordinate in the NEW catalog would be stamped
+    /// <c>above the rotation cursor</c> — asserting that this pass already advanced past an index it has
+    /// never measured. That is the same false claim #3153 exists to remove, so the honest cost is at most
+    /// one pass of re-measurement.</para>
     /// </summary>
     public const string RotationCursorKeyPrefix = "rotate:";
 
@@ -248,6 +264,30 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// unreadable value.</para>
     /// </summary>
     public const string RotationPassCompleteMarker = "wrap";
+
+    /// <summary>
+    /// The most cursors <see cref="BuildQuery"/> will splice into one statement. Above this it splices
+    /// NONE, and every database starts its pass at the largest index.
+    ///
+    /// <para><b>A backstop, not the bound.</b> What bounds the cursor list is the host's prune
+    /// (<see cref="PgPerDatabaseCollectorState"/>), which holds it at the count of LIVE databases. This
+    /// exists because that prune has a realistic silent-no-op path — an enumeration that keeps coming back
+    /// empty is a permissions failure the prune must not act on, and a store written by a build that
+    /// predates the prune carries whatever it accumulated. Without a cap the accumulation ends at
+    /// PostgreSQL's 65,535-parameter limit, where the statement throws before being sent and the cycle
+    /// fails for every database; with one it degrades to the pre-#3153 selection instead.</para>
+    ///
+    /// <para><b>Why 1,024.</b> Twenty-one times below the parameter ceiling (1,024 x 3 = 3,072 of 65,535)
+    /// and about nine times the largest per-database fan-out this product has measured, so no real target
+    /// reaches it — measured on PostgreSQL 17, a 1,024-cursor <c>resume</c> is 69 KB of SQL and executes in
+    /// single-digit milliseconds, while 21,845 is 1.5 MB. A target that does reach it has already
+    /// accumulated a thousand orphans, which is the broken state this makes graceful.</para>
+    ///
+    /// <para><b>No row lies when it engages.</b> Splicing no cursor makes every candidate in-window, so the
+    /// reasons that remain are the ceiling and work-budget ones, which are true; nothing claims to be above
+    /// a cursor. Degraded and honest, which is the direction to fail in.</para>
+    /// </summary>
+    public const int MaxSplicedCursors = 1_024;
 
     /// <summary>
     /// Where one database's last cycle stopped: the coordinate, in this collector's own measurement order,
@@ -609,7 +649,10 @@ ORDER BY k.index_bytes DESC";
     {
         var cursors = ReadCursors(context.State);
 
-        if (cursors.Count == 0)
+        /* No cursors, or so many that the statement itself is at risk: both take the conservative path of
+           starting every database at the largest index. See MaxSplicedCursors for why the cap is a backstop
+           behind the host's prune rather than the bound. */
+        if (cursors.Count == 0 || cursors.Count > MaxSplicedCursors)
         {
             return new CollectorQuery(BuildQueryText(NoCursorResumeBody));
         }

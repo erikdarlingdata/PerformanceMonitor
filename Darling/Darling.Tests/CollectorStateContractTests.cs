@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
@@ -222,6 +223,125 @@ public sealed class CollectorStateContractTests
                 source.Contains("SaveCollectorStateAsync(", StringComparison.Ordinal),
                 $"{name} must persist the observed state after the cycle");
         }
+    }
+
+    /// <summary>
+    /// EVERY <c>*KeyPrefix</c> in the collectors assembly has a prune verdict — in one of the two
+    /// per-database registries or in one of their not-keyed-by-database lists.
+    ///
+    /// <para><b>Why this exists as well as the query_store guard.</b>
+    /// <c>QueryStoreStatePruneTests.EveryPerDatabaseKeyPrefixIsInOneSharedList</c> discovers its population
+    /// by NAME PATTERN — static classes called <c>QueryStore*State</c> — which is the right census for that
+    /// family and blind to everything else. <c>PgIndexBloatCollector.RotationCursorKeyPrefix</c> is
+    /// declared on a COLLECTOR, so it matched no pattern, appeared in no list, and shipped with no verdict:
+    /// the cursors accumulated for the life of the server, and because <c>BuildQuery</c> splices all of
+    /// them into one statement reused per database, the end state was PostgreSQL's 65,535-parameter limit
+    /// rather than untidiness. This census is over the ASSEMBLY, so the next prefix declared anywhere
+    /// arrives already covered.</para>
+    ///
+    /// <para><b>Membership in the right registry is checked, not just membership.</b> The two prunes have
+    /// different live-database sources — <c>database_states</c> (a <c>sys.databases</c> snapshot, empty for
+    /// a PostgreSQL <c>server_id</c>) versus the sweep's own enumeration — so a PostgreSQL prefix in the
+    /// query_store list would be pruned by a statement that can never see its databases, and would delete
+    /// nothing forever while looking like a fix.</para>
+    /// </summary>
+    [Fact]
+    public void EveryDeclaredStateKeyPrefixHasAPruneVerdict()
+    {
+        var declared = typeof(PgIndexBloatCollector).Assembly.GetTypes()
+            .SelectMany(type => type.GetFields(BindingFlags.Public | BindingFlags.Static))
+            .Where(field => field.IsLiteral && field.FieldType == typeof(string)
+                && field.Name.EndsWith("KeyPrefix", StringComparison.Ordinal))
+            .Select(field => (Declarer: field.DeclaringType!.Name, Prefix: (string)field.GetRawConstantValue()!))
+            .ToArray();
+
+        /* The census has to have found something, and specifically the one the pattern-based guard misses:
+           a discovery that silently returned nothing would make every assertion below vacuous. */
+        Assert.NotEmpty(declared);
+        Assert.Contains(
+            (nameof(PgIndexBloatCollector), PgIndexBloatCollector.RotationCursorKeyPrefix), declared);
+
+        var queryStorePruned = QueryStorePerDatabaseState.PrunableKeys.Select(p => p.Prefix).ToArray();
+        var pgPruned = PgPerDatabaseCollectorState.PrunableKeys.Select(p => p.Prefix).ToArray();
+
+        foreach (var (declarer, prefix) in declared)
+        {
+            Assert.True(
+                queryStorePruned.Contains(prefix, StringComparer.Ordinal)
+                    || pgPruned.Contains(prefix, StringComparer.Ordinal)
+                    || QueryStorePerDatabaseState.NotKeyedByDatabase.Contains(prefix, StringComparer.Ordinal)
+                    || PgPerDatabaseCollectorState.NotKeyedByDatabase.Contains(prefix, StringComparer.Ordinal),
+                $"{declarer} declares the state key prefix '{prefix}' and no registry has a verdict on it, "
+                + "so nothing retires it when its database goes away. Decide which it is:\n"
+                + "  - keyed by DATABASE NAME on a PostgreSQL collector: add it to "
+                + "PgPerDatabaseCollectorState.PrunableKeys with its owning collector_name.\n"
+                + "  - keyed by DATABASE NAME on query_store: add it to "
+                + "QueryStorePerDatabaseState.PrunableKeys.\n"
+                + "  - keyed by anything ELSE: add it to the matching NotKeyedByDatabase list. Do NOT put "
+                + "it in a PrunableKeys to silence this - both prunes rebuild a key as prefix + "
+                + "databaseName, so a key not shaped that way matches no database and is DELETED every "
+                + "cycle.\n"
+                + "  - and check the SOURCE: the query_store prune anti-joins database_states, which is a "
+                + "sys.databases snapshot and holds no rows for a PostgreSQL server_id, so a PostgreSQL "
+                + "prefix there deletes nothing forever.");
+        }
+
+        /* Owner and prefix travel together on the PostgreSQL side too, and the owner is the name the
+           WRITER used: pg_index_bloat declares StateKeys, so both hosts persist under definition.Name. A
+           literal that drifted from it would delete nothing. */
+        Assert.Contains(
+            (PgIndexBloatCollector.Instance.Name, PgIndexBloatCollector.RotationCursorKeyPrefix),
+            PgPerDatabaseCollectorState.PrunableKeys);
+    }
+
+    /// <summary>
+    /// The PostgreSQL prune is WIRED, and wired after the per-database loop with the list that loop
+    /// enumerated.
+    ///
+    /// <para>Invisible to everything else: delete the call and every prune assertion still passes, because
+    /// they drive the prune directly — the cursors would simply accumulate in production, which is the
+    /// shape this whole item was. Source-pinned for the same reason
+    /// <see cref="BothRunnersLoadAndPersistTheState"/> is.</para>
+    ///
+    /// <para><b>Darling only, and that is the decision rather than an omission.</b> The query_store prune
+    /// is pinned in both hosts because both SKUs run query_store. Lite registers no PostgreSQL collector at
+    /// all — its <c>RunsPerDatabase</c> loop enumerates Azure databases — so a PostgreSQL prune there would
+    /// be unreachable code on a SKU that cannot hold the rows. The assertion below records that by
+    /// checking Lite does NOT carry it, so if Lite ever gains PostgreSQL targets this fails and the
+    /// decision gets remade instead of inherited.</para>
+    /// </summary>
+    [Fact]
+    public void TheDarlingHostPrunesPostgresPerDatabaseState_AndLiteDeliberatelyDoesNot()
+    {
+        var root = FindRepoRoot();
+        Assert.True(root is not null, RepoRootNotFound);
+
+        var darling = File.ReadAllText(Path.Combine(
+            root!, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+
+        Assert.Contains("PrunePgPerDatabaseStateAsync(", darling, StringComparison.Ordinal);
+
+        /* Called with the list the sweep enumerated, not a re-read: the enumeration is what makes it
+           authoritative, and a second read could disagree with what the loop actually swept. */
+        Assert.Contains(
+            "await PrunePgPerDatabaseStateAsync(server.ServerId, definition.Name, databases, cancellationToken);",
+            darling,
+            StringComparison.Ordinal);
+
+        /* Gated on the REGISTRY, so a second per-database PostgreSQL collector needs no host edit — and so
+           the prune cannot run for the 40 collectors that never wrote the prefix. */
+        Assert.Contains("PgPerDatabaseCollectorState.PrunableKeys", darling, StringComparison.Ordinal);
+
+        var lite = File.ReadAllText(Path.Combine(
+            root!, "Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs"));
+
+        Assert.DoesNotContain("PrunePgPerDatabaseStateAsync", lite, StringComparison.Ordinal);
+
+        /* The premise that makes Lite's exclusion correct, asserted rather than assumed. */
+        Assert.DoesNotContain(
+            CollectorCatalog.All.Where(c => c.TargetEngine == CollectorTargetEngine.PostgreSql),
+            definition => File.ReadAllText(Path.Combine(root!, "Lite", "Services", "RemoteCollectorService.cs"))
+                .Contains($"{definition.GetType().Name}.Instance", StringComparison.Ordinal));
     }
 
     /* ---------------- gated: live store round-trip ---------------- */

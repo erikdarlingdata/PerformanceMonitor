@@ -1570,6 +1570,12 @@ public sealed class DarlingCollectorRunner
 
             context.CurrentDatabaseName = null;
 
+            /* #3153: retire per-database state for databases this sweep did not enumerate, using the list
+               it just swept. AFTER the loop on purpose - the enumeration is what makes the list
+               authoritative, and a database that merely failed to READ is still enumerated, so its cursor
+               is kept. No-ops for every collector without a PgPerDatabaseCollectorState entry. */
+            await PrunePgPerDatabaseStateAsync(server.ServerId, definition.Name, databases, cancellationToken);
+
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
                which is exactly what this path carried before. */
@@ -4095,6 +4101,105 @@ RETURNING s.state_key";
         {
             _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
         }
+    }
+
+    /// <summary>
+    /// The PostgreSQL arm of the per-database state prune (#3153): retire every key whose database is not
+    /// in the list THIS SWEEP enumerated. <c>$1</c> server_id, <c>$2</c> collector_name, <c>$3</c> key
+    /// prefix, <c>$4</c> the enumerated database names as <c>text[]</c>.
+    ///
+    /// <para><b>Why not <see cref="PruneOrphanedDatabaseStateKeysSql"/>.</b> That one anti-joins
+    /// <c>database_states</c>, which is <c>sys.databases</c> from a SQL Server collector, so it holds no
+    /// rows for a PostgreSQL <c>server_id</c> — and it is guarded by <c>snapshot.newest IS NOT NULL</c>, so
+    /// on this engine it would delete nothing on every cycle forever while looking exactly like a working
+    /// prune. See <see cref="PgPerDatabaseCollectorState"/>.</para>
+    ///
+    /// <para><b>One array parameter, not one per database.</b> A name-per-parameter IN list would put this
+    /// statement on the same parameter budget the cursor splice it is cleaning up already competes for.
+    /// The array binds as one <c>text[]</c> whatever the database count.</para>
+    ///
+    /// <para><b><c>array_length($4, 1) > 0</c> is deliberate redundancy.</b> The caller already refuses to
+    /// prune on an empty enumeration — an empty list is how a login that cannot read <c>pg_database</c>
+    /// presents, and pruning against it would delete every cursor on the server. Repeating the check here
+    /// means a future caller that forgets it gets a no-op instead of a wipe: the failure lands on the side
+    /// that costs re-measurement rather than the side that costs the mechanism.</para>
+    /// </summary>
+    internal const string PrunePgPerDatabaseStateKeysSql = @"
+DELETE FROM collector_state s
+WHERE s.server_id = $1
+AND   s.collector_name = $2
+AND   starts_with(s.state_key, $3)
+AND   array_length($4, 1) > 0
+AND   NOT (substr(s.state_key, length($3) + 1) = ANY($4))
+RETURNING s.state_key";
+
+    /// <summary>
+    /// Prunes <see cref="PgPerDatabaseCollectorState.PrunableKeys"/> entries owned by this definition
+    /// against the database list the cycle actually enumerated (#3153).
+    ///
+    /// <para>Gated on the REGISTRY rather than on a collector name: an entry is what makes a definition
+    /// eligible, so a second per-database PostgreSQL collector needs a registry line and no host edit.
+    /// Every other collector's <c>PrunableKeys</c> lookup misses and this returns without opening a
+    /// connection, so the sweep pays nothing for it.</para>
+    ///
+    /// <para>Best-effort, like its query_store sibling: a failed prune leaves the rows for the next cycle,
+    /// and the splice cap keeps the statement executable in the meantime.</para>
+    /// </summary>
+    internal async Task<List<string>> PrunePgPerDatabaseStateAsync(
+        int serverId, string collectorName, IReadOnlyList<string> enumeratedDatabases,
+        CancellationToken cancellationToken)
+    {
+        var pruned = new List<string>();
+
+        var owned = PgPerDatabaseCollectorState.PrunableKeys
+            .Where(pair => string.Equals(pair.Owner, collectorName, StringComparison.Ordinal))
+            .ToArray();
+
+        /* An empty enumeration is a permissions failure, not an empty server: every cursor would look
+           orphaned. Refused here as well as in the statement. */
+        if (owned.Length == 0 || enumeratedDatabases.Count == 0)
+        {
+            return pruned;
+        }
+
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var live = enumeratedDatabases.ToArray();
+
+            foreach (var (owner, prefix) in owned)
+            {
+                using var command = new NpgsqlCommand(PrunePgPerDatabaseStateKeysSql, connection);
+                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.AddWithValue(owner);
+                command.Parameters.AddWithValue(prefix);
+                command.Parameters.AddWithValue(live);
+
+                /* RETURNING, not a rows-affected count, for the reason the query_store prune gives: the
+                   only symptom of a WRONG delete is a silent restart of that database's pass, so the keys
+                   have to name the databases or there is nothing to diagnose it with. */
+                using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pruned.Add(reader.GetString(0));
+                }
+            }
+
+            if (pruned.Count > 0)
+            {
+                _logger?.LogInformation(
+                    "[server_id {ServerId}] pruned {Count} {Collector} rotation cursor(s) for database(s) no longer enumerated: {Keys}",
+                    serverId, pruned.Count, collectorName, string.Join(", ", pruned));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(
+                ex, "Pruning orphaned {Collector} per-database state failed; next cycle retries", collectorName);
+        }
+
+        return pruned;
     }
 
     /// <summary>

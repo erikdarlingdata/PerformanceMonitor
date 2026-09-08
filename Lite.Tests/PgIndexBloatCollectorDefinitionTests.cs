@@ -856,4 +856,62 @@ public class PgIndexBloatCollectorDefinitionTests
 
         Assert.Equal(PgIndexBloatCollector.Instance.PayloadColumns.Count, writer.Values.Count);
     }
+
+    /// <summary>
+    /// The spliced cursor list is BOUNDED, and past the bound the statement carries none rather than
+    /// becoming one PostgreSQL refuses to execute.
+    ///
+    /// <para><b>The failure this stands under.</b> <see cref="PgIndexBloatCollector.BuildQuery"/> splices
+    /// every loaded cursor and the host reuses that one statement for each live database, so an unpruned
+    /// list grows with every database name the server has ever had. At three bound parameters per cursor
+    /// that ends at PostgreSQL's 65,535-parameter limit — measured against PostgreSQL 17 with this query's
+    /// own <c>resume</c> shape: 21,845 cursors execute, 21,846 throw
+    /// <c>A statement cannot have more than 65535 parameters</c> client-side, before the statement is
+    /// sent, so the cycle fails for EVERY database rather than degrading. The host's prune
+    /// (<c>PgPerDatabaseCollectorState</c>) is what holds the count at the live database set; this is the
+    /// floor under it, because that prune has a legitimate no-op path (an empty enumeration is a
+    /// permissions failure it must not act on).</para>
+    ///
+    /// <para><b>Degraded, and still honest.</b> With no cursor spliced every candidate is in-window, so the
+    /// only reasons that remain are the ceiling and work-budget ones — both true. Nothing claims to be
+    /// above a cursor that was not consulted.</para>
+    /// </summary>
+    [Fact]
+    public void TheSplicedCursorListIsBounded_AndFallsBackToNoCursorRatherThanAnUnexecutableStatement()
+    {
+        var cap = PgIndexBloatCollector.MaxSplicedCursors;
+
+        /* Far enough below the parameter ceiling that the statement is never the thing that breaks. */
+        Assert.True(
+            cap * 3 < 65_535 / 4,
+            $"the cap ({cap} cursors, {cap * 3} parameters) is not comfortably below PostgreSQL's "
+            + "65,535-parameter statement limit, so the backstop is close to the failure it exists to "
+            + "prevent");
+
+        var atCap = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var i = 0; i < cap; i++)
+        {
+            atCap[PgIndexBloatCollector.RotationCursorKeyPrefix + "db_" + i.ToString(CultureInfo.InvariantCulture)]
+                = PgIndexBloatCollector.FormatCursor(16_384 + i, 20_000 + i);
+        }
+
+        var spliced = Plan(atCap);
+
+        /* At the cap the cursors still travel: the bound must not be so eager that a real target loses
+           rotation. */
+        Assert.Equal(cap * 3, spliced.Parameters.Count);
+
+        var overCap = new Dictionary<string, string>(atCap, StringComparer.Ordinal)
+        {
+            [PgIndexBloatCollector.RotationCursorKeyPrefix + "one_too_many"] =
+                PgIndexBloatCollector.FormatCursor(1, 1),
+        };
+
+        var dropped = Plan(overCap);
+
+        /* One past it, nothing is bound and the text is the no-cursor form — byte-identical to a first
+           run, which is the documented conservative path rather than a new one. */
+        Assert.Empty(dropped.Parameters);
+        Assert.Equal(Plan().Text, dropped.Text);
+    }
 }
