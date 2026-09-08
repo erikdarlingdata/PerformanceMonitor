@@ -574,30 +574,48 @@ public sealed class TimescaleContinuousAggregateTests
             Enumerable.Range(unbounded.Length + 1, TimescaleSupport.LightHourlyRefreshCount),
             count => !TimescaleSupport.LightBandHoldsUnboundedRefreshCount(count));
 
-        /* And the map REFUSES rather than placing what it cannot separate. Reached through the order-taking
-           seam at the registry's unbounded members ALONE: duplicating the whole registry cannot reach it,
-           because one light member in four is unbounded today and that is exactly the density the
-           separation admits — a doubled list doubles the positions as fast as the members. A band that is
-           all unbounded is the shape that does not fit, and it is the shape a run of heavy registrations
-           walks toward. */
+        /* AND THE DEGRADED CASE, which is what the map does instead of refusing. Reached through the
+           order-taking seam at the registry's unbounded members ALONE: duplicating the whole registry
+           cannot reach it, because one light member in four is unbounded today and that is exactly the
+           density the separation admits — a doubled list doubles the positions as fast as the members. A
+           band that is all unbounded is the shape that does not fit, and it is the shape a run of heavy
+           registrations walks toward.
+
+           It degrades rather than throwing because CompressionPhaseMinutes is a static field whose
+           initializer reaches this map, and a static initializer that throws costs the whole type for the
+           life of the process. Measured, not assumed: mutating the GROUP BY recovery to return nothing
+           makes every view classify unbounded, and with a throwing map that took 72 tests red across four
+           unrelated files. */
         var allUnbounded = TimescaleSupport.HourlyRefreshPhaseOrder
             .Where(view => !string.Equals(
                 view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
             .Where(TimescaleSupport.IsUnboundedCardinalityRefresh)
             .ToArray();
 
-        /* The refusal's own condition, evaluated over THAT order's band rather than over the shipped one —
-           LightBandHoldsUnboundedRefreshCount reads the shipped registry and answers true for three
-           members, because the shipped band has twelve positions for them. A band of three has three. */
+        /* The condition, evaluated over THAT order's band rather than over the shipped one —
+           LightBandHoldsUnboundedRefreshCount's public overload reads the shipped registry and answers
+           true for three members, because the shipped band has twelve positions for them. A band of three
+           has three. */
         Assert.True(
             TimescaleSupport.LightBandIndexForUnboundedRefresh(allUnbounded.Length - 1)
                 > allUnbounded.Length - 1,
-            "a band of nothing but today's unbounded members would still hold them all, so the refusal "
-            + "below cannot be reached and this half of the case proves nothing");
+            "a band of nothing but today's unbounded members would still hold them all, so the degraded "
+            + "case below cannot be reached and this half of the case proves nothing");
 
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => TimescaleSupport.RefreshPhaseMinutesFor(
-                allUnbounded, TimescaleSupport.QueryStoreStatsHourlyView));
+        var degraded = allUnbounded
+            .Select(view => TimescaleSupport.RefreshPhaseMinutesFor(allUnbounded, view))
+            .ToArray();
+
+        Assert.Equal(
+            Enumerable
+                .Range(0, allUnbounded.Length)
+                .Select(index => index * TimescaleSupport.LightRefreshStepMinutes)
+                .ToArray(),
+            degraded);
+
+        /* Distinct starts survive the degradation, which is the guarantee #3012 needed and the one the
+           separation is built on top of rather than in place of. */
+        Assert.Equal(degraded.Length, degraded.Distinct().Count());
     }
 
     /// <summary>

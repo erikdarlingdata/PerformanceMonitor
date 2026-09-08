@@ -2089,15 +2089,38 @@ WITH NO DATA";
     /// "the last one fits in the band" and "the last one clears the heaviest refresh's window" cancel to the
     /// same statement. One condition covers both, which is why there is not a second one.</para>
     ///
-    /// <para><b>False is the answer that matters.</b> A registry that grew past what the band can separate
-    /// is not a wider band — <see cref="WidestFeasibleLightRefreshStepMinutes"/> says the band is already as
-    /// wide as the hour carries. It is a scheduling decision: a cheaper aggregate, a longer cadence for one
-    /// of them, or fewer compression minutes. <see cref="RefreshPhaseMinutesFor(string)"/> throws rather
-    /// than placing a member it cannot separate, so the answer arrives per aggregate and named.</para>
+    /// <para><b>False is the answer that matters, and it is not answered by throwing.</b> A registry that
+    /// grew past what the band can separate is not a wider band —
+    /// <see cref="WidestFeasibleLightRefreshStepMinutes"/> says the band is already as wide as the hour
+    /// carries. It is a scheduling decision: a cheaper aggregate, a longer cadence for one of them, or
+    /// fewer compression minutes. What the MAP does meanwhile is fall back to consecutive positions, which
+    /// is #3174's grid — distinct starts, no separation — and the two things that report it are this
+    /// predicate, asserted by TimescaleContinuousAggregateTests, and
+    /// <see cref="LogLightRefreshSpacingBreach"/> on the live readings.</para>
+    ///
+    /// <para><b>Why a throw would be worse than a degraded grid, which is measured rather than assumed.</b>
+    /// <see cref="CompressionPhaseMinutes"/> is a static field whose initializer reaches
+    /// <see cref="RefreshPhaseMinutesFor(string)"/>, and a static initializer that throws takes the whole
+    /// TYPE down with a <c>TypeInitializationException</c> for the life of the process — every
+    /// retention horizon, every compression statement, every refresh policy, not just the aggregate that
+    /// could not be placed. Mutating the GROUP BY recovery to return nothing reaches exactly that: every
+    /// view classifies unbounded, the band cannot separate twelve, and a throwing map took 72 tests red
+    /// across four unrelated files. The existing throw for an unregistered view cannot fire from there
+    /// because that initializer only ever iterates registered views; this condition can, because it depends
+    /// on a parse. So the map degrades and the report is separate.</para>
     /// </summary>
     public static bool LightBandHoldsUnboundedRefreshCount(int count) =>
+        LightBandHoldsUnboundedRefreshCount(count, LightHourlyRefreshCount);
+
+    /// <summary>
+    /// <see cref="LightBandHoldsUnboundedRefreshCount(int)"/> asked of an EXPLICIT band size — the seam
+    /// <see cref="RefreshPhaseMinutesFor(IReadOnlyList{string}, string)"/> needs, because that overload
+    /// answers for the order it was handed and the shipped
+    /// <see cref="LightHourlyRefreshCount"/> is not that order's band.
+    /// </summary>
+    internal static bool LightBandHoldsUnboundedRefreshCount(int count, int lightBandPositions) =>
         count <= 0
-        || LightBandIndexForUnboundedRefresh(count - 1) <= LightHourlyRefreshCount - 1;
+        || LightBandIndexForUnboundedRefresh(count - 1) <= lightBandPositions - 1;
 
     /// <summary>
     /// Which minute of the hour <paramref name="view"/>'s hourly refresh policy starts on.
@@ -2171,7 +2194,14 @@ WITH NO DATA";
     /// pool of positions and the bounded members are handed the positions the unbounded members did not
     /// take, so no position can be issued twice by construction rather than by arithmetic. It survives any
     /// permutation of the order for the same reason the consecutive form did: which member gets which
-    /// position moves, how many positions exist does not.</para>
+    /// position moves, how many positions exist does not. It also holds in the DEGRADED case below, where
+    /// every member takes a consecutive position and the pool is the same pool.</para>
+    ///
+    /// <para><b>A band that cannot separate its unbounded members degrades to consecutive positions rather
+    /// than refusing</b> (<see cref="LightBandHoldsUnboundedRefreshCount(int)"/>), because this condition
+    /// is reachable from a static field initializer and a throw there costs the whole type rather than one
+    /// aggregate. The condition is reported by a build assertion and by
+    /// <see cref="LogLightRefreshSpacingBreach"/>, not by an exception.</para>
     ///
     /// <para><c>internal</c> rather than public: the product must always reach the map through the overload
     /// that supplies its own list, or a caller could phase a policy against an order the converge does not
@@ -2187,20 +2217,22 @@ WITH NO DATA";
         var lightCount = order.Count(candidate =>
             !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal));
 
-        var unboundedIndexes = order
-            .Where(candidate =>
-                !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal)
-                && UnboundedCardinalityRefreshViews.Contains(candidate))
-            .Select((_, ordinal) => LightBandIndexForUnboundedRefresh(ordinal))
-            .ToArray();
+        var unboundedCount = order.Count(candidate =>
+            !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal)
+            && UnboundedCardinalityRefreshViews.Contains(candidate));
 
-        if (unboundedIndexes.Length > 0 && unboundedIndexes[^1] > lightCount - 1)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(view),
-                view,
-                $"the light band holds {lightCount} positions and cannot separate {unboundedIndexes.Length} unbounded-cardinality refreshes by {UnboundedLightRefreshSeparationMinutes} minutes each — see TimescaleSupport.LightBandHoldsUnboundedRefreshCount; the repair is a cheaper aggregate, a longer cadence for one of them, or fewer compression minutes, not a wider light band (#3185)");
-        }
+        /* When the band cannot hold them separated, every light member takes a consecutive position —
+           #3174's grid, which still gives distinct starts. Degrading rather than throwing because this
+           condition is reachable from CompressionPhaseMinutes' static initializer; see
+           LightBandHoldsUnboundedRefreshCount for what a throw there costs. */
+        var separates = LightBandHoldsUnboundedRefreshCount(unboundedCount, lightCount);
+
+        var unboundedIndexes = separates
+            ? Enumerable
+                .Range(0, unboundedCount)
+                .Select(LightBandIndexForUnboundedRefresh)
+                .ToArray()
+            : Array.Empty<int>();
 
         var taken = new HashSet<int>(unboundedIndexes);
         var boundedIndexes = Enumerable
@@ -2214,7 +2246,9 @@ WITH NO DATA";
         foreach (var candidate in order)
         {
             var heaviest = string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal);
-            var unbounded = !heaviest && UnboundedCardinalityRefreshViews.Contains(candidate);
+            var unbounded = separates
+                && !heaviest
+                && UnboundedCardinalityRefreshViews.Contains(candidate);
 
             if (string.Equals(candidate, view, StringComparison.Ordinal))
             {
