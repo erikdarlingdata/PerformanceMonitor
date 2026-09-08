@@ -2385,6 +2385,16 @@ LIMIT 1", connection))
     /// refresh by a wide margin is satisfied by almost anything, so the minute that WOULD violate it is
     /// computed and shown to violate it. Without that, a check that had stopped measuring the right quantity
     /// would still be green.</para>
+    ///
+    /// <para><b>The GRID half of this test still passes and the WATCH-LINE half now FAILS, on #3166's census
+    /// re-derivation, and the two conditions are left exactly as written.</b> The grid is genuinely clear: at
+    /// a 896 s ceiling the nearest compression minute is still 1,320 s past the heaviest refresh's start and
+    /// the discriminating minute is still excluded, so nothing overruns anything. What is false is
+    /// <c>ceiling &lt; RefreshSlotWarningSeconds</c>, and the 26%-gap literal derived from it — the sizing
+    /// figure is 146 s ABOVE the line, so the watch now reports the grid's own sizing rather than anything
+    /// new. Restoring the ordering means moving the line, moving the slot, or making the refresh cheaper,
+    /// which is a scheduling decision (#3035, #3044, #3107); re-typing either condition here is the only
+    /// edit that makes the failure go away while changing nothing about the store.</para>
     /// </summary>
     [Fact]
     public void NoCompressionMinuteStartsWhileTheHeaviestRefreshIsStillRunning()
@@ -2558,6 +2568,14 @@ LIMIT 1", connection))
     /// <para>The lead-time leg cuts the OTHER way and is asserted in that direction, because a reader
     /// checking the rejection is owed the fact that it does not help: the lower line leaves MORE room
     /// between itself and the slot, so it warns earlier rather than later.</para>
+    ///
+    /// <para><b>Half of that rejection now FAILS, on #3166's census re-derivation, and both conditions are
+    /// left exactly as written.</b> The recorded ceiling is still at or past the 480 s alternative, so the
+    /// alternative is still the lower of the two lines — but at 896 s the ceiling warns under the CHOSEN
+    /// line too, so the chosen line rejects the alternative on a property it has itself stopped having, and
+    /// the classifier no longer bands the ceiling <c>InsideSlot</c>. That is the ordering paragraph above
+    /// doing what it says: one of the two constants moved, so the five-sixths decision genuinely has to be
+    /// re-taken (#3044, #3107) rather than restated here.</para>
     /// </summary>
     [Fact]
     public void TheRejectedWatchLineAlternative_SitsBelowTheRecordedCeiling_WhileTheChosenLineSitsAbove()
@@ -2652,6 +2670,13 @@ LIMIT 1", connection))
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(null, quiet);
         Assert.Equal("(no log lines captured)", quiet.Joined);
 
+        /* THE ROUTINE-BAND CASE IS FED THE RECORDED CEILING, and after #3166's census re-derivation that
+           reading logs Warning rather than Debug — so this assertion FAILS and is left exactly as written.
+           It is the same inversion as the band pins: a sizing figure the product's own watch line calls a
+           warning cannot also be the example of a routine reading. Re-pointing this case at a lower literal
+           would keep the level table covered while quietly dropping the claim that the grid's own figure is
+           routine, which is the claim worth losing loudly. The remedy is the slot or the fraction (#3035,
+           #3044, #3107). */
         var inside = new CapturingTestLogger();
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
             new HeaviestRefreshSlotReading(
