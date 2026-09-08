@@ -28,12 +28,27 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// Per-run outcome the worker logs (mirrors Lite's fetch/store phase split, #1180). <paramref name="Note"/>
-/// annotates a run that SUCCEEDED but is worth explaining on its collection_log row — today only the
-/// empty-enumeration case (see <see cref="EnumeratedCollectorDriver.EmptyEnumerationMessage"/>). It is the
-/// Darling twin of Lite's <c>_lastCollectionNote</c>; null (the default) leaves the row's message column
-/// null exactly as before.
+/// Per-run outcome the worker logs (mirrors Lite's fetch/store phase split, #1180).
+/// <see cref="Note"/> — what reaches <c>collection_log.error_message</c> — is COMPUTED from the two halves
+/// below and cannot be assigned, so no caller can pick up one half and drop the other.
 /// </summary>
+/// <param name="Measurements">
+/// The labelled counts the DEFINITION measured on the target (#3161), straight off
+/// <see cref="CollectorContext.Measurements"/>. REQUIRED rather than defaulted, and for the reason
+/// <c>DarlingObservability.LogCollectionAsync</c>'s <c>fanout</c> is: most construction sites here are the
+/// early returns of runs that never reached a definition's read — an <c>AppliesTo</c> miss, an enumeration
+/// that listed nothing, a cycle the wall-clock budget abandoned — and
+/// <see cref="CollectorContext.NoMeasurements"/> is their correct answer rather than a value they forgot. A
+/// default would let those sites stand in for the ONE success site that must pass the real list, which is
+/// the site whose silence #3161 was filed about. The compiler names every site instead of a grep.
+/// </param>
+/// <param name="HostNote">
+/// The note the RUNNER authored for a run worth explaining on its collection_log row: the RDS ingest
+/// outcome, the whole-cycle budget, the probe-failure summary, the fan-out bookkeeping. Null (the default)
+/// on an ordinary run. Named <c>HostNote</c> rather than <c>Note</c> because it is only one half of what
+/// the column receives — the rename is what made the compiler point at every site that used to assume
+/// otherwise.
+/// </param>
 /// <param name="Fanout">
 /// The per-database rollup for a run that fanned out, null for one that did not (#2472). Defaulted because
 /// the great majority of construction sites here are the early returns of runs that never reached a fan-out
@@ -77,7 +92,8 @@ public sealed record CollectorRunResult(
     int Rows,
     long SqlMs,
     long StorageMs,
-    string? Note = null,
+    IReadOnlyList<CollectorMeasurement> Measurements,
+    string? HostNote = null,
     FanoutCost? Fanout = null,
     bool Abandoned = false,
     bool ServerPhasesMeasured = false,
@@ -95,6 +111,20 @@ public sealed record CollectorRunResult(
        arrives the same way for the same reason. */
     FetchPhaseCost? FetchPhases = null)
 {
+    /// <summary>
+    /// What this run puts in <c>collection_log.error_message</c>: the runner's own
+    /// <see cref="HostNote"/> and then the definition's <see cref="Measurements"/>, composed through the
+    /// shared <see cref="CollectorMeasurementNote.Compose"/> that Lite's <c>RunTelemetry.Note</c> also
+    /// computes through — so the two SKUs cannot come to disagree about what a run note contains.
+    ///
+    /// <para><b>Computed rather than stored, and that is the parity guarantee.</b> There is no spelling of
+    /// "the host note alone" for a caller to reach for, so a definition-supplied count cannot be dropped by
+    /// a host that simply never learned about it. A shared member wired into one runner reads as a
+    /// permanently-empty value in the other SKU and nothing fails to build, which is the failure mode
+    /// CONTRIBUTING's two-store parity rules name.</para>
+    /// </summary>
+    public string? Note => CollectorMeasurementNote.Compose(HostNote, Measurements);
+
     /// <summary>
     /// The part of <see cref="SqlMs"/> that is neither the open nor the drain — query building, command
     /// construction, the optional probe-failure rowset and the supplemental query. Computed as the residual so
@@ -611,7 +641,7 @@ public sealed class DarlingCollectorRunner
         /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
            filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
            different from every other target's. */
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs,
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
             RdsIngestNote(outcome, RdsPlanLogNotReachedNote, RdsPlanLogEmptyNote));
     }
 
@@ -636,7 +666,7 @@ public sealed class DarlingCollectorRunner
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs,
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
     }
 
@@ -665,7 +695,7 @@ public sealed class DarlingCollectorRunner
         /* Counted as STORAGE time rather than SQL time, matching the other two RDS-API ingestors: no query
            ran against the monitored server, and filing an HTTPS round trip under sql_duration_ms would make
            one target's numbers mean something different from every other target's. */
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs,
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
             RdsIngestNote(outcome, PiCpuNotReachedNote, PiCpuEmptyNote));
     }
 
@@ -808,7 +838,7 @@ public sealed class DarlingCollectorRunner
            dispatched at a non-SQL-Server target. */
         if (!CollectorCatalog.AppliesTo(definition, server.Target))
         {
-            return new CollectorRunResult(0, 0, 0);
+            return new CollectorRunResult(0, 0, 0, CollectorContext.NoMeasurements);
         }
 
         /* Watermark = the newest already-collected value of the definition's time column,
@@ -1631,7 +1661,7 @@ public sealed class DarlingCollectorRunner
                        empty-enumeration breadcrumb, the probe-failure summary, or both) rides onto the
                        collection_log row so it is distinguishable from a healthy collector whose databases
                        were simply quiet (#1837). Mirrors Lite's _lastCollectionNote. */
-                    return new CollectorRunResult(0, sqlMs, 0, enumeration.Note);
+                    return new CollectorRunResult(0, sqlMs, 0, CollectorContext.NoMeasurements, enumeration.Note);
                 }
 
                 /* Optional quick scalar probe (query_store's live PRODUCTVERSION check) —
@@ -2243,6 +2273,11 @@ public sealed class DarlingCollectorRunner
                         0,
                         sqlSlice.ElapsedMilliseconds,
                         0,
+                        /* Deliberately NOT context.Measurements: this cycle stored nothing and advanced no
+                           watermark, so a partial count from the slice that ran before the budget fired
+                           would describe a read that was thrown away. "12 read, 0 stored" on an abandoned
+                           run reads as a collection fault, and the cause is a timeout. */
+                        CollectorContext.NoMeasurements,
                         EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds),
                         Abandoned: true,
                         /* #2851: the abandoned cycle reports its phases too. A collector that blew a
@@ -2342,7 +2377,7 @@ public sealed class DarlingCollectorRunner
             collectionNote, StoreWriteReattemptNote(context.StoreWriteReattempts));
 
         return new CollectorRunResult(
-            rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result,
+            rowsWritten, sqlMs, storageMs, context.Measurements, collectionNote, fanout.Result,
             ServerPhasesMeasured: serverPhasesMeasured,
             ServerOpenMs: context.ServerScopeOpenMs,
             ServerDrainMs: context.ServerScopeDrainMs,

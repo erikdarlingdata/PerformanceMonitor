@@ -6995,7 +6995,7 @@ LIMIT 1";
         catch (SqlException)
         {
             /* DBCC may be denied — degrade to zero rows, mirrors Lite's warning path. */
-            return new CollectorRunResult(0, 0, 0);
+            return new CollectorRunResult(0, 0, 0, CollectorContext.NoMeasurements);
         }
     }
 }
