@@ -336,14 +336,7 @@ public sealed class AlertDeliveryChannelTests
     [Fact]
     public void Describe_OnADarlingStore_NeverSaysShown()
     {
-        string[] everyChannel =
-        {
-            AlertDelivery.ChannelNotApplicable, AlertDelivery.ChannelNoneConfigured, AlertDelivery.ChannelMuted,
-            AlertDelivery.ChannelTray, AlertDelivery.ChannelUndelivered, AlertDelivery.ChannelEmail,
-            AlertDelivery.ChannelWebhook, AlertDelivery.ChannelEmailAndWebhook, "", "toast",
-        };
-
-        foreach (var channel in everyChannel)
+        foreach (var channel in EveryStoredChannelValue())
         {
             foreach (var sent in new[] { false, true })
             {
@@ -396,6 +389,41 @@ public sealed class AlertDeliveryChannelTests
         }
     }
 
+    /// <summary>
+    /// <b>The per-SKU divergence is exactly one cell, and this says which.</b> Over every
+    /// (channel, sent, send_error) combination the column can hold, the two SKUs' renderings differ for
+    /// <c>tray</c> with <c>alert_sent = false</c> and nothing else — "Shown" where a toast really was shown,
+    /// #2781's "Logged" where the producer had no tray.
+    ///
+    /// <para>Stated as a count rather than as prose because "there is a deliberate divergence" is not a
+    /// falsifiable claim and this is: widening it, or collapsing it, fails here. A test that merely checked
+    /// the one known cell would pass while a second divergence appeared beside it.</para>
+    /// </summary>
+    [Fact]
+    public void TheTwoSkus_DivergeOnExactlyOneStoredCombination()
+    {
+        var diverging = new List<string>();
+
+        foreach (var channel in EveryStoredChannelValue())
+        {
+            foreach (var sent in new[] { false, true })
+            {
+                foreach (var error in new string?[] { null, "relay refused" })
+                {
+                    var headless = AlertDeliveryStatus.Describe(sent, channel, error, producerHadTrayChannel: false);
+                    var withTray = AlertDeliveryStatus.Describe(sent, channel, error, producerHadTrayChannel: true);
+
+                    if (headless != withTray)
+                    {
+                        diverging.Add($"{channel}/sent={sent}/error={(error is null ? "null" : "set")}");
+                    }
+                }
+            }
+        }
+
+        Assert.Equal(new[] { $"{AlertDelivery.ChannelTray}/sent=False/error=null" }, diverging.ToArray());
+    }
+
     /* ─────────────── the hatch stays where it was put ─────────────── */
 
     /// <summary>
@@ -442,6 +470,17 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /* ─────────────── helpers ─────────────── */
+
+    /// <summary>
+    /// Every value <c>notification_type</c> can hold: the declared taxonomy, plus the two shapes a stored
+    /// row can carry that the taxonomy does not name — an empty string and a value written by a version
+    /// that had a channel this one does not. The reading code must be total over the column, not just over
+    /// the constants.
+    /// </summary>
+    private static IEnumerable<string> EveryStoredChannelValue()
+        => AlertDelivery.StateCarryingChannels
+            .Concat(AlertDelivery.DeliveringChannels)
+            .Concat(new[] { "", "toast" });
 
     private static string Describe(AlertDelivery delivery)
         => AlertDeliveryStatus.Describe(delivery.Sent, delivery.Channel, delivery.SendError, producerHadTrayChannel: false);
