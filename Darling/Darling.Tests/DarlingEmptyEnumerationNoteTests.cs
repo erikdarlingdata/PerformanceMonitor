@@ -46,13 +46,13 @@ public sealed class DarlingEmptyEnumerationNoteTests
     public void An_Ordinary_Run_Result_Carries_No_Note()
     {
         /* The default keeps every other collector's row exactly as it was — message column null. */
-        Assert.Null(new CollectorRunResult(12, 34, 56).Note);
+        Assert.Null(new CollectorRunResult(12, 34, 56, CollectorContext.NoMeasurements).Note);
     }
 
     [Fact]
     public void A_Run_Result_Round_Trips_The_Note()
     {
-        var result = new CollectorRunResult(0, 5, 0, EnumeratedCollectorDriver.EmptyEnumerationMessage);
+        var result = new CollectorRunResult(0, 5, 0, CollectorContext.NoMeasurements, EnumeratedCollectorDriver.EmptyEnumerationMessage);
 
         Assert.Equal(EnumeratedCollectorDriver.EmptyEnumerationMessage, result.Note);
         Assert.Equal(0, result.Rows);
@@ -70,7 +70,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
            note — through the shared driver does, because there is then no host-side text at all. Lite's
            twin pin asserts the identical routing on its runner. */
         Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken)", source);
-        Assert.Contains("new CollectorRunResult(0, sqlMs, 0, enumeration.Note)", source);
+        Assert.Contains("new CollectorRunResult(0, sqlMs, 0, CollectorContext.NoMeasurements, enumeration.Note)", source);
 
         /* Via the shared driver, never a copy of the text — a literal here is exactly the drift this
            fix exists to prevent. */
@@ -95,6 +95,11 @@ public sealed class DarlingEmptyEnumerationNoteTests
            argument DROPPED from this call — the note included — fail here instead of silently reaching the
            store as a null.
 
+           #3161 added the definition-supplied Measurements as a REQUIRED parameter, so a site that drops it
+           now fails to COMPILE rather than failing here — but the argument's POSITION and the fact that the
+           success return is the one site passing the live `context.Measurements` rather than
+           CollectorContext.NoMeasurements are still only pinned here.
+
            #2851 wrapped the call across lines, which broke the single-line literal this used to be. Collapsing
            runs of whitespace before matching makes the pin survive REFORMATTING while still failing on a
            dropped argument, which is the property it exists for — the previous form conflated the two, so a
@@ -102,7 +107,8 @@ public sealed class DarlingEmptyEnumerationNoteTests
         var collapsed = Regex.Replace(source, @"\s+", " ");
 
         Assert.Contains(
-            "return new CollectorRunResult( rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result, " +
+            "return new CollectorRunResult( rowsWritten, sqlMs, storageMs, context.Measurements, "
+            + "collectionNote, fanout.Result, " +
             "ServerPhasesMeasured: serverPhasesMeasured, ServerOpenMs: context.ServerScopeOpenMs, " +
             "ServerDrainMs: context.ServerScopeDrainMs, ServerWatermarkMs: serverWatermarkMs, " +
             "ServerRowsRead: context.ServerScopeRowsRead, ServerBytesRead: context.ServerScopeBytesRead, " +

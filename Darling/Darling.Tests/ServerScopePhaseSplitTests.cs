@@ -152,6 +152,7 @@ public sealed class ServerScopePhaseSplitTests
             Rows: 150,
             SqlMs: 4644,
             StorageMs: 184,
+            Measurements: CollectorContext.NoMeasurements,
             ServerPhasesMeasured: true,
             ServerOpenMs: 3900,
             ServerDrainMs: 700,
@@ -172,6 +173,7 @@ public sealed class ServerScopePhaseSplitTests
             Rows: 1,
             SqlMs: 100,
             StorageMs: 0,
+            Measurements: CollectorContext.NoMeasurements,
             ServerPhasesMeasured: true,
             ServerOpenMs: 60,
             ServerDrainMs: 45);
@@ -185,7 +187,7 @@ public sealed class ServerScopePhaseSplitTests
         /* The enumerated and Azure branches leave the flag false. The log site gates on the FLAG, so their
            zeros never print as a split — which is the distinction `PerItemOpenMs > 0` cannot make, because
            it reads a genuinely instant open and a path that measures nothing as the same thing. */
-        var enumerated = new CollectorRunResult(Rows: 3956, SqlMs: 316065, StorageMs: 41);
+        var enumerated = new CollectorRunResult(Rows: 3956, SqlMs: 316065, StorageMs: 41, Measurements: CollectorContext.NoMeasurements);
 
         Assert.False(enumerated.ServerPhasesMeasured);
         Assert.Equal(0, enumerated.ServerOpenMs);
@@ -194,7 +196,7 @@ public sealed class ServerScopePhaseSplitTests
         /* And a measured run whose open really was instant still reports measured, with a zero that means
            what it says. */
         var instant = new CollectorRunResult(
-            Rows: 0, SqlMs: 0, StorageMs: 0, ServerPhasesMeasured: true);
+            Rows: 0, SqlMs: 0, StorageMs: 0, Measurements: CollectorContext.NoMeasurements, ServerPhasesMeasured: true);
 
         Assert.True(instant.ServerPhasesMeasured);
         Assert.Equal(0, instant.ServerOtherMs);
@@ -211,6 +213,7 @@ public sealed class ServerScopePhaseSplitTests
             Rows: 10,
             SqlMs: 1000,
             StorageMs: 5,
+            Measurements: CollectorContext.NoMeasurements,
             ServerPhasesMeasured: true,
             ServerOpenMs: 600,
             ServerDrainMs: 300,
@@ -395,7 +398,7 @@ public sealed class ServerScopePhaseSplitTests
         Assert.Equal(0, perDatabase.PerItemOpenMs);
 
         /* And neither of them is the server-scoped path, whose own flag stays false on both. */
-        Assert.False(new CollectorRunResult(Rows: 1, SqlMs: 1, StorageMs: 0).ServerPhasesMeasured);
+        Assert.False(new CollectorRunResult(Rows: 1, SqlMs: 1, StorageMs: 0, Measurements: CollectorContext.NoMeasurements).ServerPhasesMeasured);
     }
 
     [Fact]

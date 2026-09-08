@@ -138,7 +138,43 @@ public partial class RemoteCollectorService
     {
         public long SqlMs { get; set; }
         public long StorageMs { get; set; }
-        public string? Note { get; set; }
+
+        /// <summary>
+        /// The note the RUNNER authored — an enumeration that yielded 0 items, items whose enumeration
+        /// probe failed, a whole-cycle budget abandonment. One half of what the collection_log row
+        /// receives; <see cref="Note"/> is the whole of it. Named <c>HostNote</c> rather than <c>Note</c>
+        /// so the compiler pointed at every site that used to assume the two were the same thing.
+        /// </summary>
+        public string? HostNote { get; set; }
+
+        /// <summary>
+        /// The labelled counts the DEFINITION measured on the target this cycle (#3161), copied off
+        /// <see cref="CollectorContext.Measurements"/> when the run reaches its storage phase. Empty for
+        /// every collector that measures nothing, and for a run that never got that far.
+        /// </summary>
+        public List<CollectorMeasurement> Measurements { get; } = new();
+
+        /// <summary>
+        /// What this run puts in <c>collection_log.error_message</c>: <see cref="HostNote"/> then
+        /// <see cref="Measurements"/>, through the same shared
+        /// <see cref="CollectorMeasurementNote.Compose"/> that Darling's <c>CollectorRunResult.Note</c>
+        /// computes through — so the two SKUs cannot come to disagree about what a run note contains.
+        ///
+        /// <para><b>Computed rather than settable, and that is the parity guarantee.</b> There is no
+        /// spelling of "the host note alone" for the read site to reach for, so a definition-supplied
+        /// count cannot be dropped by a host that simply never learned about it. A shared seam wired into
+        /// one runner reads as a permanently-empty value in the other SKU and nothing fails to build,
+        /// which is the failure mode CONTRIBUTING's two-store parity rules name. Making this read-only is
+        /// also what made the compiler enumerate the six sites that used to assign it.</para>
+        /// </summary>
+        public string? Note => CollectorMeasurementNote.Compose(HostNote, Measurements);
+
+        /// <summary>Clears both halves for a new run. Called at the top of every collector.</summary>
+        public void ResetNote()
+        {
+            HostNote = null;
+            Measurements.Clear();
+        }
 
         /// <summary>
         /// True only for a cycle the #2673 whole-server wall-clock budget gave up on. Its own field rather
@@ -512,7 +548,7 @@ public partial class RemoteCollectorService
         var telemetry = TelemetryFor(GetServerId(server));
         telemetry.SqlMs = 0;
         telemetry.StorageMs = 0;
-        telemetry.Note = null;
+        telemetry.ResetNote();
         telemetry.Abandoned = false;
 
         try

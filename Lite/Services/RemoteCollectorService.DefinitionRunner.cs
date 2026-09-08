@@ -42,7 +42,7 @@ public partial class RemoteCollectorService
         var telemetry = TelemetryFor(serverId);
         telemetry.SqlMs = 0;
         telemetry.StorageMs = 0;
-        telemetry.Note = null;
+        telemetry.ResetNote();
         telemetry.Fanout = null;
 
         /* The per-database rollup (#2472), fed by both fan-out shapes — the Azure per-database connection
@@ -484,7 +484,7 @@ public partial class RemoteCollectorService
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
                which is exactly what this path carried before. */
-            telemetry.Note = EnumeratedCollectorDriver.MergeNotes(
+            telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(
                 cycleProbeFailures.Note,
                 EnumeratedCollectorDriver.BuildPartialFailureNote(
                     failed, attempted, failedDatabases, firstFailure?.Message));
@@ -531,7 +531,7 @@ public partial class RemoteCollectorService
                 /* Null on the ordinary path; the empty-enumeration breadcrumb, the probe-failure summary,
                    or both otherwise. Assigned BEFORE the zero-item early return so that cycle — the one
                    that used to log a bare SUCCESS indistinguishable from healthy — carries it too. */
-                telemetry.Note = enumeration.Note;
+                telemetry.HostNote = enumeration.Note;
                 LogEnumerationProbeFailures(definition, server, enumeration.ProbeFailures);
 
                 if (items.Count == 0)
@@ -784,7 +784,7 @@ public partial class RemoteCollectorService
                     if (definition.EmitsProbeFailures)
                     {
                         var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
-                        telemetry.Note = probes.Note;
+                        telemetry.HostNote = probes.Note;
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }
                 }
@@ -797,7 +797,7 @@ public partial class RemoteCollectorService
                     _ = ex;
                     var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
                     telemetry.SqlMs = sqlSlice.ElapsedMilliseconds;
-                    telemetry.Note = EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds);
+                    telemetry.HostNote = EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds);
                     telemetry.Abandoned = true;
                     _logger?.LogWarning(
                         "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
@@ -870,6 +870,15 @@ public partial class RemoteCollectorService
         telemetry.SqlMs = sqlMs;
         telemetry.StorageMs = storageMs;
         telemetry.Fanout = fanout.Result;
+
+        /* #3161: the counts the DEFINITION measured on the target, onto this run's collection_log row. The
+           only site that copies them — the early returns above are runs that never reached a definition's
+           read (an AppliesTo miss, an enumeration that listed nothing) or that threw their read away (the
+           wall-clock abandonment), and an empty list is their correct answer. Darling's twin is the single
+           `context.Measurements` argument on DarlingCollectorRunner's success return; the argument there is
+           REQUIRED so the compiler names every sibling site, and this assignment is the reason Note is a
+           computed property here rather than a settable one. */
+        telemetry.Measurements.AddRange(context.Measurements);
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'", rowsWritten, definition.Name, server.DisplayName);
         return rowsWritten;
