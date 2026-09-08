@@ -21,9 +21,14 @@ namespace PerformanceMonitor.Darling.Service;
 /// (when SMTP is configured and outside the per-fingerprint cooldown) and fans out to the shared
 /// <see cref="WebhookAlertService"/> (Teams/Slack), then ONE combined <c>config_alert_log</c> row
 /// is written per fired alert regardless of channel outcome — including muted alerts (flagged
-/// muted, channels skipped) and alerts with no channel configured at all (recorded as 'tray',
-/// Lite's taxonomy for delivered-without-email; the headless smoke asserts this row exists).
+/// muted, channels skipped) and alerts with no channel configured at all, whose row states
+/// <see cref="AlertDelivery.ChannelNoneConfigured"/> (the headless smoke asserts the row exists).
 /// Never throws — a dead SMTP server or Postgres store must not abort the engine's sweep.
+///
+/// <para>The row's disposition comes from <see cref="AlertDelivery.FromFanout"/> with
+/// <c>trayChannelPresent: false</c>. This service is headless: it has no tray icon and no toast code, so
+/// Lite's <c>tray</c> fallback — which is truthful there, where the deliverer really does show a balloon —
+/// would assert a UI event that cannot occur here (#3169).</para>
 ///
 /// <para>Delivery-mode fan-out (Lite/Dashboard parity): the effective mode is the shared
 /// <see cref="AlertDeliveryModeResolver"/> of a per-server override (#1236,
