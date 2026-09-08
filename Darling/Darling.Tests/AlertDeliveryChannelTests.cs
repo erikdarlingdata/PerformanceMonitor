@@ -106,19 +106,44 @@ public sealed class AlertDeliveryChannelTests
             var delivery = AlertDelivery.FromFanout(result, muted, tray);
             checked_++;
 
+            /* One-directional. The converse is false by design: an attempted email that threw is
+               ChannelEmail with Sent false and its error attached. */
             if (delivery.Sent)
             {
                 Assert.Contains(delivery.Channel, delivering);
-            }
-            else
-            {
-                Assert.DoesNotContain(delivery.Channel, delivering);
             }
         }
 
         /* The count IS the claim that the enumeration is the whole domain: 2^4 result bools x muted x
            trayChannelPresent. A shrunken loop would otherwise pass by covering less. */
         Assert.Equal(64, checked_);
+    }
+
+    /// <summary>
+    /// The decode-critical half of the invariant, stated on its own rather than left as a corollary: no
+    /// <c>Sent</c> row lands on a channel that did not deliver. This is precisely what makes
+    /// <c>alert_sent = true</c> with <c>notification_type = 'tray'</c> unreachable for a new row, and so
+    /// what licenses <see cref="TheLegacyResolutionSignature_DecodesToNoChannel"/> to read that signature
+    /// as the resolution builder's old constant.
+    /// </summary>
+    [Fact]
+    public void NoSentRow_LandsOnANonDeliveringChannel()
+    {
+        string[] nonDelivering =
+        {
+            AlertDelivery.ChannelTray, AlertDelivery.ChannelNotApplicable,
+            AlertDelivery.ChannelNoneConfigured, AlertDelivery.ChannelMuted, AlertDelivery.ChannelUndelivered,
+        };
+
+        foreach (var (result, muted, tray) in EveryFanoutCase())
+        {
+            var delivery = AlertDelivery.FromFanout(result, muted, tray);
+
+            if (delivery.Sent)
+            {
+                Assert.DoesNotContain(delivery.Channel, nonDelivering);
+            }
+        }
     }
 
     /// <summary><c>Sent</c> is exactly "a channel delivered", with no other contributor.</summary>

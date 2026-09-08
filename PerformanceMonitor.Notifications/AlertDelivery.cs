@@ -126,12 +126,17 @@ public sealed record AlertDelivery
     /// <remarks>
     /// <para><b>Invariant:</b> <see cref="Sent"/> implies <see cref="Channel"/> is one of
     /// <see cref="ChannelEmail"/>, <see cref="ChannelWebhook"/>, <see cref="ChannelEmailAndWebhook"/> — a
-    /// delivering channel names itself. That holds over the whole <c>EmailFanoutResult</c> domain, not just
-    /// the combinations the send core happens to produce, which is why the email arm tests
-    /// <c>EmailSent</c> as well as <c>EmailAttempted</c>: those are two independent bools on the result
-    /// type, and an <c>EmailSent</c> without an <c>EmailAttempted</c> would otherwise report a send on a
-    /// channel that never named itself. The invariant is what lets a reader decode the one legacy signature
-    /// this change leaves behind — see <c>AlertDeliveryStatus.Describe</c>.</para>
+    /// channel that delivered names itself. One-directional on purpose: the converse is false and should
+    /// be, because an attempted email that threw is <see cref="ChannelEmail"/> with <see cref="Sent"/>
+    /// false and its error attached.</para>
+    ///
+    /// <para>It holds over the whole <c>EmailFanoutResult</c> domain rather than over the shapes the send
+    /// core emits, which is what the ordering below is for and why the email arm reads <c>EmailSent</c> as
+    /// well as <c>EmailAttempted</c>: the result's four bools are independent, and the two combinations the
+    /// send core cannot produce (an <c>EmailSent</c> without an <c>EmailAttempted</c>, and a muted result
+    /// carrying any channel outcome) would each otherwise put a <c>Sent</c> row onto a non-delivering
+    /// channel. The invariant is what lets a reader decode the one legacy signature this change leaves
+    /// behind — see <c>AlertDeliveryStatus.Describe</c>.</para>
     ///
     /// <para><b>A configured webhook that failed reads as <see cref="ChannelUndelivered"/>, not
     /// <see cref="ChannelEmail"/>-style failure.</b> <c>EmailFanoutResult.SendError</c> tracks the EMAIL
@@ -144,21 +149,26 @@ public sealed record AlertDelivery
     {
         var sent = result.EmailSent || result.WebhookSent;
 
-        /* Ordered so the email arm outranks the tray fallback, matching the derivation this replaces. The
-           muted and unconfigured arms cannot be reached with a channel outcome to report: muted means the
-           caller passed attemptChannels: false, and AnyChannelConfigured comes from the very gates that
-           decide whether anything is attempted, so both imply an all-false result. */
+        /* The channels that carry an outcome are tested FIRST, so the invariant holds over the whole input
+           domain and not merely over the shapes the send core emits. Ordering muted ahead of them read
+           naturally — a muted alert attempts nothing — but it let a Sent row be labelled "muted", which
+           puts a true back onto a non-delivering channel and breaks the legacy decode. Both routes to that
+           are unreachable in practice (attemptChannels: !muted gates every attempt), and neither is
+           unrepresentable, which is the difference that matters.
+
+           Below the delivering arms the order preserves the derivation this replaces: muted beats tray
+           (Lite shows no toast for a muted alert), and tray beats the configuration arms so a Lite row's
+           stored value is unchanged whether or not SMTP happens to be set up. */
+        var emailInvolved = result.EmailAttempted || result.EmailSent;
+
         var channel =
-            muted ? ChannelMuted
-            : result.EmailAttempted || result.EmailSent ? ChannelEmail
+            result.WebhookSent && emailInvolved ? ChannelEmailAndWebhook
+            : result.WebhookSent ? ChannelWebhook
+            : emailInvolved ? ChannelEmail
+            : muted ? ChannelMuted
             : trayChannelPresent ? ChannelTray
             : !result.AnyChannelConfigured ? ChannelNoneConfigured
             : ChannelUndelivered;
-
-        if (result.WebhookSent)
-        {
-            channel = channel == ChannelEmail ? ChannelEmailAndWebhook : ChannelWebhook;
-        }
 
         return new AlertDelivery(sent, channel, result.SendError);
     }

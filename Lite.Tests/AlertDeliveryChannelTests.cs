@@ -59,15 +59,23 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
-    /// Over every representable send outcome, Lite's shared derivation agrees with the hand-written one it
-    /// replaced — so no Lite row's <c>alert_sent</c> or <c>notification_type</c> changes value.
-    ///
-    /// <para>The one combination excluded is <c>EmailSent</c> without <c>EmailAttempted</c>, which the send
-    /// core cannot produce and where the two derivations deliberately DISAGREE: the old one reported a send
-    /// on <c>tray</c>, and the new one names the email channel, which is what
-    /// <c>Darling.Tests.AlertDeliveryChannelTests.EverySentDisposition_NamesADeliveringChannel</c> requires.
-    /// Excluding it is a stated carve-out rather than a silent one — <see cref="TheOneDisagreement_IsTheImpossibleCombination"/>
-    /// pins that it is the ONLY disagreement, so this test cannot be weakened by widening the exclusion.</para>
+    /// The two <c>EmailFanoutResult</c> shapes <c>EmailSendCore</c> cannot emit: a send without an attempt,
+    /// and a muted alert carrying any channel outcome (the caller passes <c>attemptChannels: !muted</c>, so
+    /// every attempt is gated off). Both are representable, so the shared derivation must still be
+    /// well-defined on them and deliberately differs from the derivation it replaced there — the old one
+    /// would put a <c>Sent</c> row onto <c>tray</c> or <c>muted</c>, which is what
+    /// <c>Darling.Tests.AlertDeliveryChannelTests.EverySentDisposition_NamesADeliveringChannel</c> forbids.
+    /// Neither is reachable, so excluding them from the parity comparison costs nothing real.
+    /// </summary>
+    private static bool Unreachable(EmailFanoutResult result, bool muted)
+        => (result.EmailSent && !result.EmailAttempted)
+        || (muted && (result.EmailAttempted || result.EmailSent || result.WebhookSent));
+
+    /// <summary>
+    /// Over every send outcome the core can actually produce, Lite's shared derivation agrees with the
+    /// hand-written one it replaced — so no Lite row's <c>alert_sent</c> or <c>notification_type</c> changes
+    /// value. <see cref="EveryDisagreement_IsAnUnreachableCombination"/> pins that the exclusion is exactly
+    /// <see cref="Unreachable"/> and nothing more, so this cannot be weakened by widening it.
     /// </summary>
     [Fact]
     public void LiteDispositions_AreUnchangedFromTheHandWrittenDerivation()
@@ -76,7 +84,7 @@ public sealed class AlertDeliveryChannelTests
 
         foreach (var (result, muted) in EveryFanoutCase())
         {
-            if (result.EmailSent && !result.EmailAttempted)
+            if (Unreachable(result, muted))
             {
                 continue;
             }
@@ -89,18 +97,19 @@ public sealed class AlertDeliveryChannelTests
             Assert.Equal(expected.NotificationType, actual.Channel);
         }
 
-        /* 2^4 result bools x muted = 32, less the 8 cases carrying the impossible EmailSent-without-attempt. */
-        Assert.Equal(24, compared);
+        /* 2^4 result bools x muted = 32 representable, of which 14 are reachable: EmailSent implies
+           EmailAttempted (3 of the 4 email shapes), and muted forces every outcome false. */
+        Assert.Equal(14, compared);
     }
 
     /// <summary>
-    /// The carve-out above is exactly the impossible combination and nothing else. Without this, widening
-    /// the <c>continue</c> would make the parity claim pass by comparing less.
+    /// Every disagreement with the old derivation is one of the unreachable shapes. Without this, widening
+    /// the exclusion above would make the parity claim pass by comparing less.
     /// </summary>
     [Fact]
-    public void TheOneDisagreement_IsTheImpossibleCombination()
+    public void EveryDisagreement_IsAnUnreachableCombination()
     {
-        var disagreements = new List<EmailFanoutResult>();
+        var disagreements = new List<(EmailFanoutResult Result, bool Muted)>();
 
         foreach (var (result, muted) in EveryFanoutCase())
         {
@@ -109,12 +118,12 @@ public sealed class AlertDeliveryChannelTests
 
             if (expected.Sent != actual.Sent || expected.NotificationType != actual.Channel)
             {
-                disagreements.Add(result);
+                disagreements.Add((result, muted));
             }
         }
 
         Assert.NotEmpty(disagreements);
-        Assert.All(disagreements, r => Assert.True(r.EmailSent && !r.EmailAttempted));
+        Assert.All(disagreements, c => Assert.True(Unreachable(c.Result, c.Muted)));
     }
 
     /// <summary>
