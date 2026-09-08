@@ -75,10 +75,9 @@ public sealed class CollectionOutputBesideCostTests
         /* note_count is COUNT(error_message) over SUCCESS runs and last_note is the newest of
            them, ordered notes-first, so a positive count always has a note to point at. Kept
            consistent here rather than set independently, because a row with a count and no note
-           is a state the read cannot produce. */
-        // note_count is COUNT(error_message) over SUCCESS runs, so a fixture claiming more
-        // notes than successes describes a row no query can return. Caught here because the
-        // formatter does not validate the count, so such a fixture passes while testing nothing.
+           is a state the read cannot produce. A count above the success count is the same kind of
+           unrepresentable row, and is rejected here because FormatOutputFinding does not validate
+           it - so such a fixture would pass while testing nothing. */
         NoteCount = noteCount <= MeasuredSuccesses
             ? noteCount
             : throw new ArgumentOutOfRangeException(

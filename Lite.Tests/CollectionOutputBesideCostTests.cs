@@ -33,6 +33,11 @@ namespace Lite.Tests;
 /// </summary>
 public sealed class CollectionOutputBesideCostTests
 {
+    /* Named to mirror the Darling twin, which these fixtures are meant to match line-for-line. */
+    private const long MeasuredRuns = 79_333;
+    private const long MeasuredSuccesses = 63_448;
+    private const long MeasuredDenials = 15_885;
+
     /* #3010's own Lite fixture counts, so this row is the same shape its sibling suite already pins. */
     private static CollectorHealthRow Row(
         long rowsStored,
@@ -41,10 +46,10 @@ public sealed class CollectionOutputBesideCostTests
         long noteCount = 0) => new()
     {
         CollectorName = "deadlocks",
-        TotalRuns = 79_333,
-        SuccessCount = 63_448,
+        TotalRuns = MeasuredRuns,
+        SuccessCount = MeasuredSuccesses,
         ErrorCount = 0,
-        PermissionDeniedCount = 15_885,
+        PermissionDeniedCount = MeasuredDenials,
         RowsStored = rowsStored,
         RunsWithRows = runsWithRows,
         /* The ONLY difference between "could not read" and "read and found nothing": which side of the last
@@ -58,17 +63,15 @@ public sealed class CollectionOutputBesideCostTests
         /* note_count is COUNT(error_message) over SUCCESS runs and last_note is the newest of
            them, ordered notes-first, so a positive count always has a note to point at. Kept
            consistent here rather than set independently, because a row with a count and no note
-           is a state the read cannot produce. */
-        // note_count is COUNT(error_message) over SUCCESS runs, so a fixture claiming more
-        // notes than successes describes a row no query can return. Caught here because the
-        // formatter does not validate the count, so such a fixture passes while testing nothing.
-        // Mirrors the Darling twin's guard; SuccessCount above is the population it counts over.
-        NoteCount = noteCount <= 63_448
+           is a state the read cannot produce. A count above the success count is the same kind of
+           unrepresentable row, and is rejected here because FormatOutputFinding does not validate
+           it - so such a fixture would pass while testing nothing. */
+        NoteCount = noteCount <= MeasuredSuccesses
             ? noteCount
             : throw new ArgumentOutOfRangeException(
                 nameof(noteCount),
                 noteCount,
-                "note_count cannot exceed the 63,448 SUCCESS runs it is counted over."),
+                $"note_count cannot exceed the {MeasuredSuccesses} SUCCESS runs it is counted over."),
         LastNote = noteCount > 0 ? "enumeration yielded 0 items - nothing to collect this cycle" : null,
     };
 
@@ -122,7 +125,7 @@ public sealed class CollectionOutputBesideCostTests
     [Fact]
     public void TheNotedZero_DefersToTheNote_AndTheUnnotedZeroKeepsTheCategoryReading()
     {
-        var noted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: 63_448);
+        var noted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: MeasuredSuccesses);
         var unnoted = Row(rowsStored: 0, runsWithRows: 0, denialIsNewest: false, noteCount: 0);
 
         Assert.NotNull(noted.OutputFinding);
