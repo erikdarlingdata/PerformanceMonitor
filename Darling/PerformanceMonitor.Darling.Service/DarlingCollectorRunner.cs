@@ -4118,6 +4118,15 @@ RETURNING s.state_key";
     /// statement on the same parameter budget the cursor splice it is cleaning up already competes for.
     /// The array binds as one <c>text[]</c> whatever the database count.</para>
     ///
+    /// <para><b>No pattern matching anywhere in it, which is load-bearing for names.</b>
+    /// <c>starts_with</c> is a plain prefix test and <c>= ANY</c> is equality, so a database name is
+    /// compared as the literal text it is. A <c>LIKE</c>-shaped prune would read <c>_</c> and <c>%</c> in a
+    /// database name as wildcards and keep or delete the wrong row. Verified on PostgreSQL 17 that
+    /// <c>substr(state_key, length(prefix) + 1)</c> recovers the name exactly for a multi-byte name
+    /// (<c>length</c> and <c>substr</c> are both character-based, so they agree), that the comparison is
+    /// case-SENSITIVE as PostgreSQL identifiers are, and that <c>a_b</c> and <c>a%b</c> are matched
+    /// literally rather than as patterns.</para>
+    ///
     /// <para><b><c>array_length($4, 1) > 0</c> is deliberate redundancy.</b> The caller already refuses to
     /// prune on an empty enumeration — an empty list is how a login that cannot read <c>pg_database</c>
     /// presents, and pruning against it would delete every cursor on the server. Repeating the check here
