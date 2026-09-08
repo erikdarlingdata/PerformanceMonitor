@@ -211,11 +211,19 @@ public static class AlertDeliveryStatus
     /// <param name="sent">The row's <c>alert_sent</c>.</param>
     /// <param name="channel">The row's <c>notification_type</c>.</param>
     /// <param name="sendError">The row's <c>send_error</c>.</param>
-    /// <param name="trayChannelPresent">Whether the SKU reading this store has a tray channel — the read
-    /// side of <see cref="AlertDelivery.FromFanout"/>'s parameter of the same name, and required for the
-    /// same reason. <b>Lite: true.</b> <b>The Darling Viewer: false.</b> A stored <c>tray</c> is a
-    /// truthful "a toast was shown" on a Lite store and means nothing at all on a headless Darling one, so
-    /// one renderer cannot label it without being told which store it is reading.</param>
+    /// <param name="producerHadTrayChannel">
+    /// Whether the SKU that WROTE this store records a tray channel — the read side of
+    /// <see cref="AlertDelivery.FromFanout"/>'s <c>trayChannelPresent</c>, and required for the same
+    /// reason: a stored <c>tray</c> is a truthful "a toast was shown" on a Lite store and means nothing at
+    /// all on a headless Darling one, so one renderer cannot label it without being told which store it is
+    /// reading. <b>Lite: true.</b> <b>The Darling Viewer: false.</b>
+    ///
+    /// <para>Named for the PRODUCER rather than the reader on purpose. The Darling Viewer has an
+    /// <c>AlertToastCoordinator</c> and does raise its own toasts, so "does this SKU have a tray" is true
+    /// of the reader and false of the writer, and the value here is about the writer. Getting that backwards
+    /// would make the Viewer render "Shown" for 32,546 rows recorded by a service with no tray, which is the
+    /// exact reading this change removes.</para>
+    /// </param>
     /// <remarks>
     /// <para><b>Rows written before this taxonomy are read conservatively, not reinterpreted.</b> The one
     /// legacy signature that can be decoded is <c>alert_sent = true</c> with
@@ -225,13 +233,13 @@ public static class AlertDeliveryStatus
     /// hardcoded constant. It renders as <see cref="NoChannel"/>, which is what it always meant — on either
     /// SKU, because that builder is shared code.</para>
     ///
-    /// <para>A legacy <c>alert_sent = false</c> with <c>tray</c> is NOT decoded on a store whose SKU has no
+    /// <para>A legacy <c>alert_sent = false</c> with <c>tray</c> is NOT decoded on a store whose producer had no
     /// tray. It covers a store with no channel configured, a throttled send, and a failed webhook post, and
     /// nothing in the row separates them — the whole reason this change exists. It renders
     /// <see cref="Logged"/>, which is #2781's word for it and claims nothing in either direction. New rows
     /// say which of those they are.</para>
     /// </remarks>
-    public static string Describe(bool sent, string? channel, string? sendError, bool trayChannelPresent)
+    public static string Describe(bool sent, string? channel, string? sendError, bool producerHadTrayChannel)
     {
         if (channel == AlertDelivery.ChannelNotApplicable)
         {
@@ -265,12 +273,12 @@ public static class AlertDeliveryStatus
             return NoChannelConfigured;
         }
 
-        /* Lite's tray toast is a real delivery to a real channel. On a store written by a SKU with no tray
+        /* Lite's tray toast is a real delivery to a real channel. On a store whose producer had no tray
            the same stored value carries no information at all, so it gets #2781's neutral "Logged" — the
            label the web surface already chose for this exact row, rather than a second word for it. */
         if (channel == AlertDelivery.ChannelTray)
         {
-            return trayChannelPresent ? Shown : Logged;
+            return producerHadTrayChannel ? Shown : Logged;
         }
 
         return NotSent;

@@ -65,14 +65,17 @@ public sealed class ViewerAlertRow
 
     /// <summary>
     /// The operator-facing delivery status, from the one shared renderer both SKUs use.
-    /// <c>trayChannelPresent: false</c>: the Darling store is written by the HEADLESS service, which has no
+    /// <c>producerHadTrayChannel: false</c>: this store is written by the HEADLESS service, which has no
     /// tray and no toast code, so a stored <c>tray</c> asserts nothing that happened and must not read as
     /// "Shown". The copy this replaces did read it that way, and with no SMTP configured its email arm
     /// never ran — so every fired alert showed as "Shown" and every resolution as "Delivered", neither of
     /// which had occurred.
+    ///
+    /// <para>The answer is about the PRODUCER, not this app: the viewer has its own
+    /// <c>AlertToastCoordinator</c> and does raise toasts, but it did not write these rows.</para>
     /// </summary>
     public string StatusDisplay =>
-        AlertDeliveryStatus.Describe(AlertSent, NotificationType, SendError, trayChannelPresent: false);
+        AlertDeliveryStatus.Describe(AlertSent, NotificationType, SendError, producerHadTrayChannel: false);
 
     public bool IsResolved => AlertMetricClassifier.IsResolution(MetricName);
 

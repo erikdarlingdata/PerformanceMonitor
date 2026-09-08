@@ -289,7 +289,7 @@ public sealed class AlertDeliveryChannelTests
     [InlineData(false, AlertDelivery.ChannelTray, null, AlertDeliveryStatus.Logged)]
     public void Describe_OnADarlingStore_DiscriminatesEveryDisposition(
         bool sent, string channel, string? sendError, string expected)
-        => Assert.Equal(expected, AlertDeliveryStatus.Describe(sent, channel, sendError, trayChannelPresent: false));
+        => Assert.Equal(expected, AlertDeliveryStatus.Describe(sent, channel, sendError, producerHadTrayChannel: false));
 
     /// <summary>
     /// <b>The one legacy signature that can be decoded.</b> <c>alert_sent = true</c> with
@@ -302,9 +302,9 @@ public sealed class AlertDeliveryChannelTests
     public void TheLegacyResolutionSignature_DecodesToNoChannel()
     {
         Assert.Equal(AlertDeliveryStatus.NoChannel,
-            AlertDeliveryStatus.Describe(true, AlertDelivery.ChannelTray, null, trayChannelPresent: false));
+            AlertDeliveryStatus.Describe(true, AlertDelivery.ChannelTray, null, producerHadTrayChannel: false));
         Assert.Equal(AlertDeliveryStatus.NoChannel,
-            AlertDeliveryStatus.Describe(true, AlertDelivery.ChannelTray, null, trayChannelPresent: true));
+            AlertDeliveryStatus.Describe(true, AlertDelivery.ChannelTray, null, producerHadTrayChannel: true));
     }
 
     /// <summary>
@@ -318,7 +318,7 @@ public sealed class AlertDeliveryChannelTests
     [Fact]
     public void TheLegacyDetectedSignature_IsNotReinterpreted()
     {
-        var status = AlertDeliveryStatus.Describe(false, AlertDelivery.ChannelTray, null, trayChannelPresent: false);
+        var status = AlertDeliveryStatus.Describe(false, AlertDelivery.ChannelTray, null, producerHadTrayChannel: false);
 
         /* #2781's word for it, adopted rather than replaced with a second one. It claims nothing in either
            direction, which is the only honest reading of a row whose state cannot be recovered. */
@@ -351,7 +351,7 @@ public sealed class AlertDeliveryChannelTests
                 {
                     Assert.NotEqual(
                         AlertDeliveryStatus.Shown,
-                        AlertDeliveryStatus.Describe(sent, channel, error, trayChannelPresent: false));
+                        AlertDeliveryStatus.Describe(sent, channel, error, producerHadTrayChannel: false));
                 }
             }
         }
@@ -391,7 +391,7 @@ public sealed class AlertDeliveryChannelTests
             };
 
             Assert.Equal(
-                AlertDeliveryStatus.Describe(sent, channel, error, trayChannelPresent: false),
+                AlertDeliveryStatus.Describe(sent, channel, error, producerHadTrayChannel: false),
                 row.StatusDisplay);
         }
     }
@@ -444,7 +444,7 @@ public sealed class AlertDeliveryChannelTests
     /* ─────────────── helpers ─────────────── */
 
     private static string Describe(AlertDelivery delivery)
-        => AlertDeliveryStatus.Describe(delivery.Sent, delivery.Channel, delivery.SendError, trayChannelPresent: false);
+        => AlertDeliveryStatus.Describe(delivery.Sent, delivery.Channel, delivery.SendError, producerHadTrayChannel: false);
 
     private static EmailFanoutResult Fanout(
         bool emailAttempted = false, bool emailSent = false, string? sendError = null,

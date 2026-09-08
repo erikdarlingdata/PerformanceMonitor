@@ -462,7 +462,7 @@ public class AlertHistoryRow
     /// Darling Viewer passes false; see <see cref="AlertDeliveryStatus.Describe"/>.
     /// </summary>
     public string StatusDisplay =>
-        AlertDeliveryStatus.Describe(AlertSent, NotificationType, SendError, trayChannelPresent: true);
+        AlertDeliveryStatus.Describe(AlertSent, NotificationType, SendError, producerHadTrayChannel: true);
 
     public bool IsResolved => AlertMetricClassifier.IsResolution(MetricName);
     public bool IsCritical => AlertMetricClassifier.IsCritical(MetricName);

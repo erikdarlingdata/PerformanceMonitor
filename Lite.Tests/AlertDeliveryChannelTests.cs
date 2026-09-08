@@ -141,7 +141,7 @@ public sealed class AlertDeliveryChannelTests
         Assert.False(delivery.Sent);
         Assert.Equal(
             AlertDeliveryStatus.Shown,
-            AlertDeliveryStatus.Describe(delivery.Sent, delivery.Channel, delivery.SendError, trayChannelPresent: true));
+            AlertDeliveryStatus.Describe(delivery.Sent, delivery.Channel, delivery.SendError, producerHadTrayChannel: true));
     }
 
     /// <summary>
@@ -206,7 +206,7 @@ public sealed class AlertDeliveryChannelTests
             };
 
             Assert.Equal(
-                AlertDeliveryStatus.Describe(sent, channel, error, trayChannelPresent: true),
+                AlertDeliveryStatus.Describe(sent, channel, error, producerHadTrayChannel: true),
                 row.StatusDisplay);
         }
     }
@@ -220,9 +220,9 @@ public sealed class AlertDeliveryChannelTests
     public void TheLegacyResolutionSignature_DecodesToNoChannel_OnALiteStoreToo()
     {
         Assert.Equal(AlertDeliveryStatus.NoChannel,
-            AlertDeliveryStatus.Describe(true, AlertDelivery.ChannelTray, null, trayChannelPresent: true));
+            AlertDeliveryStatus.Describe(true, AlertDelivery.ChannelTray, null, producerHadTrayChannel: true));
         Assert.Equal(AlertDeliveryStatus.Shown,
-            AlertDeliveryStatus.Describe(false, AlertDelivery.ChannelTray, null, trayChannelPresent: true));
+            AlertDeliveryStatus.Describe(false, AlertDelivery.ChannelTray, null, producerHadTrayChannel: true));
     }
 
     /* ─────────────── where AnyChannelConfigured comes from ─────────────── */
