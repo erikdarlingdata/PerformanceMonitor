@@ -186,6 +186,39 @@ public class CollectorMeasurementSeamTests
     }
 
     [Fact]
+    public void ARenderedNoteNeverRepeatsALabel_WhichAShapeCheckCannotSee()
+    {
+        /* The counts-only grammar is a SHAPE check: two tokens carrying the same label are still
+           label=value pairs, so it passes on a note whose reader cannot tell which figure is which. That
+           is the #3159 lesson in its other direction - a pin over the composed form passing on the part
+           that did not break - and it is the route a hand-built list takes into Render, bypassing the
+           accumulation and the reservation that Measure applies.
+
+           The adversarial case is the reserved label supplied deliberately, beside a genuinely rejected
+           one: without Render enforcing the reservation too, that renders `invalid_labels=7
+           invalid_labels=1`, which is shape-legal and meaningless. */
+        var handBuilt = new[]
+        {
+            new CollectorMeasurement("events_read", 40),
+            new CollectorMeasurement(CollectorMeasurementNote.RejectedLabelCount, 7),
+            new CollectorMeasurement("GRANT SELECT", 1),
+            new CollectorMeasurement("events_read", 2),
+        };
+
+        var note = CollectorMeasurementNote.Render(handBuilt)!;
+
+        Assert.Matches(s_countsOnly, note);
+
+        var labels = note.Split(' ').Select(pair => pair.Split('=')[0]).ToList();
+        Assert.Equal(labels.Count, labels.Distinct(StringComparer.Ordinal).Count());
+
+        /* The duplicate is SUMMED, in first-seen position, and the reserved label appears exactly once
+           meaning exactly one thing: the count of labels Render refused - here the verdict and the
+           reserved label supplied as a measurement. */
+        Assert.Equal("events_read=42 " + CollectorMeasurementNote.RejectedLabelCount + "=2", note);
+    }
+
+    [Fact]
     public void TheRejectCounterIsReservedAgainstADefinitionsOwnLabel()
     {
         /* It passes the grammar, so nothing else stops a collector using it - and then the note carries

@@ -78,7 +78,10 @@ public static class CollectorMeasurementNote
     /// rejected label is a build-and-test-time failure and this counter is the backstop for a list some
     /// caller assembled by hand.
     ///
-    /// <para>RESERVED: <see cref="CollectorContext.Measure"/> refuses it as a definition's own label. It is
+    /// <para>RESERVED at BOTH doors: <see cref="CollectorContext.Measure"/> refuses it, and
+    /// <see cref="Render"/> folds it into this counter rather than printing it. Guarding only the first
+    /// would leave the invariant resting on call-site discipline in a type whose whole claim is that the
+    /// TYPE enforces it, and <see cref="Render"/> is public. It is
     /// a legal count name by the grammar, so without the reservation a collector could measure something it
     /// called <c>invalid_labels</c> and the rendered note would carry that label twice with two different
     /// meanings - one the collector's count and one this counter - which no reader could take apart.</para>
@@ -136,25 +139,62 @@ public static class CollectorMeasurementNote
             return null;
         }
 
-        var builder = new StringBuilder();
+        /* Accumulated HERE as well as in CollectorContext.Measure, and not only there. A rendered note is
+           what a reader parses, and two tokens carrying the same label mean nothing whichever door they
+           came through - so the guarantee belongs at the door everything must pass rather than at the one
+           a hand-built list can go round. Measure's own accumulation is not redundant: it keeps
+           Measurements itself a set of counts, which is what lets a definition read back what it has
+           measured so far. Insertion-ordered so the pairs print in the order the definition declared them.
+
+           A shape check cannot substitute for this. Two tokens with one label are still label=value pairs,
+           so the counts-only grammar passes on a note whose figures a reader cannot attribute - the #3159
+           lesson in its other direction, a pin over the composed form passing on the part that broke. */
+        var totals = new List<KeyValuePair<string, long>>(measurements.Count);
         var rejected = 0;
 
         foreach (var measurement in measurements)
         {
-            if (!IsValidLabel(measurement.Label))
+            /* RejectedLabelCount passes IsValidLabel, so a list assembled by hand could carry it beside a
+               genuinely rejected label and render TWO invalid_labels= tokens with two different meanings -
+               exactly what the reservation exists to prevent, arriving through the door Measure does not
+               guard. Folded into the counter rather than dropped, so the note still records a refusal. */
+            if (!IsValidLabel(measurement.Label)
+                || string.Equals(measurement.Label, RejectedLabelCount, StringComparison.Ordinal))
             {
                 rejected++;
                 continue;
             }
 
+            var seen = false;
+            for (var i = 0; i < totals.Count; i++)
+            {
+                if (string.Equals(totals[i].Key, measurement.Label, StringComparison.Ordinal))
+                {
+                    totals[i] = new KeyValuePair<string, long>(
+                        totals[i].Key, totals[i].Value + measurement.Value);
+                    seen = true;
+                    break;
+                }
+            }
+
+            if (!seen)
+            {
+                totals.Add(new KeyValuePair<string, long>(measurement.Label, measurement.Value));
+            }
+        }
+
+        var builder = new StringBuilder();
+
+        foreach (var (label, value) in totals)
+        {
             if (builder.Length > 0)
             {
                 builder.Append(' ');
             }
 
-            builder.Append(measurement.Label)
+            builder.Append(label)
                 .Append('=')
-                .Append(measurement.Value.ToString(CultureInfo.InvariantCulture));
+                .Append(value.ToString(CultureInfo.InvariantCulture));
         }
 
         if (rejected > 0)

@@ -57,7 +57,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// </param>
 /// <param name="Abandoned">
 /// True only for a cycle the #2673 whole-server wall-clock budget gave up on: nothing was stored and no
-/// watermark advanced. Carried as its own field rather than inferred from <paramref name="Note"/>, because
+/// watermark advanced. Carried as its own field rather than inferred from <see cref="Note"/>, because
 /// matching on the note's TEXT would make the collection_log status depend on a human-readable string that
 /// exists to be reworded — the classification and the wording have to move independently. Defaulted false so
 /// the seven ordinary construction sites are unchanged; the abandonment return is the only site that sets it.
