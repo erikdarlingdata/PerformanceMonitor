@@ -1939,15 +1939,18 @@ WITH NO DATA";
     /// used to NAME as the one that would settle the sampling qualifier, now performed.
     /// <b>ONE STORE'S, and the scoping is a precondition of the READ rather than a caveat about the
     /// workload (#3175).</b> That view only records executions where
-    /// <c>timescaledb.enable_job_execution_logging</c> is ON, it defaults to OFF, and the GUC is set by the
-    /// v1 <c>postgresql.conf</c> block whose marker <c>EnsureConfAppended</c> finds already present on any
-    /// pre-existing cluster — so a cluster that predates the block never gains it and cannot be healed into
-    /// it. Measured on two stores running the same binary: the older one has the GUC absent, effective
-    /// <c>off</c>, <c>source = default</c>, and <b>1</b> <c>job_history</c> row for <b>110</b> jobs; the
-    /// newer has <b>39020</b> rows. <b>A maximum over that view on an older store returns zero rows and
-    /// reads as "no run exceeded the line".</b> Everything below is therefore the census of ONE store — the
-    /// one that carries this workload and does have the GUC — and is not a fleet reading. #3177 heals the
-    /// marker. No SHIPPED read touches <c>job_history</c> (every product surface uses <c>job_stats</c>,
+    /// <c>timescaledb.enable_job_execution_logging</c> is ON and it defaults to OFF. When this census was
+    /// read the GUC was set only by the v1 <c>postgresql.conf</c> block, whose marker
+    /// <c>EnsureConfAppended</c> finds already present on any pre-existing cluster — so a cluster predating
+    /// the block could not be healed into it. Measured then, on two stores running the same binary: the
+    /// older one had the GUC absent, effective <c>off</c>, <c>source = default</c>, and <b>1</b>
+    /// <c>job_history</c> row for <b>110</b> jobs; the newer had <b>39020</b> rows. <b>A maximum over that
+    /// view on such a store returns zero rows and reads as "no run exceeded the line".</b> Everything below
+    /// is therefore the census of ONE store — the one that carries this workload and did have the GUC — and
+    /// is not a fleet reading. <b>#3175/#3177 has since given the GUC its own marker, so existing stores
+    /// heal; that does not widen this population, because the read predates the heal.</b> A later census
+    /// could be broader, and would have to say so rather than inherit this one's scope. No SHIPPED read
+    /// touches <c>job_history</c> (every product surface uses <c>job_stats</c>,
     /// deliberately — see <see cref="CompressionActivitySql"/>), so the gap is in what an investigation can
     /// ask, not in what the product reports. Read at <c>2026-09-08 01:37Z</c>, so the
     /// window is one that has ENDED and stays true rather than a scope read against a clock a doc comment
@@ -2263,11 +2266,11 @@ WITH NO DATA";
     /// the succeeded/finish filter (<b>874</b> of <b>874</b>), so this is the whole of the span rather than a
     /// status-selected part of it. <b>ONE STORE'S, on the same precondition
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states (#3175):</b> the read only sees
-    /// executions where <c>timescaledb.enable_job_execution_logging</c> is ON, that GUC cannot be healed
-    /// onto a cluster predating the conf block that sets it, and a maximum over the view on such a store
-    /// returns zero rows and reads as "nothing exceeded the line". This store has it — 874 rows for twelve
-    /// policies over three days is the positive control that says so — and no claim is made about any
-    /// other.
+    /// executions where <c>timescaledb.enable_job_execution_logging</c> is ON, that GUC could not be healed
+    /// onto a cluster predating the conf block that set it until #3175/#3177 gave it a marker of its own,
+    /// and a maximum over the view on an unhealed store returns zero rows and reads as "nothing exceeded
+    /// the line". This store had it at the read — 874 rows for twelve policies over three days is the
+    /// positive control that says so — and no claim is made about any other.
     /// The full 874-run list is NOT republished: unlike the heaviest refresh's 57, a list that long stops
     /// being re-derivable by reading and starts being a wall of digits, and what bounds a maximum is its
     /// tail. So the tail is what the mechanism paragraph below states, and the estimator is recomputable from
@@ -4681,7 +4684,7 @@ AND   js.last_run_status = 'Success'";
 
             case RefreshSlotHeadroom.ApproachingSlot:
                 logger.LogWarning(
-                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default and cannot be healed onto a cluster older than the conf block that sets it, so an empty result there is that gap and not a quiet hour (#3175). The hourly collect.store_metrics series (object_kind = 'background_job') samples one reading an hour and serves a daily point that is the day's LAST, so neither answers a maximum question on its own (#3044, #3119).",
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default, and a store provisioned before that GUC gained its own conf marker reports nothing there until it heals, so an empty result is that gap and not a quiet hour (#3175/#3177). The hourly collect.store_metrics series (object_kind = 'background_job') samples one reading an hour and serves a daily point that is the day's LAST, so neither answers a maximum question on its own (#3044, #3119).",
                     reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot,
                     reading.ClearOfSlotSeconds, RefreshSlotWarningSeconds);
                 break;
