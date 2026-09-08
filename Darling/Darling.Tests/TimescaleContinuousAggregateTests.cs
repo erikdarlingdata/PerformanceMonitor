@@ -133,9 +133,11 @@ public sealed class TimescaleContinuousAggregateTests
     /// retention re-materialized roughly three quarters of the hypertable every hour. Measured on the
     /// production store: the heaviest hourly refresh ran 3,301-6,330 s against its own 1-hour cadence — 118-175%
     /// of it, so each run started into the tail of the last — while rows arriving per hour FELL ~3x. On the
-    /// narrowed window the same refresh finishes well inside one phase slot, which is what makes the overlap
-    /// structurally impossible rather than merely absent. The figure and its derivation live on
-    /// TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds rather than being restated here.</para>
+    /// narrowed window the same refresh finishes inside its own phase window, which is what makes the
+    /// overlap structurally impossible rather than merely absent — by 364 s of a 1,260 s window against
+    /// #3166's census and #3174's re-derived grid. The figure and its derivation live on
+    /// TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds rather than being restated
+    /// here.</para>
     ///
     /// <para>Asserted for EVERY hourly view rather than the heavy one alone: the defect was a shared default,
     /// so a fix that reached only the aggregate named in the incident would leave twelve behind.</para>
@@ -168,15 +170,19 @@ public sealed class TimescaleContinuousAggregateTests
     /// <summary>
     /// TREATMENT TWO of #3012, pinned ALONE so that reverting it is red here even if the narrowing survives.
     ///
-    /// <para>The heaviest hourly refresh is still more than 4x the recorded ceiling for any other one on the
-    /// narrowed window, so what it does take has to be invisible to everything else rather than merely
-    /// short. Two things do that, and the second is the less obvious one:</para>
+    /// <para>The heaviest hourly refresh's recorded ceiling is the only one that does not fit inside
+    /// <see cref="TimescaleSupport.CompressionPhaseGuardMinutes"/>, so what it does take has to be invisible
+    /// to everything else rather than merely short. Two things do that, and the second is the less obvious
+    /// one:</para>
     ///
-    /// <para><b>Distinct minutes of the hour.</b> A refresh holds <c>AccessShareLock</c> on what it reads; a
-    /// compression policy on that same hypertable queues an <c>AccessExclusiveLock</c> request behind it; and a
-    /// QUEUED exclusive request blocks every subsequent shared request, so collector store-writes convoy behind
-    /// a lock nobody holds. Policies that share a hypertable therefore have to start at different times, which
-    /// is why the <c>query_store_stats</c> family's slots are asserted DISTINCT rather than merely present.</para>
+    /// <para><b>Distinct minutes of the hour — ALL of them, since #3174.</b> A refresh holds
+    /// <c>AccessShareLock</c> on what it reads; a compression policy on that same hypertable queues an
+    /// <c>AccessExclusiveLock</c> request behind it; and a QUEUED exclusive request blocks every subsequent
+    /// shared request, so collector store-writes convoy behind a lock nobody holds. Policies that share a
+    /// hypertable therefore have to start at different times. The grid now gives every hourly policy its own
+    /// minute, so that holds for every pair rather than for the pairs that happen to contend — which is why
+    /// the assertion below is over the WHOLE phase set and the <c>query_store_stats</c> family is kept only as
+    /// the measured case.</para>
     ///
     /// <para><b>A fixed schedule.</b> Naming <c>initial_start</c> is what switches TimescaleDB from
     /// finish-to-start to start-to-start scheduling. Under finish-to-start, one bad hour phase-locks a family
@@ -187,16 +193,41 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void HourlyRefreshPolicies_AreStaggeredAcrossTheHour_OnAFixedSchedule()
     {
-        Assert.Equal(15, TimescaleSupport.RefreshPhaseStepMinutes);
-        Assert.Equal(4, TimescaleSupport.RefreshPhaseSlots);
+        Assert.Equal(1, TimescaleSupport.LightRefreshStepMinutes);
 
         /* Thirteen hourly refreshes: the six named rollups plus the seven baseline aggregates. */
         Assert.Equal(13, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(12, TimescaleSupport.LightHourlyRefreshCount);
 
+        var phases = TimescaleSupport.HourlyRefreshPhaseOrder
+            .Select(TimescaleSupport.RefreshPhaseMinutesFor)
+            .ToArray();
+
+        /* THE INVARIANT, over the whole set rather than over the pairs that contend (#3174): thirteen
+           policies, thirteen distinct minutes. Asserted as a count identity against the list rather than
+           against a literal 13, so an aggregate registered tomorrow is covered without editing this. */
+        Assert.Equal(TimescaleSupport.HourlyRefreshPhaseOrder.Count, phases.Distinct().Count());
+
+        /* And each minute is inside the hour, on the band its own view belongs to — the heaviest refresh at
+           its own start, everything else in the light band ahead of it. A minute past the light band would
+           put a refresh inside the heaviest window or the compression band, which is what the tiling
+           assertion below and the compression grid both rest on. */
         foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
         {
             var phase = TimescaleSupport.RefreshPhaseMinutesFor(view);
-            Assert.Contains(phase, new[] { 0, 15, 30, 45 });
+            Assert.InRange(phase, 0, TimescaleSupport.MinutesInHourlyCadence - 1);
+
+            if (string.Equals(view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
+            {
+                Assert.Equal(TimescaleSupport.HeaviestRefreshStartMinute, phase);
+            }
+            else
+            {
+                Assert.InRange(
+                    phase,
+                    0,
+                    (TimescaleSupport.LightHourlyRefreshCount - 1) * TimescaleSupport.LightRefreshStepMinutes);
+            }
 
             var sql = TimescaleSupport.AddHourlyRefreshPolicySql(view);
             Assert.Contains(
@@ -230,45 +261,75 @@ public sealed class TimescaleContinuousAggregateTests
     ///
     /// <para><b>Why in seconds as well as in percent.</b> The knob is a percent of a job's own schedule
     /// interval and the grid is a number of minutes, and nothing made those two commensurable: the default
-    /// landing exactly on one slot was an accident of two independent decisions, so a grid moved to a
-    /// 10-minute step would have left the alert firing at 900 s against a 600 s slot — after the point it
-    /// exists to precede. The percent-side identity lives with the alert; this is the same claim restated in
-    /// the unit an operator reads off the alert text, so neither form can be satisfied alone.</para>
+    /// landing exactly on one slot was an accident of two independent decisions, and #3174 broke the
+    /// derivation that had made it a decision — see
+    /// <see cref="TimescaleSupport.RefreshSlotPercentOfHourlyCadence"/> for why the number cannot move even
+    /// though the grid did. What is left to check is the ORDERING, in the unit an operator reads off the
+    /// alert text: the knob must fire at or before the window the compression grid assumes a refresh fits
+    /// inside. The tightness half is gone with the uniform slot count it was expressed over, so the knob now
+    /// fires earlier than it strictly has to — the safe direction, and asserted as an inequality rather than
+    /// left implied.</para>
     ///
-    /// <para><b>The tiling assertion is not a tautology.</b> Under integer division a step that does not
-    /// divide 60 leaves <c>RefreshPhaseSlotSeconds * RefreshPhaseSlots</c> SHORT of the cadence — a
-    /// 7-minute step gives 8 slots of 420 s, 3,360 s of a 3,600 s hour — and every "a slot is a quarter of
-    /// the cadence" statement in the product silently stops being true. Pinned against
-    /// <see cref="TimescaleSupport.HourlyRefreshScheduleSpan"/> rather than a literal hour so the cadence
-    /// enters as the product's own value.</para>
+    /// <para><b>The tiling assertion is not a tautology, and it changed shape with the grid.</b> It used to
+    /// multiply one slot by a slot count, which under integer division went SHORT of the cadence for any
+    /// step that did not divide 60. The bands have different widths now, so the identity is that they
+    /// PARTITION the hour: the light band and its guard, the heaviest refresh's window, and the compression
+    /// band sum to the cadence exactly. That is stronger than the old form — it says no minute is
+    /// unassigned and none is claimed twice — and it is what makes
+    /// <see cref="TimescaleSupport.HeaviestRefreshWindowMinutes"/> a remainder rather than a third
+    /// independent number. Pinned against <see cref="TimescaleSupport.HourlyRefreshScheduleSpan"/> rather
+    /// than a literal hour so the cadence enters as the product's own value.</para>
     /// </summary>
     [Fact]
     public void TheRefreshGrid_TilesTheHourlyCadence_AndTheCadenceKnobFiresNoLaterThanOneSlot()
     {
-        var cadenceSeconds = TimescaleSupport.RefreshPhaseSlotSeconds * TimescaleSupport.RefreshPhaseSlots;
+        /* THE TILING IDENTITY: the three bands partition the hour. */
+        Assert.Equal(
+            TimescaleSupport.MinutesInHourlyCadence,
+            TimescaleSupport.HeaviestRefreshStartMinute
+            + TimescaleSupport.HeaviestRefreshWindowMinutes
+            + TimescaleSupport.CompressionPhaseBandMinutes);
 
-        Assert.Equal(TimescaleSupport.HourlyRefreshScheduleSpan, TimeSpan.FromSeconds(cadenceSeconds));
+        Assert.Equal(
+            TimescaleSupport.HourlyRefreshScheduleSpan,
+            TimeSpan.FromMinutes(TimescaleSupport.MinutesInHourlyCadence));
 
+        /* And the light band plus its guard IS that first stretch, so the identity above cannot be satisfied
+           by a start minute that came from anywhere else. */
+        Assert.Equal(
+            ((TimescaleSupport.LightHourlyRefreshCount - 1) * TimescaleSupport.LightRefreshStepMinutes)
+            + TimescaleSupport.CompressionPhaseGuardMinutes,
+            TimescaleSupport.HeaviestRefreshStartMinute);
+
+        /* Every band is strictly positive: a catalog or a policy list grown far enough would drive the
+           remainder to zero or negative, and a grid with no window for the heaviest refresh has to be red
+           here rather than produce a negative slot width. */
+        Assert.True(
+            TimescaleSupport.HeaviestRefreshWindowMinutes > 0,
+            $"the hour has no minutes left for the heaviest refresh's window: "
+            + $"{TimescaleSupport.LightHourlyRefreshCount} light policies at "
+            + $"{TimescaleSupport.LightRefreshStepMinutes}-minute spacing, a "
+            + $"{TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard and a "
+            + $"{TimescaleSupport.CompressionPhaseBandMinutes}-minute compression band already fill it — "
+            + "re-derive the grid (#3174) rather than widening any one band");
+        Assert.True(TimescaleSupport.CompressionPhaseBandMinutes > 0);
+        Assert.True(TimescaleSupport.CompressionPhaseGuardMinutes > 0);
+
+        var cadenceSeconds = (int)TimescaleSupport.HourlyRefreshScheduleSpan.TotalSeconds;
         var knobFiresAtSeconds = cadenceSeconds * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100;
 
         Assert.True(
             knobFiresAtSeconds <= TimescaleSupport.RefreshPhaseSlotSeconds,
             $"the shipped cadence knob fires at {knobFiresAtSeconds}s against a "
-            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s slot — past the width the compression phase grid "
-            + "assumes a refresh fits inside, so the alert would arrive after #3035's precondition is false");
+            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window — past the width the compression phase grid "
+            + "assumes a refresh fits inside, so the alert would arrive after #3035's precondition is false. "
+            + "The knob cannot move without a rung (V57), so the repair is the grid, not the knob");
 
-        /* And within one percentage point of the slot, so the derivation is the LATEST value that clears it
-           rather than an arbitrary early one. One point of cadence is the finest step the knob has. */
-        Assert.True(
-            knobFiresAtSeconds + cadenceSeconds / 100 > TimescaleSupport.RefreshPhaseSlotSeconds,
-            $"the shipped cadence knob fires at {knobFiresAtSeconds}s against a "
-            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s slot — earlier than it needs to be");
-
-        /* #3044's watch line sits inside the same slot, so the two signals are ordered rather than
+        /* #3044's watch line sits inside the same window, so the two signals are ordered rather than
            competing: the grid's own watch speaks first, the cadence alert at the wall. */
         Assert.True(
             TimescaleSupport.RefreshSlotWarningSeconds <= TimescaleSupport.RefreshPhaseSlotSeconds,
-            "the refresh slot watch line must sit inside the slot it watches");
+            "the refresh slot watch line must sit inside the window it watches");
     }
 
     /// <summary>
@@ -277,9 +338,9 @@ public sealed class TimescaleContinuousAggregateTests
     ///
     /// <para><b>Why the family-only check was not enough.</b> <c>collect.query_stats</c> — the other dominant
     /// table — feeds THREE hourly policies: the query-grain rollup, the per-database rollup, and the
-    /// query_stats baseline. Their phases land on distinct minutes today, but only because of where they
-    /// happen to sit in <see cref="TimescaleSupport.HourlyRefreshPhaseOrder"/>. Phases collide whenever two
-    /// positions differ by a multiple of <see cref="TimescaleSupport.RefreshPhaseSlots"/>, so inserting one
+    /// query_stats baseline. Under the uniform grid their phases landed on distinct minutes only because of
+    /// where they happened to sit in <see cref="TimescaleSupport.HourlyRefreshPhaseOrder"/> — phases collided
+    /// whenever two positions differed by a multiple of the slot count, so inserting one
     /// aggregate ahead of the per-database rollup would silently put two <c>query_stats</c> refreshes back on
     /// the same minute — the exact lock-queue adjacency this change exists to remove — and the family-only
     /// assertion would have stayed green. Raised by review rather than found here.</para>
@@ -295,12 +356,80 @@ public sealed class TimescaleContinuousAggregateTests
     /// registered. The extraction is asserted non-empty per view first: a regex that matched nothing would
     /// group every view under "no source" and report a clean sweep for having checked nothing, which is the
     /// failure mode a guard proving an absence has to rule out before its result means anything.</para>
+    ///
+    /// <para><b>Why this is kept even though #3174 made it unfalsifiable by construction.</b> Every hourly
+    /// policy now has its own minute, so a per-relation collision is impossible without a whole-set
+    /// collision — and the whole-set claim is asserted first, here, so the per-relation sweep below is the
+    /// weaker consequence rather than the load-bearing check. It stays because it is the check that states
+    /// WHY distinctness matters: it recovers the contended relations from the shipped CREATE text, so if a
+    /// later grid ever went back to sharing minutes between policies, this is the guard that says which
+    /// sharing is the harmful kind.</para>
     /// </summary>
     [Fact]
     public void HourlyRefreshPhases_AreDistinctForEveryRelationTwoPoliciesContendFor()
     {
         var definitions = TimescaleSupport.HourlyRefreshDefinitions;
         Assert.Equal(TimescaleSupport.HourlyRefreshPhaseOrder.Count, definitions.Count);
+
+        /* THE STRUCTURAL CLAIM, ahead of the per-relation sweep: no two hourly policies share a minute at
+           all, so no contending PAIR can. Asserted over the shipped list rather than over a literal count,
+           and it is what makes the sweep below unable to fail for a reason the sweep itself would have to
+           discover. */
+        var everyPhase = TimescaleSupport.HourlyRefreshPhaseOrder
+            .Select(TimescaleSupport.RefreshPhaseMinutesFor)
+            .ToArray();
+        Assert.Equal(everyPhase.Length, everyPhase.Distinct().Count());
+
+        /* THE DISCRIMINATING CASE, so the claim above is a property of the MAP and not of this list's
+           current order. Under the old grid the three collect.query_stats consumers sat at positions 0, 3
+           and 9 — all congruent mod the slot count — and inserting one aggregate ahead of the last of them
+           put two back on the same minute. Rotating the list is the same class of change, and the map has to
+           survive it: every rotation of the phase order still yields as many distinct minutes as there are
+           policies. A modulus-based map fails this at once.
+
+           THROUGH THE SHIPPED MAP, via its order-taking overload, and that is the whole point of the
+           overload existing. Re-implementing the counting rule here would prove the RULE injective under
+           permutation and leave TimescaleSupport.RefreshPhaseMinutesFor exercised at exactly one order — the
+           "a test that agrees with any derivation" failure one layer down, and the same failure this grid
+           exists to remove. Raised by review. */
+        for (var rotation = 1; rotation < TimescaleSupport.HourlyRefreshPhaseOrder.Count; rotation++)
+        {
+            var rotated = TimescaleSupport.HourlyRefreshPhaseOrder
+                .Skip(rotation)
+                .Concat(TimescaleSupport.HourlyRefreshPhaseOrder.Take(rotation))
+                .ToArray();
+
+            var minutes = rotated
+                .Select(view => TimescaleSupport.RefreshPhaseMinutesFor(rotated, view))
+                .ToArray();
+
+            Assert.Equal(minutes.Length, minutes.Distinct().Count());
+
+            /* And the map RESPONDED to the order, per VIEW — without this the loop re-asserts the unrotated
+               claim thirteen times and an overload that ignored its parameter would pass, which is the
+               defect the inline copy this replaced actually embodied. Comparing the two minute SEQUENCES is
+               not enough: an overload that ignored `rotated` still returns a permutation of the unrotated
+               minutes, so the sequences differ while nothing moved. What has to change is the minute a
+               NAMED view gets. */
+            Assert.Contains(
+                TimescaleSupport.HourlyRefreshPhaseOrder,
+                view => TimescaleSupport.RefreshPhaseMinutesFor(rotated, view)
+                    != TimescaleSupport.RefreshPhaseMinutesFor(view));
+        }
+
+        /* The two overloads agree at the shipped order, so the seam cannot drift from the map the product
+           actually uses. */
+        foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
+        {
+            Assert.Equal(
+                TimescaleSupport.RefreshPhaseMinutesFor(view),
+                TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HourlyRefreshPhaseOrder, view));
+        }
+
+        /* And the seam is as loud as the public overload for a view it does not hold. */
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TimescaleSupport.RefreshPhaseMinutesFor(
+                TimescaleSupport.HourlyRefreshPhaseOrder, TimescaleSupport.QueryStatsDailyView));
 
         /* view -> the relation its own CREATE selects FROM. */
         var sourceOf = new Dictionary<string, string>(StringComparer.Ordinal);

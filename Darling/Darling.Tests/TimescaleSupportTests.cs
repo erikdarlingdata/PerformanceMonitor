@@ -2266,87 +2266,114 @@ LIMIT 1", connection))
     /* ---------------- the compression PHASE grid (#3035) ---------------- */
 
     /// <summary>
-    /// The grid's actual invariant: every minute a compression policy may start on is clear of the band
-    /// after each refresh slot, and none of them is inside the heaviest refresh's slot at all.
+    /// The grid's actual invariant: every minute a compression policy may start on is clear of the guard band
+    /// after each LIGHT refresh, and none of them is inside the heaviest refresh's window at all.
     ///
-    /// <para><b>Not "different from the refresh minutes".</b> That weaker property is satisfied by :07, and
-    /// :07 sits squarely inside the 594 s the heaviest hourly refresh occupies from :00 — a compression tick
-    /// there is exactly the arrangement #3012's convoy formed on. What has to hold is a DISTANCE from each
-    /// refresh START, because the convoy needs compression's <c>AccessExclusiveLock</c> request to arrive
-    /// while a refresh already holds its shared lock.</para>
+    /// <para><b>Not "different from the refresh minutes".</b> That weaker property is satisfied by the minute
+    /// straight after the heaviest refresh's start, and that minute sits squarely inside the 896 s it
+    /// occupies — a compression tick there is exactly the arrangement #3012's convoy formed on. What has to
+    /// hold is a DISTANCE from each refresh START, because the convoy needs compression's
+    /// <c>AccessExclusiveLock</c> request to arrive while a refresh already holds its shared lock.</para>
     ///
-    /// <para>The whole minute list is pinned LITERALLY as well as checked against the rule that produced it.
-    /// A test that only re-derived the rule would agree with any derivation, including a wrong one; the
-    /// literal is what makes a moved grid loud.</para>
+    /// <para><b>RE-DERIVED, not renumbered (#3174).</b> The old grid's minutes were the second half of each
+    /// uniform refresh slot, and there is no uniform slot to take a half of any more. The rule is unchanged;
+    /// its output is a contiguous band at the tail of the hour because the refresh bands are contiguous too.
+    /// Both the derived WIDTH and the whole minute list are pinned: a test that only re-derived the rule
+    /// would agree with any derivation, including a wrong one, and the width is what ties the band to the
+    /// catalog rather than to whatever the refreshes happened to leave.</para>
     /// </summary>
     [Fact]
     public void CompressionPhaseGrid_ClearsEveryRefreshSlotsGuardBand_AndTheHeaviestRefreshsSlotWhole()
     {
-        Assert.Equal(15, TimescaleSupport.RefreshPhaseStepMinutes);
-        Assert.Equal(7, TimescaleSupport.CompressionPhaseGuardMinutes);
-        Assert.Equal(TimescaleSupport.RefreshPhaseStepMinutes / 2, TimescaleSupport.CompressionPhaseGuardMinutes);
+        /* The two chosen inputs, as literals, and every derived width as an identity beside its literal —
+           a re-derivation-only assertion agrees with any derivation, including a frozen one. */
+        Assert.Equal(1, TimescaleSupport.LightRefreshStepMinutes);
+        Assert.Equal(3, TimescaleSupport.CompressionPhaseMaxPerMinute);
 
-        /* THE OPERATING ENVELOPE, as assertions rather than as prose. The whole grid rests on the
-           heaviest refresh finishing inside ONE slot; a downgrade whose condition is only written in a
-           comment reads as unconditional to whoever finds it next. Raising the recorded ceiling past the
-           slot width therefore has to FAIL here rather than be renumbered through, because past that
-           point the refresh runs into its neighbour and the grid needs redesigning. */
-        Assert.Equal(594, TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
-        Assert.Equal(140, TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds);
+        Assert.Equal(4, TimescaleSupport.CompressionPhaseGuardMinutes);
+        Assert.Equal(
+            (int)Math.Ceiling(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds / 60.0),
+            TimescaleSupport.CompressionPhaseGuardMinutes);
+
+        Assert.Equal(24, TimescaleSupport.CompressionPhaseBandMinutes);
+        Assert.Equal(
+            (TimescaleSupport.HypertableCount + TimescaleSupport.CompressionPhaseMaxPerMinute - 1)
+            / TimescaleSupport.CompressionPhaseMaxPerMinute,
+            TimescaleSupport.CompressionPhaseBandMinutes);
+
+        Assert.Equal(15, TimescaleSupport.HeaviestRefreshStartMinute);
+        Assert.Equal(21, TimescaleSupport.HeaviestRefreshWindowMinutes);
+        Assert.Equal(
+            TimescaleSupport.MinutesInHourlyCadence
+            - TimescaleSupport.HeaviestRefreshStartMinute
+            - TimescaleSupport.CompressionPhaseBandMinutes,
+            TimescaleSupport.HeaviestRefreshWindowMinutes);
+
+        /* THE OPERATING ENVELOPE, as assertions rather than as prose. The whole grid rests on the heaviest
+           refresh finishing inside the window the hour can spare, with the watch line's lead time intact; a
+           downgrade whose condition is only written in a comment reads as unconditional to whoever finds it
+           next. A recorded ceiling that outgrew the window therefore has to FAIL here rather than be
+           renumbered through — and the window is a REMAINDER, so there is no wider one to give it. */
+        Assert.Equal(896, TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
+        Assert.Equal(226.8, TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds);
         Assert.True(
-            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds < TimescaleSupport.RefreshPhaseStepMinutes * 60,
+            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
             $"the heaviest hourly refresh's recorded ceiling is {TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds}s "
-            + $"against a {TimescaleSupport.RefreshPhaseStepMinutes * 60}s slot — it no longer fits inside its own slot, so "
-            + "excluding one slot is no longer enough and the compression grid has to be re-derived");
+            + $"against a {TimescaleSupport.RefreshPhaseSlotSeconds}s window — it no longer fits inside the window the "
+            + "hour can spare, so excluding that window is no longer enough and the compression grid has to be re-derived");
 
-        /* And it is WHY the heaviest slot is excluded whole rather than guarded: the guard band is
-           shorter than the ceiling, so no minute of that slot could be recovered by widening it. */
+        /* THE TWO RELATIONSHIPS THE SHAPE RESTS ON, which replace the old "more than 4x" ratio (#3174).
+           The ratio was never what the geometry consumed, and at 896 s against 226.8 s it is 3.95x — so a
+           guard written as Other * 4 < Heaviest was red at every possible step while the geometry it was
+           supposed to protect was sound. What the geometry consumes is: a light refresh fits inside the
+           guard band, and the heaviest one does not. */
+        Assert.True(
+            TimescaleSupport.CompressionPhaseGuardMinutes * 60 >= TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
+            $"the {TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard band is "
+            + $"{TimescaleSupport.CompressionPhaseGuardMinutes * 60}s against a "
+            + $"{TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s recorded ceiling for a non-heaviest hourly "
+            + "refresh — a compression policy can now start while a light refresh still holds AccessShareLock, "
+            + "which is #3012's mechanism");
         Assert.True(
             TimescaleSupport.CompressionPhaseGuardMinutes * 60 < TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
-            "the guard band now clears the heaviest refresh, so excluding its whole slot is over-conservative and the grid should be widened deliberately rather than left as-is");
+            "the guard band now clears the heaviest refresh, so excluding its whole window is over-conservative "
+            + "and the grid should be widened deliberately rather than left as-is");
 
-        /* The guard band itself is 3x the recorded ceiling for every OTHER hourly refresh, which is the
-           margin the light slots are held to. */
-        Assert.True(
-            TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds * 3 <= TimescaleSupport.CompressionPhaseGuardMinutes * 60,
-            $"the {TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard band is no longer 3x the "
-            + $"{TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s recorded ceiling for a non-heaviest hourly refresh");
-
-        /* And the ASYMMETRY between the two recorded ceilings, which is what HeaviestHourlyRefreshView's
-           "under a quarter of it" and RefreshPhaseStepMinutes' "more than 4x" both rest on. Those are the
-           only two places the asymmetry is stated in prose, and neither is derivable from the grid, so
-           without this they can go stale in either direction while every other pin stays green. */
-        Assert.True(
-            TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds * 4 < TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
-            $"the heaviest hourly refresh's {TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds}s "
-            + $"recorded ceiling is no longer more than 4x the {TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s "
-            + "recorded for any other one, so the asymmetry the grid's shape is justified by has narrowed — "
-            + "re-read HeaviestHourlyRefreshView and RefreshPhaseStepMinutes rather than editing this");
-
-        var refreshSlots = TimescaleSupport.HourlyRefreshPhaseOrder
+        var refreshMinutes = TimescaleSupport.HourlyRefreshPhaseOrder
             .Select(TimescaleSupport.RefreshPhaseMinutesFor)
             .Distinct()
             .OrderBy(m => m)
             .ToArray();
-        Assert.Equal(new[] { 0, 15, 30, 45 }, refreshSlots);
+        Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15 }, refreshMinutes);
+        Assert.Equal(TimescaleSupport.HourlyRefreshPhaseOrder.Count, refreshMinutes.Length);
 
-        var heaviestSlot = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView);
+        var heaviestMinute = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView);
 
         Assert.Equal(
-            new[] { 22, 23, 24, 25, 26, 27, 28, 29, 37, 38, 39, 40, 41, 42, 43, 44, 52, 53, 54, 55, 56, 57, 58, 59 },
+            new[] { 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59 },
             TimescaleSupport.CompressionPhaseMinutes.ToArray());
+        Assert.Equal(TimescaleSupport.CompressionPhaseBandMinutes, TimescaleSupport.CompressionPhaseMinutes.Count);
+
+        static int MinutesPastStart(int minute, int start, int cadence) => (minute - start + cadence) % cadence;
 
         foreach (var minute in TimescaleSupport.CompressionPhaseMinutes)
         {
-            var slot = minute / TimescaleSupport.RefreshPhaseStepMinutes * TimescaleSupport.RefreshPhaseStepMinutes;
+            Assert.DoesNotContain(minute, refreshMinutes);
 
-            Assert.DoesNotContain(minute, refreshSlots);
-            Assert.NotEqual(heaviestSlot, slot);
-            Assert.True(
-                minute - slot >= TimescaleSupport.CompressionPhaseGuardMinutes,
-                $":{minute.ToString("00", CultureInfo.InvariantCulture)} is only {minute - slot} minute(s) past the "
-                + $":{slot.ToString("00", CultureInfo.InvariantCulture)} refresh start, inside the "
-                + $"{TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard band");
+            foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
+            {
+                var start = TimescaleSupport.RefreshPhaseMinutesFor(view);
+                var band = string.Equals(view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal)
+                    ? TimescaleSupport.HeaviestRefreshWindowMinutes
+                    : TimescaleSupport.CompressionPhaseGuardMinutes;
+
+                Assert.True(
+                    MinutesPastStart(minute, start, TimescaleSupport.MinutesInHourlyCadence) >= band,
+                    $":{minute.ToString("00", CultureInfo.InvariantCulture)} is only "
+                    + $"{MinutesPastStart(minute, start, TimescaleSupport.MinutesInHourlyCadence)} minute(s) past "
+                    + $"{view}'s :{start.ToString("00", CultureInfo.InvariantCulture)} start, inside its "
+                    + $"{band}-minute band");
+            }
         }
 
         /* THE CONTROL: both exclusions actually removed a population. Every assertion in the loop above
@@ -2354,18 +2381,26 @@ LIMIT 1", connection))
            non-empty, shown disjoint from the grid, and shown to account for exactly the minutes missing
            from it — which is the difference between "the filter matched what it was aimed at" and "the
            filter produced output". */
-        var excludedByGuard = Enumerable.Range(0, 60)
-            .Where(m => m % TimescaleSupport.RefreshPhaseStepMinutes < TimescaleSupport.CompressionPhaseGuardMinutes)
+        var excludedByGuard = TimescaleSupport.HourlyRefreshPhaseOrder
+            .Where(v => !string.Equals(v, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
+            .SelectMany(v => Enumerable
+                .Range(TimescaleSupport.RefreshPhaseMinutesFor(v), TimescaleSupport.CompressionPhaseGuardMinutes)
+                .Select(m => m % TimescaleSupport.MinutesInHourlyCadence))
+            .Distinct()
             .ToArray();
-        var excludedByHeaviestSlot = Enumerable.Range(heaviestSlot, TimescaleSupport.RefreshPhaseStepMinutes).ToArray();
+        var excludedByHeaviestWindow = Enumerable
+            .Range(heaviestMinute, TimescaleSupport.HeaviestRefreshWindowMinutes)
+            .Select(m => m % TimescaleSupport.MinutesInHourlyCadence)
+            .ToArray();
 
-        Assert.Equal(28, excludedByGuard.Length);
-        Assert.Equal(15, excludedByHeaviestSlot.Length);
-        Assert.Contains(7, excludedByHeaviestSlot);
+        Assert.Equal(15, excludedByGuard.Length);
+        Assert.Equal(21, excludedByHeaviestWindow.Length);
+        Assert.Contains(heaviestMinute + 1, excludedByHeaviestWindow);
         Assert.Empty(excludedByGuard.Intersect(TimescaleSupport.CompressionPhaseMinutes));
-        Assert.Empty(excludedByHeaviestSlot.Intersect(TimescaleSupport.CompressionPhaseMinutes));
+        Assert.Empty(excludedByHeaviestWindow.Intersect(TimescaleSupport.CompressionPhaseMinutes));
         Assert.Equal(
-            60 - excludedByGuard.Union(excludedByHeaviestSlot).Count(),
+            TimescaleSupport.MinutesInHourlyCadence
+            - excludedByGuard.Union(excludedByHeaviestWindow).Count(),
             TimescaleSupport.CompressionPhaseMinutes.Count);
     }
 
@@ -2376,23 +2411,31 @@ LIMIT 1", connection))
     /// closer — are both red here.
     ///
     /// <para><b>Why this is separate from the guard-band check above.</b> That one asks whether each
-    /// compression minute clears the refresh in ITS OWN slot, which is a statement about the band. This asks
-    /// whether it clears the HEAVIEST refresh, whose runtime is the only one long enough to reach past its
-    /// slot at all, and the answer has to be expressed in the ceiling rather than in minutes or the
-    /// constant's value stops being load-bearing.</para>
+    /// compression minute clears every refresh's own band, which is a statement about the bands. This asks
+    /// whether it clears the HEAVIEST refresh's measured RUNTIME, which is the only quantity that keeps the
+    /// recorded ceiling load-bearing: the window is a remainder of the hour and does not consult the
+    /// ceiling, so without this the ceiling could drift with nothing noticing.</para>
     ///
     /// <para><b>The discriminating case is asserted too.</b> A comparison over a grid that already clears the
     /// refresh by a wide margin is satisfied by almost anything, so the minute that WOULD violate it is
     /// computed and shown to violate it. Without that, a check that had stopped measuring the right quantity
     /// would still be green.</para>
+    ///
+    /// <para><b>The watch-line half went RED on #3166's census and #3174's re-derived grid answered it.</b>
+    /// At a 896 s ceiling against the 750 s line a 15-minute slot produced, <c>ceiling &lt; watch</c> was
+    /// false — the sizing figure sat 146 s above the line, so the watch reported the grid's own sizing rather
+    /// than anything new. The answer was the geometry, not a re-typed band: against the window the hour can
+    /// spare the line is 1,050 s and the ceiling is 154 s below it. The gap literal moved with the two terms,
+    /// which is what it is for.</para>
     /// </summary>
     [Fact]
     public void NoCompressionMinuteStartsWhileTheHeaviestRefreshIsStillRunning()
     {
         var heaviestSlot = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView);
         var ceiling = TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
+        var cadence = TimescaleSupport.MinutesInHourlyCadence;
 
-        static int SecondsPastStart(int minute, int start) => (minute - start + 60) % 60 * 60;
+        int SecondsPastStart(int minute, int start) => (minute - start + cadence) % cadence * 60;
 
         Assert.NotEmpty(TimescaleSupport.CompressionPhaseMinutes);
         foreach (var minute in TimescaleSupport.CompressionPhaseMinutes)
@@ -2408,7 +2451,7 @@ LIMIT 1", connection))
 
         /* The comparison discriminates: the last minute still inside the refresh must fail it. Derived from
            the ceiling rather than written down, so it moves with the constant. */
-        var lastMinuteInsideTheRefresh = (heaviestSlot + (ceiling - 1) / 60) % 60;
+        var lastMinuteInsideTheRefresh = (heaviestSlot + ((ceiling - 1) / 60)) % cadence;
         Assert.True(SecondsPastStart(lastMinuteInsideTheRefresh, heaviestSlot) < ceiling);
         Assert.DoesNotContain(lastMinuteInsideTheRefresh, TimescaleSupport.CompressionPhaseMinutes);
 
@@ -2421,29 +2464,30 @@ LIMIT 1", connection))
             $"the recorded ceiling is {ceiling}s against a {TimescaleSupport.RefreshSlotWarningSeconds}s watch "
             + "line, so the figure the grid is sized against classifies as a warning and the watch reports the "
             + "grid's own sizing rather than anything new");
-        Assert.Equal(26, (TimescaleSupport.RefreshSlotWarningSeconds - ceiling) * 100 / ceiling);
+        Assert.Equal(17, (TimescaleSupport.RefreshSlotWarningSeconds - ceiling) * 100 / ceiling);
     }
 
     /* ─────────────────── #3044: the watch on the LIVE figure, not the constant ─────────────────── */
 
     /// <summary>
-    /// The slot and the watch line are DERIVED from
-    /// <see cref="TimescaleSupport.RefreshPhaseStepMinutes"/>, so a moved grid moves them.
+    /// The window and the watch line are DERIVED from
+    /// <see cref="TimescaleSupport.HeaviestRefreshWindowMinutes"/>, so a re-derived grid moves them.
     ///
     /// <para><b>Both forms, because either alone is passable by the wrong code.</b> The literals are what
     /// make a moved line loud — a re-derivation-only test agrees with any derivation, including a hardcoded
-    /// one. The identities are what make it MOVE: a warning line frozen at a literal 750 satisfies the
+    /// one. The identities are what make it MOVE: a warning line frozen at a literal 1050 satisfies the
     /// literal pin and fails <c>RefreshSlotWarningSeconds * 6 == RefreshPhaseSlotSeconds * 5</c> the moment
-    /// the step changes. That identity is stated as a cross-multiplication rather than a division so it is
-    /// exact at every step — <c>RefreshPhaseStepMinutes * 60</c> is divisible by 6 for any integer step.</para>
+    /// the window changes. That identity is stated as a cross-multiplication rather than a division so it is
+    /// exact at every width — <c>HeaviestRefreshWindowMinutes * 60</c> is divisible by 6 for any integer
+    /// number of minutes.</para>
     /// </summary>
     [Fact]
-    public void TheRefreshSlotWatchLines_AreDerivedFromTheStep_NotWrittenDown()
+    public void TheRefreshSlotWatchLines_AreDerivedFromTheWindow_NotWrittenDown()
     {
-        Assert.Equal(900, TimescaleSupport.RefreshPhaseSlotSeconds);
-        Assert.Equal(TimescaleSupport.RefreshPhaseStepMinutes * 60, TimescaleSupport.RefreshPhaseSlotSeconds);
+        Assert.Equal(1260, TimescaleSupport.RefreshPhaseSlotSeconds);
+        Assert.Equal(TimescaleSupport.HeaviestRefreshWindowMinutes * 60, TimescaleSupport.RefreshPhaseSlotSeconds);
 
-        Assert.Equal(750, TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(1050, TimescaleSupport.RefreshSlotWarningSeconds);
         Assert.Equal(
             TimescaleSupport.RefreshPhaseSlotSeconds * 5 / 6,
             TimescaleSupport.RefreshSlotWarningSeconds);
@@ -2462,7 +2506,7 @@ LIMIT 1", connection))
         Assert.True(
             TimescaleSupport.RefreshSlotWarningSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
             "the watch line is at or past the slot it is meant to give warning of");
-        Assert.Equal(150, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(210, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
     }
 
     /// <summary>
@@ -2472,10 +2516,17 @@ LIMIT 1", connection))
     /// and the watch line sits ABOVE it — so a live reading in the warning band is this job exceeding its own
     /// recorded range rather than a restatement of the figure the compression grid is sized against. The five
     /// readings taken during #3044's review all classify INSIDE too, which is the anti-crying-wolf half; the
-    /// largest of them, at 66.0% of the slot, IS the recorded ceiling.</para>
+    /// largest of them, at 47.1% of the window, was the recorded ceiling when the record was sixteen runs
+    /// long.</para>
+    ///
+    /// <para><b>The ceiling assertion below went RED on #3166's census and #3174's re-derived grid answered
+    /// it.</b> Against the 750 s line a 15-minute slot produced, 896 s classified <c>ApproachingSlot</c> and
+    /// sat 146 s above the watch line, so the relationship this test is named for had inverted. It was
+    /// restored by moving the geometry — the window the hour can spare is 1,260 s, so the line is 1,050 s —
+    /// and not by re-typing the expected band, which would have hidden it while deciding nothing.</para>
     ///
     /// <para>Both boundaries are pinned inclusive on purpose: the wall matches the build-time assertion's
-    /// <c>&lt;</c>, so a value AT the slot width fails both.</para>
+    /// <c>&lt;</c>, so a value AT the window width fails both.</para>
     /// </summary>
     [Fact]
     public void TheRefreshSlotClassifier_BandsTheLiveReadings_AndKeepsTheWatchLineAboveTheRecordedCeiling()
@@ -2528,61 +2579,85 @@ LIMIT 1", connection))
     }
 
     /// <summary>
-    /// The reason <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/> rejects the lower alternative its
-    /// doc comment names: slot less one <see cref="TimescaleSupport.CompressionPhaseGuardMinutes"/> band
-    /// sits BELOW <see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>, where the
-    /// chosen line sits above it (#3107).
+    /// The reason <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/> rejects the alternative its doc
+    /// comment names — window less one <see cref="TimescaleSupport.CompressionPhaseGuardMinutes"/> band —
+    /// RE-TAKEN at #3174, because the reason it used to give stopped being true (#3107).
     ///
-    /// <para><b>What the rejection claims is a difference in VERDICT, and it is asserted in the two halves
-    /// that difference actually has.</b> The line is a compile-time constant, so the classifier cannot be
-    /// re-run against the alternative and nothing here pretends to: what is checked is the RULE
-    /// (<see cref="TimescaleSupport.ClassifyRefreshSlotHeadroom"/> warns at or past its line and not one
-    /// second below it) and the INEQUALITY (the recorded ceiling is at or past the alternative, and below
-    /// the chosen line). Together those two say the ceiling warns under the alternative and does not under
-    /// the chosen line, which is the whole of the difference.</para>
+    /// <para><b>The old rejection was an ORDERING and the ordering is gone.</b> Under the uniform grid the
+    /// guard was half a slot, the alternative was 480 s, and 480 s sat BELOW the recorded ceiling: a line
+    /// under the ceiling warns on the very run the compression grid is sized against, which is the
+    /// crying-wolf failure the five-sixths choice exists to avoid. Re-deriving the guard from the light
+    /// refreshes' own ceiling shrank it from seven minutes to four, so the alternative rose to 1,020 s and
+    /// now sits ABOVE the ceiling. Both lines clear it, they are 30 s apart, and lead time argues mildly FOR
+    /// the lower one. The ordering therefore cannot carry the decision any more, and this test asserts that
+    /// it cannot — the inversion is pinned rather than papered over, because a rejection whose stated reason
+    /// has quietly reversed is worse than no rejection.</para>
     ///
-    /// <para><b>An ordering, deliberately, and not a share of the readings.</b> How large a fraction of any
-    /// quoted population a threshold would fire on moves as that population grows while the threshold and
-    /// the decision behind it stand still, so it cannot be pinned in a way that goes red only on a defect.
-    /// The ordering against the recorded ceiling moves only when one of the two constants moves, and then
-    /// the decision genuinely does have to be re-taken.</para>
+    /// <para><b>What rejects it now is COUPLING, and that is asserted as the two derivations.</b> The
+    /// alternative is a function of <see cref="TimescaleSupport.CompressionPhaseGuardMinutes"/>, which is a
+    /// function of <see cref="TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds"/> — a measurement
+    /// of the TWELVE OTHER refresh policies. So the alternative would move the heaviest refresh's watch line
+    /// whenever a light refresh got slower, which is a dependency the watch line has no business having.
+    /// Five sixths of <see cref="TimescaleSupport.RefreshPhaseSlotSeconds"/> depends on the window this job
+    /// has to fit inside and on nothing else. Under the uniform grid both lines were functions of the same
+    /// step, which is exactly why the argument had to be about ordering then and can be about coupling
+    /// now.</para>
     ///
-    /// <para>The lead-time leg cuts the OTHER way and is asserted in that direction, because a reader
-    /// checking the rejection is owed the fact that it does not help: the lower line leaves MORE room
-    /// between itself and the slot, so it warns earlier rather than later.</para>
+    /// <para><b>Coupling is a stable reason where a share of the readings is not.</b> How large a fraction of
+    /// any quoted population a threshold would fire on moves as that population grows while the threshold
+    /// and the decision behind it stand still. Which constants a line is a function of moves only when the
+    /// derivations move, and then the decision genuinely does have to be re-taken — as it just was.</para>
     /// </summary>
     [Fact]
-    public void TheRejectedWatchLineAlternative_SitsBelowTheRecordedCeiling_WhileTheChosenLineSitsAbove()
+    public void TheRejectedWatchLineAlternative_NoLongerSitsBelowTheRecordedCeiling_SoTheRejectionIsCoupling()
     {
         /* Derived as the prose derives it, then held to the literal too — a re-derivation-only assertion
            agrees with any derivation, including one frozen at 480. */
         var alternative =
             TimescaleSupport.RefreshPhaseSlotSeconds - (TimescaleSupport.CompressionPhaseGuardMinutes * 60);
-        Assert.Equal(480, alternative);
+        Assert.Equal(1020, alternative);
         Assert.True(
             alternative < TimescaleSupport.RefreshSlotWarningSeconds,
-            "the alternative is no longer the LOWER of the two lines, so the paragraph rejecting it as too "
-            + "low is about something else now");
+            "the alternative is no longer the LOWER of the two lines, so the paragraph rejecting it as the "
+            + "lower one is about something else now");
 
-        /* THE REJECTION, as the verdicts it produces. The figure the compression grid is sized against is
-           routine under the chosen line and a warning under the alternative: a line that warns on the load
-           the grid is built to absorb is the crying-wolf failure the five-sixths choice exists to avoid. */
+        /* THE INVERSION, pinned: the alternative now clears the recorded ceiling, so the ordering the
+           rejection used to rest on no longer discriminates between the two lines. If this ever goes back to
+           false, the ordering argument is available again and the coupling one becomes the weaker of two
+           rather than the only one. */
         var ceiling = TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
+        Assert.True(
+            ceiling < alternative,
+            $"the {alternative} s alternative sits at or below the {ceiling} s recorded ceiling again, so the "
+            + "ordering rejects it on its own and the coupling argument in the doc comment is no longer the "
+            + "load-bearing one — re-read #3107 rather than editing this assertion");
+
+        /* Both lines clear the ceiling, and the gap between them is one guard band less one sixth of the
+           window. Stated as the two verdicts the classifier actually produces, since a line is a
+           compile-time value and the classifier cannot be re-run against the alternative. */
         Assert.Equal(
             TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
             TimescaleSupport.ClassifyRefreshSlotHeadroom(ceiling));
         Assert.True(
-            ceiling >= alternative,
-            $"the {alternative} s alternative no longer sits below the {ceiling} s recorded ceiling, so the "
-            + "doc comment's sole stated reason for rejecting it is false — re-take the five-sixths decision "
-            + "(#3044, #3107) rather than editing this assertion");
-        Assert.True(
             ceiling < TimescaleSupport.RefreshSlotWarningSeconds,
             $"the chosen {TimescaleSupport.RefreshSlotWarningSeconds} s line no longer sits above the "
-            + $"{ceiling} s recorded ceiling, so it rejects the alternative on a property it has itself "
-            + "stopped having");
+            + $"{ceiling} s recorded ceiling");
+        Assert.Equal(30, TimescaleSupport.RefreshSlotWarningSeconds - alternative);
 
-        /* The rule the two inequalities above are read through: at or past the line warns, one second
+        /* THE COUPLING, as the derivations rather than as prose. The alternative tracks a measurement of the
+           OTHER twelve policies; the chosen line tracks only the window. Both are asserted as identities, so
+           a future change that made the chosen line depend on the guard would fail the second one. */
+        Assert.Equal(
+            (int)Math.Ceiling(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds / 60.0),
+            TimescaleSupport.CompressionPhaseGuardMinutes);
+        Assert.Equal(
+            TimescaleSupport.RefreshPhaseSlotSeconds * 5,
+            TimescaleSupport.RefreshSlotWarningSeconds * 6);
+        Assert.Equal(
+            TimescaleSupport.HeaviestRefreshWindowMinutes * 60,
+            TimescaleSupport.RefreshPhaseSlotSeconds);
+
+        /* The rule the inequalities above are read through: at or past the line warns, one second
            below it does not. Without this the ordering would be arithmetic with no stated consequence. */
         Assert.Equal(
             TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
@@ -2594,14 +2669,23 @@ LIMIT 1", connection))
         /* And the lead time each line leaves, as the two figures rather than as the inequality between them
            — which is the same inequality asserted above and would add nothing on its own. The lower line
            leaves the larger margin, so lead time argues FOR it and cannot be part of its rejection. */
-        Assert.Equal(420, TimescaleSupport.RefreshPhaseSlotSeconds - alternative);
-        Assert.Equal(150, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(240, TimescaleSupport.RefreshPhaseSlotSeconds - alternative);
+        Assert.Equal(210, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
     }
 
     /// <summary>
     /// The reading carries the derived answers, so a caller cannot log the seconds and drop the verdict — and
     /// the headroom goes NEGATIVE past the wall rather than clamping, because how far through the wall a run
     /// went is what sizes the re-derivation.
+    ///
+    /// <para><b>The overrun case is DERIVED from the window, not written down (#3174).</b> It used to probe
+    /// with a literal 1200 s and assert <c>-300</c>. That is a bound expressed over the grid and written as
+    /// a value, and it fails in the worst way available: at a 20-minute geometry 1200 s IS the window, so
+    /// the reading's headroom becomes 0, <c>Assert.Equal(-300, ...)</c> would be the only thing to notice —
+    /// and had the expected figure been re-typed to match, the case would have stopped testing negative
+    /// headroom while staying green. Derived, the probe is past the wall at every window width, and the
+    /// overrun is asserted to be strictly positive so a degenerate geometry cannot make the case
+    /// vacuous.</para>
     /// </summary>
     [Fact]
     public void TheRefreshSlotReading_CarriesItsOwnVerdict_AndReportsOverrunAsNegativeHeadroom()
@@ -2610,21 +2694,37 @@ LIMIT 1", connection))
             TimescaleSupport.HeaviestHourlyRefreshView,
             TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
 
-        /* The recorded ceiling: 66.0% of the slot, 306 s clear, and inside the routine band. */
+        /* The recorded ceiling: 71.1% of the window and 364 s clear, inside the routine band. That band
+           assertion went RED on #3166's census against a 15-minute slot and #3174 answered it with geometry
+           rather than with a renumbered band — see the classifier test for the ordering it restored. */
         Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.InsideSlot, atTheCeiling.Headroom);
-        Assert.Equal(306, atTheCeiling.ClearOfSlotSeconds);
-        Assert.Equal(66.0, atTheCeiling.PercentOfSlot, 1);
+        Assert.Equal(364, atTheCeiling.ClearOfSlotSeconds);
+        Assert.Equal(71.1, atTheCeiling.PercentOfSlot, 1);
 
-        /* The watch line, which is where APPROACHING starts: 83.3% of the slot, 150 s clear. */
+        /* The watch line, which is where APPROACHING starts: 83.3% of the window, 210 s clear. */
         var atTheWatchLine = new HeaviestRefreshSlotReading(
             TimescaleSupport.HeaviestHourlyRefreshView, TimescaleSupport.RefreshSlotWarningSeconds);
         Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot, atTheWatchLine.Headroom);
-        Assert.Equal(150, atTheWatchLine.ClearOfSlotSeconds);
+        Assert.Equal(210, atTheWatchLine.ClearOfSlotSeconds);
         Assert.Equal(83.3, atTheWatchLine.PercentOfSlot, 1);
 
-        var through = new HeaviestRefreshSlotReading(TimescaleSupport.HeaviestHourlyRefreshView, 1200);
+        /* OVERRUN, derived: a run one sixth of the window past the wall. The sixth is the same fraction the
+           watch line is expressed over, so this needs no second chosen number, and it is asserted positive
+           first — a zero overrun would make every assertion below pass while testing nothing. */
+        var overrunBy = TimescaleSupport.RefreshPhaseSlotSeconds / 6;
+        Assert.True(
+            overrunBy > 0,
+            "the derived overrun is zero, so the negative-headroom case below is vacuous — the window has "
+            + "collapsed and the grid needs re-deriving (#3174)");
+
+        var through = new HeaviestRefreshSlotReading(
+            TimescaleSupport.HeaviestHourlyRefreshView, TimescaleSupport.RefreshPhaseSlotSeconds + overrunBy);
         Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.SlotExceeded, through.Headroom);
-        Assert.Equal(-300, through.ClearOfSlotSeconds);
+        Assert.Equal(-overrunBy, through.ClearOfSlotSeconds);
+        Assert.True(
+            through.ClearOfSlotSeconds < 0,
+            "headroom past the wall is not negative, so the overrun clamps instead of reporting how far "
+            + "through the wall the run went");
     }
 
     /// <summary>
@@ -2640,6 +2740,13 @@ LIMIT 1", connection))
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(null, quiet);
         Assert.Equal("(no log lines captured)", quiet.Joined);
 
+        /* THE ROUTINE-BAND CASE IS FED THE RECORDED CEILING, and after #3166's census re-derivation that
+           reading logs Warning rather than Debug — so this assertion FAILS and is left exactly as written.
+           It is the same inversion as the band pins: a sizing figure the product's own watch line calls a
+           warning cannot also be the example of a routine reading. Re-pointing this case at a lower literal
+           would keep the level table covered while quietly dropping the claim that the grid's own figure is
+           routine, which is the claim worth losing loudly. The remedy is the slot or the fraction (#3035,
+           #3044, #3107). */
         var inside = new CapturingTestLogger();
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
             new HeaviestRefreshSlotReading(
@@ -2660,6 +2767,15 @@ LIMIT 1", connection))
            self-metrics series serves a last-snapshot-per-day point, so it cannot stand alone as the
            per-run history an operator following this line goes looking for. */
         Assert.Contains("timescaledb_information.job_history", approaching.Joined, StringComparison.Ordinal);
+
+        /* #3175: and the line says WHEN that route is empty, which is the half a pointer cannot carry on its
+           own. job_history only records executions where timescaledb.enable_job_execution_logging is on, it
+           is off by default, and the conf block that sets it cannot be healed onto an older cluster - so an
+           operator following this line on such a store gets zero rows and reads them as a quiet hour.
+           Pinned because the shape is a known one: get_store_metrics' description pin has required this same
+           route to be NAMED since #3119 and passed the whole time the route answered nothing there. A pin on
+           a pointer's presence cannot tell you the thing pointed at replies. */
+        Assert.Contains("enable_job_execution_logging", approaching.Joined, StringComparison.Ordinal);
 
         var exceeded = new CapturingTestLogger();
         TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
@@ -2732,52 +2848,81 @@ LIMIT 1", connection))
     /// cannot rot silently.
     ///
     /// <para>#2136's Store Job Over Cadence warns at a store-backed percent of a job's OWN schedule interval,
-    /// default 25. For an hourly job that is 900 s — exactly one refresh slot, because a slot is the hourly
-    /// cadence divided by <see cref="TimescaleSupport.RefreshPhaseSlots"/>. So an alert at the slot width
-    /// would double-fire with #2136 on the same job, the same reading and the same hour, which is what rules
-    /// the alert form out.</para>
+    /// default 25. For an hourly job that is 900 s. So an alert at the same place would fire on the same job,
+    /// the same reading and the same hour as #2136 does, which is what rules the alert form out.</para>
     ///
-    /// <para><b>But the equality is arithmetic, not design, and this test says which way it breaks.</b> The
-    /// knob is clamped [5, 100] with no relationship to <see cref="TimescaleSupport.RefreshPhaseStepMinutes"/>:
-    /// at the clamp's top it lands at 3,600 s, four slots past invalidation. That is the whole argument for a
-    /// bound derived from the step instead — and if a future step makes the default knob fire BELOW the slot,
-    /// this pin is where that gets noticed.</para>
+    /// <para><b>The 900 s was exactly one refresh slot until #3174, and now it is not — which is why the
+    /// relationship this test pins is an ORDERING rather than an equality.</b> The knob was
+    /// <c>100 / RefreshPhaseSlots</c>; the re-derived grid has no uniform slot count, and V57's applied
+    /// column default means the figure cannot move without a rung
+    /// (<see cref="TimescaleSupport.RefreshSlotPercentOfHourlyCadence"/>). So the knob lands 360 s INSIDE
+    /// the window the compression grid assumes a refresh fits in, which is the safe direction: #2136 speaks
+    /// before the wall rather than after it. What is asserted is that ordering, plus the two ways it can
+    /// break — the knob's clamp letting an operator move the effective line past the wall, and a future
+    /// re-derivation shrinking the window below where the knob already fires.</para>
+    ///
+    /// <para><b>The knob is clamped [5, 100] with no relationship to the grid at all.</b> At the clamp's top
+    /// it lands at 3,600 s, well past the window, with the grid's precondition broken and nothing said —
+    /// which is the whole argument for a bound derived from the grid instead, and #3044's line is that
+    /// bound.</para>
     /// </summary>
     [Fact]
-    public void TheJobCadenceKnob_EqualsOneSlotOnlyByArithmetic_WhichIsWhyTheSlotWatchIsSeparate()
+    public void TheJobCadenceKnob_FiresInsideTheWindow_WhichIsWhyTheSlotWatchIsSeparate()
     {
         var hourlyCadenceSeconds = (int)TimescaleSupport.HourlyRefreshScheduleSpan.TotalSeconds;
 
         Assert.Equal(3600, hourlyCadenceSeconds);
-        Assert.Equal(
-            TimescaleSupport.RefreshPhaseSlotSeconds,
-            hourlyCadenceSeconds / TimescaleSupport.RefreshPhaseSlots);
 
-        /* #2136's shipped default, and where it lands on an hourly job today: exactly the slot. */
+        /* #2136's shipped default, and where it lands on an hourly job today. */
         const int ShippedWarnPercent = 25;
         Assert.Equal(
             ShippedWarnPercent, new DarlingConfig().Alerts.StoreJobCadenceWarnPercent);
         Assert.Equal(
-            TimescaleSupport.RefreshPhaseSlotSeconds,
-            hourlyCadenceSeconds * ShippedWarnPercent / 100);
+            ShippedWarnPercent, TimescaleSupport.RefreshSlotPercentOfHourlyCadence);
+        Assert.Equal(900, hourlyCadenceSeconds * ShippedWarnPercent / 100);
 
-        /* And where the knob's own clamp lets an operator move it to — four slots past the wall, with the
-           grid's precondition broken and nothing said. */
-        Assert.Equal(
-            4 * TimescaleSupport.RefreshPhaseSlotSeconds,
-            hourlyCadenceSeconds * 100 / 100);
-
-        /* The slot watch fires first either way, which is the property that makes it worth having. */
+        /* THE ORDERING, which is what survives the grid re-derivation: the knob fires strictly inside the
+           window, so it arrives before #3035's precondition is false rather than after. A window that shrank
+           below 900 s would put #2136 past the wall, and that is red here. */
         Assert.True(
-            TimescaleSupport.RefreshSlotWarningSeconds < hourlyCadenceSeconds * ShippedWarnPercent / 100,
-            "the slot watch no longer fires before #2136's default cadence warning, so it adds no lead time");
+            hourlyCadenceSeconds * ShippedWarnPercent / 100 < TimescaleSupport.RefreshPhaseSlotSeconds,
+            $"#2136's shipped default fires at {hourlyCadenceSeconds * ShippedWarnPercent / 100}s against a "
+            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window — at or past the wall, so the cadence alert "
+            + "would arrive after #3035's precondition is already false. The knob cannot move without a rung "
+            + "(V57), so the repair is the grid");
+        Assert.Equal(360, TimescaleSupport.RefreshPhaseSlotSeconds - (hourlyCadenceSeconds * ShippedWarnPercent / 100));
+
+        /* And where the knob's own clamp lets an operator move it to — well past the wall, with the
+           grid's precondition broken and nothing said. */
+        Assert.True(
+            hourlyCadenceSeconds * 100 / 100 > TimescaleSupport.RefreshPhaseSlotSeconds,
+            "the knob's clamp can no longer be raised past the window, so the argument for a separate "
+            + "grid-derived line has changed");
+
+        /* THE ORDERING BETWEEN THE TWO SIGNALS INVERTED at #3174, and it is asserted in its new direction
+           rather than left to be discovered. #3044's watch used to fire at 750 s, BEFORE #2136's 900 s
+           default; the window the hour can spare puts it at 1,050 s, AFTER it. That is forced, not chosen:
+           the watch line has to clear the 896 s ceiling and the knob is frozen at 900 s by V57, and
+           896 < window * 50 < 900 has no integer solution — so no geometry restores the old order while the
+           ceiling stands where it does. The cost is real and belongs on the record: an operator now sees the
+           cadence alert first, and #2136's documented remedy ("extend the job's schedule_interval") is wrong
+           for this job, because the hourly schedule interval is also its end_offset. #3044's line still
+           carries the correct remedy, and it now arrives second. */
+        Assert.True(
+            TimescaleSupport.RefreshSlotWarningSeconds > hourlyCadenceSeconds * ShippedWarnPercent / 100,
+            "#3044's watch line fires at or before #2136's default cadence warning again, so the ordering "
+            + "this comment records has reverted — re-read it rather than editing the assertion");
+        Assert.True(
+            hourlyCadenceSeconds * ShippedWarnPercent / 100 < TimescaleSupport.RefreshSlotWarningSeconds
+            && TimescaleSupport.RefreshSlotWarningSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
+            "the three lines are no longer ordered knob, watch, wall");
 
         /* And the evidence that #2136 does not know this job's size, as a number rather than as prose:
-           the recorded ceiling is 16.5% of the same cadence, while the clamp in DarlingAlertSettings is
-           justified on "the production worst runs ~7% of cadence" — 252 s, under half of it. Pinned so the
-           doc comment's claim cannot quietly stop being true. */
+           the recorded ceiling is 24.9% of the same cadence, while the clamp in DarlingAlertSettings is
+           justified on "the production worst runs ~7% of cadence" — 252 s, well under half of it. Pinned so
+           the doc comment's claim cannot quietly stop being true. */
         Assert.Equal(
-            16.5,
+            24.9,
             100.0 * TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds / hourlyCadenceSeconds,
             1);
         Assert.True(
@@ -2956,9 +3101,21 @@ LIMIT 1", connection))
 
         Assert.Equal(TimescaleSupport.CompressionPhaseMinutes.Count, byMinute.Count);
 
+        /* The per-minute ceiling is the INPUT the band's width is derived from since #3174, so it is held to
+           the constant rather than to a literal read off whatever the refreshes left over. A catalog grown
+           past MaxPerMinute * BandMinutes reddens here, and the repair is a wider band — which the hour can
+           only pay for out of the heaviest refresh's window. */
         var ceiling = (TimescaleSupport.CompressionPhaseOrder.Count + TimescaleSupport.CompressionPhaseMinutes.Count - 1)
             / TimescaleSupport.CompressionPhaseMinutes.Count;
         Assert.Equal(3, ceiling);
+        Assert.Equal(TimescaleSupport.CompressionPhaseMaxPerMinute, ceiling);
+        Assert.True(
+            TimescaleSupport.HypertableCount
+            <= TimescaleSupport.CompressionPhaseMaxPerMinute * TimescaleSupport.CompressionPhaseBandMinutes,
+            $"{TimescaleSupport.HypertableCount} hypertables cannot spread over "
+            + $"{TimescaleSupport.CompressionPhaseBandMinutes} minutes at "
+            + $"{TimescaleSupport.CompressionPhaseMaxPerMinute} per minute — the band has to widen, out of "
+            + "the heaviest refresh's window (#3174)");
 
         var crowded = byMinute.Where(kv => kv.Value.Count > ceiling).ToArray();
         Assert.True(crowded.Length == 0,
@@ -2967,7 +3124,8 @@ LIMIT 1", connection))
 
         Assert.Equal("wait_stats", TimescaleSupport.CompressionPhaseOrder[0]);
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("wait_stats", out var waitStats));
-        Assert.Equal(22, waitStats);
+        Assert.Equal(36, waitStats);
+        Assert.Equal(TimescaleSupport.CompressionPhaseMinutes[0], waitStats);
 
         /* A FOREIGN hypertable is left unphased rather than assigned a minute this code has no basis for
            choosing — CompressionPhaseOrder is derived from the catalog, so an unrecognised name means "not
@@ -3124,15 +3282,21 @@ LIMIT 1", connection))
     }
 
     /// <summary>
-    /// The refresh grid is UNCHANGED by the compression grid, view by view — and the compression grid's one
-    /// input from it is pinned separately.
+    /// The refresh grid, minute by minute and view by view — and the compression grid's one input from it
+    /// pinned separately.
     ///
-    /// <para><b>Why a compression change pins the refresh assignment.</b> #3024's own stagger pin asserts
-    /// only that each phase is one of the four slots, so a reordering that permutes which view gets which
-    /// minute passes it. The compression grid is built by excluding the slot
-    /// <see cref="TimescaleSupport.HeaviestHourlyRefreshView"/> occupies, so that permutation is exactly the
-    /// edit that could put a compression minute back inside 594 s of refresh while every other pin in the
-    /// tree stayed green. Both halves are asserted: the full assignment, and the heaviest view's slot.</para>
+    /// <para><b>Why a compression change pins the refresh assignment.</b> The stagger pin asserts that the
+    /// phases are DISTINCT and on the right band, so a reordering that permutes which view gets which minute
+    /// passes it. The compression grid is built by excluding the window
+    /// <see cref="TimescaleSupport.HeaviestHourlyRefreshView"/> occupies, so a permutation that moved the
+    /// heaviest refresh out of that window is exactly the edit that could put a compression minute back
+    /// inside 896 s of refresh while every other pin in the tree stayed green. Both halves are asserted:
+    /// the full assignment, and the heaviest view's own minute.</para>
+    ///
+    /// <para><b>The table is the whole map, not a sample, and #3174 moved every row of it.</b> The heaviest
+    /// refresh is answered by identity and every other view takes the next minute of the light band, so
+    /// this table is also the readable statement of what "thirteen distinct minutes" resolves to on today's
+    /// list — the one place a reader can see the grid without re-deriving it.</para>
     /// </summary>
     [Fact]
     public void TheRefreshGridIsUnchanged_AndTheCompressionGridsOneInputFromItIsPinned()
@@ -3140,18 +3304,18 @@ LIMIT 1", connection))
         var expected = new (string View, int Minute)[]
         {
             (TimescaleSupport.QueryStatsHourlyView, 0),
-            (TimescaleSupport.ProcedureStatsHourlyView, 15),
-            (TimescaleSupport.QueryStoreStatsHourlyView, 30),
-            (TimescaleSupport.QueryStatsDbHourlyView, 45),
-            (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 0),
-            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 15),
-            (TimescaleSupport.PerfmonBaselineView, 30),
-            (TimescaleSupport.WaitStatsBaselineView, 45),
-            (TimescaleSupport.SessionStatsBaselineView, 0),
-            (TimescaleSupport.QueryStatsBaselineView, 15),
-            (TimescaleSupport.BlockedProcessBaselineView, 30),
-            (TimescaleSupport.DeadlockBaselineView, 45),
-            (TimescaleSupport.MemoryBaselineView, 0),
+            (TimescaleSupport.ProcedureStatsHourlyView, 1),
+            (TimescaleSupport.QueryStoreStatsHourlyView, 2),
+            (TimescaleSupport.QueryStatsDbHourlyView, 3),
+            (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 15),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 4),
+            (TimescaleSupport.PerfmonBaselineView, 5),
+            (TimescaleSupport.WaitStatsBaselineView, 6),
+            (TimescaleSupport.SessionStatsBaselineView, 7),
+            (TimescaleSupport.QueryStatsBaselineView, 8),
+            (TimescaleSupport.BlockedProcessBaselineView, 9),
+            (TimescaleSupport.DeadlockBaselineView, 10),
+            (TimescaleSupport.MemoryBaselineView, 11),
         };
 
         Assert.Equal(expected.Length, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
@@ -3162,15 +3326,20 @@ LIMIT 1", connection))
         }
 
         Assert.Equal(TimescaleSupport.QueryStoreStatsIntervalHourlyView, TimescaleSupport.HeaviestHourlyRefreshView);
-        Assert.Equal(0, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView));
+        Assert.Equal(
+            TimescaleSupport.HeaviestRefreshStartMinute,
+            TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView));
 
-        /* No compression minute shares a SLOT with the heaviest refresh — the property the permutation
-           above would break. */
-        var heaviestSlotIndex = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView)
-            / TimescaleSupport.RefreshPhaseStepMinutes;
-        Assert.DoesNotContain(
-            heaviestSlotIndex,
-            TimescaleSupport.CompressionPhaseMinutes.Select(m => m / TimescaleSupport.RefreshPhaseStepMinutes).ToArray());
+        /* No compression minute falls inside the heaviest refresh's WINDOW — the property the permutation
+           above would break. Expressed as the window rather than as a slot index, because a slot index
+           needed a uniform step to exist. */
+        Assert.Empty(
+            Enumerable
+                .Range(
+                    TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView),
+                    TimescaleSupport.HeaviestRefreshWindowMinutes)
+                .Select(m => m % TimescaleSupport.MinutesInHourlyCadence)
+                .Intersect(TimescaleSupport.CompressionPhaseMinutes));
 
         /* The daily refresh tier stays off the grid entirely, so nothing added here can drag one on. */
         Assert.Throws<ArgumentOutOfRangeException>(
@@ -3178,7 +3347,7 @@ LIMIT 1", connection))
 
         /* And the refresh STATEMENTS are untouched: still the refresh phase, still no compression in them. */
         var refreshSql = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.ProcedureStatsHourlyView);
-        Assert.Contains("INTERVAL '15 minutes'", refreshSql, StringComparison.Ordinal);
+        Assert.Contains("INTERVAL '1 minutes'", refreshSql, StringComparison.Ordinal);
         Assert.Contains("add_continuous_aggregate_policy", refreshSql, StringComparison.Ordinal);
         Assert.DoesNotContain("compression", refreshSql, StringComparison.Ordinal);
         Assert.DoesNotContain("columnstore", refreshSql, StringComparison.Ordinal);

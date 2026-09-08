@@ -2549,24 +2549,27 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     /* The cadence every hourly store policy has, and the denominator the warning knob is a share of. */
     private const long HourlyCadenceMs = 3_600_000;
 
-    /* ONE refresh slot, in ms, derived from the grid rather than written down — 3,600,000 divided by
-       RefreshPhaseSlots. #3060: the shipped knob default is that same quotient expressed as a percent, so
-       every boundary case below moves with RefreshPhaseStepMinutes instead of agreeing with it by accident. */
-    private const long RefreshSlotMs = HourlyCadenceMs / TimescaleSupport.RefreshPhaseSlots;
+    /* The shipped knob's own threshold in ms, derived from the knob rather than written down. #3060 derived
+       it from the grid — one refresh slot, 3,600,000 divided by the slot count — and #3174 broke that
+       derivation, because a non-uniform grid has no single slot and V57's applied column default means the
+       percent cannot move (TimescaleSupport.RefreshSlotPercentOfHourlyCadence). So the boundary cases below
+       move with the KNOB, which is the thing the alert actually compares against. The grid-side ordering that
+       used to be implied here is asserted where it lives, in TimescaleSupportTests and
+       TimescaleContinuousAggregateTests. */
+    private const long KnobThresholdMs =
+        HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100;
 
-    /* One second under whatever the shipped knob resolves to — derived from the THRESHOLD, not from the
-       slot, because the two coincide only while the grid step divides 100. */
-    private const long JustUnderTheKnobMs =
-        HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100 - 1_000;
+    /* One second under whatever the shipped knob resolves to. */
+    private const long JustUnderTheKnobMs = KnobThresholdMs - 1_000;
 
     private static StoreJobCadenceReading CadenceJob(
-        long id = 1028, long? durMs = RefreshSlotMs, long schedMs = HourlyCadenceMs,
+        long id = 1028, long? durMs = KnobThresholdMs, long schedMs = HourlyCadenceMs,
         string name = "policy_compression query_store_stats") =>
         new(id, name, durMs, schedMs);
 
     /* A refresh policy's label, in the shape JobCadenceReadSql builds it: proc_name first, then the
        hypertable. Whether the remedy text may say "extend schedule_interval" turns on this. */
-    private static StoreJobCadenceReading RefreshCadenceJob(long? durMs = RefreshSlotMs) =>
+    private static StoreJobCadenceReading RefreshCadenceJob(long? durMs = KnobThresholdMs) =>
         CadenceJob(id: 1054, durMs: durMs,
             name: TimescaleSupport.RefreshPolicyProcName + " query_store_stats_interval_hourly");
 
@@ -2576,10 +2579,9 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var h = new Harness();
         var e = h.Build();
 
-        /* A run of exactly one refresh slot against the shipped default, which IS one slot as a percent of
-           cadence (#3060). The boundary is inclusive, and BOTH sides derive from RefreshPhaseSlots — so a
-           grid moved to a different step moves the reading and the threshold together and this stays the
-           boundary case rather than falling silently to one side of a frozen literal. */
+        /* A run of exactly the shipped default's threshold. The boundary is inclusive, and BOTH sides derive
+           from the same knob — so a moved knob moves the reading and the threshold together and this stays
+           the boundary case rather than falling silently to one side of a frozen literal. */
         await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
@@ -2591,14 +2593,20 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Equal(
             $"{TimescaleSupport.RefreshSlotPercentOfHourlyCadence}%", fired.ThresholdValue);
 
-        var renderedPercent = (100.0 * RefreshSlotMs / HourlyCadenceMs).ToString("F0", CultureInfo.InvariantCulture);
+        var renderedPercent = (100.0 * KnobThresholdMs / HourlyCadenceMs).ToString("F0", CultureInfo.InvariantCulture);
         Assert.Contains($"{renderedPercent}% of its schedule interval", fired.ShortMessage, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// #3060: the shipped default is one refresh slot, and the derivation is what makes that a decision
-    /// rather than the accident it was. Cross-multiplied on purpose — two literals agreeing is exactly what a
-    /// change that freezes one of them produces, so the assertion has to be the identity and not the pair.
+    /// #3060: the shipped default fires no later than the window the compression grid assumes a refresh fits
+    /// inside, and that ORDERING is what survived #3174 breaking the derivation behind it.
+    ///
+    /// <para><b>The tightness half is gone and is not replaced.</b> It was
+    /// <c>(percent + 1) * RefreshPhaseSlots &gt; 100</c> — "the latest value that still clears one slot" —
+    /// and it needed a uniform slot count to be expressible. A non-uniform grid has nothing for it to be
+    /// tight against, and the knob cannot move to regain tightness because V57's column default is already
+    /// applied on every live store. So the knob fires EARLIER than it strictly has to, which is the safe
+    /// direction, and the V57 pin below is what stops the seed drifting from the rung.</para>
     /// </summary>
     [Fact]
     public void JobCadenceDefault_IsOneRefreshSlot_AndFiresNoLaterThanOne()
@@ -2608,19 +2616,17 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             TimescaleSupport.RefreshSlotPercentOfHourlyCadence,
             new AlertsConfig().StoreJobCadenceWarnPercent);
 
-        /* Fires at or BEFORE one slot, for any grid step: percent * slots <= 100. This is the guarantee the
-           issue was filed on — a knob unrelated to the step fires AFTER the point it exists to precede. */
+        /* Fires at or BEFORE the heaviest refresh's window. This is the guarantee the issue was filed on — a
+           knob unrelated to the grid fires AFTER the point it exists to precede. Asserted in SECONDS,
+           because that is the only unit the two sides still share. */
         Assert.True(
-            TimescaleSupport.RefreshSlotPercentOfHourlyCadence * TimescaleSupport.RefreshPhaseSlots <= 100,
-            $"a default of {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}% over "
-            + $"{TimescaleSupport.RefreshPhaseSlots} slots fires past one slot — after the compression grid's "
-            + "stated precondition is already false, which is the failure #3060 is about");
-
-        /* And is the LATEST value that does, so the derivation buys the guarantee without buying noise. */
-        Assert.True(
-            (TimescaleSupport.RefreshSlotPercentOfHourlyCadence + 1) * TimescaleSupport.RefreshPhaseSlots > 100,
-            $"a default of {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}% is earlier than it has to be "
-            + $"for {TimescaleSupport.RefreshPhaseSlots} slots");
+            HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100
+            <= TimescaleSupport.RefreshPhaseSlotSeconds * 1_000L,
+            $"a default of {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}% of an hourly cadence fires at "
+            + $"{HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100 / 1_000}s against a "
+            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window — after the compression grid's stated "
+            + "precondition is already false, which is the failure #3060 is about. The knob cannot move "
+            + "without a rung (V57), so the repair is the grid (#3174)");
 
         /* The seed must survive its own clamp, asserted through the REAL clamp rather than a copy of its
            bounds — a step fine enough to drive the derived default below the floor would have the clamp
