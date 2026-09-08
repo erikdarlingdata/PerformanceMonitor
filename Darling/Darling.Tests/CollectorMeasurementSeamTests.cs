@@ -72,6 +72,28 @@ public class CollectorMeasurementSeamTests
     }
 
     [Fact]
+    public void TheMeasurementTypeCarriesOnlyANameAndACount()
+    {
+        /* The escape route the grammar pins CANNOT see, found by mutation: adding a third member —
+           `string? Detail`, "counts are great but let the collector add one clarifying sentence" — routes a
+           verdict through a seam whose every other guard still passes, because those guards check the
+           inputs the TEST chose and a new field is populated by the DEFINITION. Freezing the member set is
+           what catches it, and it catches it at the type rather than at whichever collector happens to have
+           a pin. Adding a count to a measurement is not a thing anyone needs to do; adding prose is, and
+           this is the pin that says no.
+
+           Asserted as an exact set rather than a count, so renaming a member is caught too — a numeral
+           would keep passing while the shape changed underneath it. */
+        var members = typeof(CollectorMeasurement)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select(p => p.Name + ":" + p.PropertyType.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal(new[] { "Label:String", "Value:Int64" }, members);
+    }
+
+    [Fact]
     public void ADefinitionSuppliedNoteCarriesNoRenderedConclusion_EvenWhenHandedOne()
     {
         /* The adversarial direction, and the one that makes this pin discriminate what it claims rather than
@@ -110,6 +132,29 @@ public class CollectorMeasurementSeamTests
         Assert.Equal(
             "candidates=1264 " + CollectorMeasurementNote.RejectedLabelCount + "=2",
             rendered);
+    }
+
+    [Fact]
+    public async Task WhatARealDefinitionProducesIsCountsOnlyToo()
+    {
+        /* The pin above chooses its own measurements, so it can only prove the RENDERER adds no conclusion —
+           not that a definition cannot introduce one by another route. This one asks the same question of
+           what a shipped collector actually put in the context, driving its real read. Mutation found the
+           gap: a third member on CollectorMeasurement, populated by the definition, left every
+           hand-built-input pin green. */
+        var context = Context();
+
+        await BlockedProcessReportCollector.Instance.ReadAsync(
+            MakeReader(new[] { "<not-a-blocked-process-report/>" }), context, CancellationToken.None);
+
+        var note = CollectorMeasurementNote.Render(context.Measurements);
+
+        Assert.NotNull(note);
+        Assert.Matches(s_countsOnly, note!);
+
+        /* Every measurement it recorded is a legal count name and nothing else. */
+        Assert.All(context.Measurements, m => Assert.True(
+            CollectorMeasurementNote.IsValidLabel(m.Label), m.Label));
     }
 
     [Theory]
