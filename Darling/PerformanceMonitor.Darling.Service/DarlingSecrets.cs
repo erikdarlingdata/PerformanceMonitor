@@ -129,4 +129,62 @@ public static class DarlingSecrets
         throw new InvalidOperationException(
             $"Server '{server.DisplayName}' uses sql auth but has neither encryptedPassword nor password.");
     }
+
+    /// <summary>
+    /// Resolves a server's REMEDIATION credential password (#2138 phase 1) — the second, opt-in identity a
+    /// write to a monitored server travels on. Same two shapes <see cref="ResolvePassword"/> accepts, minus
+    /// the plaintext one.
+    ///
+    /// <para>Returns <b>null</b> for an unarmed server rather than throwing, and that asymmetry with
+    /// <see cref="ResolvePassword"/> is the point. A missing monitoring password is a misconfiguration — the
+    /// operator declared sql auth and left the secret out — so it throws. A missing remediation password is
+    /// the SHIPPED STATE of every server: nothing has gone wrong, this server simply has no phase-1
+    /// surface. Making it throw would turn the normal case into an exception, and an exception in the normal
+    /// case is a thing callers learn to swallow.</para>
+    ///
+    /// <para>There is no plaintext arm. <see cref="MonitoredServer.Password"/>'s dev-convenience slot has no
+    /// remediation counterpart: a wrong monitoring password fails a read, and a wrong remediation password
+    /// fails a write against a production server, so the convenience is not worth the same money. An
+    /// <c>env:</c>/<c>file:</c> reference is still accepted — a pointer is not a secret, and it is the only
+    /// way to arm an install with no DPAPI (the #2087 reasoning).</para>
+    ///
+    /// <para>A DPAPI failure DOES throw, through the same <see cref="DescribeDecryptFailure"/> text the
+    /// other three surfaces use: an armed server whose blob will not decrypt is a real fault, and it is
+    /// exactly the one a viewer-on-a-different-PC produces.</para>
+    /// </summary>
+    public static string? ResolveRemediationPassword(MonitoredServer server)
+    {
+        if (server is null)
+        {
+            throw new ArgumentNullException(nameof(server));
+        }
+
+        /* Both halves or nothing — HasRemediationCredential, not just the blob. A blob with no username
+           cannot build a connection string, and resolving its secret first would decrypt a credential to
+           then discover it is unusable. */
+        if (!server.HasRemediationCredential)
+        {
+            return null;
+        }
+
+        var blob = server.RemediationEncryptedPassword!;
+
+        if (DarlingSecretSource.IsReference(blob))
+        {
+            return DarlingSecretSource.Resolve(
+                blob, $"servers['{server.DisplayName}'].remediationEncryptedPassword");
+        }
+
+        try
+        {
+            return Unprotect(blob);
+        }
+        catch (CryptographicException ex)
+        {
+            throw new InvalidOperationException(
+                DescribeDecryptFailure($"the stored REMEDIATION password for server '{server.DisplayName}' " +
+                                       "(servers[].remediationEncryptedPassword)"),
+                ex);
+        }
+    }
 }

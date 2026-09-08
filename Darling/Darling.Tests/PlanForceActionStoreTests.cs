@@ -225,7 +225,11 @@ public sealed class PlanForceActionStoreTests
         string reasons,
         string outcome,
         string mode = PgPlanForceActionStore.ModeDryRun,
-        long? relatedActionId = null) => new(
+        long? relatedActionId = null,
+        /* Defaults to the bot because every pre-V113 scenario in this file is a bot scenario, so the
+           existing cases keep asserting exactly what they asserted. The operator value is passed
+           explicitly, only by the tests whose subject is the actor. */
+        string actor = PgPlanForceActionStore.ActorBot) => new(
             ActionId: 0,
             ActionTimeUtc: timeUtc,
             ServerId: TestServerId,
@@ -235,6 +239,7 @@ public sealed class PlanForceActionStoreTests
             PlanId: 7,
             Action: action,
             Mode: mode,
+            Actor: actor,
             Decision: decision,
             Reasons: reasons,
             RegressionFactor: 12.5,

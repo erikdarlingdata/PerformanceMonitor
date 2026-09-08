@@ -1089,8 +1089,9 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, plan_force_bot_enabled, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $15, $15)
+    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, plan_force_bot_enabled,
+    remediation_username, remediation_encrypted_password, created_at, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $18, $19, $15, $15)
 ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
                and this is where it is minted and made permanent. When new rows stop being hash-keyed
@@ -1121,6 +1122,15 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
                engine — a non-default port dropped here would connect to 5432 and fail with an error naming
                the right host. */
             command.Parameters.AddWithValue(server.Port);
+            /* V113 (#2138 phase 1): the remediation credential, if darling.json carried one. Seeded for
+               the same reason as the monitoring credential and NOT for the reason plan_force_bot_enabled is
+               hardcoded FALSE two lines up: that is an arm STATE the registry owns after seeding, while
+               this is a credential, and a container install with no viewer has no other way to supply one.
+               Nullable with no default, so a darling.json without these keys seeds two NULLs and the server
+               is simply unarmed. There is no plaintext fallback to merge at read time: RemediationPassword
+               does not exist, deliberately. */
+            AddNullableText(command, server.RemediationUsername);
+            AddNullableText(command, server.RemediationEncryptedPassword);
             await command.ExecuteNonQueryAsync(ct);
         }
     }
@@ -1468,7 +1478,7 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
         using var command = new NpgsqlCommand(@"
 SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate,
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
-       engine, port, server_id, plan_force_bot_enabled
+       engine, port, server_id, plan_force_bot_enabled, remediation_username, remediation_encrypted_password
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -1522,6 +1532,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                DBNull guard is for a store mid-migration — and it reads as NOT opted in, because a write
                authorization must fail CLOSED when the store cannot answer. */
             PlanForceBotEnabled = !reader.IsDBNull(16) && reader.GetBoolean(16),
+            /* V113 (#2138 phase 1): the per-server remediation credential. Nullable in the table with no
+               default, so DBNull is the EXPECTED reading for every server nobody has armed — which is
+               every server until an operator types one in. A null here is not a degraded state to warn
+               about; it is the shipped state, and it means this server has no phase-1 surface. */
+            RemediationUsername = reader.IsDBNull(17) ? null : reader.GetString(17),
+            RemediationEncryptedPassword = reader.IsDBNull(18) ? null : reader.GetString(18),
         };
 
         if (server.UsesSqlAuth && string.IsNullOrWhiteSpace(server.EncryptedPassword))

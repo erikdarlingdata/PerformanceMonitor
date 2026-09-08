@@ -353,6 +353,12 @@ public class PostgresTargetConfigTests
                for a WRITE authorization would be a silent no-op on every seeded box (#2254). It
                round-trips through the registry read, which is exactly what this test checks. */
             ("PlanForceBotEnabled", "plan_force_bot_enabled"),
+            /* V113 (#2138 phase 1): the per-server remediation credential. Unlike PlanForceBotEnabled
+               above, these two ARE settable from darling.json — an arm state belongs to the registry, but a
+               credential has to be suppliable on a container install with no viewer to type one into. So
+               they round-trip in both directions and belong here rather than beside Password's exemption. */
+            ("RemediationUsername", "remediation_username"),
+            ("RemediationEncryptedPassword", "remediation_encrypted_password"),
         };
 
         /* Password is the deliberate exception: a plaintext dev password is never persisted, and is

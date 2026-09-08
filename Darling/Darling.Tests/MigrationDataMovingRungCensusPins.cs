@@ -110,6 +110,19 @@ public sealed class MigrationDataMovingRungCensusPins
             SetsTheFloor: true,
             "CREATE INDEX over the populated collect.pg_deadlocks hypertable - index-only rung, so a "
             + "store that sat on V103 for a release pays the whole build here"),
+        new(
+            113,
+            SetsTheFloor: false,
+            "CREATE INDEX on collect.plan_force_actions (created V107), for the actor-filtered "
+            + "pending-review read. Real DML shape on a pre-existing table, but the table's SIZE is "
+            + "bounded by construction and the bound is small: one row per force/unforce decision per "
+            + "server, capped by the bot's per-query cooldown and per-server daily budget (3), and purged "
+            + "at 365 days - so its ceiling across a 42-server fleet is ~46k rows, and it is EMPTY on "
+            + "every store today because the bot ships off. An index build at that scale is milliseconds, "
+            + "which is the opposite of V104's case: that one is a hypertable carrying a real collected "
+            + "series. The two ADD COLUMNs in the same rung are not findings and that was measured rather "
+            + "than assumed - the volatile-DEFAULT shape needs DEFAULT <fn>( and this rung's default is "
+            + "the literal 'bot', and ALTER COLUMN ... DROP DEFAULT is catalog-only"),
     ];
 
     /// <summary>
