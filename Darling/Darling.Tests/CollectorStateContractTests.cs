@@ -332,6 +332,16 @@ public sealed class CollectorStateContractTests
            the prune cannot run for the 40 collectors that never wrote the prefix. */
         Assert.Contains("PgPerDatabaseCollectorState.PrunableKeys", darling, StringComparison.Ordinal);
 
+        /* BOTH empty-list guards, pinned at source because they are deliberately redundant and redundancy
+           is invisible to a behavioural test: with the statement's `array_length($4, 1) > 0` in place,
+           deleting the caller's check changes no observable outcome, so nothing would have failed. That is
+           the redundancy working — and it is also how one of the two layers gets removed as dead code by
+           someone who measured that removing it broke nothing. The property they jointly protect is that an
+           empty enumeration, which is how a login that cannot read pg_database presents, never deletes a
+           cursor; AnEmptyEnumerationRemovesNothing exercises the statement arm directly. */
+        Assert.Contains("enumeratedDatabases.Count == 0", darling, StringComparison.Ordinal);
+        Assert.Contains("array_length($4, 1) > 0", darling, StringComparison.Ordinal);
+
         var lite = File.ReadAllText(Path.Combine(
             root!, "Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs"));
 
