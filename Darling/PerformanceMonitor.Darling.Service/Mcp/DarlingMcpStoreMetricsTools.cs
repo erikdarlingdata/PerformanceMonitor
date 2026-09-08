@@ -254,9 +254,12 @@ public sealed class DarlingMcpStoreMetricsTools
                 + "job, not one row per run.",
 
             DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered =>
-                "This store has no TimescaleDB library loaded, so timescaledb.enable_job_execution_logging does not "
-                + "exist and neither does timescaledb_information.job_history. There is no per-run surface here at "
-                + "all, and no background-job rows in the series above either.",
+                "timescaledb.enable_job_execution_logging is not a setting this connection knows about, which means "
+                + "either this store is plain PostgreSQL or the timescaledb extension is not installed in this "
+                + "database — the GUC is defined by the VERSIONED TimescaleDB library, and the preloaded loader only "
+                + "pulls that in for a database that has the extension. Both cases have the same consequence here: "
+                + "timescaledb_information.job_history does not exist on this connection, so there is no per-run "
+                + "surface at all, and the series above carries no background-job rows either.",
 
             _ =>
                 "The pg_settings probe for timescaledb.enable_job_execution_logging did not complete, so whether "

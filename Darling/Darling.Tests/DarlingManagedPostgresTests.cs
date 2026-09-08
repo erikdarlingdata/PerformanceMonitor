@@ -1488,6 +1488,12 @@ public sealed class DarlingManagedPostgresTests
                    what the first version of this assertion did, and CI is where it said so. */
                 Assert.Equal(1, CountAssignments(healedConf, "shared_preload_libraries"));
 
+                /* The GUC is defined by the VERSIONED TimescaleDB library, which the preloaded loader pulls
+                   in only for a database that has the extension — so it is not in pg_settings until then.
+                   EnsureRunningAsync creates the database and TimescaleSupport creates the extension later
+                   in the worker's bootstrap; this stands in for that step so the reading below can exist. */
+                await CreateTimescaleExtensionAsync(healedConnectionString, timeout.Token);
+
                 var reading = await ReadJobExecutionLoggingSettingAsync(healedConnectionString, timeout.Token);
 
                 /* The positive control first: the compiled-in default is OFF, so the value below cannot be
@@ -1519,6 +1525,31 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
+    /// Creates the TimescaleDB extension in the store database, which is a PRECONDITION of reading the GUC
+    /// and not part of what the heal is being judged on.
+    ///
+    /// <para><b>Measured, and it is the trap in this whole area.</b> <c>timescaledb</c> in
+    /// <c>shared_preload_libraries</c> loads the LOADER, and the loader pulls in the versioned library only
+    /// for a database that has the extension installed. The GUCs the versioned library defines —
+    /// <c>timescaledb.enable_job_execution_logging</c> among them — are therefore NOT REGISTERED until then,
+    /// and <c>pg_settings</c> returns no row for the name at all. Verified on 2.30.0/PG17 with the loader
+    /// preloaded: from a database with the extension, one row; from a database created
+    /// <c>TEMPLATE template0</c> without it, ZERO rows for that GUC while
+    /// <c>timescaledb.max_background_workers</c> (a LOADER-defined GUC) still had one. That is why
+    /// <see cref="DarlingManagedPostgres.EnsureRunningAsync"/> alone is not enough to read this setting —
+    /// it creates the database, and <c>TimescaleSupport</c> creates the extension later in the worker's
+    /// bootstrap. Doing it here is standing in for that later step, not simulating the fix.</para>
+    /// </summary>
+    private static async Task CreateTimescaleExtensionAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        var unpooled = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
+        await using var connection = new NpgsqlConnection(unpooled);
+        await connection.OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS timescaledb", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// One <c>pg_settings</c> row for the job-execution-logging GUC, read through an UNPOOLED connection so
     /// the reading always costs real I/O against the server running right now. All five columns in one row
     /// rather than five reads: the value only means anything beside its default and its provenance.
@@ -1535,12 +1566,13 @@ public sealed class DarlingManagedPostgresTests
         command.Parameters.AddWithValue("name", StoreSelfMetrics.JobExecutionLoggingSetting);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-        /* A missing row would mean the TimescaleDB library is not preloaded, which is a different failure
-           from the setting being off — and one this test must not report as "off". */
+        /* A missing row is NOT "the setting is off", and it is not "the library is not preloaded" either —
+           see CreateTimescaleExtensionAsync for what it actually means, which cost a CI round to learn. */
         Assert.True(
             await reader.ReadAsync(cancellationToken),
-            $"pg_settings has no row for {StoreSelfMetrics.JobExecutionLoggingSetting}: the TimescaleDB library is not " +
-            "preloaded on this cluster, so the v1 shared_preload_libraries line did not take effect.");
+            $"pg_settings has no row for {StoreSelfMetrics.JobExecutionLoggingSetting}. Either the v1 " +
+            "shared_preload_libraries line did not take effect, or the timescaledb extension is not installed in " +
+            "this database — the versioned library that defines this GUC is only loaded for a database that has it.");
 
         return (
             reader.IsDBNull(0) ? null : reader.GetString(0),

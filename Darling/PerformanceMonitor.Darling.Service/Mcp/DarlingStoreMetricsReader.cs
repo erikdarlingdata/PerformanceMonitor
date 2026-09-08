@@ -99,15 +99,23 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time D
     /// chose is distinguishable from an <c>off</c> nobody ever touched (<c>source = default</c>, which is
     /// the shape the unhealed field store showed).</para>
     ///
-    /// <para><b>ZERO ROWS is a real answer here, not a failure.</b> The GUC is registered by the
-    /// TimescaleDB library, so <c>pg_settings</c> has no row for it on a plain-PostgreSQL store — measured
-    /// on PG17 with no extension: no <c>pg_settings</c> row, <c>current_setting(name, true)</c> NULL, and
-    /// <c>timescaledb_information.job_history</c> absent. That is
-    /// <see cref="JobExecutionLoggingStatus.NotRegistered"/> and it is reported as such, distinct from
-    /// <see cref="JobExecutionLoggingStatus.Off"/>. <c>current_setting</c> was not used: its non-missing_ok
-    /// form RAISES on an unregistered parameter and its missing_ok form flattens "unregistered" into the
-    /// same NULL an error would produce, where a row count of zero says exactly one thing. $1 setting name.
-    /// </para>
+    /// <para><b>ZERO ROWS is a real answer here, not a failure</b> — and it has TWO causes with one
+    /// consequence, which is why the note says so rather than naming one. Plain PostgreSQL has no such GUC
+    /// (measured on PG17: no <c>pg_settings</c> row, <c>current_setting(name, true)</c> NULL,
+    /// <c>timescaledb_information.job_history</c> absent). But so does a cluster that HAS the library
+    /// preloaded while the connected database has no <c>timescaledb</c> extension: the preload loads the
+    /// LOADER, and the loader pulls in the versioned library — the one that defines this GUC — only for a
+    /// database that has the extension. Measured on 2.30.0/PG17 from a database created
+    /// <c>TEMPLATE template0</c>: ZERO rows for this GUC, while <c>timescaledb.max_background_workers</c>
+    /// (loader-defined) still had one. Both cases mean <c>job_history</c> does not exist on this
+    /// connection, so both are <see cref="JobExecutionLoggingStatus.NotRegistered"/> — reported distinctly
+    /// from <see cref="JobExecutionLoggingStatus.Off"/>, which is the distinction that matters. A second
+    /// probe to split the two causes was considered and left out: no case is known where they lead to
+    /// different advice.</para>
+    ///
+    /// <para><c>current_setting</c> was not used: its non-missing_ok form RAISES on an unregistered
+    /// parameter and its missing_ok form flattens "unregistered" into the same NULL an error would produce,
+    /// where a row count of zero says exactly one thing. $1 setting name.</para>
     ///
     /// <para><b><c>sourcefile</c> IS EXPECTED TO BE NULL HERE, and that is PostgreSQL, not a fault.</b>
     /// <c>pg_settings.sourcefile</c> and <c>sourceline</c> are visible only to a superuser or a role with
