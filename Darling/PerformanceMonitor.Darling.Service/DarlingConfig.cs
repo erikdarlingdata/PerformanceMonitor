@@ -635,11 +635,13 @@ public sealed class AlertsConfig
     /// last run reaches this percent of its own schedule interval fires the Warning tier. The
     /// Critical tier is fixed at 100 (a job outrunning its cadence compounds refresh lag).
     ///
-    /// <para>#3060: the default is <see cref="TimescaleSupport.RefreshSlotPercentOfHourlyCadence"/> — one
-    /// refresh slot — rather than a literal, so it moves with <c>RefreshPhaseStepMinutes</c>. It computed to
-    /// the same 25 this shipped with; see that constant for why the equality was previously an accident and
-    /// what the derivation guarantees. V57's column default is the already-applied twin of this seed and
-    /// cannot move without a rung, which DarlingSelfAlertTests pins.</para></summary>
+    /// <para>#3060: the default is <see cref="TimescaleSupport.RefreshSlotPercentOfHourlyCadence"/>, named
+    /// rather than restated, so this seed and that constant cannot disagree. The figure is 25, and #3174
+    /// broke the derivation that used to produce it while leaving the value where it is — see that constant
+    /// for why a re-derived grid has no single slot for a percent of cadence to mean, and why V57's
+    /// already-applied column default is what the figure is anchored on instead. DarlingSelfAlertTests pins
+    /// this seed equal to the rung text and holds the knob firing at or before the heaviest refresh's
+    /// window.</para></summary>
     [JsonPropertyName("storeJobCadenceWarnPercent")]
     public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
 

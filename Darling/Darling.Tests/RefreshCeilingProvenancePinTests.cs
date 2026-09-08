@@ -34,7 +34,7 @@ namespace Darling.Tests;
 /// summary figure. Every expected value comes either from the constants
 /// (<see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>,
 /// <see cref="TimescaleSupport.RefreshPhaseSlotSeconds"/>,
-/// <see cref="TimescaleSupport.RefreshPhaseStepMinutes"/>,
+/// <see cref="TimescaleSupport.HeaviestRefreshWindowMinutes"/>,
 /// <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/>) or from the POPULATION THE COMMENT ITSELF
 /// PUBLISHES — or, for the live envelope, from a QUOTED READING the same sentence states, with the
 /// figures drawn against that reading derived rather than restated. A pin that restated the summary
@@ -110,13 +110,13 @@ public sealed class RefreshCeilingProvenancePinTests
         "public static readonly IReadOnlyList<int> CompressionPhaseMinutes";
 
     private const string WarningLineDeclaration =
-        "public const int RefreshSlotWarningSeconds";
+        "public static int RefreshSlotWarningSeconds";
 
     private static int Ceiling => TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
 
     private static int Slot => TimescaleSupport.RefreshPhaseSlotSeconds;
 
-    private static int SlotMinutes => TimescaleSupport.RefreshPhaseStepMinutes;
+    private static int SlotMinutes => TimescaleSupport.HeaviestRefreshWindowMinutes;
 
     private static int WatchLine => TimescaleSupport.RefreshSlotWarningSeconds;
 
@@ -249,7 +249,7 @@ public sealed class RefreshCeilingProvenancePinTests
         yield return (
             "the measured live envelope",
             CeilingDeclaration,
-            @"this job's maximum was ([0-9]+)\.([0-9]+) s\. That leaves ([0-9]+)\.([0-9]+) s of the slot, ([0-9]+)\.([0-9]+)% of it, and sits ([0-9]+)\.([0-9]+) s PAST",
+            @"this job's maximum was ([0-9]+)\.([0-9]+) s\. That leaves ([0-9]+)\.([0-9]+) s of the slot, ([0-9]+)\.([0-9]+)% of it, and sits ([0-9]+)\.([0-9]+) s BELOW",
             true);
 
         yield return (
@@ -261,13 +261,13 @@ public sealed class RefreshCeilingProvenancePinTests
         yield return (
             "the guard-band arithmetic the exclusion rests on",
             CompressionMinutesDeclaration,
-            @"band is ([0-9]+), so applying the ordinary band to this slot would admit ([0-9]+) minutes that sit INSIDE the refresh",
+            @"band is ([0-9]+), so applying the ordinary band to this window would admit ([0-9]+) minutes that sit INSIDE the refresh",
             true);
 
         yield return (
             "the minutes left on the table",
             CompressionMinutesDeclaration,
-            @"The other ([0-9]+) minutes of the slot are past the refresh",
+            @"The other ([0-9]+) minutes of the window are past the refresh",
             true);
 
         /* The watch line's REJECTED alternative. The figure is derived arithmetic - the slot less one guard
@@ -286,7 +286,7 @@ public sealed class RefreshCeilingProvenancePinTests
         yield return (
             "the rejected alternative watch line",
             WarningLineDeclaration,
-            @"<see cref=""CompressionPhaseGuardMinutes""/> band, ([0-9]+) s, and it sits BELOW <see cref=""HeaviestHourlyRefreshObservedCeilingSeconds""/>",
+            @"<see cref=""CompressionPhaseGuardMinutes""/> band, ([0-9]+) s, and it now sits ABOVE <see cref=""HeaviestHourlyRefreshObservedCeilingSeconds""/>",
             true);
 
         yield return (
@@ -757,7 +757,7 @@ public sealed class RefreshCeilingProvenancePinTests
         var measured10 = live[0] * 10 + live[1];
         var statedMargin10 = live[2] * 10 + live[3];
         var statedShareTenths = live[4] * 10 + live[5];
-        var statedPastWatch10 = live[6] * 10 + live[7];
+        var statedBelowWatch10 = live[6] * 10 + live[7];
 
         /* The two now COINCIDE, because the constant is the maximum of a census that includes this day
            rather than of a sample that predated it (#3166). #3119 required the measured maximum to be
@@ -778,23 +778,26 @@ public sealed class RefreshCeilingProvenancePinTests
            reading sits, and only the classifier says what the shipped code does with it. */
         Require(
             TimescaleSupport.ClassifyRefreshSlotHeadroom(measured10 / 10.0)
-                == TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
+                == TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
             $"ClassifyRefreshSlotHeadroom bands {measured10 / 10}.{measured10 % 10} s as "
             + $"{TimescaleSupport.ClassifyRefreshSlotHeadroom(measured10 / 10.0)} rather than "
-            + "ApproachingSlot, so the live envelope paragraph states a verdict the shipped classifier "
-            + $"does not produce. Against a {Slot} s slot the warning band opens at {WatchLine} s");
+            + "InsideSlot, so the live envelope paragraph states a verdict the shipped classifier "
+            + $"does not produce. Against a {Slot} s window the warning band opens at {WatchLine} s");
 
         Require(statedMargin10 == Slot * 10 - measured10,
             $"stated slot margin {statedMargin10 / 10}.{statedMargin10 % 10} s against "
             + $"{(Slot * 10 - measured10) / 10}.{(Slot * 10 - measured10) % 10} s derived from the "
             + $"{Slot} s slot less the measured maximum");
 
-        /* The distance PAST the watch line, which also carries the strict-past claim: a maximum at or
-           below the line makes this difference zero or negative, and no figure the pattern can hold
-           equals that. */
-        Require(statedPastWatch10 == measured10 - WatchLine * 10,
-            $"stated distance past the watch line {statedPastWatch10 / 10}.{statedPastWatch10 % 10} s "
-            + $"against {(measured10 - WatchLine * 10) / 10}.{(measured10 - WatchLine * 10) % 10} s "
+        /* The distance BELOW the watch line, which also carries the strict-below claim and INVERTED at
+           #3174: while the slot was 15 minutes the measured maximum sat PAST this line, and the re-derived
+           window put it under it. A maximum at or above the line makes this difference zero or negative, and
+           no figure the pattern can hold equals that — so the direction is load-bearing rather than
+           cosmetic, and a reading that climbed back past the line goes red here instead of leaving the word
+           BELOW standing over a value that is not. */
+        Require(statedBelowWatch10 == (WatchLine * 10) - measured10,
+            $"stated distance below the watch line {statedBelowWatch10 / 10}.{statedBelowWatch10 % 10} s "
+            + $"against {((WatchLine * 10) - measured10) / 10}.{((WatchLine * 10) - measured10) % 10} s "
             + $"derived from the {WatchLine} s line");
 
         Require(statedShareTenths == statedMargin10 * 1000 / (Slot * 10),

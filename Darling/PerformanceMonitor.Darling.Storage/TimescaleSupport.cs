@@ -1573,8 +1573,8 @@ WITH NO DATA";
     /// hypertable rather than with ingest. Measured on the production store: the heaviest hourly refresh
     /// (<see cref="QueryStoreStatsIntervalHourlyView"/>) ran 3,301-6,330 s against a 1-hour cadence —
     /// <b>118-175% of its own schedule interval</b> — while rows arriving per hour FELL ~3x over the same
-    /// period. Narrowed to 1 day the same refresh finishes <b>inside one phase slot</b> — by 4 s of 900 as of
-    /// #3166's census, so the margin is no longer part of the claim — and the figure
+    /// period. Narrowed to 1 day the same refresh finishes <b>inside one phase slot</b> — by 364 s of 1,260
+    /// against #3166's census and #3174's re-derived window — and the figure
     /// with its derivation is on <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> rather than
     /// restated here — a percentage of cadence written twice goes stale in one of the two places. The
     /// direction of that measurement is the whole argument: duration tracking window size while ingest moves the other way is
@@ -1586,7 +1586,8 @@ WITH NO DATA";
     /// SUBSEQUENT shared request — so collector store-writes and readers piled up behind a lock that was
     /// merely QUEUED, not held, even though their own locks are mutually compatible. At >100% of cadence the
     /// next run started into the tail of the previous one, and the convoy sustained itself. Below cadence it
-    /// cannot form, which is why this number and <see cref="RefreshPhaseStepMinutes"/> are complements rather
+    /// cannot form, which is why this number and the phase grid
+    /// (<see cref="LightRefreshStepMinutes"/>) are complements rather
     /// than alternatives: narrowing is what makes the heavy refresh finish, phasing is what keeps what
     /// remains of it out of everyone else's way.</para>
     ///
@@ -1639,72 +1640,152 @@ WITH NO DATA";
     public const string DailyRefreshScheduleInterval = "1 day";
 
     /// <summary>
-    /// Minutes between adjacent slots on the hourly refresh grid (#3012): the hourly refresh policies are
-    /// phased across the hour instead of all starting together.
+    /// The width of the hourly refresh grid in minutes, taken from
+    /// <see cref="HourlyRefreshScheduleSpan"/> rather than written as 60, so the grid and the cadence it
+    /// tiles cannot disagree about how long an hour is.
+    /// </summary>
+    public static int MinutesInHourlyCadence => (int)HourlyRefreshScheduleSpan.TotalMinutes;
+
+    /// <summary>
+    /// THE HOURLY REFRESH GRID (#3012, re-derived at #3174) — stated as a method, because a table of
+    /// minutes cannot be re-derived by the next reader and a method can.
+    ///
+    /// <para><b>The grid is three bands, read left to right across the hour.</b> First the LIGHT refreshes,
+    /// one per minute, <see cref="LightRefreshStepMinutes"/> apart. Then <see cref="CompressionPhaseGuardMinutes"/>
+    /// of clear, so the last of them has finished. Then the HEAVIEST refresh's window,
+    /// <see cref="HeaviestRefreshWindowMinutes"/> wide, which no other refresh starts inside. Then the
+    /// compression band, <see cref="CompressionPhaseBandMinutes"/> wide, which is the rest of the hour.
+    /// Every boundary is derived from a measurement or from the catalog; nothing here is a chosen minute.</para>
+    ///
+    /// <para><b>Why the shape changed, and why no step change could have done it.</b> The old grid was a
+    /// uniform <c>index % slots * step</c>, so a view's minute — and therefore whether it collided with
+    /// another view — was a property of WHERE IT SAT IN A LIST. Thirteen policies over four slots means
+    /// collisions by counting alone, and which policies collided depended on list order: the three
+    /// <c>collect.query_stats</c> consumers sat at positions 0, 3 and 9, distinct only by accident, and
+    /// inserting one aggregate ahead of the last of them would have put two back on the same minute. The map
+    /// here is INJECTIVE over the whole list instead, so contention is structurally impossible rather than
+    /// incidentally absent: no two hourly policies start on the same minute at all, whatever the order and
+    /// whatever is inserted. Two independent facts also rule out simply widening the step. A wider step
+    /// leaves FEWER residues, so the <c>query_stats</c> trio — all congruent mod 3 — collapses onto one
+    /// minute at every step at or above 20, which is #3012's own convoy adjacency recreated by the change
+    /// meant to prevent it. And <see cref="RefreshSlotPercentOfHourlyCadence"/> is 25 only while the hour
+    /// divides into four, so every available wider step also moves a default that V57 has already applied to
+    /// every live store.</para>
+    ///
+    /// <para><b>What the old configuration measured, kept because it is the only lock-wait evidence there
+    /// is.</b> The production store's <c>query_store_stats</c> job family was moved to :00/:15/:30/:45 and
+    /// the first full staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on it —
+    /// a cycle that STRADDLES the narrowing boundary
+    /// (<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>), so its four figures record what the
+    /// stagger did to lock waits and are not samples of the narrowed regime's cost. What that cycle
+    /// establishes is that phasing removes the lock waits; it says nothing about which minutes, which is why
+    /// moving them costs nothing it measured.</para>
     ///
     /// <para><b>Phasing alone is not the fix and neither is narrowing alone.</b>
     /// <see cref="HourlyRefreshStartOffset"/> is what brought the heavy refresh down from 6,330 s to
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>; this is what keeps what remains of it from
-    /// being visible to anything else, because the refresh that is running is not the one a compression
-    /// policy or a sibling refresh is about to want. The heaviest hourly refresh is still more than 4x the
-    /// recorded ceiling for any other one (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), so the
-    /// two treatments address different halves and dropping either one reopens the door.</para>
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>; the grid is what keeps what remains of it
+    /// from being visible to anything else, because the refresh that is running is not the one a compression
+    /// policy or a sibling refresh is about to want. Dropping either one reopens the door.</para>
     ///
-    /// <para><b>15 minutes over four slots is the configuration that was measured</b>, not a round number: the
-    /// production store's <c>query_store_stats</c> job family was moved to :00/:15/:30/:45 and the first full
-    /// staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on it —
-    /// a cycle that STRADDLES the narrowing boundary
-    /// (<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>), so its four figures record what the
-    /// stagger did to lock waits and are not samples of the narrowed regime's cost.
-    /// Spreading all thirteen hourly policies across thirteen distinct minutes would contend less still, and
-    /// is the obvious next refinement — but it is not what the numbers above were taken on.</para>
+    /// <para><b>One thing the hour cannot hold, said here so it is not attempted.</b> Serialising all
+    /// thirteen — every policy finishing before the next starts — needs
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> plus twelve times
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, which is 3,617.6 s against a 3,600 s hour. It
+    /// is 17.6 s short of possible, so the light refreshes DO overlap each other and the guarantee is
+    /// distinct STARTS rather than disjoint runs. That is the guarantee #3012 needed — the convoy formed on a
+    /// compression policy's queued <c>AccessExclusiveLock</c> arriving while a refresh held
+    /// <c>AccessShareLock</c>, and two refreshes hold mutually compatible locks — and it is strictly stronger
+    /// than the old grid delivered, where four policies including the heaviest all started on :00.</para>
     /// </summary>
-    public const int RefreshPhaseStepMinutes = 15;
-
-    /// <summary>Slots on the hourly refresh grid — 60 minutes divided by
-    /// <see cref="RefreshPhaseStepMinutes"/>. Pinned as that quotient rather than restated, so the two cannot
-    /// disagree.</summary>
-    public const int RefreshPhaseSlots = 60 / RefreshPhaseStepMinutes;
+    public const int LightRefreshStepMinutes = 1;
 
     /// <summary>
-    /// One refresh slot as a percent of the hourly cadence — and the value #2136's Store Job Over Cadence
-    /// warning knob ships as its default (<c>AlertsConfig.StoreJobCadenceWarnPercent</c>).
+    /// The hourly refresh policies that are not <see cref="HeaviestHourlyRefreshView"/> — the ones that share
+    /// the light band, counted from <see cref="HourlyRefreshPhaseOrder"/> rather than written down so
+    /// registering an aggregate moves the grid instead of leaving a stale count beside it.
+    /// </summary>
+    public static int LightHourlyRefreshCount => HourlyRefreshPhaseOrder.Count - 1;
+
+    /// <summary>
+    /// The minute <see cref="HeaviestHourlyRefreshView"/>'s refresh starts on: past the last light refresh,
+    /// by <see cref="CompressionPhaseGuardMinutes"/>.
     ///
-    /// <para><b>Why that alert's default belongs to the refresh grid rather than to the alert.</b> The knob
-    /// judges every store background job against a share of its own schedule interval, and the tightest
-    /// STRUCTURAL ceiling in the population it judges is this one: an hourly continuous-aggregate refresh
-    /// that outgrows its slot breaks the precondition #3035's compression phase grid rests on, because
-    /// excluding one slot is then no longer enough to keep a refresh out of a compression window. A
-    /// compression or retention policy at the same share of cadence is merely notable. So the default is the
-    /// slot, stated as the slot.</para>
+    /// <para><b>The heaviest refresh goes AFTER the light band rather than at :00, and that placement is the
+    /// decision rather than a layout preference.</b> The compression guard is one-sided
+    /// (<see cref="CompressionPhaseGuardMinutes"/>), so a compression policy on the hour's last minute is
+    /// still holding its <c>AccessExclusiveLock</c> when the next hour's grid opens. Whichever refresh opens
+    /// the hour is the one that waits behind it. Opening with the light band puts that wait on a policy whose
+    /// whole recorded ceiling is <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> and which has no
+    /// window to fit inside, and leaves the heaviest refresh — the one whose runtime has to stay under
+    /// <see cref="RefreshSlotWarningSeconds"/> — starting a full light band clear of the previous hour's
+    /// compression.</para>
+    /// </summary>
+    public static int HeaviestRefreshStartMinute =>
+        ((LightHourlyRefreshCount - 1) * LightRefreshStepMinutes) + CompressionPhaseGuardMinutes;
+
+    /// <summary>
+    /// The heaviest hourly refresh's window: what the hour has LEFT once the light band, its guard and the
+    /// compression band are each at the width their own measurement asks for.
     ///
-    /// <para><b>It computed to 25 before #3060 as well, and that was a coincidence.</b> The knob was a
-    /// literal with no reference to <see cref="RefreshPhaseStepMinutes"/>, so a grid moved to a 10-minute
-    /// step would have left it firing at 900 s against a 600 s slot — AFTER the condition it exists to
-    /// precede rather than before it. Derived, that cannot happen, and the equality is a decision rather
-    /// than an accident of two independent ones.</para>
+    /// <para><b>A remainder rather than a choice, and that is what settles where the hour's spare minutes
+    /// go.</b> The light band's width follows from how many policies there are, the guard's from
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, and the compression band's from the catalog
+    /// (<see cref="CompressionPhaseBandMinutes"/>). None of those has anything to gain from an extra minute —
+    /// a guard that already clears the light ceiling clears it no better at seven minutes than at four, and
+    /// the compression band spreads the same hypertables at the same
+    /// <see cref="CompressionPhaseMaxPerMinute"/> anywhere from 24 minutes wide to 27. This window does gain:
+    /// every minute here is 50 s of <see cref="RefreshSlotWarningSeconds"/> lead time on the one figure that
+    /// has a measured growth series behind it. So the remainder lands where it changes an answer, without
+    /// anyone choosing.</para>
     ///
-    /// <para><b>Integer division is load-bearing, not a rounding artifact.</b> Flooring is what guarantees
-    /// the warning fires at or BEFORE one slot for every possible <see cref="RefreshPhaseSlots"/> —
-    /// <c>this * RefreshPhaseSlots &lt;= 100</c> — while <c>(this + 1) * RefreshPhaseSlots &gt; 100</c> keeps
-    /// it the LATEST value that still does, so the derivation buys the guarantee without buying noise.
-    /// Both are pinned cross-multiplied by TimescaleContinuousAggregateTests rather than as literals,
-    /// because two literals can both be rubber-stamped by a change that freezes one.</para>
+    /// <para><b>It is not sized to fit the ceiling, and the difference matters.</b> Nothing above consults
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>. Whether the window the hour can spare is
+    /// wide enough for the refresh that has to fit in it is an ASSERTION —
+    /// <c>HeaviestHourlyRefreshObservedCeilingSeconds &lt; RefreshSlotWarningSeconds</c>, held by
+    /// TimescaleSupportTests — so a ceiling that outgrows the hour goes red instead of quietly re-sizing the
+    /// grid around itself. When it does go red the repair is fewer compression minutes, a cheaper refresh, or
+    /// a longer cadence for this one aggregate; it is not a wider window, because there is none to take.</para>
+    /// </summary>
+    public static int HeaviestRefreshWindowMinutes =>
+        MinutesInHourlyCadence - HeaviestRefreshStartMinute - CompressionPhaseBandMinutes;
+
+    /// <summary>
+    /// One refresh slot as a percent of the hourly cadence — the value #2136's Store Job Over Cadence warning
+    /// knob ships as its default (<c>AlertsConfig.StoreJobCadenceWarnPercent</c>).
+    ///
+    /// <para><b>This was <c>100 / RefreshPhaseSlots</c>, and #3174 broke the derivation rather than moving
+    /// the number.</b> The derivation needed the grid to be UNIFORM: "one slot" was a single width every
+    /// policy shared, so a percent of cadence could name it. The grid is three bands of different widths now
+    /// (see <see cref="LightRefreshStepMinutes"/>), and the tightest of them is one minute — so there is no
+    /// single slot left for a percent of cadence to mean, and a knob derived from the tightest band would
+    /// ship at 1% of cadence.</para>
+    ///
+    /// <para><b>And the number cannot move, which is why it is anchored here rather than re-derived
+    /// elsewhere.</b> V57 added <c>config.config_alert_settings.store_job_cadence_warn_percent</c> with
+    /// <c>DEFAULT 25</c>, and that rung has already run on every live store. The store column wins on a fresh
+    /// store, so a C# seed that drifted from it would ship a default nobody chose — moving this figure means
+    /// a new rung, deliberately not taken by re-deriving a grid. DarlingSelfAlertTests holds the seed and the
+    /// V57 text equal for exactly this reason.</para>
+    ///
+    /// <para><b>What the old derivation bought is kept as an assertion, since it is the half that mattered.</b>
+    /// The point of deriving it was that the alert must fire at or BEFORE the grid's precondition is false.
+    /// At 25% of a 3,600 s cadence the knob lands on 900 s, inside
+    /// <see cref="RefreshPhaseSlotSeconds"/> — so it still speaks first, and
+    /// TimescaleContinuousAggregateTests asserts that ordering in SECONDS against the window rather than as a
+    /// percent identity. What is GONE is the tightness half — the old
+    /// <c>(this + 1) * RefreshPhaseSlots &gt; 100</c>, which said this was the LATEST value that still
+    /// cleared one slot. That was a property of a uniform slot count and has nothing left to be tight
+    /// against; the knob now fires earlier than it strictly has to, which is the safe direction.</para>
     ///
     /// <para><b>What this does NOT do.</b> It does not bound what an operator may SET. The knob stays
-    /// clamped [5, 100] and a value above this one fires after the slot — deliberately, because the knob
-    /// judges families that have no slot, and silently retuning a live fleet's setting to satisfy this
-    /// constant would be a worse trade than the alert arriving late for one family. The slot itself is
-    /// watched independently of this knob, on the grid's own terms, by #3044's
-    /// <see cref="RefreshSlotWarningSeconds"/> line — so raising the knob cannot leave the grid's
-    /// precondition unattended, which is what makes leaving the clamp alone the cheaper trade.</para>
-    ///
-    /// <para>Expressed over <see cref="RefreshPhaseSlots"/> rather than over
-    /// <see cref="RefreshPhaseSlotSeconds"/> because a percent of cadence needs no seconds at all; the two
-    /// are the same wall, and TimescaleContinuousAggregateTests asserts the fire point in SECONDS against
-    /// <see cref="RefreshPhaseSlotSeconds"/> so the identity is checked in the unit the alert compares.</para>
+    /// clamped [5, 100] and a value above this one fires later — deliberately, because the knob judges
+    /// families that have no window, and silently retuning a live fleet's setting would be a worse trade than
+    /// the alert arriving late for one family. The heaviest refresh's window is watched independently of this
+    /// knob, on the grid's own terms, by #3044's <see cref="RefreshSlotWarningSeconds"/> line — so raising
+    /// the knob cannot leave the grid's precondition unattended, which is what makes leaving the clamp alone
+    /// the cheaper trade.</para>
     /// </summary>
-    public const int RefreshSlotPercentOfHourlyCadence = 100 / RefreshPhaseSlots;
+    public const int RefreshSlotPercentOfHourlyCadence = 25;
 
     /// <summary>
     /// The hourly refresh policies in phase order — the ONLY thing that decides which slot a policy gets, and
@@ -1741,20 +1822,39 @@ WITH NO DATA";
     /// <summary>
     /// Which minute of the hour <paramref name="view"/>'s hourly refresh policy starts on.
     ///
+    /// <para><b>INJECTIVE, and that is the whole of the contention guarantee.</b>
+    /// <see cref="HeaviestHourlyRefreshView"/> is answered by IDENTITY, not by position, and gets
+    /// <see cref="HeaviestRefreshStartMinute"/> alone. Every other view gets its own consecutive minute in
+    /// the light band, counted over the light views only. There is no modulus anywhere, so two policies
+    /// cannot share a residue — the map has no collisions to have, at any list length the band can hold, in
+    /// any order, with anything inserted anywhere. That is what makes contention structurally impossible
+    /// instead of a property of where a view happens to sit in a list, which is the state #3174 replaced.</para>
+    ///
     /// <para>Throws for a view that is not on <see cref="HourlyRefreshPhaseOrder"/> — including every DAILY
     /// view, which must not be dragged onto the grid. That is deliberately loud rather than defaulted: a new
-    /// hourly aggregate that silently got slot 0 would be coincident with three others, which is the exact
-    /// state #3012 was about. <see cref="EnsureContinuousAggregatesAsync"/> builds each policy statement
-    /// inside its own per-aggregate try, so an unregistered view costs that one aggregate and names itself in
-    /// the warning instead of taking the sweep down.</para>
+    /// hourly aggregate that silently got minute 0 would be coincident with the first light refresh, which is
+    /// the exact state #3012 was about. <see cref="EnsureContinuousAggregatesAsync"/> builds each policy
+    /// statement inside its own per-aggregate try, so an unregistered view costs that one aggregate and names
+    /// itself in the warning instead of taking the sweep down.</para>
     /// </summary>
     public static int RefreshPhaseMinutesFor(string view)
     {
-        for (var index = 0; index < HourlyRefreshPhaseOrder.Count; index++)
+        var lightIndex = 0;
+
+        foreach (var candidate in HourlyRefreshPhaseOrder)
         {
-            if (string.Equals(HourlyRefreshPhaseOrder[index], view, StringComparison.Ordinal))
+            var heaviest = string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal);
+
+            if (string.Equals(candidate, view, StringComparison.Ordinal))
             {
-                return index % RefreshPhaseSlots * RefreshPhaseStepMinutes;
+                return heaviest
+                    ? HeaviestRefreshStartMinute
+                    : lightIndex * LightRefreshStepMinutes;
+            }
+
+            if (!heaviest)
+            {
+                lightIndex++;
             }
         }
 
@@ -1772,10 +1872,20 @@ WITH NO DATA";
     ///
     /// <para>On the narrowed <see cref="HourlyRefreshStartOffset"/> window it is still by far the largest job
     /// on the grid — see <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> for the number the grid is
-    /// sized against and for the operating envelope that number defines. Every other hourly refresh's own
-    /// ceiling is under a quarter of it (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>), and that
-    /// asymmetry is what the grid below is shaped by: one slot excluded WHOLE, the rest treated as occupied
-    /// only at their start.</para>
+    /// sized against and for the operating envelope that number defines.</para>
+    ///
+    /// <para><b>The asymmetry the grid's shape rests on, stated as the two relationships it needs rather than
+    /// as a ratio (#3174).</b> Every other hourly refresh's recorded ceiling
+    /// (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>) fits inside
+    /// <see cref="CompressionPhaseGuardMinutes"/>, and this one's does not. That is why one refresh gets a
+    /// window of its own that no compression minute may enter, while the rest are treated as occupied only
+    /// for the guard band after their start. Both halves are asserted by TimescaleSupportTests, and both fail
+    /// in the direction that matters: a light ceiling past the guard band leaves compression starting inside a
+    /// running refresh, and a heaviest ceiling INSIDE the guard band would mean its window is excluded whole
+    /// for no reason. It used to be stated as a ratio — "more than 4x", "under a quarter of it" — and that was
+    /// the wrong pin twice over: the ratio was never what the geometry consumed, and at 896 s against 226.8 s
+    /// it is 3.95x, so a guard written as <c>Other * 4 &lt; Heaviest</c> was red at every possible step
+    /// while the geometry it was supposed to protect was fine.</para>
     /// </summary>
     public const string HeaviestHourlyRefreshView = QueryStoreStatsIntervalHourlyView;
 
@@ -1935,8 +2045,8 @@ WITH NO DATA";
     /// overlap at all.</para>
     ///
     /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
-    /// invalidates it is that runtime approaching <see cref="RefreshPhaseStepMinutes"/> x 60.</b> At 896 s
-    /// against a 900-second slot the margin is 4 seconds — the clearance the population above carries, a
+    /// invalidates it is that runtime approaching <see cref="RefreshPhaseSlotSeconds"/>.</b> At 896 s
+    /// against a 1260-second slot the margin is 364 seconds — the clearance the population above carries, a
     /// property of that closed record rather than of current load; the heaviest
     /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
     /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
@@ -1946,49 +2056,52 @@ WITH NO DATA";
     /// <para><b>THE LIVE ENVELOPE, which the census has now COLLAPSED onto that clearance rather than
     /// leaving beside it (#3119, #3166).</b> Over <c>2026-09-07</c> — one closed day, its 24 runs read from
     /// <c>timescaledb_information.job_history</c> at one row per run — this job's maximum was
-    /// <b>896.1 s</b>. That leaves <b>3.9 s</b> of the slot, <b>0.4%</b> of it, and sits <b>146.1 s</b>
-    /// PAST <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
-    /// <see cref="RefreshSlotHeadroom.ApproachingSlot"/>. #3119 had to state these figures apart from the
+    /// <b>896.1 s</b>. That leaves <b>363.9 s</b> of the slot, <b>28.8%</b> of it, and sits <b>153.9 s</b>
+    /// BELOW <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
+    /// <see cref="RefreshSlotHeadroom.InsideSlot"/>. #3119 had to state these figures apart from the
     /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it; now that the
     /// constant IS the census maximum, the two describe the same population and agree to the second. What
-    /// remains is the reading itself: short of the slot width, so the grid's stated precondition still
-    /// holds and this is not yet the failure the paragraph above asserts — but the residual is D wide and D
-    /// is that maximum, so nothing here can be described as completing well inside its slot.
-    /// RefreshCeilingProvenancePinTests derives every figure stated against that maximum from the grid's own
-    /// constants and takes the band from the shipped classifier, so a moved grid step moves them all and a
-    /// reading that stopped classifying as a warning goes red rather than sitting here as prose.</para>
+    /// remains is the reading itself: short of the window width, so the grid's stated precondition holds —
+    /// but the residual is D wide and D is that maximum, so nothing here can be described as completing well
+    /// inside its slot. RefreshCeilingProvenancePinTests derives every figure stated against that maximum
+    /// from the grid's own constants and takes the band from the shipped classifier, so a re-derived grid
+    /// moves them all and a reading that started classifying as a warning goes red rather than sitting here
+    /// as prose.</para>
     ///
-    /// <para><b>AND THE CONSEQUENCE THAT IS NOT THIS CONSTANT'S TO SETTLE, said here rather than left for a
-    /// reader to derive (#3166).</b> A sizing figure of 896 s is <b>ABOVE</b>
-    /// <see cref="RefreshSlotWarningSeconds"/>, so <see cref="ClassifyRefreshSlotHeadroom"/> bands the
-    /// grid's own sizing figure as <see cref="RefreshSlotHeadroom.ApproachingSlot"/> — a warning. Every
-    /// assertion that held the grid CLEAR of this constant is therefore false, in TimescaleSupportTests and
-    /// in the population clause of RefreshCeilingProvenancePinTests both, and those failures are the checks
-    /// doing their job rather than literals left behind: <see cref="RefreshSlotWarningSeconds"/>'s own
-    /// summary pre-registered this exact outcome. They are NOT widened here. What the arithmetic says and
-    /// where it stops: a 15-minute slot leaves 4 s of clearance against a measured maximum that rose 302 s
-    /// in two days, and restoring the five-sixths watch line's lead time above a 896 s figure needs a slot
-    /// of at least 1,076 s — 18 minutes, which 60 does not divide, so the grid would gain slots of unequal
-    /// width or lose one of its four. Which of those, or whether the refresh is made cheaper instead, is a
-    /// scheduling decision (#3035, #3044, #3107) and is deliberately not taken by re-deriving a
-    /// measurement.</para>
+    /// <para><b>THE CONSEQUENCE THIS CONSTANT DID NOT SETTLE, and where it was settled (#3166, #3174).</b>
+    /// Against the 900 s watch line a 15-minute slot produced, a sizing figure of 896 s was ABOVE it, so
+    /// <see cref="ClassifyRefreshSlotHeadroom"/> banded the grid's own sizing figure a warning and six test
+    /// methods went red on exactly that — the checks doing their job rather than literals left behind, and
+    /// <see cref="RefreshSlotWarningSeconds"/>'s own summary had pre-registered it. They were not widened.
+    /// What the arithmetic said: restoring the five-sixths line's lead time above 896 s needs a slot of at
+    /// least <b>1,077 s</b> — the smallest <c>s</c> with <c>s * 5 / 6 &gt; 896</c>, since 1,076 gives exactly
+    /// 896 and <see cref="ClassifyRefreshSlotHeadroom"/> warns at <c>&gt;=</c> — which is 18 whole minutes,
+    /// and 60 does not divide 18. Every step that DOES divide 60 and is wide enough collapses the
+    /// <c>collect.query_stats</c> trio onto one minute and moves
+    /// <see cref="RefreshSlotPercentOfHourlyCadence"/> off the default V57 has already applied, so no step
+    /// change was available at all. #3174 re-derived the grid's SHAPE instead
+    /// (<see cref="LightRefreshStepMinutes"/>): the window the hour can spare is
+    /// <see cref="HeaviestRefreshWindowMinutes"/>, which puts the watch line at 1,050 s and this constant
+    /// 154 s below it.</para>
     /// </summary>
     public const int HeaviestHourlyRefreshObservedCeilingSeconds = 896;
 
     /// <summary>
-    /// The slot width in seconds — the bound
+    /// The heaviest hourly refresh's window in seconds — the wall
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>'s envelope is stated against, named once so
-    /// the build-time assertion and the runtime watch below cannot disagree about what the wall is.
+    /// the build-time assertion and the runtime watch below cannot disagree about where it is.
     ///
-    /// <para>Derived from <see cref="RefreshPhaseStepMinutes"/> rather than restated, for the same reason
-    /// <see cref="RefreshPhaseSlots"/> is: a grid moved to a different step must move every bound that was
-    /// sized against it, and a literal 900 would sit still while the grid changed underneath it.</para>
+    /// <para>Derived from <see cref="HeaviestRefreshWindowMinutes"/> rather than restated: a re-derived grid
+    /// must move every bound that was expressed over it, and a literal 900 sat still while the grid changed
+    /// underneath it. The name is kept because this is still the only "slot" the product has — a width one
+    /// refresh has to finish inside — but it is now the heaviest refresh's own window rather than one tile of
+    /// a uniform grid, which is the whole of #3174's change.</para>
     /// </summary>
-    public const int RefreshPhaseSlotSeconds = RefreshPhaseStepMinutes * 60;
+    public static int RefreshPhaseSlotSeconds => HeaviestRefreshWindowMinutes * 60;
 
     /// <summary>
     /// The line at which the heaviest hourly refresh's LIVE runtime is worth a warning — five sixths of
-    /// <see cref="RefreshPhaseSlotSeconds"/>, so 750 s against today's 900 s slot.
+    /// <see cref="RefreshPhaseSlotSeconds"/>, so 1,050 s against today's 1,260 s window.
     ///
     /// <para><b>Why this exists at all, which is the whole of #3044.</b> The assertion on
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> bounds a CONSTANT, and the thing it bounds is
@@ -1998,44 +2111,45 @@ WITH NO DATA";
     /// already reads the job catalog.</para>
     ///
     /// <para><b>Five sixths is a lead-time choice, and it is applied to the derived slot rather than written
-    /// down as an answer</b> — the same shape as <see cref="CompressionPhaseGuardMinutes"/>, whose <c>/2</c> is
-    /// also a chosen fraction of a derived quantity. Two things had to hold. It must clear the routine band:
+    /// down as an answer.</b> Two things had to hold. It must clear the routine band:
     /// five consecutive live readings during #3044's own review came back 335 s, 594 s, 465 s, 359 s and
-    /// 293 s — 32.6% to 66.0% of the slot — so a line at 83.3% leaves the peak of THAT set a full sixth of
-    /// the slot below it, which is what keeps it off the load those five represent. And it must leave
-    /// usable lead
-    /// time: the remaining sixth is 150 s here, while the walk that carries this job through the hour advances
+    /// 293 s — 26.6% to 47.1% of the window — so a line at 83.3% leaves the peak of THAT set more than a
+    /// third of the window below it, which is what keeps it off the load those five represent. And it must
+    /// leave usable lead
+    /// time: the remaining sixth is 210 s here, while the walk that carries this job through the hour advances
     /// by its own runtime each cycle (see the finish-to-start note on
     /// <see cref="SetCompressionSchedulePhaseSql"/>), so the warning lands while the job still finishes inside
-    /// its slot and the grid's stated precondition is still TRUE. The alternative that tempts here is the
-    /// slot less one <see cref="CompressionPhaseGuardMinutes"/> band, 480 s, and it sits BELOW
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>: it would warn on the very run the
-    /// compression grid is sized against, and that ORDERING is the whole of its rejection. It is stated as
-    /// an ordering rather than as a share of the readings because a share is not stable: the same 480 s line
-    /// covers a different fraction of every population it is held against, and the populations here grow,
-    /// while its position against the recorded ceiling moves only when one of those two constants does and
-    /// is pinned on that relationship rather than on either figure. Lead time does NOT rule the lower line
-    /// out and is not offered as if it did: a line further below the slot warns EARLIER, so the comparison
-    /// against the ceiling has to carry the decision on its own.</para>
+    /// its slot and the grid's stated precondition is still TRUE.</para>
     ///
-    /// <para><b>This line was chosen to sit ABOVE <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>,
-    /// because that ordering is what makes a crossing mean something — and the ordering has now INVERTED
-    /// (#3166).</b> While the constant was the maximum of a sixteen-run sample, 750 s sat 26% above it, so a
-    /// reading in this band was not "approaching a known ceiling" but past the whole of the record the
-    /// compression grid was sized against: a different signal calling for a different response. Re-derived
-    /// from a census, that constant is <b>896 s</b>, which is 146 s ABOVE this line, so
-    /// <see cref="ClassifyRefreshSlotHeadroom"/> now bands the grid's own sizing figure a warning and this
-    /// line reports the sizing rather than anything new. That is precisely the case the previous version of
-    /// this paragraph pre-registered — "a ceiling that rose past this line would put the grid's own sizing
-    /// figure inside the warning band, and the pin says so rather than leaving a reader to notice" — and
-    /// the pins in TimescaleSupportTests say so now, in the only way that is any use: by going RED rather
-    /// than by being renumbered to agree. <b>Nothing here re-justifies the five sixths against the new
-    /// figure, and that is deliberate.</b> Restoring the ordering means moving this line up, moving
-    /// <see cref="RefreshPhaseSlotSeconds"/> up, or making the refresh cheaper; the first two are the same
-    /// grid decision (#3035, #3044, #3107) and the third is not a threshold at all. A measurement is not a
-    /// mandate to pick one, so the fraction is left where it was and the inversion is left visible.</para>
+    /// <para><b>The alternative, and the reason it is rejected — which #3174 had to RE-TAKE rather than
+    /// restate, because the old reason stopped being true.</b> The alternative that tempts here is the slot
+    /// less one <see cref="CompressionPhaseGuardMinutes"/> band, 1020 s, and it now sits ABOVE
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>. It used to sit below it — that was the
+    /// whole of its rejection, since a line under the recorded ceiling warns on the very run the compression
+    /// grid is sized against — and the re-derivation took that argument away by shrinking the guard band from
+    /// half a uniform slot to the light refreshes' own ceiling. Both lines now clear the ceiling and they are
+    /// 30 s apart, so the ordering no longer discriminates and lead time argues mildly FOR the lower one.
+    /// What rejects it instead is COUPLING, a property the old geometry could not have exposed: the guard band
+    /// is derived from <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, a measurement of the TWELVE
+    /// OTHER refresh policies, so the alternative would make the heaviest refresh's watch line move whenever
+    /// a light refresh got slower. Five sixths of <see cref="RefreshPhaseSlotSeconds"/> depends on the window
+    /// this job has to fit inside and on nothing else. Under a uniform grid the guard was
+    /// <c>step / 2</c> and both lines were functions of the same step, which is exactly why the argument had
+    /// to be about ordering back then and can be about coupling now.</para>
+    ///
+    /// <para><b>This line sits ABOVE <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>, and that is
+    /// what makes a crossing mean something.</b> The census re-derivation (#3166) put that constant at
+    /// <b>896 s</b>, which INVERTED the ordering against the 750 s line a 15-minute slot produced — and
+    /// restoring it is one of the two things the re-derived grid is for. Against the window the hour can
+    /// spare, this line is 1,050 s and the ceiling is 154 s below it, so a reading in this band is again past
+    /// the whole of the record the compression grid is sized against: a different signal calling for a
+    /// different response, rather than a restatement of the grid's own sizing. <b>The relationship is what
+    /// is pinned, not the two numbers</b> — a ceiling that rose past this line would put the grid's own
+    /// sizing figure inside the warning band, and TimescaleSupportTests says so by going RED rather than
+    /// leaving a reader to notice. That pin has now fired once and been answered by re-deriving the geometry
+    /// instead of by renumbering the band, which is the only answer that changes anything.</para>
     /// </summary>
-    public const int RefreshSlotWarningSeconds = RefreshPhaseSlotSeconds * 5 / 6;
+    public static int RefreshSlotWarningSeconds => RefreshPhaseSlotSeconds * 5 / 6;
 
     /// <summary>
     /// Where one live reading of <see cref="HeaviestHourlyRefreshView"/>'s runtime sits against the slot it
@@ -2064,7 +2178,7 @@ WITH NO DATA";
     ///
     /// <para><b>Both boundaries are inclusive, and that is the point of the function rather than an
     /// implementation detail.</b> The build-time assertion is
-    /// <c>HeaviestHourlyRefreshObservedCeilingSeconds &lt; RefreshPhaseStepMinutes * 60</c>, so a value AT the
+    /// <c>HeaviestHourlyRefreshObservedCeilingSeconds &lt; RefreshPhaseSlotSeconds</c>, so a value AT the
     /// slot width already fails it. <see cref="RefreshSlotHeadroom.SlotExceeded"/> therefore starts at
     /// <c>&gt;=</c> the same width: the runtime watch and the constant's assertion agree on where the wall is
     /// by construction, which is the property a second hand-written comparison could not offer.</para>
@@ -2087,32 +2201,48 @@ WITH NO DATA";
 
     /// <summary>
     /// The longest run recorded for any hourly refresh OTHER than <see cref="HeaviestHourlyRefreshView"/> —
-    /// the number the <see cref="CompressionPhaseGuardMinutes"/> margin is CHARACTERISED against. The first
-    /// full staggered cycle came back 26 s / 2 s / 864 s / 140 s, so this is the 140.
+    /// and, since #3174, the number <see cref="CompressionPhaseGuardMinutes"/> is DERIVED from rather than
+    /// merely characterised against.
     ///
-    /// <para><b>It carries the same regime-membership problem as the 864 in that list, and the difference is
-    /// what it is used FOR.</b> That cycle straddles the narrowing boundary
-    /// (<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>), and the narrowed
-    /// <see cref="HourlyRefreshStartOffset"/> reached every hourly policy rather than only the heaviest one,
-    /// so this reading's membership is undetermined in exactly the way the excluded run's is. What stops that
-    /// being the same defect is that NOTHING IS SIZED FROM IT:
-    /// <see cref="CompressionPhaseGuardMinutes"/> is derived from <see cref="RefreshPhaseStepMinutes"/>, and
-    /// this figure only says how much margin that derivation happens to leave — 3x, asserted by
-    /// TimescaleSupportTests, which is a check on the CHARACTERISATION rather than a bound the grid rests
-    /// on.</para>
+    /// <para><b>226.8 s, re-derived from a per-run census and no longer the 140 (#3174).</b> The old figure
+    /// came from the first full staggered cycle — 26 s / 2 s / 864 s / 140 s — a cycle that STRADDLES the
+    /// narrowing boundary, so its readings' regime membership was undetermined in exactly the way the run
+    /// excluded from <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>'s population is. The
+    /// re-derivation is the same read that constant names — <c>timescaledb_information.job_history</c>, one
+    /// row per run, on the one store that carries this workload — applied to the twelve non-heaviest hourly
+    /// refresh policies instead of to the one. ESTIMATOR: the maximum, for the same reason it is the maximum
+    /// there. The population is NOT republished here, and that is a stated limitation rather than an
+    /// omission: this figure was read by #3174's census and the series is recorded on that issue, so
+    /// RefreshCeilingProvenancePinTests can hold the derived grid quantities to it but cannot recompute the
+    /// estimator from a listed population the way it can for the heaviest refresh. A population published
+    /// here that nobody in this file's history read would be worse than a cited one.</para>
     ///
-    /// <para><b>Which is also why it is not re-derived here.</b> Re-deriving it needs a clean post-boundary
-    /// per-run series for the light refreshes, and no such series has been read — the census read named on
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> would supply it for these policies too. The
-    /// direction of the risk is stated rather than left to be discovered: a true light-refresh ceiling ABOVE
-    /// 140 s would make the 3x characterisation false, and the assertion is written to fail in that
-    /// direction.</para>
+    /// <para><b>THE MIDNIGHT REGIME IS IN, and its own doc is why (#3174).</b> Both of the two large values
+    /// occur at <c>00:30</c>, and the second is <b>41% above</b> the first night's — so the figure is a
+    /// midnight reading, and the obvious move is to exclude the midnight hour as unrepresentative. That is the
+    /// wrong move, and this paragraph used to contain the argument against it: <b>NOTHING WAS SIZED FROM
+    /// IT</b> — the guard was derived from the grid step, and this figure "only says how much margin that
+    /// derivation happens to leave". A readout of a margin has to include the runs where the margin was
+    /// consumed, or it stops being a readout of anything; removing the runs that fired a pin is the
+    /// re-type-a-band-to-pass move one constant over. The mechanism behind those two values is #3112's
+    /// midnight band — the daily chunk-close burst meeting the refresh grid at the shared midnight boundary,
+    /// where at every other hour the compression ticks find nothing eligible and finish in seconds. The grid
+    /// does not change how much work midnight carries, so this figure is the right one for the guard to be
+    /// derived from and the midnight band remains its own question.</para>
+    ///
+    /// <para><b>What changed underneath it: it IS sized from now, so the old escape no longer applies.</b>
+    /// <see cref="CompressionPhaseGuardMinutes"/> is this figure rounded up to a whole minute, which makes it
+    /// a bound the grid rests on rather than a characterisation of one. The direction of risk is stated rather
+    /// than left to be discovered: a light-refresh ceiling past <c>CompressionPhaseGuardMinutes * 60</c> leaves
+    /// a compression policy able to start while a light refresh still holds <c>AccessShareLock</c>, which is
+    /// #3012's mechanism, and TimescaleSupportTests is written to fail in that direction.</para>
     /// </summary>
-    public const int OtherHourlyRefreshObservedCeilingSeconds = 140;
+    public const double OtherHourlyRefreshObservedCeilingSeconds = 226.8;
 
     /// <summary>
-    /// How long after a refresh slot starts a compression policy may be scheduled — half a
-    /// <see cref="RefreshPhaseStepMinutes"/> slot.
+    /// How long after a light refresh starts a compression policy may be scheduled —
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> rounded UP to a whole minute, so 4 minutes
+    /// against a 226.8 s ceiling.
     ///
     /// <para><b>The guard is one-sided, and that asymmetry is the mechanism rather than a simplification.</b>
     /// #3012's convoy needs compression's <c>AccessExclusiveLock</c> request to ARRIVE while a refresh already
@@ -2121,21 +2251,94 @@ WITH NO DATA";
     /// that way — a compression run already holding its lock blocks collectors for its own duration whether or
     /// not a refresh starts, which is the ordinary cost of compressing and not something a schedule can move.
     /// So compression is kept clear of the minutes AFTER a refresh start and needs no clearance before the
-    /// next one.</para>
+    /// next one. That one-sidedness is also what decides which band opens the hour — see
+    /// <see cref="HeaviestRefreshStartMinute"/>.</para>
     ///
-    /// <para>Half a slot is 7 minutes here, which is exactly 3x
-    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> — the longest run recorded for any hourly
-    /// refresh other than the heaviest — and it can never exceed the gap it sits in, because it is
-    /// derived from the slot width rather than chosen against it. That 3x is the margin the envelope on
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> is stated in terms of: the light
-    /// refreshes would have to climb past 420 s, three times their recorded ceiling, before a
-    /// compression tick could land inside one.</para>
+    /// <para><b>It was <c>step / 2</c> and is now the ceiling itself, which is a smaller number and a
+    /// stronger check (#3174).</b> Half a uniform slot was 7 minutes and happened to be 3x the light
+    /// refreshes' then-recorded ceiling, and that 3x was asserted — a check on the CHARACTERISATION rather
+    /// than on anything the grid rested on. There is no uniform slot to halve now, so the guard is derived
+    /// from the measurement it has to cover: 226.8 s rounds up to 4 minutes, and the assertion becomes the
+    /// requirement (<c>CompressionPhaseGuardMinutes * 60 &gt;= OtherHourlyRefreshObservedCeilingSeconds</c>)
+    /// instead of a multiple of it. <b>The rounding is the whole margin, and it is 13.2 s.</b> That is thin
+    /// and it is stated rather than dressed up: what it buys is that the margin can only be consumed by the
+    /// light refreshes actually getting slower, which goes red here, where a multiple of a ceiling could
+    /// be satisfied by a guard that had stopped covering anything. A wider guard is not free either — every
+    /// minute of it comes out of <see cref="HeaviestRefreshWindowMinutes"/>, which is the band that has a
+    /// measured growth series behind it.</para>
+    ///
+    /// <para><b>It can never exceed the gap it sits in</b>, because
+    /// <see cref="HeaviestRefreshStartMinute"/> and <see cref="CompressionPhaseBandMinutes"/> are both
+    /// expressed over it: widening the guard moves the heaviest refresh later and narrows its window rather
+    /// than overrunning a neighbour. TimescaleContinuousAggregateTests holds the three bands to tiling the
+    /// hour exactly, so a guard wide enough to leave no window at all is red rather than silent.</para>
     /// </summary>
-    public const int CompressionPhaseGuardMinutes = RefreshPhaseStepMinutes / 2;
+    public static int CompressionPhaseGuardMinutes =>
+        (int)Math.Ceiling(OtherHourlyRefreshObservedCeilingSeconds / 60.0);
 
     /// <summary>
-    /// Every minute of the hour a compression policy may start on: the second half of each refresh slot,
-    /// with the heaviest refresh's slot excluded entirely.
+    /// The most compression policies the grid will put on one minute — the input the compression band's WIDTH
+    /// is derived from, rather than a figure read off it afterwards.
+    ///
+    /// <para><b>Why this is the input and the width is the output (#3174).</b> The band used to be whatever
+    /// minutes a uniform refresh step left over, and how thinly 70 hypertables spread across them was a
+    /// consequence nobody chose — a test asserted the resulting ceiling was 3 and would have accepted 4 or 5
+    /// from a moved step. The thing that has an operational meaning is the spread: every hypertable's newest
+    /// 1-day chunk becomes eligible at the same UTC midnight (see <see cref="CompressionPhaseMinutes"/>), so
+    /// the count sharing a minute is the count of simultaneous chunk rewrites at that boundary. So the spread
+    /// is stated and the width follows from the catalog.</para>
+    ///
+    /// <para><b>3 preserves the shipped behaviour rather than proposing new behaviour</b>, which is the
+    /// reason to prefer it to any other number here: it is the spread the grid has always produced, so a
+    /// re-derivation that lands on it changes where compression runs without changing how concentrated it is.
+    /// The failure direction is stated: a catalog grown past
+    /// <c>CompressionPhaseMaxPerMinute * CompressionPhaseBandMinutes</c> is red, and the repair is a wider
+    /// band — which the hour can only pay for out of <see cref="HeaviestRefreshWindowMinutes"/>, and only
+    /// while that window still clears <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>.</para>
+    /// </summary>
+    public const int CompressionPhaseMaxPerMinute = 3;
+
+    /// <summary>
+    /// The compression band's width in minutes: enough for every hypertable we own to start at no more than
+    /// <see cref="CompressionPhaseMaxPerMinute"/> per minute, taken from
+    /// <see cref="HypertableCount"/> so registering a collector moves the band instead of quietly crowding
+    /// it.
+    /// </summary>
+    public static int CompressionPhaseBandMinutes =>
+        (HypertableCount + CompressionPhaseMaxPerMinute - 1) / CompressionPhaseMaxPerMinute;
+
+    /// <summary>
+    /// Every minute of the hour a compression policy may start on — the tail of the hour, once every hourly
+    /// refresh has had the clearance its own recorded ceiling asks for.
+    ///
+    /// <para><b>RE-DERIVED at #3174, not renumbered.</b> These minutes were the second half of each uniform
+    /// refresh slot with the heaviest refresh's slot dropped, and a grid with no uniform slot makes those
+    /// minutes meaningless. The rule below is the same rule the old one was — no compression minute may start
+    /// while a refresh is running — applied to the re-derived refresh grid, which is why it produces a
+    /// contiguous band at the end of the hour instead of three chunks inside it: the refreshes are contiguous
+    /// now too.</para>
+    ///
+    /// <para><b>ONE predicate, and both exclusions are cases of it.</b> A minute is clear when it is at least
+    /// its own band past EVERY refresh start, measured forward round the hour. The band is
+    /// <see cref="CompressionPhaseGuardMinutes"/> for a light refresh and
+    /// <see cref="HeaviestRefreshWindowMinutes"/> — the whole window — for
+    /// <see cref="HeaviestHourlyRefreshView"/>. Writing the exclude-whole decision as "its band is its whole
+    /// window" is what keeps it a decision rather than a special case, and it walks
+    /// <see cref="HourlyRefreshPhaseOrder"/> through <see cref="RefreshPhaseMinutesFor"/>, so the grid and
+    /// this band cannot drift apart.</para>
+    ///
+    /// <para><b>Why the heaviest window is excluded whole rather than guarded.</b>
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1260 seconds in its window and the
+    /// <see cref="CompressionPhaseGuardMinutes"/> band is 4, so applying the ordinary band to this window
+    /// would admit 11 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
+    /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
+    /// 6 minutes of the window are past the refresh and are left on the table deliberately: recovering them
+    /// means sizing a band for one window against a bound whose population is 57 readings and still moving
+    /// (194 s to 896 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen and
+    /// not a renumbering. Stated in SECONDS against the window in seconds, because the occupancy is only
+    /// exactly stateable to a tenth of a minute while the ceiling happens to be a multiple of six seconds, and
+    /// 896 is not: a figure that has to be rounded to stay in its unit is a rounded claim wearing an exact
+    /// one's clothes.</para>
     ///
     /// <para><b>Why a spread rather than one shared minute.</b> All the compression policies would happily
     /// share a minute as far as LOCKS go — they compress different hypertables, so they do not contend with
@@ -2144,48 +2347,43 @@ WITH NO DATA";
     /// every hypertable's newest closed chunk becomes eligible at the same UTC midnight. Drifting policies
     /// discover that eligibility at whatever minute they have drifted to, which spreads the daily rewrite
     /// across the hour; collapsing them onto one minute would concentrate it into one. That is a burst this
-    /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.</para>
+    /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.
+    /// How thin the spread has to be is <see cref="CompressionPhaseMaxPerMinute"/>, and the band's width
+    /// follows from it — so the re-derivation moves WHERE compression runs without changing how concentrated
+    /// it is, which is the one property #3112's midnight band is sensitive to.</para>
     ///
-    /// <para><b>Why the heaviest slot is excluded whole rather than guarded.</b>
-    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 900 seconds in its slot and the
-    /// <see cref="CompressionPhaseGuardMinutes"/> band is 7, so applying the ordinary band to this slot would
-    /// admit 8 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
-    /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
-    /// 0 minutes of the slot are past the refresh, so the exclusion no longer declines to recover anything:
-    /// there is nothing there to recover, and the question of sizing a band for one slot against a bound
-    /// whose population is 57 readings and still moving
-    /// (194 s to 896 s within the clean regime) has answered itself for as long as that stays true —
-    /// #3035's exclude-versus-guard decision is not reopened by it and is certainly not a renumbering.
-    /// Stated in SECONDS against the slot in seconds, because the occupancy is only exactly stateable to a
-    /// tenth of a minute while the ceiling happens to be a multiple of six seconds, and 896 is not: a
-    /// figure that has to be rounded to stay in its unit is a rounded claim wearing an exact one's
-    /// clothes.
-    /// Excluding the slot is also what keeps the remaining minutes far from the only refresh that can reach
-    /// forward: the nearest is a full slot past the heaviest one, and the furthest is 59 minutes past
-    /// it.</para>
-    ///
-    /// <para>Derived from the refresh grid, so a change to <see cref="RefreshPhaseStepMinutes"/> or to where
-    /// the heaviest refresh sits moves these minutes with it rather than leaving behind a literal that used to
-    /// be clear. Declared HERE, after <see cref="HourlyRefreshPhaseOrder"/>, because a static field
-    /// initializer runs in declaration order and this one reads that list through
+    /// <para>Declared HERE, after <see cref="HourlyRefreshPhaseOrder"/>, because a static field initializer
+    /// runs in declaration order and this one reads that list through
     /// <see cref="RefreshPhaseMinutesFor"/>.</para>
     /// </summary>
     public static readonly IReadOnlyList<int> CompressionPhaseMinutes = BuildCompressionPhaseMinutes();
 
     private static int[] BuildCompressionPhaseMinutes()
     {
-        var heaviestSlot = RefreshPhaseMinutesFor(HeaviestHourlyRefreshView);
-        var minutes = new List<int>(60);
+        var cadence = MinutesInHourlyCadence;
+        var minutes = new List<int>(cadence);
 
-        for (var minute = 0; minute < 60; minute++)
+        for (var minute = 0; minute < cadence; minute++)
         {
-            var slot = minute / RefreshPhaseStepMinutes * RefreshPhaseStepMinutes;
-            if (slot == heaviestSlot || minute - slot < CompressionPhaseGuardMinutes)
+            var clear = true;
+
+            foreach (var view in HourlyRefreshPhaseOrder)
             {
-                continue;
+                var band = string.Equals(view, HeaviestHourlyRefreshView, StringComparison.Ordinal)
+                    ? HeaviestRefreshWindowMinutes
+                    : CompressionPhaseGuardMinutes;
+
+                if ((minute - RefreshPhaseMinutesFor(view) + cadence) % cadence < band)
+                {
+                    clear = false;
+                    break;
+                }
             }
 
-            minutes.Add(minute);
+            if (clear)
+            {
+                minutes.Add(minute);
+            }
         }
 
         return minutes.ToArray();
@@ -2619,7 +2817,7 @@ WHERE j.job_id = $1::integer";
     /// <summary>
     /// Converges EXISTING hourly continuous-aggregate refresh policies onto both halves of #3012's treatment —
     /// the narrowed <see cref="HourlyRefreshStartOffset"/> window and the
-    /// <see cref="RefreshPhaseStepMinutes"/> phase grid — for stores that already have policies.
+    /// <see cref="RefreshPhaseMinutesFor"/> phase grid — for stores that already have policies.
     ///
     /// <para><b>Behaviour on each of the three store states, because that is the whole contract.</b> A FRESH
     /// store has no refresh jobs yet — its aggregates are created moments LATER — so this reads an empty set
@@ -2715,8 +2913,8 @@ WHERE j.job_id = $1::integer";
         if (converged > 0)
         {
             logger?.LogInformation(
-                "TimescaleDB: {Converged}/{Total} hourly refresh policies moved onto the {Interval} window and the {Step}-minute phase grid (#3012).",
-                converged, stale.Count, HourlyRefreshStartOffset, RefreshPhaseStepMinutes);
+                "TimescaleDB: {Converged}/{Total} hourly refresh policies moved onto the {Interval} window and their own minute on the phase grid ({Minutes} distinct minutes, #3012/#3174).",
+                converged, stale.Count, HourlyRefreshStartOffset, HourlyRefreshPhaseOrder.Count);
         }
 
         return converged;
@@ -4375,13 +4573,14 @@ AND   js.last_run_status = 'Success'";
     ///
     /// <para><b>Not a second self-alert, and the reason is arithmetic rather than taste.</b> #2136's Store Job
     /// Over Cadence already judges this job's <c>last_run_duration</c> against its own schedule interval, and
-    /// its default warning knob of 25% of a 3,600 s cadence lands on 900 s — EXACTLY one slot, because a slot
-    /// is <c>3600 / RefreshPhaseSlots</c>. So an alert at the slot width would double-fire with #2136 on the
-    /// same job, the same reading and the same hour. What it would not do is make the bound reliable: that 25%
-    /// is a store-backed operator knob clamped [5, 100] with no relationship to
-    /// <see cref="RefreshPhaseStepMinutes"/>, so raising it to 50 to quiet a busy store silently moves the
-    /// effective line to 1,800 s — twice the invalidation point — and moving the grid to a 10-minute step
-    /// would leave the knob firing at 900 s against a 600 s slot, 300 s PAST invalidation.</para>
+    /// its default warning knob of 25% of a 3,600 s cadence lands on 900 s, inside the
+    /// <see cref="RefreshPhaseSlotSeconds"/> window. So an alert at the window width would fire on the same
+    /// job, the same reading and the same hour as #2136 does, which is what rules the alert form out. What
+    /// #2136 would not do is make the bound reliable: that 25% is a store-backed operator knob clamped
+    /// [5, 100] with no relationship to the grid at all since #3174 broke the derivation
+    /// (<see cref="RefreshSlotPercentOfHourlyCadence"/>), so raising it to 50 to quiet a busy store silently
+    /// moves the effective line to 1,800 s — past the invalidation point — and a re-derived grid moves the
+    /// window underneath a knob that cannot follow it.</para>
     ///
     /// <para><b>That the two lines coincide is a coincidence of two independent decisions, and the clearest
     /// evidence is that #2136 does not know this job's size.</b> Its clamp is justified in
@@ -4413,8 +4612,8 @@ AND   js.last_run_status = 'Success'";
         {
             case RefreshSlotHeadroom.SlotExceeded:
                 logger.LogError(
-                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s, at or past the {Slot}s refresh slot ({Percent:F1}% of it) — it no longer fits inside its own slot, so excluding one slot is no longer enough and the compression phase grid's stated precondition is false. The grid has to be RE-DERIVED (#3035), not renumbered: a {Step}-minute grid can no longer hold thirteen hourly refreshes, so the fix is fewer slots, a longer cadence for this aggregate, or splitting it (#3044).",
-                    reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot, RefreshPhaseStepMinutes);
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s, at or past the {Slot}s window it has to fit inside ({Percent:F1}% of it) — so excluding that window is no longer enough and the compression phase grid's stated precondition is false. The grid has to be RE-DERIVED (#3035), not renumbered: the hour cannot spare a wider window than {Window} minutes while the compression band still spreads every hypertable, so the fix is fewer compression minutes, a longer cadence for this aggregate, or splitting it (#3044/#3174).",
+                    reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot, HeaviestRefreshWindowMinutes);
                 break;
 
             case RefreshSlotHeadroom.ApproachingSlot:
