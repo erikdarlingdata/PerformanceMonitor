@@ -293,8 +293,9 @@ public sealed class DarlingManagedPostgres
     /// <see cref="BuildConfAppend"/> would cost nothing at runtime (identical value, last occurrence wins)
     /// and would leave the repository asserting this setting in the block that provably cannot deliver it —
     /// which is the reading #1681 made, and the one the next person would copy. The GUC is stated once, in
-    /// the block that heals. <c>ConfV1BlockCarriesNoHealableSetting</c> pins the move so it cannot drift
-    /// back.</para>
+    /// the block that heals. Two pins hold it: <c>TheJobExecutionLoggingGuc_IsInV11AndNotInTheUnhealableV1Block</c>
+    /// asserts both halves of the move, and <c>ConfV1Block_ContentIsFrozen_ANewSettingNeedsItsOwnMarker</c>
+    /// fails on any setting added to the v1 builder — the pin whose absence let this through.</para>
     ///
     /// <para><b>DELIBERATELY NOT A WIDENING OF THE V1 MARKER, and the harm is measured rather than
     /// asserted.</b> Making the v1 check ask "is the GUC line present?" instead of "is the v1 marker

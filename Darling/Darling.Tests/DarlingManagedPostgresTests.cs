@@ -343,32 +343,56 @@ public sealed class DarlingManagedPostgresTests
     /// <para>The v1 names are DERIVED from the v1 builder rather than listed, so a v1 that gains a setting
     /// (which <see cref="ConfV1Block_ContentIsFrozen_ANewSettingNeedsItsOwnMarker"/> forbids) is covered
     /// here without editing this test.</para>
+    ///
+    /// <para><b>The fixture carries initdb's COMMENTED defaults, and that is load-bearing.</b> A real
+    /// postgresql.conf documents every setting as a commented line before the product appends anything, so
+    /// a fixture built only from the product's own blocks cannot see an instrument that counts a comment as
+    /// an assignment — and the first version of this test used one. It passed here and failed against a
+    /// live cluster, where <c>#shared_preload_libraries = ''</c> made a substring count read 2 on a
+    /// perfectly healthy file. Counting through <see cref="CountAssignments"/> against a fixture that
+    /// contains the decoys is what makes "exactly one assignment" a claim about the product rather than
+    /// about the fixture.</para>
     /// </summary>
     [Fact]
     public void HealingAConfWithoutV11_AppendsOnlyThatBlock_AndReAppliesNoV1Setting()
     {
+        /* initdb's generated preamble, in shape: every setting present as a COMMENTED line, including the
+           ones the product also assigns. These are decoys for any instrument that counts substrings. */
+        const string StockPreamble =
+            "# -----------------------------\n" +
+            "# PostgreSQL configuration file\n" +
+            "# -----------------------------\n" +
+            "#shared_preload_libraries = ''\t# (change requires restart)\n" +
+            "#port = 5432\t\t\t\t# (change requires restart)\n" +
+            "#listen_addresses = 'localhost'\t\t# (change requires restart)\n" +
+            "#default_toast_compression = 'pglz'\t# 'pglz' or 'lz4'\n" +
+            "#timescaledb.enable_job_execution_logging = off\n";
+
         /* The field shape: a cluster whose conf carries v1 (and every later marker) but no v11 block, so
-           the GUC line is simply absent and nothing in the file says so. */
-        var existing = DarlingManagedPostgres.BuildConfAppend(5641)
+           the GUC has no live assignment and nothing in the file says so. */
+        var existing = StockPreamble
+            + DarlingManagedPostgres.BuildConfAppend(5641)
             + DarlingManagedPostgres.BuildTimeZoneConfAppend()
             + DarlingManagedPostgres.BuildMessageLocaleConfAppend();
 
-        /* The pre-heal reading, asserted rather than assumed: absent, not off. There is no assignment at
-           all, which is what made the effective value `off` with `source = default` in the field. */
+        /* The pre-heal reading, asserted rather than assumed: absent, not off. ZERO live assignments — the
+           commented decoy above is not one — which is what made the effective value `off` with
+           `source = default` in the field. */
+        Assert.Equal(0, CountAssignments(existing, StoreSelfMetrics.JobExecutionLoggingSetting));
         Assert.Null(LastSettingValue(existing, StoreSelfMetrics.JobExecutionLoggingSetting));
 
         var healed = existing + DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend();
 
         /* The heal: exactly one v11 block, and the GUC now has exactly one assignment, whose value is on. */
         Assert.Equal(1, CountOccurrences(healed, DarlingManagedPostgres.ConfMarkerV11));
-        Assert.Equal(1, CountOccurrences(healed, StoreSelfMetrics.JobExecutionLoggingSetting + " = "));
+        Assert.Equal(1, CountAssignments(healed, StoreSelfMetrics.JobExecutionLoggingSetting));
         Assert.Equal("on", LastSettingValue(healed, StoreSelfMetrics.JobExecutionLoggingSetting));
 
-        /* And nothing else moved: every v1 setting still has exactly ONE assignment, so no part of the
+        /* And nothing else moved: every v1 setting still has exactly ONE live assignment, so no part of the
            shared v1 block was re-applied. A widened v1 match would put every one of these at two. */
         foreach (var name in SettingNames(DarlingManagedPostgres.BuildConfAppend(5641)))
         {
-            Assert.Equal(1, CountOccurrences(healed, name + " = "));
+            Assert.Equal(1, CountAssignments(healed, name));
         }
 
         /* The v1 marker itself is untouched, which is the direct statement that v1 did not re-fire. */
@@ -484,6 +508,42 @@ public sealed class DarlingManagedPostgresTests
         Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
         Assert.DoesNotContain("\nwork_mem = ", block, StringComparison.Ordinal);
         Assert.DoesNotContain("effective_cache_size", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// How many LIVE assignments of <paramref name="setting"/> the conf carries — the instrument for "was
+    /// this block re-applied", which a substring count cannot be.
+    ///
+    /// <para><b>Why not <c>CountOccurrences(conf, name + " = ")</c>.</b> initdb's generated
+    /// postgresql.conf documents every setting as a COMMENTED line, so a real cluster's file already
+    /// carries <c>#shared_preload_libraries = ''</c> before the product appends anything — a substring
+    /// count reads 2 on a perfectly healthy conf and the assertion then fails for a reason that has
+    /// nothing to do with the product. Not hypothetical: it is what the first version of
+    /// <see cref="ExistingStore_GainsJobExecutionLogging_OnNextStart_Gated"/> did against a live cluster,
+    /// while the synthetic fixture in
+    /// <see cref="HealingAConfWithoutV11_AppendsOnlyThatBlock_AndReAppliesNoV1Setting"/> passed because it
+    /// held only the product's own blocks and none of initdb's decoys. Same comment discipline as
+    /// <see cref="LastSettingValue"/>, so the two agree about what an assignment is.</para>
+    /// </summary>
+    private static int CountAssignments(string conf, string setting)
+    {
+        var count = 0;
+        foreach (var raw in conf.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=', StringComparison.Ordinal);
+            if (separator > 0 && line[..separator].Trim().Equals(setting, StringComparison.Ordinal))
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -1422,7 +1482,11 @@ public sealed class DarlingManagedPostgresTests
                 /* Appended, never rewritten in place: the v1 marker still occurs exactly once, so no part
                    of that shared block was re-applied to heal this setting. */
                 Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarker));
-                Assert.Equal(1, CountOccurrences(healedConf, "shared_preload_libraries = "));
+
+                /* Live ASSIGNMENTS, not substring hits: initdb's generated conf already carries a commented
+                   #shared_preload_libraries line, so a substring count reads 2 on a healthy file. That is
+                   what the first version of this assertion did, and CI is where it said so. */
+                Assert.Equal(1, CountAssignments(healedConf, "shared_preload_libraries"));
 
                 var reading = await ReadJobExecutionLoggingSettingAsync(healedConnectionString, timeout.Token);
 

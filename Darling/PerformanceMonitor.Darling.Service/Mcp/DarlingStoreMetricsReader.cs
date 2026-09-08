@@ -108,6 +108,15 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time D
     /// form RAISES on an unregistered parameter and its missing_ok form flattens "unregistered" into the
     /// same NULL an error would produce, where a row count of zero says exactly one thing. $1 setting name.
     /// </para>
+    ///
+    /// <para><b><c>sourcefile</c> IS EXPECTED TO BE NULL HERE, and that is PostgreSQL, not a fault.</b>
+    /// <c>pg_settings.sourcefile</c> and <c>sourceline</c> are visible only to a superuser or a role with
+    /// <c>pg_read_all_settings</c>; the MCP host connects as the least-privilege <c>mcp</c> role, so it
+    /// gets a NULL there. Measured on 2.30.0/PG17 with a plain LOGIN role: <c>setting</c>, <c>source</c>,
+    /// <c>boot_val</c> and <c>context</c> all came back, <c>sourcefile</c> came back empty. This is why
+    /// <see cref="JobExecutionLoggingReading.OffByExplicitOverride"/> keys on <c>source</c> rather than on
+    /// <c>sourcefile</c> — the derived answer must not depend on a column the caller may not be allowed to
+    /// see. Do not "fix" the NULL by escalating the read's privileges.</para>
     /// </summary>
     public const string JobExecutionLoggingSql = @"
 SELECT
@@ -175,6 +184,11 @@ WHERE name = $1";
     /// <see cref="JobExecutionLoggingStatus.Unreadable"/> rather than to a thrown exception or to a
     /// plausible-looking <c>Off</c>: a precondition check must never be able to fail the read it qualifies,
     /// and must never report a state it did not measure.
+    ///
+    /// <para>Takes no logger, unlike the failure-isolated reads in <c>TimescaleSupport</c>, because the
+    /// failure is reported to the one consumer that exists: <c>Unreadable</c> and its note go into the
+    /// response the caller is already reading. A log line would put the fault somewhere the person asking
+    /// the question is not looking.</para>
     /// </summary>
     public static async Task<JobExecutionLoggingReading> GetJobExecutionLoggingAsync(
         NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
@@ -209,8 +223,12 @@ WHERE name = $1";
 
             return new JobExecutionLoggingReading(status, setting, source, sourceFile);
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Cancellation is deliberately NOT isolated, matching every other broad catch in this codebase.
+               A caller who cancelled did not ask "is logging on?" and get no answer — they asked us to stop,
+               and reporting that as Unreadable would put a measurement-shaped word on an act of the caller's
+               own. Everything else becomes Unreadable, which the response says out loud. */
             return new JobExecutionLoggingReading(JobExecutionLoggingStatus.Unreadable, null, null, null);
         }
     }
