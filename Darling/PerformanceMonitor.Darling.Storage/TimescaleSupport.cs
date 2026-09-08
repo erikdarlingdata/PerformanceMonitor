@@ -1573,7 +1573,8 @@ WITH NO DATA";
     /// hypertable rather than with ingest. Measured on the production store: the heaviest hourly refresh
     /// (<see cref="QueryStoreStatsIntervalHourlyView"/>) ran 3,301-6,330 s against a 1-hour cadence —
     /// <b>118-175% of its own schedule interval</b> — while rows arriving per hour FELL ~3x over the same
-    /// period. Narrowed to 1 day the same refresh finishes <b>well inside one phase slot</b>, and the figure
+    /// period. Narrowed to 1 day the same refresh finishes <b>inside one phase slot</b> — by 4 s of 900 as of
+    /// #3166's census, so the margin is no longer part of the claim — and the figure
     /// with its derivation is on <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> rather than
     /// restated here — a percentage of cadence written twice goes stale in one of the two places. The
     /// direction of that measurement is the whole argument: duration tracking window size while ingest moves the other way is
