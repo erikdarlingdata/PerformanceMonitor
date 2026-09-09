@@ -8,6 +8,7 @@
 
 using System;
 using System.Diagnostics.Tracing;
+using System.Threading;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Services;
@@ -206,7 +207,9 @@ internal static class EntraCredentialSelectionLog
     /// </summary>
     internal const int MaxCredentialTypeNameLength = 256;
 
-    private static volatile string? s_lastReported;
+    /* Not volatile: every read goes through Volatile.Read and every write through
+       Interlocked.Exchange, and a volatile field cannot be passed by ref to either. */
+    private static string? s_lastReported;
 
     /// <summary>
     /// A listener for a connection about to be opened with
@@ -313,6 +316,12 @@ internal static class EntraCredentialSelectionLog
     /// <summary>
     /// Reads the listener and writes the line. A no-op for a <c>null</c> listener, which is every
     /// mode but this one.
+    ///
+    /// <para><b>Called from a <c>finally</c> at both call sites, so it must not throw.</b> Nothing
+    /// here does I/O: <see cref="Decide"/> is pure string work and <see cref="AppLogger"/> enqueues
+    /// into a buffer. There is deliberately no blanket <c>catch</c> — a <c>finally</c> that swallows
+    /// everything would make this feature silently dead at exactly the moment it broke, and would
+    /// hide the defect rather than the symptom.</para>
     /// </summary>
     internal static void Report(EntraCredentialSelectionListener? listener)
     {
@@ -321,11 +330,25 @@ internal static class EntraCredentialSelectionLog
             return;
         }
 
-        var line = Decide(listener.SelectedCredentialType, listener.RejectedPayload, s_lastReported);
+        var captured = listener.SelectedCredentialType;
+        var line = Decide(captured, listener.RejectedPayload, Volatile.Read(ref s_lastReported));
 
         if (line.Reported is not null)
         {
-            s_lastReported = line.Reported;
+            /* Claimed atomically, because a read-then-write pair does not dedupe here.
+               CheckAllConnectionsAsync checks servers concurrently, and one raised event is delivered
+               to EVERY attached listener - so two concurrent first connections capture the SAME name
+               and, reading before either writes, both decide they are the first and both log at
+               Information. Interlocked.Exchange hands exactly one caller a previous value different
+               from what it is claiming; anyone else gets its own name back and re-decides against it.
+               The correctness of that rests on the exchange being atomic, not on a test: the race is
+               not reproducible on demand, and the sequential form of the same path is pinned. */
+            var previous = Interlocked.Exchange(ref s_lastReported, line.Reported);
+
+            if (string.Equals(previous, line.Reported, StringComparison.Ordinal))
+            {
+                line = Decide(captured, listener.RejectedPayload, previous);
+            }
         }
 
         if (line.Level == LogLevel.Information)

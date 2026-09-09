@@ -480,6 +480,25 @@ public sealed class EntraCredentialSelectionTests : IDisposable
     public void Report_DoesNothingForANullListener() =>
         EntraCredentialSelectionLog.Report(null);
 
+    /// <summary>
+    /// <para><b>A captured selection is reported whether or not the connection then succeeded.</b>
+    /// <see cref="EntraCredentialSelectionLog.Report"/> takes nothing but the listener — it has no
+    /// success argument to get wrong — and this pins that, because the call sites now invoke it from
+    /// a <c>finally</c> and the reason they do is that the failing case is the one that matters. The
+    /// call sites' own half is <see cref="EveryConnectionOpenSite_AttachesBeforeTheOpenAndReportsOnBothPaths"/>;
+    /// this is the half that shows there is nothing here for a failure to suppress.</para>
+    /// </summary>
+    [Fact]
+    public void Report_TakesNoSuccessArgument_SoAFailedOpenCannotSuppressIt()
+    {
+        var parameters = typeof(EntraCredentialSelectionLog)
+            .GetMethod(nameof(EntraCredentialSelectionLog.Report), BindingFlags.NonPublic | BindingFlags.Static)!
+            .GetParameters();
+
+        Assert.Single(parameters);
+        Assert.Equal(typeof(EntraCredentialSelectionListener), parameters[0].ParameterType);
+    }
+
     // ---- What gets written, and at which level -------------------------------------------
 
     /// <summary>
@@ -644,14 +663,25 @@ public sealed class EntraCredentialSelectionTests : IDisposable
     /// file would be satisfied by the comment alone and would pass with every call deleted. #3201's
     /// equivalent pin did exactly that until the strip was added.</para>
     ///
-    /// <para><b>The ORDER is the discriminating assertion.</b> Both names being present is satisfied
-    /// by a <c>Report</c> placed before the open, which would capture nothing on every connection
-    /// forever while reading as fully instrumented.</para>
+    /// <para><b>Three discriminating assertions, and the third is the one review found missing.</b>
+    /// Both names being present is satisfied by a <c>Report</c> placed before the open, which would
+    /// capture nothing on every connection forever while reading as fully instrumented — so the
+    /// order is asserted. And <c>Begin</c> before the open with <c>Report</c> after it is satisfied
+    /// by a <c>Report</c> on the SUCCESS TAIL, which drops the selection on every failed open. That
+    /// is not a corner: <c>Azure.Identity</c> raises the event when it acquires a token, before SQL
+    /// Server has accepted or rejected the identity that token names, so the wrong-ambient-identity
+    /// case this feature exists for arrives as a login failure with the selection already captured —
+    /// and the driver caches the credential as soon as the token exists, so there is no second
+    /// chance. Hence the third assertion: a <c>finally</c> between the attach and the report.</para>
+    ///
+    /// <para>Asserted on the WINDOW between <c>Begin</c> and <c>Report</c> rather than on the body,
+    /// so an unrelated <c>finally</c> elsewhere in the method cannot satisfy it —
+    /// <c>RunConnectionTestAsync</c> already had one, for re-enabling its buttons.</para>
     /// </summary>
     [Theory]
     [InlineData("Lite/Services/ServerManager.cs", "CheckConnectionAsync(string serverId")]
     [InlineData("Lite/Windows/AddServerDialog.xaml.cs", "RunConnectionTestAsync()")]
-    public void EveryConnectionOpenSite_BeginsBeforeTheOpenAndReportsAfterIt(
+    public void EveryConnectionOpenSite_AttachesBeforeTheOpenAndReportsOnBothPaths(
         string relativePath, string methodAnchor)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(relativePath));
@@ -672,6 +702,15 @@ public sealed class EntraCredentialSelectionTests : IDisposable
         Assert.True(begin >= 0, $"{relativePath} must attach the credential-selection listener in {methodAnchor}");
         Assert.True(report >= 0, $"{relativePath} must report the credential selection in {methodAnchor}");
 
+        /* One of each, so a duplicate call cannot make the window assertions read off the wrong
+           pair of indices. */
+        Assert.Equal(
+            begin,
+            body.LastIndexOf("EntraCredentialSelectionLog.Begin", StringComparison.Ordinal));
+        Assert.Equal(
+            report,
+            body.LastIndexOf("EntraCredentialSelectionLog.Report", StringComparison.Ordinal));
+
         Assert.True(
             begin < open,
             "the listener must be attached BEFORE the open, or Azure.Identity raises event 13 with "
@@ -680,6 +719,11 @@ public sealed class EntraCredentialSelectionTests : IDisposable
             open < report,
             "the selection must be reported AFTER the open, or it is read before the event that "
                 + "produces it and every connection reports nothing");
+
+        var window = body[begin..report];
+
+        Assert.Contains("finally", window, StringComparison.Ordinal);
+        Assert.Contains("try", window, StringComparison.Ordinal);
     }
 
     // ---- Helpers -------------------------------------------------------------------------

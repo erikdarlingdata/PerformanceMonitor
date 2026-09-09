@@ -380,11 +380,23 @@ public partial class AddServerDialog : Window
                - see EntraCredentialSelectionLog. Instrumented here AS WELL AS in ServerManager, not
                instead of it: the event fires at most once per process, so whichever site opens the
                first EntraDefaultCredential connection is the only one that can observe it, and which
-               one that is depends on whether a server was already saved when the sweep ran. */
+               one that is depends on whether a server was already saved when the sweep ran.
+
+               Reported in a FINALLY for the same reason as the sibling site: the token is acquired,
+               and the event raised, BEFORE SQL Server accepts or rejects the identity it names. A
+               user pressing Test because they suspect the wrong Azure identity is being used gets a
+               failed open, and the selection has to survive it - which is also the only chance,
+               since the driver caches the credential as soon as a token exists. */
             using (var credentialSelection = EntraCredentialSelectionLog.Begin(builder))
             {
-                await connection.OpenAsync();
-                EntraCredentialSelectionLog.Report(credentialSelection);
+                try
+                {
+                    await connection.OpenAsync();
+                }
+                finally
+                {
+                    EntraCredentialSelectionLog.Report(credentialSelection);
+                }
             }
 
             using var cmd = new SqlCommand("SELECT @@VERSION", connection);
