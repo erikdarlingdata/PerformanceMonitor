@@ -29,8 +29,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// Convention deviations from Lite (matching every other viewer read): (1) reads are both-sides window-bound
 /// on naive-UTC <c>collection_time</c> ($ positional params, Kind=Unspecified); (2) <c>collection_time</c> is
 /// naive UTC and renders through <see cref="ViewerTimeHelper.ForDisplay"/>, while the DMV wall-clock stamps
-/// (creation_time / last_execution_time / cached_time / first_execution_time) are the SQL server's own local
-/// time and render raw through <see cref="FormatServerClock"/>; (3) Darling's <c>delta_*</c> columns are
+/// (query_stats' creation_time / last_execution_time and procedure_stats' cached_time /
+/// last_execution_time) are the SQL server's own local time and render raw through
+/// <see cref="FormatServerClock"/> — query_store_stats' first_execution_time / last_execution_time are
+/// NOT in that family, being normalised to UTC by the collector, and take ForDisplay; (3) Darling's
+/// <c>delta_*</c> columns are
 /// already per-collection-cycle deltas, so — like the overlay — there is no C# row-over-row differencing
 /// (Lite's history rows carry the same collector-computed deltas). Numeric columns read through
 /// <c>Convert.ToXxx(GetValue)</c> so a bigint / integer / numeric provider type all bind cleanly.

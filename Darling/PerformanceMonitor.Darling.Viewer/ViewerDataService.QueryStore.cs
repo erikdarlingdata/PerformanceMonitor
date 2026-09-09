@@ -91,8 +91,19 @@ public sealed class ViewerQueryStoreRow
     public double AvgNumPhysicalIoReads { get; set; }
     public double MinNumPhysicalIoReads { get; set; }
     public double MaxNumPhysicalIoReads { get; set; }
-    public string FirstExecutionTimeLocal => ViewerDataService.FormatServerClock(FirstExecutionTime);
-    public string LastExecutionTimeLocal => ViewerDataService.FormatServerClock(LastExecutionTime);
+    /// <summary>Query Store returns <c>datetimeoffset</c> and <c>QueryStoreCollector</c> normalises both
+    /// execution stamps through <c>((DateTimeOffset)…).UtcDateTime</c> before storing, so
+    /// <c>query_store_stats.first_execution_time</c> and <c>last_execution_time</c> are naive UTC —
+    /// unlike the <c>sys.dm_exec_*</c> stamps, which are the server's own clock. They therefore convert
+    /// through <see cref="ViewerTimeHelper.ForDisplay"/> rather than rendering raw.</summary>
+    public string FirstExecutionTimeLocal => FirstExecutionTime.HasValue
+        ? ViewerTimeHelper.ForDisplay(FirstExecutionTime.Value).ToString("yyyy-MM-dd HH:mm:ss")
+        : "";
+
+    /// <inheritdoc cref="FirstExecutionTimeLocal"/>
+    public string LastExecutionTimeLocal => LastExecutionTime.HasValue
+        ? ViewerTimeHelper.ForDisplay(LastExecutionTime.Value).ToString("yyyy-MM-dd HH:mm:ss")
+        : "";
     public double TotalCpuMs => TotalExecutions * AvgCpuTimeMs;
     public double TotalDurationMs => TotalExecutions * AvgDurationMs;
 }
