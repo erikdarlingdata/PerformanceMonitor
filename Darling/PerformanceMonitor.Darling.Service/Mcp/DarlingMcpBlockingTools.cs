@@ -44,7 +44,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpBlockingTools
 {
-    [McpServerTool(Name = "get_blocking"), Description("Gets blocking events captured by the blocked process report extended event (plus the always-on DMV blocking-snapshot fallback). Shows the blocked and blocking sessions, wait types, wait times, and query text for both. Use this first for a quick overview, then use get_blocked_process_xml for deep analysis of prolonged blocking.")]
+    [McpServerTool(Name = "get_blocking"), Description("Gets blocking events captured by the blocked process report extended event (plus the always-on DMV blocking-snapshot fallback). Shows the blocked and blocking sessions, wait types, wait times, and query text for both. Use this first for a quick overview, then use get_blocked_process_xml for deep analysis of prolonged blocking. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct.")]
     public static async Task<string> GetBlocking(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -121,12 +121,12 @@ public sealed class DarlingMcpBlockingTools
                 blocking_sql_text = McpHelpers.Truncate(r.BlockingSqlText, 2000),
                 blocked_transaction_name = r.BlockedTransactionName,
                 blocking_transaction_name = r.BlockingTransactionName,
-                blocked_last_tran_started = r.BlockedLastTranStarted?.ToString("o"),
-                blocking_last_tran_started = r.BlockingLastTranStarted?.ToString("o"),
-                blocked_last_batch_started = r.BlockedLastBatchStarted?.ToString("o"),
-                blocking_last_batch_started = r.BlockingLastBatchStarted?.ToString("o"),
-                blocked_last_batch_completed = r.BlockedLastBatchCompleted?.ToString("o"),
-                blocking_last_batch_completed = r.BlockingLastBatchCompleted?.ToString("o"),
+                blocked_last_tran_started = r.BlockedLastTranStartedUtc?.ToString("o"),
+                blocking_last_tran_started = r.BlockingLastTranStartedUtc?.ToString("o"),
+                blocked_last_batch_started = r.BlockedLastBatchStartedUtc?.ToString("o"),
+                blocking_last_batch_started = r.BlockingLastBatchStartedUtc?.ToString("o"),
+                blocked_last_batch_completed = r.BlockedLastBatchCompletedUtc?.ToString("o"),
+                blocking_last_batch_completed = r.BlockingLastBatchCompletedUtc?.ToString("o"),
                 blocked_priority = r.BlockedPriority,
                 blocking_priority = r.BlockingPriority,
                 has_report_xml = r.HasReportXml,

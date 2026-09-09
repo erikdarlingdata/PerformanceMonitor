@@ -46,7 +46,7 @@ internal static class DarlingObjectStatsReader
     public sealed record IndexUsageRow(
         string DatabaseName, string SchemaName, string TableName, string? IndexName, string? IndexTypeDesc,
         double ReservedMb, long TotalRows, long UserSeeks, long UserScans, long UserLookups, long TotalReads,
-        long UserUpdates, DateTime? LastUserAccess, string Classification);
+        long UserUpdates, DateTime? LastUserAccessUtc, string Classification);
 
     /// <summary>One per-index locking / latch-contention row.</summary>
     public sealed record IndexLockingRow(
@@ -177,8 +177,33 @@ internal static class DarlingObjectStatsReader
     /// healthy collection, full retention and zero returned rows, which reads exactly like a collection
     /// failure. The database filter is what makes the question answerable; the count below is what stops the
     /// answer being read as complete.</para>
+    /// <para><b><c>last_user_access</c> is de-skewed to naive UTC.</b> The four columns it is the
+    /// <c>GREATEST</c> of come straight off <c>sys.dm_db_index_usage_stats</c>
+    /// (<c>IndexObjectStatsCollector</c> ships <c>us.last_user_seek</c> and its three siblings verbatim), so
+    /// the stored values are the monitored server's LOCAL wall clock. All four share one offset, so
+    /// subtracting after the <c>GREATEST</c> is equivalent to subtracting before it and costs one expression
+    /// instead of four. <c>GREATEST</c> ignoring NULLs is what is wanted here — an index used in only one of
+    /// the four ways still reports that one access — and subtracting an interval from the all-NULL case
+    /// keeps it NULL. This read returns NO other timestamp, which is why converting rather than labelling
+    /// matters more here than elsewhere: there is nothing else in the payload for a reader to notice a
+    /// disagreement against.</para>
+    /// <para>The alias deliberately does NOT carry a <c>_utc</c> suffix, unlike the other fifteen. This one
+    /// is a projection alias rather than a column, and <c>ConsumedTimestampFrameDisciplineTests</c> reaches
+    /// the payload field through the alias — a suffix here would make the field name and the alias diverge
+    /// and drop the site out of that census. The conversion is pinned directly by
+    /// <c>EveryDeSkewedAtReadSite_CarriesItsConversionInTheReaderItDependsOn</c>, which is a stronger claim
+    /// than a suffix nothing checks.</para>
     /// </summary>
     public const string IndexUsageSql = """
+        WITH svr AS (
+            SELECT COALESCE((
+                SELECT sp.utc_offset_minutes
+                FROM server_properties AS sp
+                WHERE sp.server_id = $1
+                AND   sp.utc_offset_minutes IS NOT NULL
+                ORDER BY sp.collection_time DESC
+                LIMIT 1), 0) AS offset_minutes
+        )
         SELECT
             database_name,
             schema_name,
@@ -192,7 +217,7 @@ internal static class DarlingObjectStatsReader
             COALESCE(user_lookups, 0) AS user_lookups,
             COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) AS total_reads,
             COALESCE(user_updates, 0) AS user_updates,
-            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,
+            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access,
             CASE
                 WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
                      AND COALESCE(user_updates, 0) = 0 THEN 'Unused'
@@ -200,7 +225,7 @@ internal static class DarlingObjectStatsReader
                      AND COALESCE(user_updates, 0) > 0 THEN 'Write-only'
                 ELSE 'Active'
             END AS classification
-        FROM v_index_object_stats
+        FROM v_index_object_stats, svr
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
         AND   ($2::text IS NULL OR database_name = $2::text)
