@@ -187,8 +187,15 @@ internal sealed class EntraCredentialSelectionListener : EventListener
 /// <para><i>Only the last REPORTED name outlives the attempt.</i> Nothing else is retained: the
 /// listener is gone and the captured value is read once. <see cref="s_lastReported"/> exists so an
 /// unchanged repeat is a <see cref="LogLevel.Debug"/> line instead of an
-/// <see cref="LogLevel.Information"/> one, because the selection is a process fact and a monitoring
-/// tool restating it once per server per sweep would be noise. A CHANGED name still reports at
+/// <see cref="LogLevel.Information"/> one, because a monitoring tool restating it once per server per
+/// sweep would be noise. <b>Process-wide is the right granularity for what is logged, which is not
+/// quite the same as the selection being a process fact.</b> The chain it resolves from — environment
+/// variables, an <c>az login</c> session, machine identity — is genuinely process-wide, but the
+/// driver keys its credential cache on authority, scope, audience and client id, so two servers in
+/// different tenants get different <c>DefaultAzureCredential</c> instances and each raises its own
+/// event. Both are collapsed here when they select the same TYPE, deliberately: the type name is all
+/// that is recorded, so a second line would repeat it and add nothing. Telling those two apart would
+/// need the tenant or the server on the line, and neither belongs there. A CHANGED name still reports at
 /// <see cref="LogLevel.Information"/> — the driver clears its credential cache
 /// (<c>ActiveDirectoryAuthenticationProvider.cs:136-138</c>), so a different source genuinely can
 /// win later, and that is the one thing here worth interrupting someone with.</para>
