@@ -686,6 +686,18 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private static Regex McpPayloadEmission(string field) =>
         new(@"(?<![\w.])" + Regex.Escape(field) + @"\s*=[^;,\r\n]*?ToString\(""o""\)");
 
+    /// <summary>A renderer call on a column's property, taken off the enclosing row OR off a receiver:
+    /// three real sites pass the property off a lambda parameter (<c>ForDisplay(d.SampleTime)</c>), and a
+    /// receiver-less pattern cannot see them at all — found-and-declined beats invisible.</summary>
+    private static Regex RenderCall(string renderer, string column) =>
+        new(@"\b" + Regex.Escape(renderer) + @"\s*\(\s*(?:[A-Za-z_]\w*\.)?" + Regex.Escape(Pascal(column)) + @"\b");
+
+    /// <summary>A SQL projection alias. No trailing comma required: an alias that is the LAST column before
+    /// <c>FROM</c> carries a frame exactly like any other, and requiring the comma would drop it from a
+    /// census that calls itself closed.</summary>
+    private static readonly Regex ProjectionAlias =
+        new(@"([^\r\n]*?)\s+AS\s+([a-z][a-z0-9_]*)(?![\w])", RegexOptions.IgnoreCase);
+
     /// <summary>The two WPF renderers that ADD the collected offset — i.e. that take naive UTC — and the
     /// one that renders raw, i.e. that takes the server's own clock. <c>FormatServerTime</c> is Lite's
     /// <c>ForDisplay</c>, not its <c>FormatServerClock</c>: it adds the offset and names its parameter
@@ -1150,8 +1162,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
         foreach (var path in McpSourceFiles())
         {
-            foreach (var projection in Regex.Matches(File.ReadAllText(path), @"([^\r\n]*?)\s+AS\s+([a-z][a-z0-9_]*)\s*,",
-                         RegexOptions.IgnoreCase).Cast<Match>())
+            foreach (var projection in ProjectionAlias.Matches(File.ReadAllText(path)).Cast<Match>())
             {
                 var alias = projection.Groups[2].Value;
 
@@ -1176,6 +1187,44 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         }
 
         return found.Select(kv => (kv.Key, kv.Value)).OrderBy(r => r.Key, StringComparer.Ordinal).ToArray();
+    }
+
+    /// <summary>
+    /// <see cref="McpPayloadEmission"/> deliberately stops at a newline: the field and its
+    /// <c>ToString("o")</c> have to be one statement, or every payload object would match every field name
+    /// appearing anywhere inside it. That bound is a blind spot for a field whose emission genuinely spans
+    /// lines, so the shape is MEASURED rather than noted — there are none today, and the build fails on the
+    /// first one instead of quietly dropping it out of a census that calls itself closed.
+    /// </summary>
+    [Fact]
+    public void NoPayloadEmissionOfACensusField_SpansMoreThanOneStatement()
+    {
+        var fields = FrameRegister().Keys.Select(k => k.Column)
+            .Concat(RenamedServerLocalProjections().Select(r => r.Alias))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.NotEmpty(fields);
+
+        var spanning = new List<string>();
+
+        foreach (var path in McpSourceFiles())
+        {
+            var text = File.ReadAllText(path);
+
+            foreach (var field in fields)
+            {
+                var pattern = @"(?<![\w.])" + Regex.Escape(field)
+                    + @"\s*=\s*[^;,\r\n]*\r?\n[^;]{0,240}?ToString\(""o""\)";
+
+                foreach (var site in Regex.Matches(text, pattern).Cast<Match>())
+                {
+                    spanning.Add($"{Relative(path)}|{field}|{text[..site.Index].Count(c => c == '\n') + 1}");
+                }
+            }
+        }
+
+        Assert.Empty(spanning);
     }
 
     [Fact]
@@ -1212,9 +1261,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             {
                 foreach (var (renderer, expects) in Renderers)
                 {
-                    var pattern = @"\b" + renderer + @"\s*\(\s*" + Regex.Escape(Pascal(column)) + @"\b";
-
-                    foreach (var site in Regex.Matches(text, pattern).Cast<Match>())
+                    foreach (var site in RenderCall(renderer, column).Matches(text).Cast<Match>())
                     {
                         var tables = ResolveTables(path, text, site.Index, column);
 
@@ -1238,10 +1285,27 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         /* A floor on the sites actually JUDGED, not only on the files opened: a matcher that stopped
            recognising the renderers would otherwise report an empty offender set over 459 files. */
         Assert.True(judged >= 30, $"only {judged} render sites were judged — check the renderer patterns");
-        Assert.Empty(declined);
+        Assert.Equal(
+            DeclinedAmbiguousRenderSites.OrderBy(d => d, StringComparer.Ordinal).ToArray(),
+            declined.OrderBy(d => d, StringComparer.Ordinal).ToArray());
 
         AssertMatchesInventory(found, [SiteLabel.DesktopRenderFrameMismatch]);
     }
+
+    /// <summary>
+    /// Render sites this guard DECLINES: a frame-ambiguous property name whose table cannot be narrowed to
+    /// one frame, because the file holds no SQL and no row type that resolves it. All three plot
+    /// <c>cpu_utilization_stats.sample_time</c>, which <c>GetCpuUtilizationAsync</c> de-skews to naive UTC
+    /// in SQL (#1262) before the chart sees it — so <c>ForDisplay</c> is correct there — but it is the
+    /// READ that establishes that, not anything this scan can see. Pinned at set equality so the decline
+    /// cannot grow, which is the whole cost of refusing to key on the column name.
+    /// </summary>
+    private static readonly string[] DeclinedAmbiguousRenderSites =
+    [
+        "Darling/PerformanceMonitor.Darling.Viewer/CorrelatedTimelineLanesControl.xaml.cs|sample_time|ForDisplay",
+        "Darling/PerformanceMonitor.Darling.Viewer/CorrelatedTimelineLanesControl.xaml.cs|sample_time|ForDisplay",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Charts.cs|sample_time|ForDisplay",
+    ];
 
     /// <summary>Each <see cref="SiteLabel.DeSkewedAtRead"/> entry's conversion is present in the reader it
     /// depends on. Without this the label is a way to delete a site from the census by asserting it is
@@ -1380,6 +1444,24 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         /* Pascal: the column-to-property transform the render scan keys on. */
         Assert.Equal("FirstExecutionTime", Pascal("first_execution_time"));
         Assert.Equal("BlockedLastTranStarted", Pascal("blocked_last_tran_started"));
+
+        /* RenderCall takes the property off the enclosing row OR off a receiver, and does not mistake a
+           longer property that merely starts with the same text. The PRODUCTION matcher, not a retyped
+           copy of its pattern: a pin over a local copy passes while the scan it stands for is crippled. */
+        Assert.Matches(RenderCall("ForDisplay", "sample_time"), "ViewerTimeHelper.ForDisplay(SampleTime).ToString(\"s\")");
+        Assert.Matches(
+            RenderCall("ForDisplay", "sample_time"),
+            "cpuTask.Result.Select(d => ViewerTimeHelper.ForDisplay(d.SampleTime).ToOADate())");
+        Assert.DoesNotMatch(RenderCall("ForDisplay", "sample_time"), "ViewerTimeHelper.ForDisplay(s.SampleTimeUtc).ToOADate()");
+        Assert.DoesNotMatch(RenderCall("FormatServerClock", "sample_time"), "ViewerTimeHelper.ForDisplay(d.SampleTime)");
+
+        /* ProjectionAlias takes an alias that is the LAST column before FROM, with no comma after it. */
+        Assert.Equal(
+            "last_user_access",
+            ProjectionAlias.Match("    GREATEST(last_user_seek, last_user_scan) AS last_user_access\r\nFROM x").Groups[2].Value);
+        Assert.Equal(
+            "last_user_access",
+            ProjectionAlias.Match("    GREATEST(last_user_seek, last_user_scan) AS last_user_access,").Groups[2].Value);
 
         /* And the two renderer families are distinguished, not merged: three names, two expectations. */
         Assert.Equal(3, Renderers.Length);
