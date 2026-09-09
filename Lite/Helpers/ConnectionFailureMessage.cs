@@ -39,6 +39,13 @@ public static class ConnectionFailureMessage
     /// The broker stage from <see cref="EntraBrokerFailure.Classify"/>.
     /// <see cref="EntraBrokerFailureKind.None"/> adds nothing.
     /// </param>
+    /// <param name="ambientFailure">
+    /// Why the ambient Azure credential chain failed, from
+    /// <see cref="EntraAmbientCredentialFailure.Classify"/>.
+    /// <see cref="EntraAmbientCredentialFailureKind.None"/> adds nothing. Required rather than
+    /// defaulted: a caller that forgets it would silently show the opaque chain error this argument
+    /// exists to translate, and a compile error is the only thing that reliably prevents that.
+    /// </param>
     /// <param name="logDirectory">
     /// The resolved directory holding the log files, or null/blank to omit the pointer. Omitted
     /// rather than guessed: a wrong path sends a reporter somewhere empty and reads as "there are no
@@ -47,6 +54,7 @@ public static class ConnectionFailureMessage
     public static string Compose(
         string? driverError,
         EntraBrokerFailureKind brokerFailure,
+        EntraAmbientCredentialFailureKind ambientFailure,
         string? logDirectory)
     {
         var body = new StringBuilder();
@@ -58,11 +66,23 @@ public static class ConnectionFailureMessage
 
         /* The explanation goes AFTER the driver's text, not instead of it. The driver's message
            carries the error codes a report needs to be actionable; this only says which side of the
-           handshake they came from. */
+           handshake they came from.
+
+           Both classifiers are consulted, and both can contribute. They describe different modes'
+           failures and normally at most one fires - but a broker refusal reaching a
+           EntraDefaultCredential connection would mean the credential chain's own broker link had
+           become live, which is the one thing that could take this mode's advantage away. Showing
+           both rather than choosing between them is how that would be visible at all. */
         var explanation = EntraBrokerFailure.Explain(brokerFailure);
         if (explanation is not null)
         {
             body.Append("\n\n").Append(explanation);
+        }
+
+        var ambientExplanation = EntraAmbientCredentialFailure.Explain(ambientFailure);
+        if (ambientExplanation is not null)
+        {
+            body.Append("\n\n").Append(ambientExplanation);
         }
 
         if (!string.IsNullOrWhiteSpace(logDirectory))

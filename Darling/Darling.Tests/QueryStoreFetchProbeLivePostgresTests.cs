@@ -20,7 +20,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The #2312 touch-and-probe against a REAL store — the one statement the whole activity-driven fetch
-/// runs on, whose risk lives entirely in how PostgreSQL evaluates the data-modifying CTEs, the hourly
+/// runs on, whose risk lives entirely in how PostgreSQL evaluates the data-modifying CTEs, the liveness
 /// guard, the hash comparisons and the LEFT JOIN together; no source pin can speak to any of it. Also the
 /// writer's NULL-digest content-less marker, which V77's nullable column exists for: it must land, read as
 /// RESOLVED, and never re-enter the fetch list.
@@ -56,7 +56,11 @@ public sealed class QueryStoreFetchProbeLivePostgresTests
         var bodySucceeded = false;
         try
         {
-            var landedAt = DateTime.UtcNow.AddHours(-3);
+            /* Older than the touch guard, DERIVED from it rather than typed: the liveness assertions below
+               are the guard firing, so a fixture with a hard-coded age silently stops testing the touch the
+               moment the width moves — it would land inside the guard, no UPDATE would run, and the freshness
+               counts would read 0/0. One hour past the width is enough; the guard is a strict inequality. */
+            var landedAt = DateTime.UtcNow.AddHours(-(QueryStoreLivenessTouchGuard.GuardHours + 1));
 
             /* Plan 1: real content with a hash. Plan 2: the engine had nothing to give — the writer must
                land the NULL-digest marker rather than skipping the row. */
@@ -92,9 +96,9 @@ public sealed class QueryStoreFetchProbeLivePostgresTests
             Assert.Equal(new FetchProbeVerdict(2, Resolved: true, HashStale: false), verdicts[1]);
             Assert.Equal(new FetchProbeVerdict(3, Resolved: false, HashStale: false), verdicts[2]);
 
-            /* Liveness: the touch advanced last_seen past the 3-hour-old landing stamp (the rows were
-               older than the hourly guard, so the update fired) — on the map AND on the dimension row the
-               real digest points at. */
+            /* Liveness: the touch advanced last_seen past the landing stamp (the rows were older than the
+               guard, so the update fired) — on the map AND on the dimension row the real digest points
+               at. */
             using (var freshness = new NpgsqlCommand(@"
 SELECT
     (SELECT COUNT(*) FROM collect.query_store_plan_map

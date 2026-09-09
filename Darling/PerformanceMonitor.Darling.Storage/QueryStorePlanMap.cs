@@ -146,11 +146,17 @@ WHERE EXCLUDED.last_seen >= query_store_plan_map.last_seen";
     /// true, this restructure would silently stop refreshing <c>last_seen</c> and reintroduce the GC hazard the
     /// touch exists to prevent.</para>
     ///
-    /// <para>Guarded at one hour like the dimension upsert's own conflict arm, and for the same reason — the
-    /// horizons are multi-day, so an update per row per hour is enough freshness and the write amplification
-    /// stays bounded on a hot catalog. The margin arithmetic already accounts for this trailing hour. Hash
-    /// adoption rides the same guard: it is a backfill, not a correctness deadline, and un-guarding it would
-    /// re-write every legacy row on every cycle until the first touch landed.</para>
+    /// <para>Both guard sites — the <c>touched</c> CTE and <c>dim_touch</c> — carry
+    /// <see cref="QueryStoreLivenessTouchGuard.GuardInterval"/>, which is the ONLY place the width is
+    /// written. That is what makes the same-pass claim above hold by construction: with a literal per site,
+    /// the map row and the dimension row are guarded by copies that happen to agree, and moving one of them
+    /// is exactly the divergence this paragraph rules out. The guard is a share of the margin the prune
+    /// cutoffs already reserve for a trailing stamp, derived there rather than chosen here, so the horizon
+    /// arithmetic and the guard cannot drift apart. Every guard site is a PER-ROW predicate, so a row that
+    /// stays referenced is re-stamped at least once per window and the width is the bound on how stale a
+    /// live row's stamp can be. Hash adoption rides the same guard: it is a backfill, not a correctness
+    /// deadline, and un-guarding it would re-write every legacy row on every cycle until the first touch
+    /// landed.</para>
     ///
     /// <para>The CTE is ordered by the map's primary key for the #1801 reason on <see cref="UpsertSql"/> —
     /// this is the one statement in the design that touches many rows across two tables on every cycle of
@@ -161,7 +167,7 @@ WHERE EXCLUDED.last_seen >= query_store_plan_map.last_seen";
     /// deadlock impossible. If one is observed, the fix is to drive the update from an explicitly ordered
     /// <c>SELECT ... FOR UPDATE</c>, not to widen this comment.</para>
     /// </summary>
-    public const string TouchAndProbeSql = @"WITH touched AS (
+    public static readonly string TouchAndProbeSql = @"WITH touched AS (
     SELECT m.server_id, m.database_name, m.plan_id, m.digest, batch.plan_hash AS live_hash
     FROM collect.query_store_plan_map AS m
     JOIN unnest($1::integer[], $2::text[], $3::bigint[], $4::text[])
@@ -169,7 +175,7 @@ WHERE EXCLUDED.last_seen >= query_store_plan_map.last_seen";
       ON  batch.server_id = m.server_id
       AND batch.database_name = m.database_name
       AND batch.plan_id = m.plan_id
-    WHERE m.last_seen < $5::timestamp - interval '1 hour'
+    WHERE m.last_seen < $5::timestamp - " + QueryStoreLivenessTouchGuard.GuardInterval + @"
     ORDER BY m.server_id, m.database_name, m.plan_id
 ),
 map_touch AS (
@@ -186,7 +192,7 @@ dim_touch AS (
     UPDATE collect.query_plan_dim AS d
     SET last_seen = $5::timestamp
     WHERE d.digest IN (SELECT digest FROM map_touch WHERE digest IS NOT NULL)
-      AND d.last_seen < $5::timestamp - interval '1 hour'
+      AND d.last_seen < $5::timestamp - " + QueryStoreLivenessTouchGuard.GuardInterval + @"
     RETURNING d.digest
 )
 SELECT
