@@ -96,16 +96,14 @@ public static class EntraAmbientCredentialFailure
         /* Walked to the bottom, because the driver's own message is the outermost layer and the
            chain's is underneath it - the same shape that made a Message-only read useless in #3196.
 
-           OUTERMOST WINS, and unlike EntraBrokerFailure that is the whole of the priority rule here:
-           the two markers are prefixes of different sentences, so no single message can match both,
-           and the order the two ifs are written in therefore decides nothing. Only the DEPTH does.
-           Azure.Identity produces the two at different depths - CreateTokenCredentialInstance's
-           unhandled-exception wrapper sits above whatever the source threw - so the shallower marker
-           is the one describing this attempt and the deeper one is context it wrapped.
-
-           This comment previously claimed the ifs were "ordered by specificity". They are not
-           ordered at all in any sense a caller can observe, and the test asserting the ordering
-           passed with the two swapped. Saying so here rather than keeping a rule nothing enforces. */
+           OUTERMOST WINS, and unlike EntraBrokerFailure that is the whole of the priority rule here.
+           The two markers are prefixes of different sentences, so no single message can match both,
+           and the order the two ifs are written in is therefore not observable by any caller - only
+           the DEPTH is. Azure.Identity produces the two at different depths: GetTokenFromCredential-
+           Async's unhandled-exception wrapper (DefaultAzureCredential.cs:199) sits above whatever the
+           source threw, so the shallower marker describes this attempt and the deeper one is context
+           it wrapped. Anything that flattens the chain before matching loses that distinction, which
+           is what Classify_TakesTheShallowestMarkerWhenTheChainHoldsBoth asserts in both directions. */
         for (var current = ex; current is not null; current = current.InnerException)
         {
             var message = current.Message;

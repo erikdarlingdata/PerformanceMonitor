@@ -282,12 +282,13 @@ public class EntraDefaultCredentialTests
     public void Classify_TakesTheShallowestMarkerWhenTheChainHoldsBoth()
     {
         /* Asserted in BOTH directions, and that is the point. The first assertion alone passes
-           whatever the walk does, because the arm testing the fault marker is written first - it
-           was the whole of this test until a mutation swapped the two arms and nothing failed. The
-           second assertion is the one that discriminates: it can only hold if depth decides, so a
-           bottom-up walk, or one that flattens every message into a single string before matching,
-           fails it. The two markers are prefixes of different sentences and cannot both match one
-           message, so arm order is not observable and only depth is. */
+           whatever the walk does, because the arm testing the fault marker is written first, so
+           swapping the two arms leaves it green. The second assertion is the one that
+           discriminates: it can hold only if DEPTH decides, so a bottom-up walk, or one that
+           flattens every message into a single string before matching, fails it. The two markers
+           are prefixes of different sentences and cannot both match one message, so arm order is
+           not observable by any caller and only depth is. Deleting either half leaves a test that
+           cannot fail. */
         var faultOverDeclined = new InvalidOperationException(
             ChainFaultedMessage,
             new InvalidOperationException(ChainDeclinedMessage));
@@ -441,9 +442,9 @@ public class EntraDefaultCredentialTests
            a simple assembly name answers null both when the assembly is absent and when nothing can
            be loaded by that form at all - so in any assembly whose closure does not carry
            Azure.Identity, the assertion below passes for entirely the wrong reason and would keep
-           passing with the broker package added. Measured: run against a harness that referenced
-           only Microsoft.Data.SqlClient, both halves of this pin passed with no Azure assembly on
-           disk. Proving the probe CAN return a type is what makes the null meaningful. */
+           passing with the broker package added - measured, in a harness carrying no Azure
+           assembly at all, where both halves of this pin were green. Proving the probe CAN return a
+           type is what makes the null below evidence of anything. */
         Assert.NotNull(Type.GetType(
             "Azure.Identity.DefaultAzureCredential, Azure.Identity", throwOnError: false));
 
