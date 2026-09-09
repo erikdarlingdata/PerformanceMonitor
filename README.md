@@ -426,16 +426,16 @@ Common issues:
 
 ## Authentication
 
-Every edition supports six authentication types, defined once in `PerformanceMonitor.Common.AuthenticationTypes` and shared by Lite, Darling, the Dashboard, and the CLI installer:
+`PerformanceMonitor.Common.AuthenticationTypes` supports six authentication types, defined once there and named the same way in every edition. **Not every edition connects with all six**, so the table says which does what: Lite offers all of them, while the Darling service builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
 
-| Type | Interactive? | Credential stored? | Where |
-|---|---|---|---|
-| Windows | No | None | — |
-| SQL Server | No | Password | Windows Credential Manager |
-| Entra ID (MFA) | Yes, once per session | None | — |
-| Service Principal | No | Client secret | Windows Credential Manager |
-| Managed Identity | No | None | — |
-| Existing Azure Sign-In | No | None | — (established outside the app, e.g. `az login`) |
+| Type | Editions | Interactive? | Credential stored? | Where |
+|---|---|---|---|---|
+| Windows | Lite, Darling | No | None | — |
+| SQL Server | Lite, Darling | No | Password | Windows Credential Manager |
+| Entra ID (MFA) | Lite | Yes, once per session | None | — |
+| Service Principal | Lite | No | Client secret | Windows Credential Manager |
+| Managed Identity | Lite | No | None | — |
+| Existing Azure Sign-In | Lite | No | None | — (established outside the app, e.g. `az login`) |
 
 **Managed Identity and Service Principal** are non-interactive Azure AD (Entra ID) authentication modes, added for fleet onboarding of Azure SQL Database / Managed Instance without a per-server interactive MFA prompt (see [#1038](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1038)). Both map directly to `Microsoft.Data.SqlClient`'s native `SqlAuthenticationMethod` (`ActiveDirectoryServicePrincipal` / `ActiveDirectoryManagedIdentity`) — PerformanceMonitor never acquires, caches, or stores a token itself; the official Microsoft driver handles that internally.
 
