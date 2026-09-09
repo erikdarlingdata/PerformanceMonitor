@@ -109,6 +109,17 @@ namespace Darling.Tests;
 /// divergence both summaries argue the estimator FROM cannot exist at any values, so a population that
 /// thin cannot support the argument its own doc makes for taking a maximum.</para>
 ///
+/// <para><b>AND THE COUNT ITSELF, held against the tail the same summary publishes (#3200).</b> The floor
+/// reaches the light ceiling's population through a number in PROSE — the census sentence's count, over a
+/// population the summary deliberately does not republish — so it is satisfiable by assertion in a way the
+/// heaviest ceiling's parsed population length is not. What removes that is arithmetic rather than a second
+/// sentence agreeing with the first: the summary states a 95th percentile and publishes readings above it,
+/// and under nearest rank a population of <c>n</c> can hold only <c>n - ceil(95n/100)</c> members above its
+/// own 95th percentile. So the count is bounded below by the tail, the bound is searched with
+/// <see cref="NearestRank"/> from the number of published readings that actually exceed the stated
+/// percentile, and a census stating a count it did not read has to fabricate three separately pinned
+/// sentences consistently rather than one number.</para>
+///
 /// <para><b>And the SCOPING rule, held file-wide rather than only where it is stated (#3133).</b>
 /// <see cref="Verify"/> requires the ceiling paragraph's live-envelope population to carry a CLOSED scope;
 /// <see cref="NoOpenPopulationClaim_SurvivesOutsideTheSentenceThatRejectsIt"/> requires the rest of the
@@ -134,6 +145,17 @@ public sealed class RefreshCeilingProvenancePinTests
     /// whichever of them <see cref="Verify"/> happened to reach first.
     /// </summary>
     private const string ThinPopulation = "PIN POPULATION FLOOR";
+
+    /// <summary>
+    /// Marks a verification failure caused by a census COUNT too small to hold the readings the same
+    /// summary publishes above its own stated 95th percentile, so
+    /// <see cref="TheReadingsAboveTheStatedPercentile_BoundTheCensusCount"/> can prove that THIS bound
+    /// fired and not <see cref="ThinPopulation"/>'s floor, which reads the same number one clause earlier.
+    /// The two are ordered so they cannot both fire, but ordering is an argument about the file rather than
+    /// something the failure itself says, and a mutation test that cannot tell them apart is asserting the
+    /// ordering instead of the bound.
+    /// </summary>
+    private const string PercentileTailBound = "PIN PERCENTILE TAIL BOUND";
 
     private const string CeilingDeclaration =
         "public const int HeaviestHourlyRefreshObservedCeilingSeconds";
@@ -259,6 +281,87 @@ public sealed class RefreshCeilingProvenancePinTests
             + "percentile is a different reading from the maximum, which is the divergence this constant's "
             + "own estimator argument rests on, so below it that argument has nothing to be about. "
             + howToWiden);
+    }
+
+    /// <summary>
+    /// The smallest population that can hold <paramref name="readingsAboveThePercentile"/> members strictly
+    /// above its own nearest-rank 95th percentile — <see cref="PopulationFloor"/> generalised from one
+    /// reading above the percentile to any number of them (#3200).
+    ///
+    /// <para><b>Why this is a bound at all.</b> Over a strictly ascending probe the value at 1-based rank
+    /// <c>r</c> IS <c>r</c>, so <c>n - NearestRank(1..n, 95)</c> is exactly how many members a population of
+    /// <c>n</c> can carry above its own 95th percentile. A summary that publishes <c>k</c> readings above
+    /// the percentile it states is therefore claiming a population able to carry <c>k</c> of them, and
+    /// <c>ceil(95n/100)</c> turns that claim into a floor on <c>n</c> rather than leaving the count free.</para>
+    ///
+    /// <para><b>A SECOND search rather than <see cref="DerivePopulationFloor"/> delegating to this one, on
+    /// purpose.</b> The two have to agree at a threshold of one, because that case IS the property the floor
+    /// is derived from, and
+    /// <see cref="TheReadingsAboveTheStatedPercentile_BoundTheCensusCount"/> asserts the agreement. A shared
+    /// implementation would move both together, so the agreement would assert nothing: it is a control only
+    /// while the two are computed independently.</para>
+    ///
+    /// <para>BOUNDED at the same 1000 draws the floor's search stops at, and for the same reason: a
+    /// threshold no population that size can satisfy is a finding about the figures being asked about
+    /// rather than a reason to search further. Only the top twentieth of a population sits above its 95th
+    /// percentile, so 1000 draws covers any threshold up to fifty — far past anything either summary
+    /// publishes, and the throw says so plainly if that stops being true.</para>
+    /// </summary>
+    private static int DeriveFloorForReadingsAboveThePercentile(int readingsAboveThePercentile)
+    {
+        for (var draws = 1; draws <= 1000; draws++)
+        {
+            var ascending = Enumerable.Range(1, draws).ToArray();
+            if (ascending[^1] - NearestRank(ascending, 95) >= readingsAboveThePercentile)
+            {
+                return draws;
+            }
+        }
+
+        throw new PinDriftException(
+            $"no population up to 1000 draws carries {readingsAboveThePercentile} readings above its own "
+            + "nearest-rank 95th percentile, so a summary publishing that many of them is describing a "
+            + "population larger than this search can reach. Re-read the published tail rather than "
+            + "widening this search.");
+    }
+
+    /// <summary>
+    /// The bound the published tail puts on a census COUNT, applied where the count is the only thing the
+    /// summary publishes about its population (#3200) — so it is the one clause at that site the count
+    /// cannot satisfy by being asserted.
+    ///
+    /// <para><b>The threshold is COUNTED at run time, not fixed at the number the tree happens to
+    /// publish.</b> A percentile raised above one of the published readings really is less information
+    /// about the population's size, so the bound has to weaken with it; a fixed threshold would keep
+    /// asserting a strength the summary no longer supplies. At zero readings above the percentile the bound
+    /// is one draw and <see cref="PopulationFloor"/> is the only floor left, which is the correct
+    /// degeneracy rather than a hole.</para>
+    /// </summary>
+    private static void RequireEnoughDrawsForThePublishedTail(
+        string constant,
+        int runs,
+        int[] publishedTailTenths,
+        int percentileTenths,
+        string howToWiden)
+    {
+        var above = publishedTailTenths.Where(reading => reading > percentileTenths).ToArray();
+        var bound = DeriveFloorForReadingsAboveThePercentile(above.Length);
+
+        Require(runs >= bound,
+            $"{PercentileTailBound}: {constant} is stated as the maximum of {runs} runs with a stated 95th "
+            + $"percentile of {percentileTenths / 10}.{percentileTenths % 10} s, and the same summary "
+            + $"publishes {above.Length} of its readings strictly above that percentile "
+            + $"({string.Join(", ", above.Select(r => $"{r / 10}.{r % 10} s"))}). Under nearest rank the "
+            + "95th percentile is the value at rank ceil(95n/100), so only n - ceil(95n/100) members can "
+            + $"sit above it — which takes at least {bound} runs to carry {above.Length} of them, not "
+            + $"{runs}. This is the clause a count cannot satisfy by being asserted: this population is not "
+            + "republished, so every other figure here is consistent with any count at all, while this one "
+            + "ties the count to two other pinned sentences and a re-derivation has to make all three "
+            + "agree. So do not lower this bound — it is searched from NearestRank, the same function the "
+            + "percentile clauses run, over however many published readings actually exceed the stated "
+            + "percentile. Exactly one of three things is wrong: the count is understated and the census "
+            + "sentence is the edit, or the 95th percentile is overstated and the quantile sentence is, or "
+            + "the population really is this thin and the constant may not be moved over it. " + howToWiden);
     }
 
     /// <summary>
@@ -918,8 +1021,16 @@ public sealed class RefreshCeilingProvenancePinTests
     /// The heaviest ceiling publishes its population, so shrinking it is a STRUCTURAL edit to the lists
     /// (<see cref="ShrinkPublishedPopulation"/>) and cannot go through the width-preserving ordinal rewrite
     /// the drift sweep uses. The light ceiling publishes only a COUNT, so shrinking its population is one
-    /// number — which is exactly why that site could be re-derived on a handful of runs with nothing going
-    /// red at all.</para>
+    /// number — which is why the count is the figure this floor has to reach at that site, and why
+    /// <see cref="TheReadingsAboveTheStatedPercentile_BoundTheCensusCount"/> sits on top of it: this case
+    /// asks whether a count clears a constant, and that one asks whether it agrees with the percentile and
+    /// the tail the same summary publishes.</para>
+    ///
+    /// <para><b>Which is also why the light mutation here does not need to be self-consistent, and the
+    /// other case's does.</b> This one rewrites the census count alone, leaving the filter control stating
+    /// the old figure — and the floor is reached before the clause that would notice, so the failure is the
+    /// floor's. A mutation into the band above the floor has to rewrite both, because there every clause
+    /// ahead of the tail bound passes.</para>
     ///
     /// <para><b>The baseline is asserted GREEN on both sides of each mutation, and the floor is PRINTED
     /// into its own assertions.</b> A detector that reported a violation for everything would report one
@@ -1032,6 +1143,199 @@ public sealed class RefreshCeilingProvenancePinTests
            them reached the tree — which is the failure that would make every case above meaningless. */
         Verify(source);
         Verify(ReadTimescaleSupportSource());
+    }
+
+    /// <summary>
+    /// Non-vacuity for the bound the published tail puts on the light census's COUNT (#3200), by the
+    /// mutation it exists to reject: a census consistent with itself, wide enough to clear
+    /// <see cref="PopulationFloor"/>, and still too thin to carry the readings its own percentile sentence
+    /// puts above it.
+    ///
+    /// <para><b>The mutation is made INTO THE BAND between the two bounds, not below both.</b> A census of
+    /// four runs is under the floor as well, so it is caught by
+    /// <see cref="RequireEnoughDrawsForAMaximum"/> one clause earlier and proves nothing about this one.
+    /// The count used here is <see cref="PopulationFloor"/> itself — the smallest count that clears the
+    /// floor, so the floor cannot be what fires, and a value read out of the same search rather than a
+    /// number typed into this test. The failure is then required to carry
+    /// <see cref="PercentileTailBound"/> and NOT <see cref="ThinPopulation"/>, because the two clauses read
+    /// the same figure and a case that cannot tell them apart is asserting their ordering instead of this
+    /// bound.</para>
+    ///
+    /// <para><b>And the mutation has to be SELF-CONSISTENT, which is the whole difference from the floor's
+    /// light case.</b> Above the floor every count clause ahead of the tail bound is live, so the census
+    /// sentence and both figures of the succeeded/finish filter control move together
+    /// (<see cref="ThinLightCensusConsistently"/>). The quantile and third-largest sentences are left
+    /// alone, and that is asserted rather than intended: those are the two legs the bound is computed from,
+    /// and a mutation that moved them would be testing a different relationship.</para>
+    ///
+    /// <para><b>The bound is pinned STRICTLY STRONGER than the floor at the shipped figures, and MINIMAL in
+    /// both directions.</b> Strictly stronger, because a tail bound that came out equal to
+    /// <see cref="PopulationFloor"/> on the tree as it stands would be decoration behind a clause that
+    /// already fires, and nothing else here would say so. Minimal, because one draw below it a population
+    /// cannot carry that many readings above its own 95th percentile and at it a population can — so the
+    /// bound is neither loose enough to admit the census it rejects nor high enough to reject one it should
+    /// not.</para>
+    ///
+    /// <para><b>And the two searches are required to AGREE where they overlap.</b>
+    /// <see cref="DeriveFloorForReadingsAboveThePercentile"/> at one reading above the percentile is
+    /// <see cref="PopulationFloor"/>'s own criterion, so the two independently written searches must return
+    /// the same value there; at zero readings the bound must collapse to a single draw, leaving the floor
+    /// as the only thing holding the line. Both ends, because only the first says the generalisation really
+    /// contains the floor and only the second says it weakens rather than holds a value it can no longer
+    /// derive.</para>
+    /// </summary>
+    [Fact]
+    public void TheReadingsAboveTheStatedPercentile_BoundTheCensusCount()
+    {
+        var source = ReadTimescaleSupportSource();
+
+        /* CLEAN FIRST, and printed rather than assumed — the same reason the floor's case does it. A
+           detector that reported a violation for everything would report one for the tree as it stands. */
+        Verify(source);
+
+        /* THE TWO SEARCHES AGREE WHERE THEY MUST. One reading above the percentile IS the property
+           PopulationFloor is derived from, and the two searches are written independently precisely so
+           that this can be a control rather than a restatement. */
+        Assert.Equal(PopulationFloor, DeriveFloorForReadingsAboveThePercentile(1));
+
+        /* AND THE DEGENERATE END. Zero readings above the percentile says nothing about n, so the bound
+           collapses to one draw and PopulationFloor is the only floor left. */
+        Assert.Equal(1, DeriveFloorForReadingsAboveThePercentile(0));
+
+        /* THE SHIPPED FIGURES, read the way Verify reads them rather than restated here. */
+        var lightProse = DocProseFor(source, LightCeilingDeclaration);
+        var census = Numbers(lightProse, "the light-refresh census");
+        var quantiles = Numbers(lightProse, "the light-refresh quantiles");
+        var growth = Numbers(lightProse, "the midnight night-over-night growth");
+        var third = Numbers(lightProse, "the third-largest light run");
+        var percentileTenths = (quantiles[0] * 10) + quantiles[1];
+        var tail = new[]
+        {
+            (census[0] * 10) + census[1],
+            (growth[0] * 10) + growth[1],
+            (third[0] * 10) + third[1],
+        };
+        var above = tail.Count(reading => reading > percentileTenths);
+        var bound = DeriveFloorForReadingsAboveThePercentile(above);
+
+        /* STRICTLY STRONGER THAN THE FLOOR at the shipped figures, or the clause it feeds is decoration
+           sitting behind one that already fires. */
+        Assert.True(bound > PopulationFloor,
+            $"the published tail puts {above} readings above the stated 95th percentile, which bounds the "
+            + $"census at {bound} runs against a {PopulationFloor}-draw floor — so this bound asserts "
+            + "nothing the floor was not already asserting.");
+
+        /* AND MINIMAL, both directions. Only the first half says the bound is high enough; only the second
+           says it is not higher than its own criterion requires. */
+        var justBelow = Enumerable.Range(1, bound - 1).ToArray();
+        Assert.True(justBelow[^1] - NearestRank(justBelow, 95) < above,
+            $"at {bound - 1} draws a population already carries {above} readings above its own nearest-rank "
+            + "95th percentile, so the bound is higher than its own criterion requires.");
+        var atTheBound = Enumerable.Range(1, bound).ToArray();
+        Assert.True(atTheBound[^1] - NearestRank(atTheBound, 95) >= above,
+            $"at {bound} draws a population cannot carry {above} readings above its own nearest-rank 95th "
+            + "percentile, so DeriveFloorForReadingsAboveThePercentile returned a value its own criterion "
+            + "does not satisfy.");
+
+        /* AND THE REAL CENSUS CLEARS IT. A bound above the shipped count would make this file red for a
+           reason that is not a defect. */
+        Assert.True(census[2] >= bound,
+            $"the light ceiling's census is {census[2]} runs against a {bound}-run bound, so this file is "
+            + "red on the tree as it stands.");
+
+        /* THE MUTATION: the census count and BOTH figures of the filter control rewritten to the floor,
+           through the same width-preserving ordinal rewrite the drift sweep uses. */
+        var thinned = ThinLightCensusConsistently(source, PopulationFloor);
+        Assert.True(thinned is not null,
+            "could not thin the light census consistently, so nothing was proved.");
+        Assert.NotEqual(source, thinned);
+
+        /* CONFIRMED BY CONTENT, not by the edit having been attempted: parse the mutated source the way
+           Verify does and require all three figures to be the one intended — the rewrite pads to the
+           original width, so a wrong ordinal or a lost zero-pad shows up here rather than as a mutation
+           that landed somewhere else. */
+        var thinnedProse = DocProseFor(thinned!, LightCeilingDeclaration);
+        var thinnedCensus = Numbers(thinnedProse, "the light-refresh census");
+        var thinnedFilter = Numbers(thinnedProse, "the light-refresh census exclusion count");
+        Assert.Equal(PopulationFloor, thinnedCensus[2]);
+        Assert.Equal(PopulationFloor, thinnedFilter[0]);
+        Assert.Equal(PopulationFloor, thinnedFilter[1]);
+
+        /* IN THE BAND, and the census maximum, the quantiles and the third-largest untouched — so the
+           count is the only thing that moved and the bound is being asked about the same tail. */
+        Assert.True(thinnedCensus[2] < bound,
+            $"the thinned census is {thinnedCensus[2]} runs, which is not under the {bound}-run bound, so "
+            + "this case cannot prove the bound fires.");
+        Assert.Equal((census[0] * 10) + census[1], (thinnedCensus[0] * 10) + thinnedCensus[1]);
+        Assert.Equal(quantiles, Numbers(thinnedProse, "the light-refresh quantiles"));
+        Assert.Equal(third, Numbers(thinnedProse, "the third-largest light run"));
+
+        var failure = Assert.ThrowsAny<Exception>(() => Verify(thinned!));
+        Assert.Contains(PercentileTailBound, failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(ThinPopulation, failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(ParseMiss, failure.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            nameof(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds),
+            failure.Message,
+            StringComparison.Ordinal);
+
+        /* AND THE MESSAGE NAMES EVERY READING THE BOUND WAS COMPUTED OVER, matched by VALUE against this
+           test's own read of the prose rather than against the list the clause was handed. Two
+           independently built lists of the same three pins that have to agree — which is what catches the
+           clause's list quietly losing a member: that lowers the bound while leaving every assertion above
+           this one true, so the marker, the minimality halves and the band case would all still pass. */
+        foreach (var reading in tail.Where(reading => reading > percentileTenths))
+        {
+            Assert.Contains(
+                $"{reading / 10}.{reading % 10} s",
+                failure.Message,
+                StringComparison.Ordinal);
+        }
+
+        /* GREEN ON THE OTHER SIDE TOO. The mutation is made on a copy, so this can only fail if it reached
+           the tree — the failure that would make everything above meaningless. */
+        Verify(source);
+        Verify(ReadTimescaleSupportSource());
+    }
+
+    /// <summary>
+    /// Rewrites the light census's run count AND both figures of its succeeded/finish filter control to
+    /// <paramref name="runs"/>, in a COPY of <paramref name="source"/> — the only shape of thinning that
+    /// reaches the tail bound, because a count that disagrees with the filter control is caught by the
+    /// clause that joins them, several clauses earlier.
+    ///
+    /// <para>Three width-preserving ordinal rewrites through <see cref="RewriteNumberInDocRun"/> rather
+    /// than a string replace, for the reason that helper documents: this doc run states the same count in
+    /// sentences these two pins do NOT read, and a replace would mutate prose no pin is aimed at. Width
+    /// preservation is also what keeps the ordinals stable across the three, so each rewrite addresses the
+    /// number the previous one left alone.</para>
+    /// </summary>
+    private static string? ThinLightCensusConsistently(string source, int runs)
+    {
+        var replacement = runs.ToString(CultureInfo.InvariantCulture);
+        var prose = DocProseFor(source, LightCeilingDeclaration);
+
+        var censusPattern = PatternFor("the light-refresh census");
+        var censusFirst = OrdinalOfFirstNumberInGroups(prose, censusPattern);
+        Require(censusFirst >= 0,
+            $"{ParseMiss}: the light census pattern captured no number, so its pin is vacuous");
+
+        var filterPattern = PatternFor("the light-refresh census exclusion count");
+        var filterFirst = OrdinalOfFirstNumberInGroups(prose, filterPattern);
+        Require(filterFirst >= 0,
+            $"{ParseMiss}: the filter-control pattern captured no number, so its pin is vacuous");
+
+        /* The census's run count is its pattern's THIRD captured number — a maximum stated to one decimal,
+           then the count — and the filter control's two are consecutive. Both arithmetics are asserted by
+           CONTENT at the call site rather than trusted, which is what catches either of them being wrong. */
+        var thinned = RewriteNumberInDocRun(
+            source, LightCeilingDeclaration, censusPattern, censusFirst + 2, replacement);
+        thinned = thinned is null
+            ? null
+            : RewriteNumberInDocRun(thinned, LightCeilingDeclaration, filterPattern, filterFirst, replacement);
+        return thinned is null
+            ? null
+            : RewriteNumberInDocRun(thinned, LightCeilingDeclaration, filterPattern, filterFirst + 1, replacement);
     }
 
     /// <summary>
@@ -1581,12 +1885,15 @@ public sealed class RefreshCeilingProvenancePinTests
         var lightMax10 = (lightCensus[0] * 10) + lightCensus[1];
         var lightRuns = lightCensus[2];
 
-        /* THE SAME FLOOR, at the site that had NOTHING to stop this (#3193). The heaviest ceiling's
-           population is published, so its clauses at least compute over readings and one of them - the
-           95th-percentile divergence - is unsatisfiable below the floor as a side effect. This one's
-           population is deliberately not republished; only its COUNT is. Every figure the paragraph states
-           is therefore consistent with any count whatever, and a census cut from 874 runs to four was
-           measured green across this whole file. */
+        /* THE SAME FLOOR, and the FIRST clause at this site that reads the count at all (#3193). The
+           heaviest ceiling's population is published, so its clauses compute over readings and one of them
+           - the 95th-percentile divergence - is unsatisfiable below the floor as a side effect. This one's
+           population is deliberately not republished; only its COUNT is, so no clause here computes over
+           its members. This asks the cheapest question about that count - whether a maximum over it can
+           bound anything - and it is first because its answer names the repair. What ties the count to the
+           rest of the summary is the tail bound at the end of this site (#3200), which is a strictly
+           higher bar; ordered this way round, a census thin enough to fail both is diagnosed as a
+           population to widen rather than as three sentences to reconcile. */
         RequireEnoughDrawsForAMaximum(
             nameof(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds),
             lightRuns,
@@ -1651,9 +1958,38 @@ public sealed class RefreshCeilingProvenancePinTests
             + "same sentence states, truncated as the prose states it");
 
         var thirdLargest = Read("the third-largest light run");
-        Require((thirdLargest[0] * 10) + thirdLargest[1] < previousNight10,
+        var thirdLargest10 = (thirdLargest[0] * 10) + thirdLargest[1];
+        Require(thirdLargest10 < previousNight10,
             $"the run called third-largest, {thirdLargest[0]}.{thirdLargest[1]} s, is at or above the "
             + "second-largest the same paragraph states, so the ordering the sentence claims is false");
+
+        /* AND THE BOUND THE STATED PERCENTILE PUTS ON THE CENSUS COUNT (#3200). The floor above reads the
+           count and asks only whether it clears a constant. This asks whether the count AGREES with the
+           two sentences just read: three published readings sit above a stated 95th percentile, and under
+           nearest rank that is not free - it takes a population large enough for three members to sit
+           above rank ceil(95n/100). So the count stops being the one figure at this site that every other
+           sentence is indifferent to, and becomes one leg of a relationship among three separately pinned
+           sentences.
+
+           THE READINGS ARE THE ONES ALREADY IN HAND, and deliberately NOT a sweep of this doc run's
+           numerals. A sweep would collect percentile gaps, coverage margins, a growth percentage and
+           another population's maximum - every one of them above the stated percentile and none of them a
+           member of this population - and inflate the bound on evidence the summary never supplied, which
+           is failing in the direction that GRANTS strength. Each of the three below is read from its own
+           pin with its own pattern, and Verify has just required them strictly ordered, so they are three
+           distinct members and there is nothing for a de-duplication to remove. The midnight maximum is
+           not a fourth: Verify requires it to BE the census maximum. The cost of naming them is that this
+           is a fixed list of three: if a later paragraph publishes a fourth tail reading under its own pin,
+           the list does not grow with it and the bound stays weaker than the evidence would allow - which
+           is understated, never satisfied by a census it should reject. */
+        RequireEnoughDrawsForThePublishedTail(
+            nameof(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds),
+            lightRuns,
+            new[] { lightMax10, previousNight10, thirdLargest10 },
+            light95Tenths,
+            "Widening means a fresh read at a later instant restated with its own count, its own quantiles "
+            + "AND its own tail - the three sentences read together, because that is what this bound is "
+            + "over.");
 
         /* And the guard band's DECLARED width, which is what changed at #3188: #3174 made the band the
            ceiling rounded up, and #3188 cut that tie because a measurement whose own population is decided
