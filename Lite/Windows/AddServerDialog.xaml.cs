@@ -332,7 +332,7 @@ public partial class AddServerDialog : Window
         return builder;
     }
 
-    private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool MfaCancelled, string? ServerVersion)> RunConnectionTestAsync()
+    private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool MfaCancelled, string? ServerVersion, EntraBrokerFailureKind BrokerFailure)> RunConnectionTestAsync()
     {
         TestButton.IsEnabled = false;
         SaveButton.IsEnabled = false;
@@ -345,6 +345,7 @@ public partial class AddServerDialog : Window
         string? errorMessage = null;
         bool mfaCancelled = false;
         string? serverVersion = null;
+        var brokerFailure = EntraBrokerFailureKind.None;
 
         try
         {
@@ -360,6 +361,24 @@ public partial class AddServerDialog : Window
             errorMessage = ex.Message;
             if (EntraMfaAuthRadio.IsChecked == true && MfaAuthenticationHelper.IsMfaCancelledException(ex))
                 mfaCancelled = true;
+            else
+                brokerFailure = EntraBrokerFailure.Classify(ex);
+
+            /* Logged here, where the exception object still exists. ex.Message alone is what the
+               dialog can show, and for a federated-auth failure the message is the shallowest layer
+               of a chain several deep - the driver wraps MSAL's exception, which wraps the broker's.
+               AppLogger.Error walks that chain; nothing else on this path does, so a failure that is
+               not logged here is a failure whose detail the process never recorded anywhere.
+               Cancellations are excluded: one is a decision the user made, its own dialog already
+               reports it, and filing user intent as an error would bury real faults among them. */
+            if (!mfaCancelled)
+            {
+                AppLogger.Error(
+                    "AddServer",
+                    $"Connection test failed for '{ServerNameBox.Text.Trim()}' "
+                        + $"(authentication: {DescribeSelectedAuthentication()}, broker stage: {brokerFailure})",
+                    ex);
+            }
         }
         finally
         {
@@ -368,8 +387,35 @@ public partial class AddServerDialog : Window
             StatusText.Text = string.Empty;
         }
 
-        return (connected, errorMessage, mfaCancelled, serverVersion);
+        return (connected, errorMessage, mfaCancelled, serverVersion, brokerFailure);
     }
+
+    /// <summary>
+    /// The selected authentication mode, for the log line only.
+    ///
+    /// <para>Named from the radio buttons rather than read back off the connection string, because
+    /// the connection string holds a password and a log line must not. The mode is the part of the
+    /// form that changes which code path failed, and it is the first thing a report needs.</para>
+    /// </summary>
+    private string DescribeSelectedAuthentication()
+    {
+        if (WindowsAuthRadio.IsChecked == true) return "Windows";
+        if (SqlAuthRadio.IsChecked == true) return "SQL Server";
+        if (EntraMfaAuthRadio.IsChecked == true) return "Microsoft Entra MFA";
+        if (ServicePrincipalAuthRadio.IsChecked == true) return "Service principal";
+        if (ManagedIdentityAuthRadio.IsChecked == true) return "Managed identity";
+        return "unknown";
+    }
+
+    /// <summary>
+    /// The detail block for a "Connection Failed" dialog, carrying the log location so a report can
+    /// include the exception chain rather than a screenshot of its first line.
+    /// </summary>
+    private static string ComposeFailureDetail(string? errorMessage, EntraBrokerFailureKind brokerFailure) =>
+        ConnectionFailureMessage.Compose(
+            errorMessage,
+            brokerFailure,
+            string.IsNullOrEmpty(App.DataDirectory) ? null : System.IO.Path.Combine(App.DataDirectory, "logs"));
 
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
@@ -379,7 +425,7 @@ public partial class AddServerDialog : Window
             return;
         }
 
-        var (connected, errorMessage, mfaCancelled, serverVersion) = await RunConnectionTestAsync();
+        var (connected, errorMessage, mfaCancelled, serverVersion, brokerFailure) = await RunConnectionTestAsync();
 
         if (connected)
         {
@@ -410,7 +456,7 @@ public partial class AddServerDialog : Window
         }
         else
         {
-            var detail = errorMessage != null ? $"\n\nError: {errorMessage}" : string.Empty;
+            var detail = ComposeFailureDetail(errorMessage, brokerFailure);
             MessageBox.Show(
                 $"Could not connect to {ServerNameBox.Text.Trim()}.{detail}",
                 "Connection Failed",
@@ -504,7 +550,7 @@ public partial class AddServerDialog : Window
         // Test connection when data collection is enabled
         if (EnabledCheckBox.IsChecked == true)
         {
-            var (connected, errorMessage, mfaCancelled, _) = await RunConnectionTestAsync();
+            var (connected, errorMessage, mfaCancelled, _, brokerFailure) = await RunConnectionTestAsync();
 
             if (!connected)
             {
@@ -524,7 +570,7 @@ public partial class AddServerDialog : Window
                 }
                 else
                 {
-                    var detail = errorMessage != null ? $"\n\nError: {errorMessage}" : string.Empty;
+                    var detail = ComposeFailureDetail(errorMessage, brokerFailure);
                     MessageBox.Show(
                         $"Could not connect to {ServerNameBox.Text.Trim()}.{detail}\n\nTo save this server without a working connection, uncheck \"Enable data collection for this server\".",
                         "Connection Failed",
