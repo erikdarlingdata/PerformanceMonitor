@@ -152,8 +152,8 @@ public static class EntraBrokerFailure
             + "sign-in and refused it. The server name, the database name and the account password "
             + "are not what failed. Windows does not report the reason to applications, and the SQL "
             + "client offers no way to sign in through a browser instead, so retrying as-is will "
-            + "fail the same way. Signing the Windows work-or-school account out and back in, or "
-            + "clearing the broker's cached state, is what usually clears it.",
+            + "fail the same way. The documented remedies are Windows-side: signing the "
+            + "work-or-school account out and back in, or clearing the broker's cached state.",
 
         _ => null,
     };
