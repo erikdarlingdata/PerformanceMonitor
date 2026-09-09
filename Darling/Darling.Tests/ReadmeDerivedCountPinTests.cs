@@ -195,8 +195,9 @@ public sealed class ReadmeDerivedCountPinTests
     /// <summary>
     /// The pinned NAME SETS — the same guard as <see cref="Pins"/> one resolution finer. A count going
     /// stale and a list going stale are the same defect, and the list is the one that shipped wrong: the
-    /// permissions paragraph named four of the six collectors that need an extension and nothing failed,
-    /// because an enumeration is only better than a count if something breaks when it is incomplete.
+    /// permissions paragraph was once written naming four of the six collectors that need an extension,
+    /// with every check green on that commit, because an enumeration is only better than a count if
+    /// something breaks when it is incomplete.
     ///
     /// <para>Each entry captures ONE span of the README and turns it into a set, which is then required to
     /// equal what the catalog declares — in BOTH directions. Missing catches the defect that shipped;

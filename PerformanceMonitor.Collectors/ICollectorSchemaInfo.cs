@@ -143,9 +143,10 @@ public interface ICollectorSchemaInfo
     ///
     /// <para><b>Why a declaration rather than prose.</b> A collector that needs an extension degrades to a
     /// non-fatal <c>PERMISSIONS</c> skip and stores nothing, so the dependency is only ever visible in
-    /// whatever documentation somebody remembered to update. That documentation shipped naming four of the
-    /// six collectors that had one, and nothing failed — an enumeration in prose is only better than a
-    /// count if something breaks when it is wrong. Declared on the collector, it is derivable, so
+    /// whatever documentation somebody remembered to update. That documentation was once written naming
+    /// four of the six collectors that had one, with every check green on the commit that said so — an
+    /// enumeration in prose is only better than a count if something breaks when it is wrong. A reviewer
+    /// caught that one. Declared on the collector, it is derivable, so
     /// <c>Darling/README.md</c>'s permissions paragraph is pinned to it and a new collector with a
     /// dependency fails the build until the paragraph names it.</para>
     ///
