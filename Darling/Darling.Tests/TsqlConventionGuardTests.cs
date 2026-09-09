@@ -1244,9 +1244,9 @@ public sealed class TsqlConventionGuardTests
     /// separately.</b> An OVER-EXTENDED body keeps containing the literals below it AND the next member's,
     /// so it hands out a name that is confidently wrong. An UNDER-READ body stops containing the literals
     /// below the cut, and a literal contained by nothing is labelled <see cref="Unknown"/> — which is only
-    /// loud if some census is looking for a site of that kind. Thirteen members strand a literal today and
-    /// no census looks for those, so the whole class read as healthy until the ranges themselves were
-    /// checked against a second derivation.</para>
+    /// loud if some census is looking for a site of that kind. Most of <see cref="KnownTruncatedRanges"/>
+    /// strands a literal, and no census looks for a site of that kind, so the whole class read as healthy
+    /// until the ranges themselves were checked against a second derivation.</para>
     ///
     /// <para>The two arms are complementary rather than redundant, and both are pinned by
     /// <see cref="TheMemberScan_IsBoundedByTheNextDeclaration_AndByTheBraceWalkAtTheEndOfTheFile"/>:
