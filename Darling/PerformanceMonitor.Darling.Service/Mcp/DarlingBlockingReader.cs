@@ -34,6 +34,27 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// Darling.Tests can pin the dialect + columns without a live Postgres.
 /// </para>
 ///
+/// <para><b>Two clock frames in one row, reconciled at the read boundary (load-bearing).</b> A
+/// blocked-process row carries an <c>event_time</c> that is already naive UTC on BOTH arms — the XE
+/// <c>@timestamp</c> for the report rows, the collector's own <c>collection_time</c> for the DMV snapshot —
+/// while the six transaction/batch stamps beside it are the monitored server's LOCAL wall clock: the report
+/// arm parses them out of the blocked-process-report XML's <c>lasttranstarted</c> / <c>lastbatchstarted</c> /
+/// <c>lastbatchcompleted</c> attributes, and the DMV arm ships
+/// <c>sys.dm_tran_active_transactions.transaction_begin_time</c> verbatim. So the mixture is inside a single
+/// ROW, not merely a single payload. These reads de-skew all six to naive UTC by the collected
+/// <c>server_properties.utc_offset_minutes</c> (V16), leaving the STORED frame local so the collectors keep
+/// comparing local against local; a server with no offset yet collected falls back to 0, and the single-row
+/// COALESCE CTE guarantees the cross join never drops an event.
+/// </para>
+///
+/// <para><b>Why converting matters here specifically.</b> These six are how a reader establishes whether a
+/// blocker's transaction PREDATES the blocking event — that ordering is the whole diagnostic. Read as UTC
+/// when they are local they are early by the server's offset (4 hours on the production fleet), which
+/// inverts the ordering and makes a transaction that began during the block look like it began before it.
+/// The window stays on the naive-UTC <c>collection_time</c>, so the de-skew changes no row SELECTION — only
+/// the values returned.
+/// </para>
+///
 /// <para>
 /// The tool result shapes mirror LITE's <c>McpBlockingTools</c> (get_blocked_process_reports /
 /// get_deadlocks / get_deadlock_detail / get_blocked_process_xml) field-for-field — the store-faithful
@@ -71,12 +92,12 @@ internal static class DarlingBlockingReader
         public string? BlockingLoginName { get; set; }
         public string? BlockedTransactionName { get; set; }
         public string? BlockingTransactionName { get; set; }
-        public DateTime? BlockedLastTranStarted { get; set; }
-        public DateTime? BlockingLastTranStarted { get; set; }
-        public DateTime? BlockedLastBatchStarted { get; set; }
-        public DateTime? BlockingLastBatchStarted { get; set; }
-        public DateTime? BlockedLastBatchCompleted { get; set; }
-        public DateTime? BlockingLastBatchCompleted { get; set; }
+        public DateTime? BlockedLastTranStartedUtc { get; set; }
+        public DateTime? BlockingLastTranStartedUtc { get; set; }
+        public DateTime? BlockedLastBatchStartedUtc { get; set; }
+        public DateTime? BlockingLastBatchStartedUtc { get; set; }
+        public DateTime? BlockedLastBatchCompletedUtc { get; set; }
+        public DateTime? BlockingLastBatchCompletedUtc { get; set; }
         public int BlockedPriority { get; set; }
         public int BlockingPriority { get; set; }
     }
@@ -94,49 +115,60 @@ internal static class DarlingBlockingReader
     /// <summary>
     /// The XE blocked-process-report read — the viewer's <c>BlockedProcessReportsSql</c> projection trimmed
     /// to the columns Lite's get_blocked_process_reports surfaces. Reads the BASE table (the viewer reads
-    /// base here too, for the V7 plan-column safety). $1 server_id, $2/$3 window (naive UTC).
+    /// base here too, for the V7 plan-column safety). The six transaction/batch stamps are de-skewed from the
+    /// server's local clock to naive UTC; <c>event_time</c> is the XE <c>@timestamp</c> and is already UTC, so
+    /// it is deliberately left alone. $1 server_id, $2/$3 window (naive UTC).
     /// </summary>
     public const string BlockedProcessReportsSql = """
+        WITH svr AS (
+            SELECT COALESCE((
+                SELECT sp.utc_offset_minutes
+                FROM server_properties AS sp
+                WHERE sp.server_id = $1
+                AND   sp.utc_offset_minutes IS NOT NULL
+                ORDER BY sp.collection_time DESC
+                LIMIT 1), 0) AS offset_minutes
+        )
         SELECT
-            event_time,
-            database_name,
-            blocked_spid,
-            blocked_ecid,
-            blocking_spid,
-            blocking_ecid,
-            wait_time_ms,
-            wait_resource,
-            lock_mode,
-            blocked_status,
-            blocked_isolation_level,
-            blocked_log_used,
-            blocked_transaction_count,
-            blocked_client_app,
-            blocked_host_name,
-            blocked_login_name,
-            blocked_sql_text,
-            blocking_status,
-            blocking_isolation_level,
-            blocking_client_app,
-            blocking_host_name,
-            blocking_login_name,
-            blocking_sql_text,
-            blocked_transaction_name,
-            blocking_transaction_name,
-            blocked_last_tran_started,
-            blocking_last_tran_started,
-            blocked_last_batch_started,
-            blocking_last_batch_started,
-            blocked_last_batch_completed,
-            blocking_last_batch_completed,
-            blocked_priority,
-            blocking_priority,
-            blocked_process_report_xml,
-            contentious_object
-        FROM blocked_process_reports
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+            bpr.event_time,
+            bpr.database_name,
+            bpr.blocked_spid,
+            bpr.blocked_ecid,
+            bpr.blocking_spid,
+            bpr.blocking_ecid,
+            bpr.wait_time_ms,
+            bpr.wait_resource,
+            bpr.lock_mode,
+            bpr.blocked_status,
+            bpr.blocked_isolation_level,
+            bpr.blocked_log_used,
+            bpr.blocked_transaction_count,
+            bpr.blocked_client_app,
+            bpr.blocked_host_name,
+            bpr.blocked_login_name,
+            bpr.blocked_sql_text,
+            bpr.blocking_status,
+            bpr.blocking_isolation_level,
+            bpr.blocking_client_app,
+            bpr.blocking_host_name,
+            bpr.blocking_login_name,
+            bpr.blocking_sql_text,
+            bpr.blocked_transaction_name,
+            bpr.blocking_transaction_name,
+            bpr.blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started_utc,
+            bpr.blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started_utc,
+            bpr.blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started_utc,
+            bpr.blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started_utc,
+            bpr.blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed_utc,
+            bpr.blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed_utc,
+            bpr.blocked_priority,
+            bpr.blocking_priority,
+            bpr.blocked_process_report_xml,
+            bpr.contentious_object
+        FROM blocked_process_reports AS bpr, svr
+        WHERE bpr.server_id = $1
+        AND   bpr.collection_time >= $2
+        AND   bpr.collection_time <= $3
         ORDER BY event_time DESC
         LIMIT 200
         """;
@@ -144,34 +176,47 @@ internal static class DarlingBlockingReader
     /// <summary>
     /// The always-on DMV blocking-snapshot fallback read — the viewer's <c>DmvBlockingSnapshotsSql</c>
     /// projection (the DMV snapshot carries no report XML, isolation levels, transaction/batch times, or
-    /// priorities). Same parameters as <see cref="BlockedProcessReportsSql"/>.
+    /// priorities). Its <c>event_time</c> is the collector's own naive-UTC <c>collection_time</c>
+    /// (<c>DmvBlockingSnapshotCollector</c> stamps it from <c>context.CollectionTime</c>), while its two
+    /// transaction stamps come straight off <c>sys.dm_tran_active_transactions</c> and are server-local — so
+    /// the same de-skew applies here, on two columns instead of six. Same parameters as
+    /// <see cref="BlockedProcessReportsSql"/>.
     /// </summary>
     public const string DmvBlockingSnapshotsSql = """
+        WITH svr AS (
+            SELECT COALESCE((
+                SELECT sp.utc_offset_minutes
+                FROM server_properties AS sp
+                WHERE sp.server_id = $1
+                AND   sp.utc_offset_minutes IS NOT NULL
+                ORDER BY sp.collection_time DESC
+                LIMIT 1), 0) AS offset_minutes
+        )
         SELECT
-            event_time,
-            database_name,
-            blocked_spid,
-            blocked_ecid,
-            blocking_spid,
-            blocking_ecid,
-            wait_time_ms,
-            lock_mode,
-            blocking_status,
-            contentious_object,
-            blocked_sql_text,
-            blocking_sql_text,
-            blocked_login_name,
-            blocked_host_name,
-            blocked_client_app,
-            blocking_login_name,
-            blocking_host_name,
-            blocking_client_app,
-            blocked_last_tran_started,
-            blocking_last_tran_started
-        FROM v_dmv_blocking_snapshots
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+            dbs.event_time,
+            dbs.database_name,
+            dbs.blocked_spid,
+            dbs.blocked_ecid,
+            dbs.blocking_spid,
+            dbs.blocking_ecid,
+            dbs.wait_time_ms,
+            dbs.lock_mode,
+            dbs.blocking_status,
+            dbs.contentious_object,
+            dbs.blocked_sql_text,
+            dbs.blocking_sql_text,
+            dbs.blocked_login_name,
+            dbs.blocked_host_name,
+            dbs.blocked_client_app,
+            dbs.blocking_login_name,
+            dbs.blocking_host_name,
+            dbs.blocking_client_app,
+            dbs.blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started_utc,
+            dbs.blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started_utc
+        FROM v_dmv_blocking_snapshots AS dbs, svr
+        WHERE dbs.server_id = $1
+        AND   dbs.collection_time >= $2
+        AND   dbs.collection_time <= $3
         ORDER BY event_time DESC
         LIMIT 200
         """;
@@ -223,12 +268,12 @@ internal static class DarlingBlockingReader
                     BlockingSqlText = reader.IsDBNull(22) ? "" : reader.GetString(22),
                     BlockedTransactionName = reader.IsDBNull(23) ? null : reader.GetString(23),
                     BlockingTransactionName = reader.IsDBNull(24) ? null : reader.GetString(24),
-                    BlockedLastTranStarted = reader.IsDBNull(25) ? null : reader.GetDateTime(25),
-                    BlockingLastTranStarted = reader.IsDBNull(26) ? null : reader.GetDateTime(26),
-                    BlockedLastBatchStarted = reader.IsDBNull(27) ? null : reader.GetDateTime(27),
-                    BlockingLastBatchStarted = reader.IsDBNull(28) ? null : reader.GetDateTime(28),
-                    BlockedLastBatchCompleted = reader.IsDBNull(29) ? null : reader.GetDateTime(29),
-                    BlockingLastBatchCompleted = reader.IsDBNull(30) ? null : reader.GetDateTime(30),
+                    BlockedLastTranStartedUtc = reader.IsDBNull(25) ? null : reader.GetDateTime(25),
+                    BlockingLastTranStartedUtc = reader.IsDBNull(26) ? null : reader.GetDateTime(26),
+                    BlockedLastBatchStartedUtc = reader.IsDBNull(27) ? null : reader.GetDateTime(27),
+                    BlockingLastBatchStartedUtc = reader.IsDBNull(28) ? null : reader.GetDateTime(28),
+                    BlockedLastBatchCompletedUtc = reader.IsDBNull(29) ? null : reader.GetDateTime(29),
+                    BlockingLastBatchCompletedUtc = reader.IsDBNull(30) ? null : reader.GetDateTime(30),
                     BlockedPriority = reader.IsDBNull(31) ? 0 : reader.GetInt32(31),
                     BlockingPriority = reader.IsDBNull(32) ? 0 : reader.GetInt32(32),
                     BlockedProcessReportXml = reader.IsDBNull(33) ? "" : reader.GetString(33),
@@ -264,8 +309,8 @@ internal static class DarlingBlockingReader
                     BlockingLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
                     BlockingHostName = reader.IsDBNull(16) ? null : reader.GetString(16),
                     BlockingClientApp = reader.IsDBNull(17) ? null : reader.GetString(17),
-                    BlockedLastTranStarted = reader.IsDBNull(18) ? null : reader.GetDateTime(18),
-                    BlockingLastTranStarted = reader.IsDBNull(19) ? null : reader.GetDateTime(19),
+                    BlockedLastTranStartedUtc = reader.IsDBNull(18) ? null : reader.GetDateTime(18),
+                    BlockingLastTranStartedUtc = reader.IsDBNull(19) ? null : reader.GetDateTime(19),
                     Source = BlockedProcessAlertRow.DmvSnapshotSource,
                 });
             }

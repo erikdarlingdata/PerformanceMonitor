@@ -11,10 +11,22 @@ using PerformanceMonitorLite.Services;
 namespace PerformanceMonitorLite.Mcp;
 
 /// <summary>
-/// Supplies the UTC offset for the MCP reads whose window is expressed in the MONITORED SERVER'S local wall
-/// clock rather than in UTC — <c>get_cpu_utilization</c> (<c>cpu_utilization_stats.sample_time</c>) and
-/// <c>get_default_trace_events</c> (<c>default_trace_events.event_time</c>). Every other MCP read windows on
-/// <c>collection_time</c>, which is naive UTC, and needs nothing from here.
+/// Supplies the UTC offset to the MCP reads that touch a column holding the MONITORED SERVER'S local wall
+/// clock, in either of two ways.
+///
+/// <para><b>A window expressed in the server's frame:</b> <c>get_cpu_utilization</c>
+/// (<c>cpu_utilization_stats.sample_time</c>) and <c>get_default_trace_events</c>
+/// (<c>default_trace_events.event_time</c>). Every other read windows on <c>collection_time</c>, which is
+/// naive UTC, and needs nothing from here for its window.</para>
+///
+/// <para><b>A returned VALUE that has to be de-skewed:</b> <c>get_default_trace_events</c> again, plus
+/// <c>get_running_jobs</c> (<c>running_jobs.start_time</c>, the msdb Agent clock),
+/// <c>get_blocked_process_reports</c> (the six blocked_/blocking_ transaction and batch stamps),
+/// <c>get_index_usage</c> (<c>last_user_access</c>, off <c>sys.dm_db_index_usage_stats</c>),
+/// <c>get_pvs_stats</c> (the four ADR cleaner times) and <c>get_plan_corrections</c> (the four
+/// <c>sys.dm_db_tuning_recommendations</c> lifecycle times). Those five need the offset only for the value:
+/// their windows and their snapshot self-subqueries all run on <c>collection_time</c>, so the de-skew
+/// changes no row selection.</para>
 ///
 /// <para><b>Why an MCP tool cannot use the desktop's offset.</b> <c>ServerTimeHelper.UtcOffsetMinutes</c> is
 /// process-wide state written only by the WPF tab paths, so it holds whichever server the UI last selected —

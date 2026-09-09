@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpJobTools
 {
-    [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual.")]
+    [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, the same frame as collection_time (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so start_time and current_duration_seconds agree.")]
     public static async Task<string> GetRunningJobs(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -20,6 +20,14 @@ public sealed class McpJobTools
 
         try
         {
+            /* The stamps below are THIS server's local wall clock in the store, so putting them in the
+               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
+               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
+               because the WPF grids read the same rows and render them through ServerTimeHelper — that
+               surface has its own frame defect and its own issue, and folding the two together would fix
+               one by breaking the other. */
+            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+
             var rows = await dataService.GetRunningJobsAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
@@ -50,7 +58,7 @@ public sealed class McpJobTools
                 job_name = r.JobName,
                 job_id = r.JobId,
                 job_enabled = r.JobEnabled,
-                start_time = r.StartTime.ToString("o"),
+                start_time = r.StartTime.AddMinutes(-utcOffsetMinutes).ToString("o"),
                 current_duration_seconds = r.CurrentDurationSeconds,
                 current_duration_formatted = r.CurrentDurationFormatted,
                 avg_duration_seconds = r.AvgDurationSeconds,

@@ -25,7 +25,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPlanCorrectionTools
 {
     [McpServerTool(Name = "get_plan_corrections"), Description(
-        "Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, plus each database's current automatic-tuning enablement state. Use when a query's plan changed suddenly - APC forcing or unforcing a plan is a first-class explanation - or to check whether automatic tuning is on and actually working (desired vs actual state). Rows come from sys.dm_db_tuning_recommendations captured on a schedule; a recommendation's state moves through Active/Verifying/Success/Reverted as the engine acts.")]
+        "Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, plus each database's current automatic-tuning enablement state. Use when a query's plan changed suddenly - APC forcing or unforcing a plan is a first-class explanation - or to check whether automatic tuning is on and actually working (desired vs actual state). Rows come from sys.dm_db_tuning_recommendations captured on a schedule; a recommendation's state moves through Active/Verifying/Success/Reverted as the engine acts. Every timestamp here is UTC, including valid_since / last_refresh / execute_action_initiated_time / revert_action_initiated_time - the DMV reports those four in the monitored server's local clock and this read de-skews them - so they order correctly against collection_time.")]
     public static async Task<string> GetPlanCorrections(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -46,6 +46,14 @@ public sealed class McpPlanCorrectionTools
             if (limitError != null) return limitError;
 
             var tuning = await dataService.GetLatestAutomaticTuningAsync(resolved.ServerId);
+            /* The stamps below are THIS server's local wall clock in the store, so putting them in the
+               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
+               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
+               because the WPF grids read the same rows and render them through ServerTimeHelper — that
+               surface has its own frame defect and its own issue, and folding the two together would fix
+               one by breaking the other. */
+            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+
             var rows = await dataService.GetPlanCorrectionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             if (tuning.Count == 0 && rows.Count == 0)
@@ -76,12 +84,12 @@ public sealed class McpPlanCorrectionTools
                 regressed_plan_cpu_time_average_ms = r.RegressedPlanCpuTimeAverageMs,
                 last_good_plan_execution_count = r.LastGoodPlanExecutionCount,
                 last_good_plan_cpu_time_average_ms = r.LastGoodPlanCpuTimeAverageMs,
-                valid_since = r.ValidSince?.ToString("o"),
-                last_refresh = r.LastRefresh?.ToString("o"),
+                valid_since = r.ValidSince?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                last_refresh = r.LastRefresh?.AddMinutes(-utcOffsetMinutes).ToString("o"),
                 execute_action_initiated_by = r.ExecuteActionInitiatedBy,
-                execute_action_initiated_time = r.ExecuteActionInitiatedTime?.ToString("o"),
+                execute_action_initiated_time = r.ExecuteActionInitiatedTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
                 revert_action_initiated_by = r.RevertActionInitiatedBy,
-                revert_action_initiated_time = r.RevertActionInitiatedTime?.ToString("o"),
+                revert_action_initiated_time = r.RevertActionInitiatedTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
                 query_text = McpHelpers.Truncate(r.QueryText, 2000),
             });
 

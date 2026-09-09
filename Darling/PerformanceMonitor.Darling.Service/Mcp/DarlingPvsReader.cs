@@ -21,11 +21,32 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// snapshot, one row per database; the trend read is the #2018 chart's window — every stored point for the
 /// TOP-5 databases by PVS size at the newest collection, with percent-of-database computed per POINT from
 /// the same row's data-file denominator the grid uses, so no surface can tell a different story.
+///
+/// <para><b>The four cleaner times are de-skewed to naive UTC at this boundary.</b>
+/// <c>PvsStatsCollector</c> ships them verbatim off <c>sys.dm_tran_persistent_version_store_stats</c>, so the
+/// stored values are the monitored server's LOCAL wall clock, while the <c>collection_time</c> beside them —
+/// and the <c>as_of</c> the tool derives from it — are naive UTC. Left raw, the payload says the off-row
+/// cleaner last ran one whole offset ago: measured on the production fleet the cleaner had run 0.6 to 41
+/// seconds before the snapshot and the payload read 4 h 00 m. That lands exactly on the question this read
+/// exists to answer — the tool's own description sends a caller here "when ADR cleanup looks stuck" — so a
+/// phantom four-hour stall is the worst place for an unmarked frame. The trend read needs nothing: it
+/// returns only <c>collection_time</c>.</para>
 /// </summary>
 internal static class DarlingPvsReader
 {
-    /// <summary>Latest PVS snapshot, one row per database, biggest version store first. $1 server_id.</summary>
+    /// <summary>Latest PVS snapshot, one row per database, biggest version store first, with the four cleaner
+    /// times de-skewed from the server's local clock to naive UTC. The snapshot self-subquery and the ordering
+    /// both stay off the cleaner columns, so neither depends on the offset. $1 server_id.</summary>
     public const string PvsStatsLatestSql = @"
+WITH svr AS (
+    SELECT COALESCE((
+        SELECT sp.utc_offset_minutes
+        FROM server_properties AS sp
+        WHERE sp.server_id = $1
+        AND   sp.utc_offset_minutes IS NOT NULL
+        ORDER BY sp.collection_time DESC
+        LIMIT 1), 0) AS offset_minutes
+)
 SELECT
     database_name,
     is_accelerated_database_recovery_on,
@@ -35,12 +56,12 @@ SELECT
     current_aborted_transaction_count,
     oldest_active_transaction_id,
     oldest_aborted_transaction_id,
-    aborted_version_cleaner_start_time,
-    aborted_version_cleaner_end_time,
-    offrow_version_cleaner_start_time,
-    offrow_version_cleaner_end_time,
+    aborted_version_cleaner_start_time - make_interval(mins => svr.offset_minutes) AS aborted_version_cleaner_start_time_utc,
+    aborted_version_cleaner_end_time - make_interval(mins => svr.offset_minutes) AS aborted_version_cleaner_end_time_utc,
+    offrow_version_cleaner_start_time - make_interval(mins => svr.offset_minutes) AS offrow_version_cleaner_start_time_utc,
+    offrow_version_cleaner_end_time - make_interval(mins => svr.offset_minutes) AS offrow_version_cleaner_end_time_utc,
     collection_time
-FROM v_pvs_stats
+FROM v_pvs_stats, svr
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
@@ -87,10 +108,10 @@ ORDER BY p.database_name, p.collection_time";
         long? AbortedTransactionCount,
         long? OldestActiveTransactionId,
         long? OldestAbortedTransactionId,
-        DateTime? AbortedCleanerStartTime,
-        DateTime? AbortedCleanerEndTime,
-        DateTime? OffrowCleanerStartTime,
-        DateTime? OffrowCleanerEndTime,
+        DateTime? AbortedCleanerStartTimeUtc,
+        DateTime? AbortedCleanerEndTimeUtc,
+        DateTime? OffrowCleanerStartTimeUtc,
+        DateTime? OffrowCleanerEndTimeUtc,
         DateTime CollectionTime);
 
     /// <summary>One trend point (per database, per collection).</summary>
