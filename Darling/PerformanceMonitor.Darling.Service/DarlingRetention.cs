@@ -294,7 +294,11 @@ public static class DarlingRetention
                same resolver the fact purge above uses, so a raised per-collector override can never outlive
                the dims and orphan a reader — plus a margin covering the two ways a fact can outlive its
                nominal horizon: drop_chunks only drops a chunk once its WHOLE range is past the cutoff (up to
-               one ChunkIntervalDays of extra rows), and the upsert refreshes last_seen at most hourly. */
+               one ChunkIntervalDays of extra rows), and last_seen is refreshed under a guard rather than on
+               every sighting. Two guards write it and the WIDER one is what the margin has to absorb: the
+               dim upsert's conflict arm at one hour, and the Query Store liveness touch at
+               QueryStoreLivenessTouchGuard.GuardHours — which is itself a stated share of this margin, so
+               the two cannot drift apart. */
             var widestFactRetentionDays = 1;
             foreach (var definition in CollectorCatalog.All)
             {
@@ -776,12 +780,14 @@ public static class DarlingRetention
 
     /// <summary>
     /// The dimension GC's cutoff (#1795): the ASSUMED horizon (widest dim-feeding fact retention +
-    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> drop_chunks granularity + 1 day for the hourly
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> drop_chunks granularity + 1 day for the
     /// <c>last_seen</c> refresh guard), CLAMPED to one day before the oldest surviving digest-carrying
     /// fact row when that measured floor reaches further back — held history bounds the GC instead of
     /// deferring it. The measured side carries the SAME one-day margin, for the same reason: a dim row's
-    /// <c>last_seen</c> can trail its newest referencing fact by up to the hourly refresh guard, so
-    /// pruning right AT the floor could take content the floor row still references. A null floor (no
+    /// <c>last_seen</c> can trail its newest referencing fact by up to the refresh guard's width
+    /// (<see cref="QueryStoreLivenessTouchGuard.GuardHours"/> hours, which is a stated share of this very
+    /// margin — see <see cref="QueryStoreLivenessTouchGuard"/>), so pruning right AT the floor could take
+    /// content the floor row still references. A null floor (no
     /// digest-carrying facts anywhere — a fresh or fully-aged store) leaves the assumed horizon alone:
     /// with no facts, nothing can dangle, and last_seen still bounds what is old enough to take.
     /// </summary>
@@ -802,7 +808,8 @@ public static class DarlingRetention
            GC unable to fire until a month after projected disk-full). With the knob enabled, a fact
            older than the window keeps its metrics, hashes and text but renders a MISSING plan — the
            null every reader already handles — in exchange for a bounded store. The same one-day
-           margin as the measured side covers the hourly last_seen refresh guard. Disabled (0 or
+           margin as the measured side covers the last_seen refresh guard, whose width is a stated
+           share of it (QueryStoreLivenessTouchGuard). Disabled (0 or
            below) returns the coupled cutoff before any dedicated value is computed, so the old
            behavior is reproduced exactly rather than approximated through a comparison. */
         if (planContentRetentionDays <= 0)
@@ -832,9 +839,12 @@ public static class DarlingRetention
     /// renders "not collected" and self-corrects; content pruned while a map row survives is a live fact
     /// resolving to absent XML, silently. The coupled pair keeps that gap at ChunkIntervalDays; the
     /// dedicated pair keeps it at one day (map at knob, dim at knob + 1 — the same one-day stamp-skew
-    /// margin as everywhere else, because <c>TouchAndProbeSql</c> refreshes the map's stamp eagerly while the
-    /// dim's refresh is hourly-guarded, so the dim's stamp can trail). Both components are strictly
-    /// ordered, so the max-of-newer composition preserves the ordering under every knob value —
+    /// margin as everywhere else). What that margin covers is the touch guard: <c>TouchAndProbeSql</c>
+    /// guards the map's stamp and the dim's at the SAME width — <see cref="QueryStoreLivenessTouchGuard"/>
+    /// is the one place it is written, deliberately, because two copies could diverge and the map row and
+    /// the dim row must not be able to age out at different times. So EITHER stamp can trail its newest
+    /// referencing fact by up to that width, and the margin is sized to absorb it. Both components are
+    /// strictly ordered, so the max-of-newer composition preserves the ordering under every knob value —
     /// pinned in PlanContentRetentionTests across the full age sweep.
     /// </summary>
     internal static DateTime ComputeMapCutoff(DateTime utcNow, int widestFactRetentionDays, int planContentRetentionDays = 0)
