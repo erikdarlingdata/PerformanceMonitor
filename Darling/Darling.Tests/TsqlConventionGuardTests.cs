@@ -1240,11 +1240,13 @@ public sealed class TsqlConventionGuardTests
     /// <summary>
     /// Every member declaration's range is one whole member.
     ///
-    /// <para><b>Attribution is silent when this fails, which is why it is asserted separately.</b> A
-    /// truncated body stops containing the literals below the cut, and a literal contained by nothing is
-    /// labelled <see cref="Unknown"/> — loud. But an OVER-EXTENDED body keeps containing them, and it
-    /// contains the next member's literals too, so it hands out a name that is confidently wrong and
-    /// nothing above notices. That is the direction that needs its own check.</para>
+    /// <para><b>Attribution is silent in both failing directions, which is why each is asserted
+    /// separately.</b> An OVER-EXTENDED body keeps containing the literals below it AND the next member's,
+    /// so it hands out a name that is confidently wrong. An UNDER-READ body stops containing the literals
+    /// below the cut, and a literal contained by nothing is labelled <see cref="Unknown"/> — which is only
+    /// loud if some census is looking for a site of that kind. Thirteen members strand a literal today and
+    /// no census looks for those, so the whole class read as healthy until the ranges themselves were
+    /// checked against a second derivation.</para>
     ///
     /// <para>The two arms are complementary rather than redundant, and both are pinned by
     /// <see cref="TheMemberScan_IsBoundedByTheNextDeclaration_AndByTheBraceWalkAtTheEndOfTheFile"/>:
@@ -1266,6 +1268,7 @@ public sealed class TsqlConventionGuardTests
         var truncated = new List<string>();
         var overExtended = new List<string>();
         var overlapping = new List<string>();
+        var stoppedShort = new List<string>();
 
         foreach (var (tree, roots, anchor) in ScannedTrees)
         {
@@ -1308,6 +1311,10 @@ public sealed class TsqlConventionGuardTests
                             overExtended.Add(
                                 $"{where} runs to line {LineOf(map.Code, declaration.End - 1)}, past the "
                                 + $"declaration at line {LineOf(map.Code, declaration.NextStart)}");
+                            continue;
+
+                        case RangeShape.Truncated:
+                            stoppedShort.Add($"{relative} {declaration.Name}");
                             continue;
 
                         case RangeShape.WholeMember:
@@ -1357,7 +1364,73 @@ public sealed class TsqlConventionGuardTests
             "these member ranges overlap. Members do not nest, so one range has swallowed another and the "
             + "literals in the inner one are attributed by whichever starts later:"
             + Environment.NewLine + string.Join(Environment.NewLine, overlapping));
+
+        /* Asserted as a SET, not a count. A count restates the size of the inventory and goes stale with
+           no edit to any member — and it cannot tell an addition from a removal, which is the whole
+           question here: one member leaving is progress, one arriving is a scan that has quietly stopped
+           reading a member whole. Set equality fails on both, and names which. */
+        Assert.Equal(
+            KnownTruncatedRanges.OrderBy(s => s, StringComparer.Ordinal),
+            stoppedShort.OrderBy(s => s, StringComparer.Ordinal));
     }
+
+    /// <summary>
+    /// Every member whose range stops short of its own content — carried, labelled, and deliberately NOT
+    /// fixed.
+    ///
+    /// <para><b>Why an inventory rather than a repair.</b> No consumer of the map under-reads because of
+    /// these. The four that exist — <c>DarlingPgReadSqlParsesLiveTests</c>,
+    /// <c>StoreSqlClockDisciplineTests</c>, <c>TempDbReservedLabelProvenanceTests</c> and this file — either
+    /// scan a corpus none of these members are in (the first two read only
+    /// <c>PerformanceMonitor.Darling.Storage</c>) or look for a kind of site none of them strand: what
+    /// falls outside these ranges is date formats and UI fallbacks — <c>"yyyy-MM-dd HH:mm:ss"</c>,
+    /// <c>"Never"</c>, <c>"None scheduled"</c>, <c>"N0"</c> — never T-SQL and never a tempdb label. Editing
+    /// 31 member bodies to satisfy a walker would be changing the subject to suit the instrument.</para>
+    ///
+    /// <para><b>What the inventory is for is the day that stops being true.</b> Thirteen of these strand a
+    /// string literal, and <see cref="EnclosingMember"/> answers <c>&lt;unknown&gt;</c> for every one of
+    /// them today. A census that starts looking for a site of that kind — a format string, a renderer name —
+    /// would silently miss it here, and the miss reads as absence rather than as error. This list is what
+    /// makes such a member visible before a census is written against it, which is the opposite order from
+    /// how the current 31 were found.</para>
+    ///
+    /// <para>Scope: the trees <see cref="ScannedTrees"/> sweeps, so <c>Darling.Tests</c> and
+    /// <c>Lite.Tests</c> are outside it. Three further truncated members live there and are not listed.</para>
+    /// </summary>
+    private static readonly string[] KnownTruncatedRanges =
+    [
+        "PerformanceMonitor.Collectors/CollectorRuntimePrecondition.cs DescribeObserved",
+        "PerformanceMonitor.Collectors/PgColumnStatsCoverage.cs Figure",
+        "PerformanceMonitor.Collectors/StallWaitProbe.cs TriggerElapsedFor",
+        "PerformanceMonitor.Collectors/StallWaitProbe.cs FitsUnderBudget",
+        "PerformanceMonitor.Common/SystemHealthParser.cs GbFromBytes",
+        "PerformanceMonitor.Common/SystemHealthParser.cs GbFromKb",
+        "PerformanceMonitor.Notifications/WebhookAlertService.cs DeriveResourceDatabase",
+        "Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs IsCommandTimeout",
+        "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs ToSettings",
+        "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs IsConfigured",
+        "Darling/PerformanceMonitor.Darling.Service/HypotheticalIndexRequest.cs IsComplete",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs OutputFinding",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TriggerMbPerSecond",
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TerminalSilenceMs",
+        "Darling/PerformanceMonitor.Darling.Service/Targets/PostgresTargetProvider.cs WithDatabase",
+        "Darling/PerformanceMonitor.Darling.Service/Targets/SqlServerTargetProvider.cs WithDatabase",
+        "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.ServerManagement.cs SelectedTabCollectorScope",
+        "Darling/PerformanceMonitor.Darling.Viewer/ManageServersWindow.xaml.cs LastCollectedDisplay",
+        "Darling/PerformanceMonitor.Darling.Viewer/RecommendationsViewModel.cs HasStructuredFixAction",
+        "Darling/PerformanceMonitor.Darling.Viewer/SettingsWindow.xaml.cs BuildViewerPreferences",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Blocking.cs EventTimeLocal",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Deadlock.cs DeadlockTimeLocal",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Deadlock.cs LastTranStartedLocal",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.JobHistory.cs RunTimeLocal",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.JobHistory.cs LastSuccessfulRunLocal",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.JobHistory.cs NextScheduledRunLocal",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.LongQueries.cs EventTimeLocal",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs Local",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs Local",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs Timestamp",
+        "Lite/Services/LocalDataService.CollectionHealth.cs OutputFinding",
+    ];
 
     /* ───────────────────────── the resolver, pinned on arranged source ───────────────────────── */
 
