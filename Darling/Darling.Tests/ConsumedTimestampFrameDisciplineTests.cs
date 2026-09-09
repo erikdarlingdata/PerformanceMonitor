@@ -403,14 +403,20 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         return found;
     }
 
+    /// <summary>
+    /// The frames a resolved relation yields for one of ITS columns. The relation name has to end where it
+    /// ends: <c>sys.dm_exec_query_stats</c> is a prefix of <c>sys.dm_exec_query_statistics_xml</c>, which
+    /// <c>QuerySnapshotsCollector</c> applies two lines from a timestamp column, so a plain substring test
+    /// would lend one relation's documented frame to an unrelated one.
+    /// </summary>
     private static HashSet<ClockFrame> FramesInRelation(string relation, string column)
     {
         var found = new HashSet<ClockFrame>();
 
         foreach (var (name, columns, frame, _) in RelationMarkers)
         {
-            if (relation.Contains(name, StringComparison.OrdinalIgnoreCase)
-                && columns.Contains(column, StringComparer.Ordinal))
+            if (columns.Contains(column, StringComparer.Ordinal)
+                && Regex.IsMatch(relation, Regex.Escape(name) + @"(?![\w])", RegexOptions.IgnoreCase))
             {
                 found.Add(frame);
             }
@@ -1340,6 +1346,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         Assert.Empty(FramesInRelation("sys.dm_os_sys_info", "ms_ticks"));
         Assert.Empty(FramesInRelation("sys.dm_db_resource_stats", "end_time"));
         Assert.Empty(FramesInRelation("sys.query_store_runtime_stats", "last_execution_time"));
+        /* The relation name ends where it ends, or one DMV lends its documented frame to a longer-named
+           sibling: sys.dm_exec_query_stats is a prefix of the TVF QuerySnapshotsCollector applies. */
+        Assert.Equal([ClockFrame.ServerLocal], FramesInRelation("sys.dm_exec_query_stats AS qs", "creation_time"));
+        Assert.Empty(FramesInRelation("sys.dm_exec_query_statistics_xml(der.session_id)", "creation_time"));
 
         /* FramesInText: the clock markers, and the fact that a UTC one is not a local one. */
         Assert.Equal([ClockFrame.Utc], FramesInText("evt.value('(@timestamp)[1]', 'datetime2')"));
