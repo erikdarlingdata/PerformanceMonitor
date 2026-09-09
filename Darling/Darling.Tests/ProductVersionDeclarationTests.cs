@@ -63,7 +63,7 @@ public class ProductVersionDeclarationTests
     /// The version-source paths a reader may name. Two entries are checkouts of <c>main</c> rather than
     /// paths in this tree: <c>check-version-bump.yml</c> compares the PR's version against main's, and
     /// main does not carry <see cref="DeclarationFile"/> until the release that introduces it lands there,
-    /// so the gate falls back to the file it used to read. A path under <c>main-branch/</c> cannot be
+    /// so the gate falls back to where main does declare it. A path under <c>main-branch/</c> cannot be
     /// validated against this tree at all, which is why the allowance is three named literals and not a
     /// prefix: a fourth arriving fails, and the fallback is meant to be deleted once main has the file.
     /// </summary>

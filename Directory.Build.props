@@ -49,8 +49,8 @@
     this change: the three shipped apps stamp 3.6.0.0 before and after, Dashboard and the two Installer
     projects move 3.3.0.0 to 3.6.0.0, and the shared libraries and test assemblies move 1.0.0.0 to 3.6.0.0.
     Nothing reads a library's or test assembly's own version to make a decision. UpdateCheckService reads the
-    ENTRY assembly, and DarlingCliCommands.ProductVersion reads the service assembly, which declared a
-    version before this change and inherits the same one now.
+    ENTRY assembly, and DarlingCliCommands.ProductVersion reads the service assembly, which is a shipped
+    app and carries the product version either way.
   -->
 
 </Project>

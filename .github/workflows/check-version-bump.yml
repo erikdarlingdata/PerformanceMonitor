@@ -62,9 +62,9 @@ jobs:
         shell: pwsh
         run: |
           # main does not carry Directory.Build.props until the release that centralises the
-          # version (#3222) lands there, so fall back to the file this gate used to read --
-          # that release PR has to be able to pass on a main that predates the change.
-          # Removable once main has Directory.Build.props.
+          # version (#3222) lands there, so fall back to deprecated/Dashboard/Dashboard.csproj,
+          # which is where main declares its version. That release PR has to be able to pass
+          # against a main that predates the file. Removable once main has it.
           $path = 'main-branch/Directory.Build.props'
           if (-not (Test-Path $path)) { $path = 'main-branch/deprecated/Dashboard/Dashboard.csproj' }
           $version = ([xml](Get-Content $path)).Project.PropertyGroup.Version | Where-Object { $_ }
