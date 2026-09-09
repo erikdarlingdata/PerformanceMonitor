@@ -203,6 +203,12 @@ jobs:
               # directories, for the same reason #2114 added the *.xaml catch-all above an
               # enumerated six: an enumerated list stops covering the next file added.
               - 'Lite/**/*.cs'
+              # #3222, same reason again and a project file this time: ProductVersionDeclarationTests
+              # enumerates every csproj/props/targets in the tree to assert that exactly one place
+              # declares a product version. Lite's project file is in that population, so adding a
+              # version property back to it must run the Darling guard that would catch it. Derived
+              # rather than the one path, for the reason the two entries above are derived.
+              - 'Lite/**/*.csproj'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
