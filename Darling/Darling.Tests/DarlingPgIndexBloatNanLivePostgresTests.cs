@@ -54,6 +54,16 @@ namespace Darling.Tests;
 /// <c>LeafFragmentation</c> by name would pass unchanged if a third <c>double?</c> column were added to this
 /// read without the normalisation. Reflecting over the record's <c>double?</c> properties makes the next
 /// column arrive already covered.</para>
+///
+/// <para><b>Since #3234 this suite exercises the HISTORICAL row shape, deliberately.</b> The collector no
+/// longer calls <c>pgstatindex</c> on a schedule — it estimates from catalog statistics — but the store
+/// holds 90 days of exact rows written before that change, and the seeding below names only the pre-V114
+/// columns. So <c>est_tuple_bytes</c> is NULL on every row here, which is what makes
+/// <c>measurement_kind</c> resolve to <c>measured</c> and <c>MeasuredAt</c> carry a time. That is the
+/// property under test and it is not incidental: keying the estimate/measured discriminator on the
+/// PRESENCE of a modelled tuple width rather than on a null density is what keeps these rows correctly
+/// labelled, and an empty measured index — whose density is legitimately null — from being reported as an
+/// estimate.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DarlingPgIndexBloatNanLivePostgresTests
