@@ -160,6 +160,21 @@ public sealed record ComposeUnitFamily(string Name, IReadOnlyList<ComposeUnit> U
 /// </summary>
 public sealed record ComposeDimension(string SourceTable, string Name, string Column, bool Likeable, bool ViaModuleJoin = false, string? FallbackColumn = null);
 
+/// <summary>The clock an event table's own time column is recorded in. Declared per annotation source
+/// because the store has no single answer: an XE-sourced column carries the UTC <c>@timestamp</c>, while the
+/// Default Trace ships <c>fn_trace_gettable</c>'s <c>StartTime</c>, which is the monitored server's local wall
+/// clock. <c>ServerLocalReadFrameDisciplineTests</c> checks each declaration against the owning collector's
+/// own query text rather than trusting this enum.</summary>
+public enum AnnotationClockFrame
+{
+    /// <summary>Naive UTC as stored — the XE <c>@timestamp</c> columns. Needs no conversion.</summary>
+    Utc = 0,
+
+    /// <summary>The monitored server's local wall clock as stored. The compiler de-skews it to UTC by the
+    /// collected <c>server_properties.utc_offset_minutes</c> before windowing or returning it.</summary>
+    ServerLocal = 1,
+}
+
 /// <summary>
 /// One event-annotation SOURCE (design D5): a collector event table whose rows can be overlaid as point
 /// markers on a time-series panel. <see cref="TimeColumn"/> is the event's OWN time column (when the event
@@ -167,6 +182,14 @@ public sealed record ComposeDimension(string SourceTable, string Name, string Co
 /// <see cref="LabelColumn"/> a short text column for the marker tooltip. Both — like a measure's columns —
 /// are pinned to the owning collector's <c>PayloadColumns</c> by <c>DarlingComposeTests</c>, so the annotation
 /// compiler emits them schema-qualified (<c>collect.&lt;table&gt;</c>) and never touches a caller string.
+///
+/// <para><see cref="Frame"/> is what makes the overlay comparable to the measure it decorates. A panel's
+/// x-axis is naive UTC — the measure query buckets on the collector's <c>PrefixTimeColumnName</c>, which is
+/// <c>collection_time</c> — and an annotation whose <see cref="TimeColumn"/> is server-local would be both
+/// windowed against the wrong slice and plotted at the wrong x-position, silently and by the server's
+/// offset. With several sources overlaid at once the frames would differ WITHIN one chart, which is worse
+/// than a uniform error because no single correction recovers it. Declaring the frame here lets
+/// <c>ComposeCompiler.CompileAnnotation</c> de-skew exactly the sources that need it.</para>
 /// </summary>
 public sealed record ComposeAnnotationSource(
     string Key,
@@ -174,7 +197,8 @@ public sealed record ComposeAnnotationSource(
     string Category,
     string SourceTable,
     string TimeColumn,
-    string LabelColumn);
+    string LabelColumn,
+    AnnotationClockFrame Frame = AnnotationClockFrame.Utc);
 
 /// <summary>
 /// One measure — a named, composable metric. Everything identifier-bearing (<see cref="SourceTable"/>,
@@ -1336,7 +1360,8 @@ public static class MeasureCatalog
         new ComposeAnnotationSource("deadlocks", "Deadlocks", CatBlocking, "deadlocks", "deadlock_time", "database_name"),
         new ComposeAnnotationSource("blocked_process_reports", "Blocked-process reports", CatBlocking, "blocked_process_reports", "event_time", "contentious_object"),
         new ComposeAnnotationSource("long_query_completions", "Long-query completions", CatLongQueries, "long_query_completions", "event_time", "object_name"),
-        new ComposeAnnotationSource("default_trace_events", "Default-trace events", CatDefaultTrace, "default_trace_events", "event_time", "event_name"),
+        /* The one server-local source: fn_trace_gettable's StartTime, not an XE @timestamp. */
+        new ComposeAnnotationSource("default_trace_events", "Default-trace events", CatDefaultTrace, "default_trace_events", "event_time", "event_name", AnnotationClockFrame.ServerLocal),
         new ComposeAnnotationSource("system_health_events", "system_health events", CatSystemHealth, "system_health_events", "event_time", "event_type"),
     };
 

@@ -23,21 +23,37 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// through the store's <c>search_path = collect, config, public</c>. The SQL is a public const so
 /// Darling.Tests can pin the dialect + columns without a live Postgres.
 ///
-/// <para><b>Server-local timestamps (load-bearing):</b> unlike the XE collectors (deadlock / system_health),
-/// whose <c>event_time</c> is the UTC XE <c>@timestamp</c>, the Default Trace <c>StartTime</c> — and thus this
-/// table's <c>event_time</c> — is the monitored server's LOCAL wall-clock time (the .trc files store local
-/// time; the Dashboard windows it against <c>SYSDATETIME()</c>, server-local). Storing it raw keeps the
-/// collector's dedup watermark bulletproof (local StartTime vs a local watermark, no conversion). So this
-/// monitor-side read, whose window bounds arrive in UTC, converts them to the server's local frame INSIDE the
-/// query by the collected <c>server_properties.utc_offset_minutes</c> (V16 — the same offset the viewer uses
-/// for server-local display); a server with no offset yet collected falls back to 0 (treat local == UTC), and
-/// the single-row COALESCE CTE guarantees the cross join never drops the events.</para>
+/// <para><b>Server-local storage, UTC at the read boundary (load-bearing):</b> unlike the XE collectors
+/// (deadlock / system_health), whose <c>event_time</c> is the UTC XE <c>@timestamp</c>, the Default Trace
+/// <c>StartTime</c> — and thus this table's <c>event_time</c> — is the monitored server's LOCAL wall-clock
+/// time (the .trc files store local time). Storing it raw keeps the collector's dedup watermark bulletproof
+/// (local StartTime vs a local watermark, no conversion), which is why the STORED frame stays local and
+/// <c>CollectorTimestampFrameTests</c> pins it that way. Each of this column's three readers then de-skews
+/// to naive UTC by the collected <c>server_properties.utc_offset_minutes</c> (V16) — this read, the
+/// viewer's <c>ViewerDataService.DefaultTraceEventsByWindowSql</c> by the same expression on the same
+/// column, and Lite's, in C# on the loaded row. A server with
+/// no offset yet collected falls back to 0 (treat local == UTC) and the single-row COALESCE CTE guarantees
+/// the cross join never drops the events.</para>
+///
+/// <para><b>Why the returned value is converted and not merely labelled.</b> The surfaces a caller
+/// actually correlates these events against are naive UTC — <c>collection_log.collection_time</c>,
+/// <c>list_servers.last_collection</c>, the XE <c>event_time</c> columns, and this tool's own
+/// <c>as_of</c> argument — so a server-local <c>event_time</c> beside them reads as UTC by default and is
+/// wrong by the offset in the direction that INVERTS causality: an event at 04:28 UTC on a server at UTC-4
+/// renders as 00:28 and appears to precede the 04:28 collector error it actually coincided with. A suffix
+/// or a note would leave that value in the response for a reader to line up against those surfaces anyway.
+/// Converting is also what the two sibling readers of this very column already do — the viewer's
+/// <c>event_time_utc</c> above, and Lite's <c>get_default_trace_events</c>, which de-skews to
+/// <c>DefaultTraceEventRow.EventTimeUtc</c> — so a second convention here would leave one column read three
+/// ways.</para>
 /// </summary>
 internal static class DarlingDefaultTraceReader
 {
-    /// <summary>One stored Default Trace event row (the fields the MCP tool surfaces + gates on).</summary>
+    /// <summary>One stored Default Trace event row (the fields the MCP tool surfaces + gates on). The event
+    /// time is naive UTC: the read de-skews the stored server-local StartTime, so it shares the frame of every
+    /// other timestamp the MCP surface returns.</summary>
     public sealed record DefaultTraceEventRow(
-        DateTime? EventTime,
+        DateTime? EventTimeUtc,
         string? EventName,
         int? EventClass,
         int? Spid,
@@ -55,11 +71,25 @@ internal static class DarlingDefaultTraceReader
 
     /// <summary>
     /// Stored Default Trace events for the window, newest first. Windows on <c>event_time</c> (the trace
-    /// StartTime — server-LOCAL), NOT collection_time, so "last 24 hours" means events that HAPPENED in the
-    /// last 24 hours. The window bounds ($2/$3) arrive as naive UTC and are converted to the server's LOCAL
-    /// frame in-query by the collected <c>utc_offset_minutes</c> (single-row COALESCE CTE — 0 when none is
-    /// collected yet, and the cross join keeps every event). $1 server_id, $2/$3 window (naive UTC). Reads the
-    /// base tables (no v_* views).
+    /// StartTime), NOT collection_time, so "last 24 hours" means events that HAPPENED in the last 24 hours.
+    /// The stored <c>event_time</c> is server-LOCAL, so it is de-skewed to naive UTC by the collected
+    /// <c>utc_offset_minutes</c> (single-row COALESCE CTE — 0 when none is collected yet, and the cross join
+    /// keeps every event) and BOTH returned and windowed as <c>event_time_utc</c>. Returning and bounding on
+    /// the same expression is the point: the caller's window, the caller's <c>as_of</c>, and every timestamp
+    /// in the response are then one frame. $1 server_id, $2/$3 window (naive UTC). Reads the base tables
+    /// (no v_* views).
+    ///
+    /// <para>The de-skew is spelled on the COLUMN rather than added to the bounds. The two forms select the
+    /// same rows — one collected offset applies to both sides, so <c>event_time &gt;= $2 + off</c> and
+    /// <c>event_time - off &gt;= $2</c> are algebraically identical — but only this one leaves a UTC value to
+    /// return, and it is byte-comparable with the viewer's read of the same column. It costs no index either
+    /// way: <c>PgSchemaGenerator.CreateIndex</c> gives this table <c>(server_id, collection_time)</c>, so
+    /// there is no <c>event_time</c> index for an expression to forfeit.</para>
+    ///
+    /// <para>One collected offset covers the whole window, so a window straddling a DST transition de-skews
+    /// both sides by the post-transition offset and is off by an hour on the far side. That is the same
+    /// single-snapshot approximation the viewer's read and #2992's <c>creation_time</c> de-skew make, and it
+    /// is stated here rather than implied.</para>
     /// </summary>
     public const string EventsByWindowSql = """
         WITH svr AS (
@@ -72,7 +102,7 @@ internal static class DarlingDefaultTraceReader
                 LIMIT 1), 0) AS offset_minutes
         )
         SELECT
-            dte.event_time,
+            dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc,
             dte.event_name,
             dte.event_class,
             dte.spid,
@@ -89,9 +119,9 @@ internal static class DarlingDefaultTraceReader
             dte.integer_data
         FROM default_trace_events AS dte, svr
         WHERE dte.server_id = $1
-        AND   dte.event_time >= $2 + make_interval(mins => svr.offset_minutes)
-        AND   dte.event_time <= $3 + make_interval(mins => svr.offset_minutes)
-        ORDER BY dte.event_time DESC
+        AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2
+        AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3
+        ORDER BY event_time_utc DESC
         """;
 
     /// <summary>Reads the stored Default Trace event rows over the window (newest first).</summary>

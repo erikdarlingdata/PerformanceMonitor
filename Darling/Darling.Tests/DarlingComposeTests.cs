@@ -1853,7 +1853,12 @@ public sealed class DarlingComposeTests
     [InlineData("deadlocks", "collect.deadlocks", "f.deadlock_time AS ts", "f.database_name AS label")]
     [InlineData("blocked_process_reports", "collect.blocked_process_reports", "f.event_time AS ts", "f.contentious_object AS label")]
     [InlineData("long_query_completions", "collect.long_query_completions", "f.event_time AS ts", "f.object_name AS label")]
-    [InlineData("default_trace_events", "collect.default_trace_events", "f.event_time AS ts", "f.event_name AS label")]
+    /* #3198: default_trace_events is the one server-local annotation source, so its ts is the DE-SKEWED
+       expression — the panel's x-axis is naive UTC (the measure query buckets on collection_time), and a
+       local marker would be both selected from the wrong slice and drawn at the wrong x-position, next to
+       four XE sources that are UTC on the same chart. ServerLocalReadFrameDisciplineTests derives which
+       sources are server-local from the collectors' own SQL rather than from this list. */
+    [InlineData("default_trace_events", "collect.default_trace_events", "f.event_time - make_interval(mins => COALESCE(o.utc_offset_minutes, 0)) AS ts", "f.event_name AS label")]
     [InlineData("system_health_events", "collect.system_health_events", "f.event_time AS ts", "f.event_type AS label")]
     public void CompileAnnotations_EachSource_SelectsItsCatalogTimeAndLabelColumns(string key, string table, string tsExpr, string labelExpr)
     {

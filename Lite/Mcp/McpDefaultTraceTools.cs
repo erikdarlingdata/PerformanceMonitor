@@ -17,7 +17,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpDefaultTraceTools
 {
-    [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. NOTE: configuration-change events are excluded here — use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
+    [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. event_time is UTC, the same frame as as_of (the Default Trace stores its StartTime in the monitored server's local clock; this read de-skews it). NOTE: configuration-change events are excluded here — use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
     public static async Task<string> GetDefaultTraceEvents(
         LocalDataService dataService,
         ServerManager serverManager,
