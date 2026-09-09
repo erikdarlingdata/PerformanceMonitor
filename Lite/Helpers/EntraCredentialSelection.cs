@@ -164,8 +164,25 @@ internal sealed class EntraCredentialSelectionListener : EventListener
 /// process, forever, to learn a fact that can only be reported once. So <see cref="Begin"/> is
 /// called immediately before the open and the listener is disposed immediately after it; an
 /// undisposed <see cref="EventListener"/> keeps receiving events, so the disposal is the window.
-/// The cost of the narrow window is that an event raised outside it is missed, which is why BOTH of
-/// Lite's connection-open sites carry one rather than only the dialog a user is looking at.</para>
+/// The cost of the narrow window is that an event raised outside it is missed — so the two
+/// instrumented sites had to be the ones that get there FIRST, and they are, by construction rather
+/// than by luck: <c>CollectionBackgroundService.ExecuteAsync</c> runs
+/// <c>ServerManager.CheckAllConnectionsAsync</c> BEFORE
+/// <c>RemoteCollectorService.RunDueCollectorsAsync</c> on every cycle including the first, and that
+/// loop is the only thing that drives collection — so the connectivity check is the first code in
+/// the process to open a connection to a monitored server. The interactive first-touch paths are
+/// the connection dialog's Test button and <c>MainWindow</c>'s explicit retry, and both go through
+/// an instrumented open. <c>EntraCredentialSelectionOrderingTests</c> pins that ordering, because it
+/// lives in another file and a reorder there would silently blind this.</para>
+///
+/// <para><b>What that still does not cover, stated rather than implied.</b> Lite has other
+/// <c>SqlConnection</c> sites that reach a monitored server — the bulk-add dialog, the excluded-
+/// databases dialog, a server tab's ad-hoc reads, the plan fetcher. Each needs an already-configured
+/// server, so in practice the sweep has run first; but a user who drives one of them inside the
+/// background service's five-second startup delay could acquire the first token there. The
+/// consequence is a <see cref="LogLevel.Debug"/> "not observed" line rather than a wrong one, which
+/// is the direction to fail in — and it is why that line names the caching as the expected cause
+/// instead of asserting it.</para>
 ///
 /// <para><i>Only the last REPORTED name outlives the attempt.</i> Nothing else is retained: the
 /// listener is gone and the captured value is read once. <see cref="s_lastReported"/> exists so an
