@@ -51,10 +51,12 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class QueryStoreLivenessTouchGuard
 {
     /// <summary>
-    /// The margin the guard's staleness is spent out of, in days: the SMALLEST margin reserved by any table
-    /// this guard's touch writes <c>last_seen</c> on, so one shared width is safe on all of them. Derived
-    /// rather than restated, so tightening any of those margins narrows the guard instead of silently eating
-    /// its headroom.
+    /// The allowance the guard's staleness is sized against, in days: the SMALLEST <c>PruneMarginDays</c>
+    /// declared by any table this guard's touch writes <c>last_seen</c> on, so one shared width is safe on
+    /// all of them. Derived rather than restated, so tightening any of those margins narrows the guard
+    /// instead of silently eating its headroom. It is a conservative PROXY for the room actually available
+    /// rather than the room itself — see the third paragraph, which is the one that matters if you are
+    /// changing this.
     ///
     /// <para><b>The INCLUSION CRITERION, because a <c>min</c> over an unstated enumeration is the next
     /// defect.</b> A table contributes a term exactly when this guard's touch writes its <c>last_seen</c>.
@@ -71,12 +73,13 @@ public static class QueryStoreLivenessTouchGuard
     /// the plan-content knob enabled — and its default is 21 — the dedicated arm governs and the map's cutoff
     /// is the knob itself with no margin term in it at all. So this constant is not "the room available"; it
     /// is the smallest stamp-trailing allowance the retention arithmetic names anywhere, and it is strictly
-    /// SMALLER than the least room any reachable configuration leaves. Enumerated over the shipped
-    /// arithmetic: 48 combinations of dim-feeding retention (floored at 1 day) against the knob (off, or
-    /// clamped to 7–365), least room 2 days at retention 1 with the knob off, 21 days in the default
-    /// configuration. Anchoring on the named 1-day allowance rather than on a floor computed from three
-    /// interacting knobs is the deliberate trade: it keeps the derivation readable and it keeps the guard
-    /// inside the true room by a further factor of two at the worst point.</para>
+    /// SMALLER than the least room any reachable configuration leaves. Swept over the shipped arithmetic
+    /// rather than argued, across dim-feeding retention (floored at 1 day by <c>Math.Max</c>, and at 1 day by
+    /// <c>StoreConfigProvider.ValidRetention</c> before that) against the knob (off, or clamped to its 7–365
+    /// range): the least room is TWO days, at retention 1 with the knob off, and it is 21 days in the default
+    /// configuration. Anchoring on the named one-day allowance rather than on a floor computed from three
+    /// interacting knobs is the deliberate trade: it keeps the derivation readable, and it keeps the guard
+    /// inside the true room by a further factor of two even at the worst point.</para>
     ///
     /// <para><b>Only two of the three tables contribute a term, and the third needs none.</b>
     /// <c>query_plan_dim</c> has no <c>PruneMarginDays</c> of its own — its room above the fact horizon is
