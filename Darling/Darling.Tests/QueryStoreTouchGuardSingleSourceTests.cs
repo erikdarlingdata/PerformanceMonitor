@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -42,12 +44,49 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
 {
     /* The two files that carry a guarded last_seen touch. Named rather than globbed: a glob that stopped
        matching would shrink the scanned set to nothing and report a clean bill of health, and the whole
-       point of this pin is that the SECOND file is the one an editor misses. */
+       point of this pin is that the SECOND file is the one an editor misses.
+
+       This is the DECLARED set, and TheGuardedStoreTypesAreDerivedFromTheGuardSites requires it to equal the
+       set the project-wide scan finds. So it is a decision record rather than the scan's input: a new file
+       carrying a guard site reds here until somebody decides it belongs, and a file listed here that has no
+       guard site reds too. */
     private static readonly string[] GuardedSourceFiles =
     [
         "QueryStorePlanMap.cs",
         "QueryStoreTextStore.cs",
     ];
+
+    /// <summary>
+    /// The store type each guarded file declares. Convention, verified: the file name is the type name, and
+    /// the type is resolved out of the built assembly so a rename cannot quietly drop a term.
+    /// </summary>
+    private static string StoreTypeOf(string sourceFile) =>
+        Path.GetFileNameWithoutExtension(sourceFile);
+
+    /// <summary>
+    /// A file the scan must SEE and must NOT classify as guarded - the exclusion made measurable.
+    ///
+    /// <para><see cref="PgStatementText"/> declares a <c>PruneMarginDays</c> of 2 and has no guard site: its
+    /// <c>UpsertSql</c> conflict arm advances <c>last_seen</c> on every conflict under a monotonicity guard,
+    /// not a staleness one, and its margin exists so text outlives the statistics rows referencing it. Two
+    /// is above <see cref="QueryStoreLivenessTouchGuard.StampSkewMarginDays"/>, so including it in the
+    /// <c>min</c> could not move the value - which is precisely why the criterion needs a test rather than a
+    /// sentence. Named here so the exclusion reds if the scan ever stops being able to see the file, which is
+    /// the failure a set equality cannot report: an invisible file is absent from both sides and they
+    /// agree.</para>
+    /// </summary>
+    private const string UnguardedMarginFile = "PgStatementText.cs";
+
+    /* Floor on the project-wide sweep. The storage project holds dozens of .cs files; a glob that stopped
+       matching, or a directory that moved, would otherwise derive an EMPTY guarded set and agree with an
+       empty expectation. */
+    private const int MinimumProjectFilesScanned = 20;
+
+    /* How a guard site is recognised in CODE (comments and literals blanked): a reference to the one
+       constant. Deliberately the code reference and not the SQL text - a site that spells its own interval is
+       NoGuardSiteSpellsItsOwnWidth's business, and counting it as a guard site here would let a reverted site
+       keep its membership. */
+    private const string GuardReference = "QueryStoreLivenessTouchGuard.GuardInterval";
 
     /// <summary>
     /// The three guarded touches: two in <see cref="QueryStorePlanMap"/> (the <c>touched</c> CTE and
@@ -176,14 +215,16 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
             + $"{QueryStoreLivenessTouchGuard.StampSkewMarginHours}h margin — it must be at least an hour, "
             + "and the divisor must divide the margin exactly, or the share taken is not the share stated.");
 
-        /* Sized on the TIGHTER of the two prune margins, so one shared width is safe on both sides. */
+        /* Sized on the TIGHTEST margin among the guarded tables, so one shared width is safe on all of
+           them. WHICH tables those are is TheGuardedStoreTypesAreDerivedFromTheGuardSites' business - this
+           only checks the value the enumeration produces. */
         Assert.Equal(
-            Math.Min(QueryStorePlanMap.PruneMarginDays, QueryStoreTextStore.PruneMarginDays),
-            QueryStoreLivenessTouchGuard.StampSkewMarginDays);
+            QueryStoreLivenessTouchGuard.StampSkewMarginDays,
+            Math.Min(QueryStorePlanMap.PruneMarginDays, QueryStoreTextStore.PruneMarginDays));
 
         Assert.Equal(
-            QueryStoreLivenessTouchGuard.StampSkewMarginDays * 24,
-            QueryStoreLivenessTouchGuard.GuardHours * QueryStoreLivenessTouchGuard.MarginShareDivisor);
+            QueryStoreLivenessTouchGuard.GuardHours * QueryStoreLivenessTouchGuard.MarginShareDivisor,
+            QueryStoreLivenessTouchGuard.StampSkewMarginDays * 24);
 
         /* And the width is DERIVED in source, not restated. Read from the code with comments and literals
            blanked, so an initializer quoted in a doc comment cannot satisfy it. */
@@ -200,6 +241,112 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
         Assert.Equal(
             $"interval '{QueryStoreLivenessTouchGuard.GuardHours} hours'",
             QueryStoreLivenessTouchGuard.GuardInterval);
+    }
+
+    /// <summary>
+    /// <see cref="QueryStoreLivenessTouchGuard.StampSkewMarginDays"/> is a <c>min</c> over an enumeration, and
+    /// the enumeration's MEMBERSHIP is derived from the guard sites rather than declared beside it.
+    ///
+    /// <para><b>Why this needs a test and not a sentence.</b> The criterion is "the prune margin of every
+    /// table this guard's touch writes <c>last_seen</c> on". The tree holds three <c>PruneMarginDays</c>
+    /// constants and only two of them qualify: <see cref="PgStatementText.PruneMarginDays"/> is 2 and belongs
+    /// to a table with NO guard site, whose upsert advances <c>last_seen</c> on every conflict under a
+    /// monotonicity guard and whose margin exists so text outlives the statistics rows referencing it.
+    /// Because 2 is above the current minimum, adding it to the <c>min</c> would be a genuine category error
+    /// that changes NO value - so no other assertion here, and no reviewer reading the result, would notice.
+    /// A term that is wrong to include and cannot move the answer is the worst kind to leave
+    /// unenforced.</para>
+    ///
+    /// <para>So the guarded store types are derived by sweeping the whole storage project for guard sites,
+    /// and the set of <c>PruneMarginDays</c> terms in the initializer's own SOURCE must equal that set. A new
+    /// store type that grows a guard joins the <c>min</c> or reds; one without a guard cannot be added to it
+    /// by mistake.</para>
+    /// </summary>
+    [Fact]
+    public void TheGuardedStoreTypesAreDerivedFromTheGuardSites()
+    {
+        var projectDirectory = RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Storage");
+        var separator = Path.DirectorySeparatorChar;
+        var projectFiles = Directory
+            .EnumerateFiles(projectDirectory, "*.cs", SearchOption.AllDirectories)
+            .Where(path => !path.Contains($"{separator}obj{separator}", StringComparison.Ordinal)
+                        && !path.Contains($"{separator}bin{separator}", StringComparison.Ordinal))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToList();
+
+        /* The anti-vacuity floor. A moved directory or a broken filter derives an EMPTY guarded set, which
+           agrees with an empty expectation and reports clean. */
+        Assert.True(
+            projectFiles.Count >= MinimumProjectFilesScanned,
+            $"only {projectFiles.Count} .cs files were swept out of {projectDirectory} (floor "
+            + $"{MinimumProjectFilesScanned}) - the sweep is not reading the storage project, so every set "
+            + "equality below would hold for a reason unrelated to guard membership.");
+
+        var scannedNames = projectFiles.Select(path => Path.GetFileName(path)!).ToList();
+
+        /* The exclusion has to be a fact about a file the sweep CAN see. An invisible file is absent from the
+           derived set and absent from the expectation, so the equality passes while the decision it looks
+           like was never taken. */
+        Assert.Contains(UnguardedMarginFile, scannedNames, StringComparer.Ordinal);
+
+        var derived = projectFiles
+            .Where(path => CSharpSourceWalker
+                .StripCommentsAndStrings(File.ReadAllText(path))
+                .Contains(GuardReference, StringComparison.Ordinal))
+            .Select(path => Path.GetFileName(path)!)
+            .Where(name => !string.Equals(name, "QueryStoreLivenessTouchGuard.cs", StringComparison.Ordinal))
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(GuardedSourceFiles.OrderBy(f => f, StringComparer.Ordinal).ToArray(), derived);
+        Assert.DoesNotContain(UnguardedMarginFile, derived, StringComparer.Ordinal);
+
+        /* Every derived file's store type must exist in the built assembly and declare the constant, so a
+           rename cannot drop a term while the file name still parses. */
+        var expectedTerms = derived.Select(StoreTypeOf).OrderBy(t => t, StringComparer.Ordinal).ToArray();
+
+        foreach (var storeType in expectedTerms)
+        {
+            var type = typeof(QueryStoreLivenessTouchGuard).Assembly
+                .GetType("PerformanceMonitor.Darling.Storage." + storeType, throwOnError: false);
+
+            Assert.NotNull(type);
+            Assert.NotNull(type!.GetField("PruneMarginDays", BindingFlags.Public | BindingFlags.Static));
+        }
+
+        /* And the initializer's OWN terms, read out of source with comments and literals blanked, must be
+           exactly those types. This is the assertion that reds on PgStatementText.PruneMarginDays being
+           folded in, which every value assertion in this class passes unchanged. */
+        var guardSource = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile(
+                "Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreLivenessTouchGuard.cs"));
+
+        var declarationAt = guardSource.IndexOf("StampSkewMarginDays =", StringComparison.Ordinal);
+        Assert.True(
+            declarationAt >= 0,
+            "StampSkewMarginDays' initializer was not found in the code, so its terms cannot be read and "
+            + "this pin would assert nothing.");
+
+        var initializer = CSharpSourceWalker.StatementSpanFrom(guardSource, declarationAt, 1);
+        var actualTerms = Regex
+            .Matches(initializer, @"([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*PruneMarginDays")
+            .Select(match => match.Groups[1].Value)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(term => term, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(expectedTerms, actualTerms);
+
+        /* query_plan_dim is the third table the touch writes and contributes no term, because it has no
+           PruneMarginDays: its room above the fact horizon is ChunkIntervalDays + 1 in
+           DarlingRetention.ComputeDimensionCutoff. MarginOrderingHolds already pins the map's margin strictly
+           below that, so guard <= map margin < dim margin follows from an invariant this repo already holds
+           rather than from a second copy of the arithmetic. Asserted here so the chain reds if that ordering
+           ever inverts, which would silently put the dim inside the guard's reach. */
+        Assert.True(
+            QueryStorePlanMap.MarginOrderingHolds(TimescaleSupport.ChunkIntervalDays),
+            "the map's prune margin is no longer strictly inside the dimension's, so a guard sized on the "
+            + "map's margin no longer clears the dimension GC and query_plan_dim needs a term of its own.");
     }
 
     private static int CountOf(string haystack, string needle)

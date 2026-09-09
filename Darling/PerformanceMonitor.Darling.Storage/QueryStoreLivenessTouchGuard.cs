@@ -43,17 +43,46 @@ namespace PerformanceMonitor.Darling.Storage;
 /// would widen whenever an operator widened retention, while the budget it actually spends from would not
 /// move at all. That is a relationship that does not hold, dressed as a derivation.</para>
 ///
-/// <para>Taken from the TIGHTER of the two margins, because one shared width has to be safe on both sides:
-/// the plan side reserves <see cref="QueryStorePlanMap.PruneMarginDays"/> and the text side
-/// <see cref="QueryStoreTextStore.PruneMarginDays"/>. Each side's cutoff also carries the retention term on
-/// top of its margin, which is further room the guard does not count.</para>
+/// <para>Taken from the TIGHTEST margin among the tables this touch writes, because one shared width has to
+/// be safe on all of them. Which tables those are is a stated criterion with a test behind it, not an
+/// implied enumeration — see <see cref="StampSkewMarginDays"/>. Each table's cutoff also carries the
+/// retention term on top of its margin, which is further room the guard does not count.</para>
 /// </summary>
 public static class QueryStoreLivenessTouchGuard
 {
     /// <summary>
-    /// The margin the guard's staleness is spent out of, in days: the SMALLER of the two prune margins the
-    /// touched tables reserve, so one shared width is safe on both. Derived rather than restated, so
-    /// tightening either margin narrows the guard instead of silently eating its headroom.
+    /// The margin the guard's staleness is spent out of, in days: the SMALLEST margin reserved by any table
+    /// this guard's touch writes <c>last_seen</c> on, so one shared width is safe on all of them. Derived
+    /// rather than restated, so tightening any of those margins narrows the guard instead of silently eating
+    /// its headroom.
+    ///
+    /// <para><b>The INCLUSION CRITERION, because a <c>min</c> over an unstated enumeration is the next
+    /// defect.</b> A table contributes a term exactly when this guard's touch writes its <c>last_seen</c>.
+    /// That is three tables — <c>query_store_plan_map</c> and <c>query_plan_dim</c> from
+    /// <see cref="QueryStorePlanMap.TouchAndProbeSql"/>, and <c>query_store_text</c> from
+    /// <see cref="QueryStoreTextStore.TouchAndProbeSql"/> — and it is emphatically NOT "every table with a
+    /// <c>PruneMarginDays</c>". Membership is enforced rather than asserted:
+    /// <c>QueryStoreTouchGuardSingleSourceTests</c> derives the guarded store types by scanning the whole
+    /// project for guard sites and requires the set of <c>PruneMarginDays</c> terms in this initializer to
+    /// equal it, so a term that is wrong to include reds even when it cannot move the value.</para>
+    ///
+    /// <para><b>Only two of the three tables contribute a term, and the third needs none.</b>
+    /// <c>query_plan_dim</c> has no <c>PruneMarginDays</c> of its own — its room above the fact horizon is
+    /// <c>ChunkIntervalDays + 1</c> in <c>DarlingRetention.ComputeDimensionCutoff</c>, whose trailing day is
+    /// documented there as covering this very guard. <see cref="QueryStorePlanMap.MarginOrderingHolds"/>
+    /// already pins <c>PruneMarginDays &lt; ChunkIntervalDays + 1</c>, so a guard that fits inside the map's
+    /// margin fits inside the dimension's by that existing invariant rather than by a second copy of the
+    /// arithmetic. The chain is: guard ≤ map margin &lt; dim margin.</para>
+    ///
+    /// <para><b><see cref="PgStatementText.PruneMarginDays"/> is deliberately excluded, and it is the worked
+    /// example the criterion exists for.</b> It is 2, so adding it could not change this value — which is
+    /// exactly why leaving the criterion implicit was the hazard. <see cref="PgStatementText"/> has no guard
+    /// site at all: its <c>UpsertSql</c> conflict arm advances <c>last_seen</c> on every conflict under a
+    /// MONOTONICITY guard (<c>EXCLUDED.last_seen &gt;= …</c>), not a staleness one, so nothing about this
+    /// width can make its stamp trail. Its margin is a fact-OUTLIVING margin — its own doc says "so text
+    /// outlives the statistics rows that reference it" — which is a different job wearing the same constant
+    /// name. The test asserts that file is inside the scanned population and outside the guarded set, so the
+    /// exclusion is a measured fact rather than a claim about a file the scan might be blind to.</para>
     /// </summary>
     public const int StampSkewMarginDays =
         QueryStorePlanMap.PruneMarginDays < QueryStoreTextStore.PruneMarginDays
