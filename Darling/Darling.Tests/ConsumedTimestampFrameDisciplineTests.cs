@@ -1064,10 +1064,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             }
         }
 
-        AssertMatchesInventory(
-            found,
-            [SiteLabel.McpPayloadUnmarked, SiteLabel.DeSkewedAtRead],
-            "MCP payload");
+        AssertMatchesInventory(found, [SiteLabel.McpPayloadUnmarked, SiteLabel.DeSkewedAtRead]);
 
         Assert.Equal(
             DeclinedAmbiguousMcpSites.OrderBy(d => d.File + "|" + d.Column, StringComparer.Ordinal)
@@ -1219,7 +1216,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         Assert.True(judged >= 30, $"only {judged} render sites were judged — check the renderer patterns");
         Assert.Empty(declined);
 
-        AssertMatchesInventory(found, [SiteLabel.DesktopRenderFrameMismatch], "desktop render");
+        AssertMatchesInventory(found, [SiteLabel.DesktopRenderFrameMismatch]);
     }
 
     /// <summary>Each <see cref="SiteLabel.DeSkewedAtRead"/> entry's conversion is present in the reader it
@@ -1371,7 +1368,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     {
         var used = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var (table, column, collector, engine) in TimestampColumns())
+        foreach (var (_, column, collector, engine) in TimestampColumns())
         {
             if (engine != CollectorTargetEngine.SqlServer)
             {
@@ -1408,8 +1405,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                     }
                 }
             }
-
-            _ = table;
         }
 
         /* SYSUTCDATETIME and GETDATE arrive through a variable or a sibling assignment rather than the
@@ -1438,8 +1433,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     private static void AssertMatchesInventory(
         Dictionary<(string File, string Column, string Tables), int> found,
-        SiteLabel[] labels,
-        string what)
+        SiteLabel[] labels)
     {
         static string Render(string file, string column, string tables, int sites) =>
             string.Create(CultureInfo.InvariantCulture, $"{file} | {column} | {tables} | {sites}");
@@ -1457,7 +1451,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
         Assert.NotEmpty(actual);
         Assert.Equal(expected, actual);
-        _ = what;
     }
 
     private static IEnumerable<string> McpSourceFiles() =>
