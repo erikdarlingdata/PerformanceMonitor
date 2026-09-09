@@ -424,9 +424,9 @@ internal static class CSharpMemberMap
     ///
     /// <para><b>Trailing <c>;</c> and whitespace are trimmed, which is what makes the disagreement mean
     /// something.</b> <c>=&gt; new T { … };</c> ends the range at the initialiser's brace and leaves the
-    /// <c>;</c> outside it — true of 510 members on the tree, and harmless, because no literal lives in a
-    /// semicolon — and they outnumber the members where real content falls outside the range by more than
-    /// ten to one, so reporting them would bury the set that matters. What is compared is therefore the end
+    /// <c>;</c> outside it, which is harmless because no literal lives in a semicolon — and those members
+    /// outnumber the ones where real content falls outside the range by more than ten to one, so reporting
+    /// them would bury the set that matters. What is compared is therefore the end
     /// of the declaration's CONTENT, and the shape reds only when something a scan could look for is
     /// stranded. Those semicolon-only members are the same defect one character short of mattering: append
     /// <c>.Normalize()</c> after the initialiser and one joins the reported set with nothing else changing,
@@ -622,9 +622,13 @@ internal static class CSharpMemberMap
     ///
     /// <para><b>Both of those are over-reads, and that was the gap.</b> A range that stops SHORT is closed,
     /// is under <c>NextStart</c>, and — ending early — cannot overlap its successor, so it satisfied every
-    /// arm above and read as <see cref="RangeShape.WholeMember"/>. Measured on the tree at the commit that
-    /// added this: 544 member ranges stop short, 34 of them by more than one character, and 13 strand a
-    /// string literal that <see cref="EnclosingMember"/> then answers <c>&lt;unknown&gt;</c> for.
+    /// arm above and read as <see cref="RangeShape.WholeMember"/>. The members this finds strand content
+    /// inside their own declaration, and where that content is a string literal
+    /// <see cref="EnclosingMember"/> answers <c>&lt;unknown&gt;</c> for it — a site that is in the source
+    /// and outside every range a census resolves through. How many there are is not written here: the live
+    /// figure is <c>TsqlConventionGuardTests.KnownTruncatedRanges</c>, which a test holds to the tree, and a
+    /// count repeated in prose goes stale the first time an unrelated PR rewrites one of those members —
+    /// which happened to this comment's own numbers within an hour of it being written.
     /// <see cref="RangeShape.Truncated"/> is that arm, and it is the reason
     /// <see cref="DeclaredRange.ContentEnd"/> is carried: it comes from
     /// <see cref="StatementEnd"/> rather than from a second run of the walk being checked.</para>
