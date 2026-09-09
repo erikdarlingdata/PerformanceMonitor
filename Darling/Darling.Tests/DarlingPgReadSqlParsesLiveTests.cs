@@ -172,8 +172,11 @@ public sealed class DarlingPgReadSqlParsesLiveTests
             "these reader types contribute no parse-checked read at all, so nothing verifies their SQL "
             + "resolves: " + string.Join(", ", empty));
 
-        /* The census. Keyed file-stem-to-type-name, which holds because each reader file declares exactly
-           the one reader type it is named for — asserted by the type clause above finding the same 28. */
+        /* The census, keyed by the DECLARING TYPE on both sides. It was keyed by file stem, which held
+           only while every reader file declared exactly the one type it is named for — an invariant
+           nothing asserted, and CONTRIBUTING.md endorses partial classes for large files. Splitting
+           DarlingPgFooReader.cs would have keyed its other half DarlingPgFooReader.Extra.SomeSql,
+           matched nothing, and failed LOUDLY for a field reflection covers fine. */
         var discovered = new HashSet<string>(reads.Select(r => r.Name), StringComparer.Ordinal);
         var declared = DeclaredStringFields();
         var missing = declared.Where(d => !discovered.Contains(d) && !NotQueryFields.Contains(d)).ToList();
@@ -183,6 +186,15 @@ public sealed class DarlingPgReadSqlParsesLiveTests
             $"only {declared.Count} static string fields were read out of the reader SOURCE (expected at "
             + $"least the {MinimumExpectedReads} reads reflection finds); the file glob or the declaration "
             + "pattern has broken, and a census with no denominator cannot fail");
+
+        /* Attribution breaking is a different fault from a field being uncovered, and reporting it as
+           the latter would send the next reader to the wrong file. */
+        var unattributed = declared.Where(d => d.StartsWith(NoDeclaringType, StringComparison.Ordinal)).ToList();
+
+        Assert.True(
+            unattributed.Count == 0,
+            "these declared string fields could not be attributed to a declaring type, so the census "
+            + "cannot be compared against reflection at all: " + string.Join(", ", unattributed));
 
         Assert.True(
             missing.Count == 0,
@@ -201,9 +213,14 @@ public sealed class DarlingPgReadSqlParsesLiveTests
 
     /// <summary>
     /// <c>Type.Field</c> for every <c>const string</c> and <c>static readonly string</c> declared in the
-    /// Storage project's <c>DarlingPg*Reader*.cs</c> files, read from the SOURCE. Read through
-    /// <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> so a declaration spelled in a doc comment or
-    /// inside a string cannot enter the census — the same instrument the store-SQL pins scan with.
+    /// Storage project's <c>DarlingPg*Reader*.cs</c> files, read from the SOURCE.
+    ///
+    /// <para>Read through <see cref="CSharpMemberMap"/> — which walks with
+    /// <see cref="CSharpSourceWalker"/> — so a declaration spelled in a doc comment or inside a string
+    /// cannot enter the census, and so each field is attributed to the type that DECLARES it rather
+    /// than to the file that holds it. The file stem is not the key: it agrees with the type name only
+    /// while no reader file is split, and a partial-class split would key half the fields to a name no
+    /// CLR type has.</para>
     /// </summary>
     private static IReadOnlyList<string> DeclaredStringFields([CallerFilePath] string thisFile = "")
     {
@@ -218,15 +235,49 @@ public sealed class DarlingPgReadSqlParsesLiveTests
 
         foreach (var path in Directory.EnumerateFiles(storage, "DarlingPg*Reader*.cs", SearchOption.TopDirectoryOnly))
         {
-            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
+            var map = CSharpMemberMap.Of(File.ReadAllText(path));
 
-            foreach (Match match in declaration.Matches(code))
+            foreach (Match match in declaration.Matches(map.Code))
             {
-                fields.Add(Path.GetFileNameWithoutExtension(path) + "." + match.Groups["name"].Value);
+                fields.Add(EnclosingType(map, match.Index) + "." + match.Groups["name"].Value);
             }
         }
 
         return fields;
+    }
+
+    /// <summary>What <see cref="CSharpMemberMap.Unknown"/> is for a member, for a TYPE: the name the
+    /// census keys an unattributable field under, so it fails saying the attribution broke rather than
+    /// saying the field is uncovered.</summary>
+    private const string NoDeclaringType = "<no declaring type>";
+
+    /// <summary>
+    /// The innermost <see cref="CSharpMemberMap.DeclarationKind.Type"/> declaration containing
+    /// <paramref name="offset"/>. Innermost rather than nearest-above because a reader file also
+    /// declares its row types, and a field below one of those belongs to whichever type's BODY it sits
+    /// in — which a scan for the closest preceding declaration would get wrong.
+    /// </summary>
+    private static string EnclosingType(CSharpMemberMap.MemberMap map, int offset)
+    {
+        var name = NoDeclaringType;
+        var innermost = -1;
+
+        foreach (var declaration in map.Declarations)
+        {
+            /* End is -1 when the brace walk never closed the body, which means it runs to EOF. */
+            if (declaration.Kind != CSharpMemberMap.DeclarationKind.Type
+                || declaration.Start > offset
+                || (declaration.End >= 0 && offset >= declaration.End)
+                || declaration.Start <= innermost)
+            {
+                continue;
+            }
+
+            name = declaration.Name;
+            innermost = declaration.Start;
+        }
+
+        return name;
     }
 
     [Fact]
