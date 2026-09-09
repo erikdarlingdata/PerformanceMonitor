@@ -130,6 +130,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// <summary>
     /// Clock and decode markers read straight out of an assignment's own text. This codebase writes
     /// <c>alias = expression</c>, so the right-hand side IS the provenance (#3202's technique).
+    ///
+    /// <para>Every entry here decides at least one census column, and
+    /// <see cref="EveryProvenanceMarker_IsReachedByAtLeastOneColumnInTheCensus"/> holds that with no
+    /// exemptions. <c>GETDATE</c> and <c>GETUTCDATE</c> are therefore absent even though the collectors
+    /// contain fifty-two occurrences of them: those are all in WATERMARK bounds and window predicates, not
+    /// in a stored column's expression, so listing them would put two entries in the vocabulary that are
+    /// indistinguishable from mis-typed ones. A future column assigned from a clock function not listed
+    /// here is UNREADABLE and demands a declaration, which is the loud direction to be wrong in.</para>
     /// </summary>
     private static readonly (string Marker, ClockFrame Frame, string Why)[] ExpressionMarkers =
     [
@@ -138,9 +146,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("AT TIME ZONE 'UTC'", ClockFrame.Utc,
             "an explicit conversion into UTC in the collector's own SQL"),
         ("SYSUTCDATETIME", ClockFrame.Utc, "a UTC clock function"),
-        ("GETUTCDATE", ClockFrame.Utc, "a UTC clock function"),
         ("SYSDATETIME", ClockFrame.ServerLocal, "a LOCAL clock function"),
-        ("GETDATE", ClockFrame.ServerLocal, "a LOCAL clock function"),
         ("msdb.dbo.agent_datetime", ClockFrame.ServerLocal,
             "Agent's own date/time decode, over columns Agent writes in the server's local clock"),
     ];
@@ -388,7 +394,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         return map;
     }
 
-    private static HashSet<ClockFrame> FramesInText(string text)
+    private static HashSet<ClockFrame> FramesInText(string text, ISet<string>? markersUsed = null)
     {
         var found = new HashSet<ClockFrame>();
 
@@ -397,6 +403,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             if (text.Contains(marker, StringComparison.OrdinalIgnoreCase))
             {
                 found.Add(frame);
+                markersUsed?.Add(marker);
             }
         }
 
@@ -413,7 +420,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// synthetic longer name, because a matcher contract that only holds for the names currently present is
     /// one collector away from not holding.
     /// </summary>
-    private static HashSet<ClockFrame> FramesInRelation(string relation, string column)
+    private static HashSet<ClockFrame> FramesInRelation(string relation, string column, ISet<string>? markersUsed = null)
     {
         var found = new HashSet<ClockFrame>();
 
@@ -423,6 +430,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 && Regex.IsMatch(relation, Regex.Escape(name) + @"(?![\w])", RegexOptions.IgnoreCase))
             {
                 found.Add(frame);
+                markersUsed?.Add(name);
             }
         }
 
@@ -436,9 +444,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// ring-buffer arithmetic is a tick COUNT, not a clock — so the verdict rests on the markers actually
     /// found, and a column with none of them is unreadable.
     /// </summary>
-    private static HashSet<ClockFrame> FramesOfAssignment(string rhs, Dictionary<string, HashSet<string>> aliases, string sql, int depth = 0)
+    private static HashSet<ClockFrame> FramesOfAssignment(
+        string rhs,
+        Dictionary<string, HashSet<string>> aliases,
+        string sql,
+        ISet<string>? markersUsed = null,
+        int depth = 0)
     {
-        var found = FramesInText(rhs);
+        var found = FramesInText(rhs, markersUsed);
 
         foreach (var reference in Regex.Matches(rhs, @"(?<![\w.@])(\w+)\.(\w+)").Cast<Match>())
         {
@@ -455,7 +468,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             {
                 foreach (var relation in relations)
                 {
-                    found.UnionWith(FramesInRelation(relation, reference.Groups[2].Value));
+                    found.UnionWith(FramesInRelation(relation, reference.Groups[2].Value, markersUsed));
                 }
             }
         }
@@ -476,7 +489,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                         continue;
                     }
 
-                    found.UnionWith(FramesOfAssignment(assignment, aliases, sql, depth + 1));
+                    found.UnionWith(FramesOfAssignment(assignment, aliases, sql, markersUsed, depth + 1));
                 }
             }
         }
@@ -486,7 +499,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /// <summary>The classifier's verdict for one (table, column): a single frame, or null when the T-SQL
     /// yields no marker at all or yields two that disagree. Null is an UNKNOWN and never a UTC.</summary>
-    private static ClockFrame? ClassifyFromTsql(string collector, string column)
+    private static ClockFrame? ClassifyFromTsql(string collector, string column, ISet<string>? markersUsed = null)
     {
         var sql = WithoutComments(File.ReadAllText(CollectorSourcePath(collector)));
         var aliases = AliasMap(sql);
@@ -494,7 +507,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
         foreach (var assignment in AssignmentsOf(sql, column, variable: false))
         {
-            frames.UnionWith(FramesOfAssignment(assignment, aliases, sql));
+            frames.UnionWith(FramesOfAssignment(assignment, aliases, sql, markersUsed));
         }
 
         return frames.Count == 1 ? frames.Single() : null;
@@ -1359,7 +1372,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         /* FramesInText: the clock markers, and the fact that a UTC one is not a local one. */
         Assert.Equal([ClockFrame.Utc], FramesInText("evt.value('(@timestamp)[1]', 'datetime2')"));
         Assert.Equal([ClockFrame.Utc], FramesInText("CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC')"));
-        Assert.Equal([ClockFrame.ServerLocal], FramesInText("DATEDIFF(SECOND, ja.start_execution_date, GETDATE())"));
+        Assert.Equal([ClockFrame.ServerLocal], FramesInText("DATEADD(SECOND, -x, SYSDATETIME())"));
+        /* GETDATE is deliberately NOT in the vocabulary: the collectors use it only in watermark bounds. */
+        Assert.Empty(FramesInText("DATEDIFF(SECOND, ja.start_execution_date, GETDATE())"));
         Assert.Empty(FramesInText("qs.creation_time"));
 
         /* Pascal: the column-to-property transform the render scan keys on. */
@@ -1374,15 +1389,23 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     }
 
     /// <summary>
-    /// The marker vocabulary is not allowed to collapse: every entry has to be reachable, or a mis-typed
-    /// relation name would sit in the list forever contributing nothing while the column it was added for
-    /// silently became unreadable — and unreadable columns are answered by declaration, so the collapse
-    /// would surface as a growing declared arm rather than as a failure here.
+    /// The marker vocabulary is not allowed to collapse: every entry has to decide at least one census
+    /// column. An entry that decides none is indistinguishable from a mis-typed one, and the column it was
+    /// added for has gone unreadable — which surfaces as a growing declared arm rather than as a failure,
+    /// so nothing else here would catch it.
+    ///
+    /// <para><b>No exemptions, and it drives the real classifier.</b> An earlier form of this walked the
+    /// assignments itself and exempted three markers as "reached indirectly". That second, weaker copy of
+    /// the resolution logic could not follow a variable, so <c>SYSUTCDATETIME</c> — which decides
+    /// <c>memory_pressure_events.sample_time</c> through <c>@now</c> — looked unreachable and got exempted
+    /// alongside two entries that genuinely decide nothing. Recording the markers the classifier itself
+    /// consumes is what distinguishes those two cases.</para>
     /// </summary>
     [Fact]
     public void EveryProvenanceMarker_IsReachedByAtLeastOneColumnInTheCensus()
     {
         var used = new HashSet<string>(StringComparer.Ordinal);
+        var classified = 0;
 
         foreach (var (_, column, collector, engine) in TimestampColumns())
         {
@@ -1391,54 +1414,36 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 continue;
             }
 
-            var sql = WithoutComments(File.ReadAllText(CollectorSourcePath(collector)));
-            var aliases = AliasMap(sql);
-
-            foreach (var assignment in AssignmentsOf(sql, column, variable: false))
+            if (ClassifyFromTsql(collector, column, used) is not null)
             {
-                foreach (var (marker, _, _) in ExpressionMarkers)
-                {
-                    if (assignment.Contains(marker, StringComparison.OrdinalIgnoreCase))
-                    {
-                        used.Add(marker);
-                    }
-                }
-
-                foreach (var reference in Regex.Matches(assignment, @"(?<![\w.@])(\w+)\.(\w+)").Cast<Match>())
-                {
-                    if (!aliases.TryGetValue(reference.Groups[1].Value, out var relations))
-                    {
-                        continue;
-                    }
-
-                    foreach (var (name, columns, _, _) in RelationMarkers)
-                    {
-                        if (columns.Contains(reference.Groups[2].Value, StringComparer.Ordinal)
-                            && relations.Any(r => r.Contains(name, StringComparison.OrdinalIgnoreCase)))
-                        {
-                            used.Add(name);
-                        }
-                    }
-                }
+                classified++;
             }
         }
 
-        /* SYSUTCDATETIME and GETDATE arrive through a variable or a sibling assignment rather than the
-           column's own right-hand side; naming them keeps this from demanding an unreachable directness. */
-        var reachedIndirectly = new[] { "SYSUTCDATETIME", "GETDATE", "GETUTCDATE" };
+        /* The same 40 the register reports, recomputed here: if this walk classified nothing the marker set
+           would be empty and the assertions below would be about an empty population. */
+        Assert.Equal(TsqlServerLocalCount + TsqlUtcCount, classified);
 
         foreach (var (marker, _, why) in ExpressionMarkers)
         {
             Assert.True(
-                used.Contains(marker) || reachedIndirectly.Contains(marker, StringComparer.Ordinal),
-                $"expression marker '{marker}' ({why}) is reached by no census column — it is either mis-typed "
+                used.Contains(marker),
+                $"expression marker '{marker}' ({why}) decides no census column — it is either mis-typed "
                 + "or the column it was added for has gone unreadable");
         }
 
         foreach (var (name, _, _, why) in RelationMarkers)
         {
-            Assert.True(used.Contains(name), $"relation marker '{name}' ({why}) is reached by no census column");
+            Assert.True(
+                used.Contains(name),
+                $"relation marker '{name}' ({why}) decides no census column");
         }
+
+        /* Nothing outside the vocabulary got recorded, so the set above is the vocabulary and not a
+           superset that happens to contain it. */
+        Assert.Equal(
+            ExpressionMarkers.Length + RelationMarkers.Length,
+            used.Count);
     }
 
     /* ═══════════════════════ plumbing ═══════════════════════ */
