@@ -66,6 +66,18 @@ public static class QueryStoreLivenessTouchGuard
     /// project for guard sites and requires the set of <c>PruneMarginDays</c> terms in this initializer to
     /// equal it, so a term that is wrong to include reds even when it cannot move the value.</para>
     ///
+    /// <para><b>The anchor is a conservative PROXY for the room, and the precondition matters.</b>
+    /// <c>PruneMarginDays</c> is the map's margin only while <c>ComputeMapCutoff</c>'s COUPLED arm wins. With
+    /// the plan-content knob enabled — and its default is 21 — the dedicated arm governs and the map's cutoff
+    /// is the knob itself with no margin term in it at all. So this constant is not "the room available"; it
+    /// is the smallest stamp-trailing allowance the retention arithmetic names anywhere, and it is strictly
+    /// SMALLER than the least room any reachable configuration leaves. Enumerated over the shipped
+    /// arithmetic: 48 combinations of dim-feeding retention (floored at 1 day) against the knob (off, or
+    /// clamped to 7–365), least room 2 days at retention 1 with the knob off, 21 days in the default
+    /// configuration. Anchoring on the named 1-day allowance rather than on a floor computed from three
+    /// interacting knobs is the deliberate trade: it keeps the derivation readable and it keeps the guard
+    /// inside the true room by a further factor of two at the worst point.</para>
+    ///
     /// <para><b>Only two of the three tables contribute a term, and the third needs none.</b>
     /// <c>query_plan_dim</c> has no <c>PruneMarginDays</c> of its own — its room above the fact horizon is
     /// <c>ChunkIntervalDays + 1</c> in <c>DarlingRetention.ComputeDimensionCutoff</c>, whose trailing day is
