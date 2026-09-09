@@ -255,8 +255,8 @@ public sealed class DarlingMcpPgTableBloatTools
             var tables = rows.Select(r =>
             {
                 var suppression = EstimateSuppressionReason(r);
-                /* Identifier-quoted then literal-escaped, for the reasons DarlingPgIndexBloatReader
-                   .QuoteIdentifier records: regclass text input folds an unquoted part to lower
+                /* Identifier-quoted then literal-escaped, for the reasons PgIdentifier.Qualify
+                   records: regclass text input folds an unquoted part to lower
                    case, and a name created through a double-quoted CREATE may contain a single
                    quote that would close this literal inside a command an operator is invited to
                    paste privileged. Pre-dates #3234 and is fixed here rather than left as the half
