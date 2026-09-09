@@ -60,6 +60,12 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
        Anchoring on the shape rather than on a table alias is what lets one expectation cover all three. */
     private const string GuardAnchor = "last_seen < $5::timestamp - ";
 
+    /* The RAW reader, not the LF-normalising one, and deliberately: every anchor below is single-line, so
+       nothing here can span a line break. The one place a newline could reach an anchor —
+       GuardHours' initializer, which a reformat could wrap — collapses whitespace itself before matching,
+       which is a stronger guarantee than normalising the newline and still depending on the rest of the
+       spacing. See RepoFileAdoptionTests for why that choice is a decision rather than a default. */
+
     /* An interval literal with a NUMBER in it. The prune statements in both files build
        "INTERVAL '" + chunkIntervalDays + " days'" by concatenation, so no single literal there ever holds a
        digit inside the quotes — which is why this pattern discriminates a hard-coded guard from the
@@ -88,7 +94,7 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
     {
         foreach (var file in GuardedSourceFiles)
         {
-            var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Storage", file);
+            var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", file);
             var literals = CSharpSourceWalker.StringLiteralBodies(source).ToList();
 
             Assert.True(
@@ -182,7 +188,7 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
         /* And the width is DERIVED in source, not restated. Read from the code with comments and literals
            blanked, so an initializer quoted in a doc comment cannot satisfy it. */
         var guardSource = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFileLf(
+            RepoFile.ReadRepoFile(
                 "Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreLivenessTouchGuard.cs"));
 
         Assert.Contains(
