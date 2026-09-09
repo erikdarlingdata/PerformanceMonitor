@@ -37,8 +37,12 @@ public class EntraCredentialSelectionOrderingTests
     [Fact]
     public void TheCollectionLoop_ChecksConnections_BeforeItCollects()
     {
-        /* Stripped, so the several comments in that method discussing the connection check and the
-           collectors cannot satisfy the ordering below on their own. */
+        /* Stripped, and the strip is load-bearing rather than habit. No comment in that file names
+           either identifier TODAY, so the strip changes nothing today - but measured: with the loop
+           genuinely inverted AND one comment added naming CheckAllConnectionsAsync ahead of the
+           collector call, this pin passes on raw text and fails on stripped text. A one-line
+           ordering note of exactly that shape is the most natural thing for someone to write while
+           reordering this loop, which is the case where the pin has to still work. */
         var source = CSharpSourceWalker.StripCommentsAndStrings(
             ReadRepoFile("Lite/Services/CollectionBackgroundService.cs"));
 
