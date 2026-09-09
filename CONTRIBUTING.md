@@ -70,14 +70,14 @@ PostgreSQL.
 git clone https://github.com/erikdarlingdata/PerformanceMonitor.git
 cd PerformanceMonitor
 
-# Build Full Dashboard
-dotnet build Dashboard/Dashboard.csproj
+# Build Full Dashboard (deprecated)
+dotnet build deprecated/Dashboard/Dashboard.csproj
 
 # Build Lite Edition
 dotnet build Lite/PerformanceMonitorLite.csproj
 
-# Build CLI Installer (self-contained)
-dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
+# Build CLI Installer (deprecated, self-contained)
+dotnet publish deprecated/Installer/PerformanceMonitorInstaller.csproj -c Release
 
 # Build Darling (headless service, then the viewer)
 dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj
