@@ -155,7 +155,7 @@ public class RunningJobRow
     public bool IsRunningLong { get; set; }
     public decimal? PercentOfAverage { get; set; }
 
-    public string StartTimeLocal => StartTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+    public string StartTimeLocal => ServerTimeHelper.FormatServerClock(StartTime);
 
     public string CurrentDurationFormatted => FormatDuration(CurrentDurationSeconds);
     public string AvgDurationFormatted => FormatDuration(AvgDurationSeconds);

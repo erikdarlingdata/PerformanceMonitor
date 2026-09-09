@@ -990,7 +990,7 @@ public class DeadlockProcessDetail : DeadlockProcessInfo
     public string DeadlockTimeLocal => ServerTimeHelper.FormatServerTime(DeadlockTime);
     public string VictimDisplay => IsVictim ? "Victim" : "";
     public string WaitTimeFormatted => WaitTime > 0 ? $"{WaitTime:N0} ms" : "";
-    public string LastTranStartedLocal => ServerTimeHelper.FormatServerTime(LastTranStarted);
+    public string LastTranStartedLocal => ServerTimeHelper.FormatServerClock(LastTranStarted);
 
     /// <summary>
     /// Parses a list of <see cref="DeadlockRow"/> into per-process detail rows via the shared
@@ -1043,9 +1043,9 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public string EventTimeLocal => ServerTimeHelper.FormatServerTime(EventTime);
     public string WaitTimeFormatted => WaitTimeMs < 1000 ? $"{WaitTimeMs} ms" : $"{WaitTimeMs / 1000.0:F1} sec";
     public bool IsLongBlock => WaitTimeMs > 30000;
-    public string BlockedLastTranStartedLocal => ServerTimeHelper.FormatServerTime(BlockedLastTranStarted);
-    public string BlockedLastBatchStartedLocal => ServerTimeHelper.FormatServerTime(BlockedLastBatchStarted);
-    public string BlockedLastBatchCompletedLocal => ServerTimeHelper.FormatServerTime(BlockedLastBatchCompleted);
+    public string BlockedLastTranStartedLocal => ServerTimeHelper.FormatServerClock(BlockedLastTranStarted);
+    public string BlockedLastBatchStartedLocal => ServerTimeHelper.FormatServerClock(BlockedLastBatchStarted);
+    public string BlockedLastBatchCompletedLocal => ServerTimeHelper.FormatServerClock(BlockedLastBatchCompleted);
 }
 
 public class QuerySnapshotRow
@@ -1100,7 +1100,7 @@ public class QuerySnapshotRow
     public double TranLogUsedMb { get; set; }
     public DateTime? TranStartTime { get; set; }
     public int RequestId { get; set; }
-    public string TranStartTimeLocal => ServerTimeHelper.FormatServerTime(TranStartTime);
+    public string TranStartTimeLocal => ServerTimeHelper.FormatServerClock(TranStartTime);
 
     // Chain mode — set by WaitDrillDownWindow when showing head blockers
     public string ChainBlockingPath { get; set; } = "";

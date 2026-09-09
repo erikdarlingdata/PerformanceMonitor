@@ -63,8 +63,11 @@ public sealed class DeadlockProcessDetail : DeadlockProcessInfo
         => DeadlockTime is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
     public string VictimDisplay => IsVictim ? "Victim" : "";
     public string WaitTimeFormatted => WaitTime > 0 ? $"{WaitTime:N0} ms" : "";
-    public string LastTranStartedLocal
-        => LastTranStarted is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
+    /// <summary>The transaction start parsed out of the deadlock graph's <c>lasttranstarted</c> attribute,
+    /// which SQL Server writes in the monitored server's LOCAL clock — so it renders raw, unlike
+    /// <see cref="DeadlockTimeLocal"/> above, whose <c>deadlock_time</c> is the XE <c>@timestamp</c> and is
+    /// naive UTC. Two frames, two renderers, one class (#3207).</summary>
+    public string LastTranStartedLocal => ViewerDataService.FormatServerClock(LastTranStarted);
 
     /// <summary>
     /// Parses a list of <see cref="ViewerDeadlockRow"/> into per-process detail rows via the shared

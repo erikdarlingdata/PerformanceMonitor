@@ -698,15 +698,26 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private static readonly Regex ProjectionAlias =
         new(@"([^\r\n]*?)\s+AS\s+([a-z][a-z0-9_]*)(?![\w])", RegexOptions.IgnoreCase);
 
-    /// <summary>The two WPF renderers that ADD the collected offset — i.e. that take naive UTC — and the
-    /// one that renders raw, i.e. that takes the server's own clock. <c>FormatServerTime</c> is Lite's
-    /// <c>ForDisplay</c>, not its <c>FormatServerClock</c>: it adds the offset and names its parameter
-    /// <c>utcTime</c>. Lite has no raw renderer at all, which is why a comment in the Darling viewer
-    /// claiming parity with it is wrong in the direction that hid this.</summary>
+    /// <summary>
+    /// Every WPF renderer, with the frame its input has to be in. <c>ForDisplay</c> and Lite's
+    /// <c>FormatServerTime</c> ADD the collected offset, so they take naive UTC — <c>FormatServerTime</c> is
+    /// Lite's <c>ForDisplay</c>, not its <c>FormatServerClock</c>, and it names its parameter
+    /// <c>utcTime</c>. <c>FormatServerClock</c> takes the server's own clock.
+    ///
+    /// <para>#3207 changed two things here. Lite had NO raw renderer, which is why sixteen of its sites
+    /// pushed a server-local value through <c>FormatServerTime</c> and why a comment in the Darling viewer
+    /// claiming parity with it was wrong in the direction that hid this; Lite now has
+    /// <c>ServerTimeHelper.FormatServerClock</c>, matching the name already listed here. And
+    /// <c>FormatStoredUtc</c> is new on the Darling side: the five <c>query_store_stats</c> sites had no
+    /// honest way to say "this column is UTC" and reached for the raw renderer instead. It is registered
+    /// rather than left out so those sites stay checkable — an unlisted renderer is invisible to this scan,
+    /// which would have silently dropped five sites out of the census as the price of fixing them.</para>
+    /// </summary>
     private static readonly (string Renderer, ClockFrame Expects)[] Renderers =
     [
         ("ForDisplay", ClockFrame.Utc),
         ("FormatServerTime", ClockFrame.Utc),
+        ("FormatStoredUtc", ClockFrame.Utc),
         ("FormatServerClock", ClockFrame.ServerLocal),
     ];
 
@@ -831,70 +842,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             + "buckets the de-skewed value, so the emitted expression is the bucket key"),
 
         /* ── desktop renders: the column's frame against the renderer's (#3207) ── */
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStore.cs",
-            "first_execution_time", "query_store_stats", 1,
-            "naive UTC rendered RAW, so four hours late; Lite gets this one right"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStore.cs",
-            "last_execution_time", "query_store_stats", 1, "naive UTC rendered RAW, so four hours late"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStoreRegressions.cs",
-            "last_execution_time", "query_store_stats", 1,
-            "naive UTC rendered RAW; the doc at :29 states the wrong frame outright and appeals to the "
-            + "sibling Query Store tab, which is how one wrong site became three"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.RunningJobs.cs",
-            "start_time", "running_jobs", 1,
-            "server-local through ForDisplay, so four hours EARLY, beside a CollectionTimeLocal that is right"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs",
-            "first_execution_time", "query_store_stats", 1,
-            "the file header lumps Query Store in with the DMVs; true of query_stats/procedure_stats in the "
-            + "same file, false of query_store_stats"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs",
-            "last_execution_time", "query_store_stats", 1,
-            "same file, same header; the query_stats and procedure_stats rows beside it are correct, which "
-            + "is why the Tables column is part of this key"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.Blocking.cs",
-            "blocked_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1,
-            "server-local through FormatServerTime, which adds the offset again; EventTimeLocal in the same "
-            + "class is correct"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.Blocking.cs",
-            "blocked_last_batch_started", "blocked_process_reports", 1, "server-local through FormatServerTime"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.Blocking.cs",
-            "blocked_last_batch_completed", "blocked_process_reports", 1, "server-local through FormatServerTime"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.Blocking.cs",
-            "tran_start_time", "query_snapshots", 1,
-            "server-local through FormatServerTime; Darling renders the same column through FormatServerClock "
-            + "and its comment claims the two agree"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.PlanCorrection.cs",
-            "valid_since", "plan_correction", 1,
-            "server-local through FormatServerTime; not in #3207's list, found by deriving the census"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.PlanCorrection.cs",
-            "last_refresh", "plan_correction", 1, "server-local through FormatServerTime; not in #3207's list"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.PlanCorrection.cs",
-            "execute_action_initiated_time", "plan_correction", 1,
-            "server-local through FormatServerTime; not in #3207's list"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.PlanCorrection.cs",
-            "revert_action_initiated_time", "plan_correction", 1,
-            "server-local through FormatServerTime; not in #3207's list"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.QueryStats.cs",
-            "creation_time", "query_stats", 2,
-            "server-local through FormatServerTime, in two row types; the Lite read de-skews only the WINDOW "
-            + "BOUND ($2 + $5 * INTERVAL '1' MINUTE) and returns the raw local value, which is #3198's "
-            + "half-fix shape. Darling renders the same column through FormatServerClock"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.QueryStats.cs",
-            "cached_time", "procedure_stats", 2, "server-local through FormatServerTime; not in #3207's list"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.QueryStats.cs",
-            "last_execution_time", "procedure_stats+query_stats", 4,
-            "server-local through FormatServerTime in four row types; both tables agree on the frame, so the "
-            + "ambiguous NAME resolves here even though it does not in general"),
     ];
 
     private const int McpPayloadUnmarkedSites = 33;
-    private const int DesktopRenderMismatchSites = 22;
+    private const int DesktopRenderMismatchSites = 0;
     private const int DeSkewedAtReadSites = 2;
 
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */

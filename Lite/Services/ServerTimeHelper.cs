@@ -106,4 +106,32 @@ public static class ServerTimeHelper
 
     public static string FormatServerTime(DateTime? utcTime, string format = "yyyy-MM-dd HH:mm:ss")
         => utcTime.HasValue ? ConvertForDisplay(utcTime.Value.AddMinutes(_utcOffsetMinutes), CurrentDisplayMode).ToString(format) : "";
+
+    /// <summary>
+    /// Renders a value that is ALREADY the monitored server's local wall clock — a DMV or XML timestamp the
+    /// collector shipped verbatim — in the current display mode. The counterpart to
+    /// <see cref="FormatServerTime(DateTime, string)"/>, which takes naive UTC and adds the offset to reach
+    /// the server's clock; this one is already there, so it only converts OUT.
+    ///
+    /// <para><b>Why Lite needed a second renderer.</b> <c>FormatServerTime</c> names its parameter
+    /// <c>utcTime</c> and adds the offset unconditionally, so handing it a server-local value adds the
+    /// offset a second time and displays one whole offset EARLY — four hours on the production fleet's
+    /// measured -240. Sixteen render sites did exactly that (#3207), because Lite had no way to say "this
+    /// value is already on the server's clock". The Darling viewer has had that distinction since it split
+    /// <c>ViewerTimeHelper.ForDisplay</c> from <c>ViewerDataService.FormatServerClock</c>; this closes the
+    /// gap, and a doc comment in <c>ViewerDataService.QuerySnapshots</c> that claimed the two SKUs already
+    /// agreed is corrected with it.</para>
+    ///
+    /// <para><b>It is mode-aware, unlike Darling's namesake.</b> Darling's <c>FormatServerClock</c> renders
+    /// literally raw and so shows the server's clock even under UTC display mode. Routing through
+    /// <see cref="ConvertForDisplay"/> instead honours the user's Server/Local/UTC choice for these columns
+    /// the way every other Lite timestamp does, which is the behaviour the setting promises.</para>
+    /// </summary>
+    public static string FormatServerClock(DateTime serverLocalTime, string format = "yyyy-MM-dd HH:mm:ss")
+        => ConvertForDisplay(serverLocalTime, CurrentDisplayMode).ToString(format);
+
+    /// <summary>As <see cref="FormatServerClock(DateTime, string)"/>, empty for a value the collector did
+    /// not capture.</summary>
+    public static string FormatServerClock(DateTime? serverLocalTime, string format = "yyyy-MM-dd HH:mm:ss")
+        => serverLocalTime.HasValue ? FormatServerClock(serverLocalTime.Value, format) : "";
 }

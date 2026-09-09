@@ -80,11 +80,18 @@ public sealed class ViewerQuerySnapshotRow
     public string CollectionTimeLocal =>
         CollectionTime == DateTime.MinValue ? "" : ViewerTimeHelper.ForDisplay(CollectionTime).ToString("yyyy-MM-dd HH:mm:ss");
 
-    /// <summary>The transaction begin time, empty when the request has no open transaction. Mirrors Lite's
-    /// <c>QuerySnapshotRow.TranStartTimeLocal</c> (raw server-clock <c>FormatServerTime</c>):
-    /// transaction_begin_time from sys.dm_tran_active_transactions is a SQL-server-local wall-clock time (NOT
-    /// naive UTC), so it renders raw via <see cref="ViewerDataService.FormatServerClock"/> like the other
-    /// dm_exec_* times (last_execution_time / cached_time), NOT through the UTC-converting ForDisplay.</summary>
+    /// <summary>The transaction begin time, empty when the request has no open transaction.
+    /// <c>transaction_begin_time</c> from <c>sys.dm_tran_active_transactions</c> is a SQL-server-local
+    /// wall-clock time (NOT naive UTC), so it renders raw via
+    /// <see cref="ViewerDataService.FormatServerClock"/> like the other <c>dm_exec_*</c> times
+    /// (last_execution_time / cached_time), NOT through the UTC-converting <c>ForDisplay</c>.
+    ///
+    /// <para>This used to claim parity with Lite's <c>QuerySnapshotRow.TranStartTimeLocal</c>, calling its
+    /// <c>FormatServerTime</c> a "raw server-clock" renderer. It is not — it ADDS the collected offset and
+    /// names its parameter <c>utcTime</c> — so Lite's site was double-skewing while this comment asserted
+    /// the two agreed, which is the direction that hid it. #3207 gave Lite a real raw renderer
+    /// (<c>ServerTimeHelper.FormatServerClock</c>) and moved its site onto it, so the two SKUs now do
+    /// agree.</para></summary>
     public string TranStartTimeLocal => ViewerDataService.FormatServerClock(TranStartTime);
 }
 

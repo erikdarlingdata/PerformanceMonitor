@@ -203,10 +203,10 @@ public class PlanCorrectionRow
     public string ImplementationScript { get; set; } = "";
 
     public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string ValidSinceLocal => ServerTimeHelper.FormatServerTime(ValidSince);
-    public string LastRefreshLocal => ServerTimeHelper.FormatServerTime(LastRefresh);
-    public string ExecuteActionInitiatedTimeLocal => ServerTimeHelper.FormatServerTime(ExecuteActionInitiatedTime);
-    public string RevertActionInitiatedTimeLocal => ServerTimeHelper.FormatServerTime(RevertActionInitiatedTime);
+    public string ValidSinceLocal => ServerTimeHelper.FormatServerClock(ValidSince);
+    public string LastRefreshLocal => ServerTimeHelper.FormatServerClock(LastRefresh);
+    public string ExecuteActionInitiatedTimeLocal => ServerTimeHelper.FormatServerClock(ExecuteActionInitiatedTime);
+    public string RevertActionInitiatedTimeLocal => ServerTimeHelper.FormatServerClock(RevertActionInitiatedTime);
 
     /* Tri-state: the flags are NULL when Query Store aged the plan out, which is not the same as "No". */
     public string ForcedDisplay => YesNo(LastGoodPlanIsForced);

@@ -25,9 +25,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 ///
 /// <para>Metric values are ms (duration/CPU, converted from µs in SQL) and raw pages (reads); the percents
 /// are plain deltas the grid formats to N2%. <see cref="LastExecutionTime"/> is the Query Store row's
-/// last-exec column (the SQL server's local wall clock in Darling's store), shown RAW via
-/// <see cref="ViewerDataService.FormatServerClock"/> exactly like the sibling Query Store tab — NOT run
-/// through the naive-UTC→local conversion the collection_time columns get. The regression read carries no
+/// last-exec column, and it is naive UTC in Darling's store — Query Store returns
+/// <c>datetimeoffset</c> and <c>QueryStoreCollector</c> normalises through
+/// <c>DateTimeOffset.UtcDateTime</c> before storing — so it converts through
+/// <see cref="ViewerDataService.FormatStoredUtc"/> like the collection_time columns, NOT raw. #3207: it was
+/// rendered raw here and on the sibling Query Store tab, four hours LATE on the fleet's measured -240, and
+/// the appeal to that sibling is how one wrong site became three. The regression read carries no
 /// plan XML (the Dashboard TVF selects none either), so — like the sibling Query Store tab (View-Plan
 /// deferred) — there is no plan surface; double-clicking a row opens that query's history window instead
 /// (mirroring the Dashboard grid's double-click).</para>
@@ -60,8 +63,8 @@ public sealed class ViewerQueryStoreRegressionRow
     public bool CanGetActualPlan => QueryId != 0;
     public DateTime? LastExecutionTime { get; set; }
 
-    /// <summary>The last-execution wall clock shown raw (the sibling Query Store tab's convention).</summary>
-    public string LastExecutionTimeLocal => ViewerDataService.FormatServerClock(LastExecutionTime);
+    /// <summary>The last-execution time, converted from the store's naive UTC to the display mode.</summary>
+    public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);
 }
 
 public sealed partial class ViewerDataService

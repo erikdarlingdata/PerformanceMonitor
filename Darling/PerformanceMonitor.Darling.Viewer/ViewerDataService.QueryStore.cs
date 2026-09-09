@@ -91,8 +91,8 @@ public sealed class ViewerQueryStoreRow
     public double AvgNumPhysicalIoReads { get; set; }
     public double MinNumPhysicalIoReads { get; set; }
     public double MaxNumPhysicalIoReads { get; set; }
-    public string FirstExecutionTimeLocal => ViewerDataService.FormatServerClock(FirstExecutionTime);
-    public string LastExecutionTimeLocal => ViewerDataService.FormatServerClock(LastExecutionTime);
+    public string FirstExecutionTimeLocal => ViewerDataService.FormatStoredUtc(FirstExecutionTime);
+    public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);
     public double TotalCpuMs => TotalExecutions * AvgCpuTimeMs;
     public double TotalDurationMs => TotalExecutions * AvgDurationMs;
 }

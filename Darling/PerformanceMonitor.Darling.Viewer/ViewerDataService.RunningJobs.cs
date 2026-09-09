@@ -113,10 +113,12 @@ public sealed partial class ViewerDataService
 /// <summary>
 /// One row of the Running Jobs grid — a currently-running SQL Agent job with its historical duration
 /// comparison. Copied VERBATIM from Lite's <c>RunningJobRow</c> (LocalDataService.RunningJobs.cs): the
-/// duration/percent/running-long display columns are all collector-side computations, and
-/// <see cref="StartTimeLocal"/> routes the store's naive-UTC start_time through
-/// <see cref="ViewerTimeHelper.ForDisplay"/> — the viewer's mode-aware Server/Local/UTC conversion every
-/// other Darling timestamp also uses.
+/// duration/percent/running-long display columns are all collector-side computations.
+/// <see cref="StartTimeLocal"/> renders <c>start_time</c> raw through
+/// <see cref="ViewerDataService.FormatServerClock"/>: it is the msdb Agent's LOCAL wall clock, not naive
+/// UTC — <c>RunningJobsCollector</c> ships <c>ja.start_execution_date</c> verbatim and measures duration
+/// against <c>GETDATE()</c> — so #3207 stopped it going through <c>ForDisplay</c>, which subtracts the
+/// offset a second time and showed a job four hours before it started on the fleet's measured -240.
 /// </summary>
 public class RunningJobRow
 {
@@ -132,7 +134,7 @@ public class RunningJobRow
     public bool IsRunningLong { get; set; }
     public decimal? PercentOfAverage { get; set; }
 
-    public string StartTimeLocal => ViewerTimeHelper.ForDisplay(StartTime).ToString("yyyy-MM-dd HH:mm:ss");
+    public string StartTimeLocal => ViewerDataService.FormatServerClock(StartTime);
 
     public string CurrentDurationFormatted => FormatDuration(CurrentDurationSeconds);
     public string AvgDurationFormatted => FormatDuration(AvgDurationSeconds);

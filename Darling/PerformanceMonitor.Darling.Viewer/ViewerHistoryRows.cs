@@ -16,10 +16,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (LocalDataService.QueryStats.cs / .QueryStore.cs). Numeric members stay in the store's units (microseconds
 /// for CPU/duration, KB for grants); the display properties convert, mirroring Lite's grid + metric chart.
 /// The one viewer adaptation is time display: <see cref="CollectionTime"/> is the collector's naive-UTC
-/// capture time and routes through <see cref="ViewerTimeHelper.ForDisplay"/>, while the DMV / Query Store
-/// wall-clock stamps (creation / last-execution / cached / first-execution) are the SQL server's own local
-/// time and render raw through <see cref="ViewerDataService.FormatServerClock"/> — the same split every other
-/// viewer query row uses (see <see cref="ViewerQueryStatsRow"/>).
+/// capture time and routes through <see cref="ViewerTimeHelper.ForDisplay"/>. The DMV wall-clock stamps
+/// (creation / cached / last-execution on <c>query_stats</c> and <c>procedure_stats</c>) are the SQL
+/// server's own local time and render raw through <see cref="ViewerDataService.FormatServerClock"/>.
+/// <c>query_store_stats</c>' first- and last-execution times are NOT in that group, which is what #3207
+/// corrected here: Query Store returns <c>datetimeoffset</c> and the collector normalises it to UTC, so
+/// those two convert through <see cref="ViewerDataService.FormatStoredUtc"/>.
 /// </summary>
 internal static class HistoryTime
 {
@@ -224,6 +226,6 @@ public sealed class ViewerQueryStoreHistoryRow
     public double TotalDurationMs => ExecutionCount * AvgDurationMs;
     public double TotalCpuMs => ExecutionCount * AvgCpuTimeMs;
     public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
-    public string FirstExecutionTimeLocal => ViewerDataService.FormatServerClock(FirstExecutionTime);
-    public string LastExecutionTimeLocal => ViewerDataService.FormatServerClock(LastExecutionTime);
+    public string FirstExecutionTimeLocal => ViewerDataService.FormatStoredUtc(FirstExecutionTime);
+    public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);
 }
