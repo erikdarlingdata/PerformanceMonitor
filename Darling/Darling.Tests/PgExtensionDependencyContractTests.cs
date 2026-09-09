@@ -174,6 +174,25 @@ public sealed class PgExtensionDependencyContractTests
                 .Select(e => e.ExtensionName)
                 .ToHashSet(StringComparer.Ordinal);
 
+            /* The other direction, and it matters because of what the README pin would otherwise do with a
+               false declaration: that pin would report the extension as missing from the paragraph, and the
+               obvious way to make it green is to write the extension into the prose -- which lands a
+               dependency the product does not have in the documentation, looking derived. Only extensions
+               this map knows are checked, so declaring an extension whose objects are not listed here stays
+               legal; the map is a PostgreSQL fact table, and needing to extend it must not be a reason to
+               weaken it. */
+            var known = ExtensionObjects.Select(o => o.Extension).ToHashSet(StringComparer.Ordinal);
+            var claimed = declared.Where(known.Contains)
+                .Except(touched, StringComparer.Ordinal)
+                .OrderBy(v => v, StringComparer.Ordinal)
+                .ToArray();
+
+            Assert.True(claimed.Length == 0,
+                $"{definition.Name} declares {string.Join(", ", claimed)} in RequiredPgExtensions, and its "
+                + "query text touches no object that extension owns. Remove the declaration -- the "
+                + "permissions paragraph is pinned to it, so a dependency the collector does not have "
+                + "becomes a dependency the documentation tells an operator to install.");
+
             var undeclared = touched.Except(declared, StringComparer.Ordinal).ToArray();
 
             Assert.True(undeclared.Length == 0,
