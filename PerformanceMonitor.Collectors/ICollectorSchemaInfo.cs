@@ -135,4 +135,30 @@ public interface ICollectorSchemaInfo
     /// host or a test can enumerate the collectors that carry state without the row type.</para>
     /// </summary>
     IReadOnlyList<string> StateKeys { get; }
+
+    /// <summary>
+    /// PostgreSQL extensions this collector's query cannot run without, each with what installing it costs
+    /// (#3187). Empty for every SQL Server definition and for the PostgreSQL ones that read core catalogs
+    /// and Aurora's built-in functions.
+    ///
+    /// <para><b>Why a declaration rather than prose.</b> A collector that needs an extension degrades to a
+    /// non-fatal <c>PERMISSIONS</c> skip and stores nothing, so the dependency is only ever visible in
+    /// whatever documentation somebody remembered to update. That documentation was once written naming
+    /// four of the six collectors that had one, with every check green on the commit that said so — an
+    /// enumeration in prose is only better than a count if something breaks when it is wrong. A reviewer
+    /// caught that one. Declared on the collector, it is derivable, so
+    /// <c>Darling/README.md</c>'s permissions paragraph is pinned to it and a new collector with a
+    /// dependency fails the build until the paragraph names it.</para>
+    ///
+    /// <para><b>Not the same set as <c>PgExtensionAvailabilityCollector</c>'s roster</b>, which exists so
+    /// absence is REPORTABLE and therefore both lists extensions no collector reads and omits one that a
+    /// collector does; see <see cref="PgExtensionDependency"/>.</para>
+    ///
+    /// <para>A default interface implementation rather than a required member, the same choice
+    /// <see cref="TargetEngine"/> made and for the same reason: the existing definitions and the test
+    /// doubles that implement this interface directly need no change. Declared HERE, beside
+    /// <see cref="AppliesTo"/> and <see cref="StateKeys"/>, so the set is enumerable off
+    /// <see cref="CollectorCatalog.All"/> without the row type.</para>
+    /// </summary>
+    IReadOnlyList<PgExtensionDependency> RequiredPgExtensions => Array.Empty<PgExtensionDependency>();
 }

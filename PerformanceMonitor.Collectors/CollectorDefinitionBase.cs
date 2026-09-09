@@ -44,6 +44,14 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 
     public virtual IReadOnlyList<string> StateKeys => System.Array.Empty<string>();
 
+    /* Declared here as well as on the interface, unlike a member that only ever reads through
+       ICollectorSchemaInfo: the interface's default implementation is not reachable through the class type,
+       so without this a derived definition could not `override` it and the interface map would keep
+       resolving to the empty default no matter what the definition said. TargetEngine carries the same
+       pair for the same reason. */
+    public virtual IReadOnlyList<PgExtensionDependency> RequiredPgExtensions =>
+        System.Array.Empty<PgExtensionDependency>();
+
     public virtual int? PerItemRowCountWarnThreshold => null;
 
     public virtual int? PerItemTextByteBudget => null;
