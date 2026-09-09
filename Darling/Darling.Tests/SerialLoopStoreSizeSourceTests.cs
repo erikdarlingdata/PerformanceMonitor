@@ -325,23 +325,67 @@ public sealed class SerialLoopStoreSizeSourceTests
         Assert.Contains(quoted, StoreSelfMetrics.StoreInsertSql, StringComparison.Ordinal);
         Assert.Contains(quoted, StoreSelfMetrics.LatestStoreSizeSql, StringComparison.Ordinal);
 
-        /* And the four C# consumers partition their response on the same const rather than on a retyped
-           copy of its value. Scanned over stripped source so a "store" written in a comment cannot
-           satisfy it, and asserted as an ABSENCE of the bare literal — because the presence of the const
-           somewhere in the file would be satisfied by one call site while three others drifted. */
+        /* And the C# consumers partition their response on the same const rather than on a retyped copy
+           of its value.
+
+           The first draft of this asserted DoesNotContain("ObjectKind == \"") over STRIPPED source, and a
+           mutation restoring a bare literal came back green: stripping blanks the literal INCLUDING its
+           opening quote, so that pattern cannot appear in stripped source at all and the assertion could
+           not fail. Asserting a pattern that the transform it reads has already removed is a pin that
+           passes on every input — which is why the mutation table below has a row for the instrument and
+           not only for the subject.
+
+           What replaces it asserts the invariant directly: EVERY ObjectKind comparison in the file has the
+           const on its right-hand side. Over stripped source a comparison against a literal reads as
+           "==" followed by blanks, so the next code token is not the const and the site is reported. */
         var toolsPath = Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp",
             "DarlingMcpStoreMetricsTools.cs");
         Assert.True(File.Exists(toolsPath), $"store-metrics MCP tool source not found: {toolsPath}");
 
-        var toolsCode = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(toolsPath));
+        var toolsRaw = File.ReadAllText(toolsPath);
+        var (compared, literal) = ObjectKindComparisons(toolsRaw);
 
-        Assert.DoesNotContain(
-            "ObjectKind == \"", toolsCode, StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "ObjectKind != \"", toolsCode, StringComparison.Ordinal);
-        Assert.Contains(
-            "StoreSelfMetrics.StoreObjectKind", toolsCode, StringComparison.Ordinal);
+        Assert.True(
+            compared > 0,
+            "no ObjectKind comparison found in DarlingMcpStoreMetricsTools.cs — the scan this assertion "
+            + "rests on matched nothing, so its result says nothing");
+
+        Assert.True(
+            literal.Count == 0,
+            $"{literal.Count} ObjectKind comparison(s) in DarlingMcpStoreMetricsTools.cs compare against "
+            + "something other than StoreSelfMetrics.StoreObjectKind. The kind is one const with six "
+            + "consumers because a reader filtering on a kind the writer stopped writing returns zero "
+            + $"rows rather than erroring: {string.Join(", ", literal)}");
+    }
+
+    /// <summary>
+    /// Every <c>.ObjectKind ==</c> / <c>!=</c> comparison in <paramref name="source"/>: how many there are,
+    /// and the ones whose right-hand side is not
+    /// <see cref="StoreSelfMetrics.StoreObjectKind"/>. Read over STRIPPED source, where a literal
+    /// right-hand side survives as blanks — so the next code token after the operator is not the const,
+    /// and the site is reported.
+    /// </summary>
+    private static (int Compared, List<string> NotTheConst) ObjectKindComparisons(string source)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var offenders = new List<string>();
+        var compared = 0;
+
+        foreach (Match m in Regex.Matches(
+            code, @"\.ObjectKind\s*[!=]=\s*", RegexOptions.CultureInvariant))
+        {
+            compared++;
+            var rest = code[(m.Index + m.Length)..];
+
+            if (!rest.TrimStart().StartsWith("StoreSelfMetrics.StoreObjectKind", StringComparison.Ordinal))
+            {
+                var line = code.Take(m.Index).Count(c => c == '\n') + 1;
+                offenders.Add($"line {line}");
+            }
+        }
+
+        return (compared, offenders);
     }
 
     /// <summary>
@@ -364,6 +408,33 @@ public sealed class SerialLoopStoreSizeSourceTests
     public void TheScanner_ReadsQueriesAndNotProseAboutThem(string source, bool expectedHit)
     {
         Assert.Equal(expectedHit, s_storeScalingRead.IsMatch(LiteralsOf(source)));
+    }
+
+    /// <summary>
+    /// The positive control for <see cref="ObjectKindComparisons"/>, and it exists because its predecessor
+    /// had none and was therefore unfalsifiable — a mutation restoring a bare <c>"store"</c> literal to one
+    /// of the four call sites came back GREEN, because the pattern being asserted absent had already been
+    /// removed by the transform the assertion read.
+    ///
+    /// <para>Both counts are asserted, not just the offender count. A scan that found no comparisons at all
+    /// would report zero offenders and read exactly like a clean file, which is the same failure one layer
+    /// down. The third and fourth fixtures are the mutation that got through; the fifth is the other
+    /// direction, where the retired form written in a COMMENT must not be reported.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("if (r.ObjectKind == StoreSelfMetrics.StoreObjectKind) { }\n", 1, 0)]
+    [InlineData("if (p.ObjectKind != StoreSelfMetrics.StoreObjectKind) { }\n", 1, 0)]
+    [InlineData("if (r.ObjectKind == \"store\") { }\n", 1, 1)]
+    [InlineData("if (r.ObjectKind != \"store\") { }\n", 1, 1)]
+    [InlineData("/* r.ObjectKind == \"store\" is what this used to do. */\n", 0, 0)]
+    [InlineData("var storeLatest = latest.FirstOrDefault();\n", 0, 0)]
+    public void TheObjectKindScanner_SeesALiteralRightHandSide(
+        string source, int expectedCompared, int expectedOffenders)
+    {
+        var (compared, offenders) = ObjectKindComparisons(source);
+
+        Assert.Equal(expectedCompared, compared);
+        Assert.Equal(expectedOffenders, offenders.Count);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
