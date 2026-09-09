@@ -87,6 +87,17 @@ namespace Darling.Tests;
 /// <see cref="Verify"/> requires that it CONSUMED every pin in <see cref="Pins"/>, because a pattern defined
 /// in the list and never asserted against anything looks exactly like a pattern doing work.</para>
 ///
+/// <para><b>AND A FLOOR ON THE POPULATION ITSELF, which every clause above presupposed and none of
+/// them stated (#3193).</b> Each ceiling is required to equal the maximum of a population its comment
+/// publishes; nothing required that population to be large enough for a maximum over it to mean
+/// anything. So a constant could be RE-DERIVED DOWNWARD on a handful of runs and satisfy every
+/// relationship here — which is the direction that costs, because these constants are what the
+/// compression grid's clearance is measured against. <see cref="PopulationFloor"/> is the floor, and it
+/// is DERIVED rather than chosen: the first <c>n</c> at which the nearest-rank 95th percentile is a
+/// different reading from the maximum, searched with <see cref="NearestRank"/> itself. Below it the
+/// divergence both summaries argue the estimator FROM cannot exist at any values, so a population that
+/// thin cannot support the argument its own doc makes for taking a maximum.</para>
+///
 /// <para><b>And the SCOPING rule, held file-wide rather than only where it is stated (#3133).</b>
 /// <see cref="Verify"/> requires the ceiling paragraph's live-envelope population to carry a CLOSED scope;
 /// <see cref="NoOpenPopulationClaim_SurvivesOutsideTheSentenceThatRejectsIt"/> requires the rest of the
@@ -102,6 +113,16 @@ public sealed class RefreshCeilingProvenancePinTests
     /// would let the sweep report success for a guard that had gone blind.
     /// </summary>
     private const string ParseMiss = "PIN PARSE MISS";
+
+    /// <summary>
+    /// Marks a verification failure caused by the published population being too THIN for a maximum
+    /// over it to establish anything, so
+    /// <see cref="ThePopulationFloor_ReportsAPopulationTooThinToSupportAMaximum"/> can prove that the
+    /// FLOOR fired and not a neighbouring clause that reads the same numbers. Shrinking a population
+    /// falsifies several claims at once, so without a marker a mutation test on this one would pass on
+    /// whichever of them <see cref="Verify"/> happened to reach first.
+    /// </summary>
+    private const string ThinPopulation = "PIN POPULATION FLOOR";
 
     private const string CeilingDeclaration =
         "public const int HeaviestHourlyRefreshObservedCeilingSeconds";
@@ -133,6 +154,101 @@ public sealed class RefreshCeilingProvenancePinTests
     private static int SlotMinutes => TimescaleSupport.HeaviestRefreshWindowMinutes;
 
     private static int WatchLine => TimescaleSupport.RefreshSlotWarningSeconds;
+
+    /// <summary>
+    /// The smallest population either ceiling may be stated as the MAXIMUM of — derived from
+    /// <see cref="NearestRank"/> rather than chosen, because a floor nobody can re-derive is the defect this
+    /// file exists to catch, one level up (#3193).
+    ///
+    /// <para><b>What it is.</b> The first <c>n</c> at which the nearest-rank 95th percentile of an ascending
+    /// population is a DIFFERENT READING from that population's maximum. Below it <c>ceil(95n/100)</c> is
+    /// <c>n</c>, so the 95th percentile IS the maximum — and both ceiling summaries argue for the maximum
+    /// over a percentile on the ground that the two answers have DIVERGED. A population that cannot exhibit
+    /// that divergence at any values cannot support the argument its own doc makes for the estimator, so it
+    /// is not a population one of these constants may be taken over.</para>
+    ///
+    /// <para><b>Why SEARCHED and not written down.</b> It runs the same function the percentile clauses in
+    /// <see cref="Verify"/> run, over a strictly ascending probe so that a distinct rank is a distinct value.
+    /// Change the percentile the summaries quote, or the definition of nearest rank, and this moves with
+    /// them: it is a function of the file rather than a number in it. It is also MINIMAL by construction
+    /// rather than merely sufficient —
+    /// <see cref="ThePopulationFloor_ReportsAPopulationTooThinToSupportAMaximum"/> asserts the property
+    /// fails one draw below it — so it cannot be quietly raised either, which a typed number could be.</para>
+    ///
+    /// <para><b>NECESSARY, NOT SUFFICIENT, and the sufficient half was already here.</b> This is a floor on
+    /// the COUNT and it cannot see composition: exactly this many draws from one quiet stretch would clear
+    /// it. What stops that is a SECOND condition per constant, and <see cref="Verify"/> carried both before
+    /// this floor existed. The heaviest ceiling's population must hold runs from the boundary day AND from
+    /// at least one day after it — the two non-empty requirements on its separately published halves — so
+    /// it spans two calendar days at minimum. The light ceiling's maximum must BE the midnight run its own
+    /// paragraph names, with an earlier midnight run strictly below it, which is stronger than requiring the
+    /// population to merely contain a midnight. So the real requirement is a CONJUNCTION of size and
+    /// composition; what neither site had was the size half, and that is what this adds.</para>
+    ///
+    /// <para><b>And why no midnight-coverage clause is added here.</b> For the constant whose own doc
+    /// supplies that mechanism it would be IMPLIED by the midnight assertions already in
+    /// <see cref="Verify"/> — the date is inside that pin's own pattern, so a population with no midnight
+    /// in it is already a parse miss — and a clause that cannot fail while another passes certifies the
+    /// defect instead of preventing it. For the heaviest ceiling the mechanism does not transfer: its
+    /// published population is a list of DURATIONS carrying no clock, and its summary attributes its
+    /// maximum to a per-day growth trend rather than to an hour of the day. Neither site is a place a
+    /// midnight floor could do work the file was not already doing.</para>
+    /// </summary>
+    private static int PopulationFloor { get; } = DerivePopulationFloor();
+
+    /// <summary>
+    /// <see cref="PopulationFloor"/>, searched rather than stated. BOUNDED, so a <see cref="NearestRank"/>
+    /// that stopped separating the two answers at any size reports that plainly instead of spinning — an
+    /// unbounded search for a property that no longer holds is a hang, which reads as infrastructure rather
+    /// than as a finding.
+    /// </summary>
+    private static int DerivePopulationFloor()
+    {
+        for (var draws = 1; draws <= 1000; draws++)
+        {
+            var ascending = Enumerable.Range(1, draws).ToArray();
+            if (NearestRank(ascending, 95) < ascending[^1])
+            {
+                return draws;
+            }
+        }
+
+        throw new PinDriftException(
+            "no population up to 1000 draws puts the nearest-rank 95th percentile below the maximum, so "
+            + "NearestRank no longer separates the two answers at any size and the estimator argument both "
+            + "ceiling summaries make cannot be evaluated. Re-read NearestRank rather than widening this "
+            + "search.");
+    }
+
+    /// <summary>
+    /// The floor, applied where a run count is already in hand — <see cref="Verify"/> has the heaviest
+    /// population's length from the lists it parses and the light one's count from its census sentence, so
+    /// this is an assertion rather than a new extraction.
+    ///
+    /// <para><b>The message says what the floor is FOR, because "population too small" tells the reader
+    /// nothing they can act on.</b> Two repairs are available and only one of them is ever right, so the
+    /// text names the asymmetry that decides between them rather than leaving it to be re-reasoned.</para>
+    /// </summary>
+    private static void RequireEnoughDrawsForAMaximum(string constant, int runs, string howToWiden)
+    {
+        Require(runs >= PopulationFloor,
+            $"{ThinPopulation}: {constant} is stated as the maximum of {runs} runs, under the "
+            + $"{PopulationFloor}-draw floor. A maximum over n draws is a PREFIX MAXIMUM — the largest "
+            + "reading seen so far — which is a WEAK LOWER BOUND on what this job does and no bound at all "
+            + "on what it does next; the fewer the draws, the weaker, because the largest of a handful of "
+            + "draws from a spread lands anywhere in that spread. That weakness has a DIRECTION, and it is "
+            + "the whole reason this floor exists. LOOSENING a sizing constant on thin evidence is "
+            + "conservative: the grid keeps more clearance than it turns out to need. TIGHTENING one is "
+            + "not, because this constant is what the compression grid's clearance is MEASURED AGAINST, so "
+            + "a smaller value silently narrows the clearance every downstream assertion is made about — "
+            + "the thin-evidence case and the dangerous direction are the same case. So the repair is one "
+            + "of exactly two things: WIDEN THE POPULATION and re-derive over it, or LEAVE THE CONSTANT "
+            + "WHERE IT IS until the population is wide enough to move it. Do not lower this floor to admit "
+            + $"the population you have — {PopulationFloor} is the first n at which the nearest-rank 95th "
+            + "percentile is a different reading from the maximum, which is the divergence this constant's "
+            + "own estimator argument rests on, so below it that argument has nothing to be about. "
+            + howToWiden);
+    }
 
     /// <summary>
     /// The pinned sentences, and the ONLY place a pattern is written down — <see cref="Verify"/> looks them up
@@ -780,6 +896,129 @@ public sealed class RefreshCeilingProvenancePinTests
     }
 
     /// <summary>
+    /// Non-vacuity for the population floor, at BOTH sites, by the mutation the floor exists to reject:
+    /// shrink the population below it and require verification to fail — with a message that identifies the
+    /// FLOOR rather than a neighbour, since shrinking a population falsifies several claims at once and a
+    /// bare throw would not say which one was caught.
+    ///
+    /// <para><b>The two sites need DIFFERENT mutations, and that asymmetry is the finding behind #3193.</b>
+    /// The heaviest ceiling publishes its population, so shrinking it is a STRUCTURAL edit to the lists
+    /// (<see cref="ShrinkPublishedPopulation"/>) and cannot go through the width-preserving ordinal rewrite
+    /// the drift sweep uses. The light ceiling publishes only a COUNT, so shrinking its population is one
+    /// number — which is exactly why that site could be re-derived on a handful of runs with nothing going
+    /// red at all.</para>
+    ///
+    /// <para><b>The baseline is asserted GREEN on both sides of each mutation, and the floor is PRINTED
+    /// into its own assertions.</b> A detector that reported a violation for everything would report one
+    /// for the tree as it stands, and every case below would still pass. So the unmutated source is
+    /// verified first, each real population is required to clear the floor, and the source is verified
+    /// again at the end to show no case left state behind.</para>
+    ///
+    /// <para><b>And the floor is pinned MINIMAL, not merely sufficient.</b> At one draw below it the
+    /// nearest-rank 95th percentile must BE the maximum, and at the floor it must not. That is what makes
+    /// <see cref="PopulationFloor"/> the smallest defensible value rather than a number that happens to be
+    /// large enough — a floor that could be silently raised is a floor that could be silently chosen.</para>
+    ///
+    /// <para><b>This is the file's red-proofing idiom for a non-pin assertion, and it is a different
+    /// harness from <see cref="EveryNumericPin_ReportsAnInjectedDrift"/> on purpose.</b> That sweep
+    /// enumerates <see cref="Pins"/> and bumps each captured number, so it covers EXTRACTIONS; the floor
+    /// adds no pattern and consumes no pin, so it is unreachable from there — a digit bump moves a stated
+    /// value and never a population's size. A dedicated mutating fact is what
+    /// <see cref="TheInadmissibleReadings_CannotBeFoldedIntoTheStatusVerifiedSeries"/>,
+    /// <see cref="TheInadmissibilityClaim_MatchesTheShippedSql"/> and
+    /// <see cref="TheOpenPopulationGuard_ReportsEachForbiddenShape"/> already use for the same reason.</para>
+    /// </summary>
+    [Fact]
+    public void ThePopulationFloor_ReportsAPopulationTooThinToSupportAMaximum()
+    {
+        var source = ReadTimescaleSupportSource();
+
+        /* CLEAN FIRST, and printed rather than assumed. Without this every case below could be reporting a
+           failure the tree already had, which is indistinguishable from a caught mutation. */
+        Verify(source);
+
+        /* THE FLOOR IS MINIMAL. One draw below it the 95th percentile by nearest rank is the maximum, so
+           the divergence the estimator argument rests on cannot exist; at the floor it does. Both halves,
+           because only the first says the floor is high enough and only the second says it is not too
+           high. */
+        Assert.True(PopulationFloor > 1, "a floor of one draw would admit a single reading as a maximum.");
+        var justBelow = Enumerable.Range(1, PopulationFloor - 1).ToArray();
+        Assert.Equal(justBelow[^1], NearestRank(justBelow, 95));
+        var atTheFloor = Enumerable.Range(1, PopulationFloor).ToArray();
+        Assert.True(NearestRank(atTheFloor, 95) < atTheFloor[^1],
+            $"at {PopulationFloor} draws the nearest-rank 95th percentile is still the maximum, so the "
+            + "floor does not buy the divergence it is derived from and DerivePopulationFloor returned a "
+            + "value its own criterion does not satisfy.");
+
+        /* AND BOTH REAL POPULATIONS CLEAR IT, read the same way Verify reads them. A floor above either of
+           them would make this whole file red for a reason that is not a defect. */
+        var heaviest = CleanPopulation(DocProseFor(source, CeilingDeclaration)).Length;
+        var light = Numbers(DocProseFor(source, LightCeilingDeclaration), "the light-refresh census")[2];
+        Assert.True(heaviest >= PopulationFloor,
+            $"the heaviest ceiling's published population is {heaviest} runs against a {PopulationFloor} "
+            + "floor, so this file is red on the tree as it stands.");
+        Assert.True(light >= PopulationFloor,
+            $"the light ceiling's census is {light} runs against a {PopulationFloor} floor, so this file is "
+            + "red on the tree as it stands.");
+
+        /* (1) THE HEAVIEST: shrink the two published lists to two readings each, which is four runs. Two
+           rather than one because both patterns require a list of at least two, and a one-element list is a
+           parse miss wearing a caught mutation's clothes. */
+        var shrunk = ShrinkPublishedPopulation(source, keep: 2);
+        Assert.NotEqual(source, shrunk);
+
+        /* The mutation confirmed by CONTENT, not by the edit having been attempted: parse the mutated
+           source the way Verify does and require the population it yields to be the one intended. */
+        var shrunkPopulation = CleanPopulation(DocProseFor(shrunk, CeilingDeclaration));
+        var shrunkCount = shrunkPopulation.Length;
+        Assert.Equal(4, shrunkCount);
+        Assert.True(shrunkCount < PopulationFloor,
+            $"the shrunk population is {shrunkCount} runs, which is not under the {PopulationFloor} floor, "
+            + "so this case cannot prove the floor fires.");
+
+        var heaviestFailure = Assert.ThrowsAny<Exception>(() => Verify(shrunk));
+        Assert.Contains(ThinPopulation, heaviestFailure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(ParseMiss, heaviestFailure.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            nameof(TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds),
+            heaviestFailure.Message,
+            StringComparison.Ordinal);
+
+        /* (2) THE LIGHT: rewrite the census's own run count. Through the same ordinal rewrite the drift
+           sweep uses rather than a bare string replace, because 874 appears four times in that doc run and
+           only two of them are pinned — a replace would mutate prose this pin does not read and prove
+           something other than what it was aimed at. The rewrite pads to the original width, so the count
+           comes back as a zero-padded four and parses as one, which is the intended value. */
+        var censusPattern = PatternFor("the light-refresh census");
+        var lightProse = DocProseFor(source, LightCeilingDeclaration);
+        var firstCaptured = OrdinalOfFirstNumberInGroups(lightProse, censusPattern);
+        Assert.True(firstCaptured >= 0, "the light census pattern captured no number, so its pin is vacuous.");
+
+        /* The run count is the pattern's THIRD captured number and the three sit consecutively in the prose
+           (a maximum stated to one decimal, then the count), so its ordinal is the first plus two. Asserted
+           by content below rather than trusted, which is what would catch that arithmetic being wrong. */
+        var thinnedLight = RewriteNumberInDocRun(
+            source, LightCeilingDeclaration, censusPattern, firstCaptured + 2, "4");
+        Assert.True(thinnedLight is not null,
+            "could not rewrite the light census's run count, so nothing was proved.");
+        Assert.NotEqual(source, thinnedLight);
+        Assert.Equal(4, Numbers(DocProseFor(thinnedLight!, LightCeilingDeclaration), "the light-refresh census")[2]);
+
+        var lightFailure = Assert.ThrowsAny<Exception>(() => Verify(thinnedLight!));
+        Assert.Contains(ThinPopulation, lightFailure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(ParseMiss, lightFailure.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            nameof(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds),
+            lightFailure.Message,
+            StringComparison.Ordinal);
+
+        /* GREEN ON THE OTHER SIDE TOO. Both mutations are made on copies, so this can only fail if one of
+           them reached the tree — which is the failure that would make every case above meaningless. */
+        Verify(source);
+        Verify(ReadTimescaleSupportSource());
+    }
+
+    /// <summary>
     /// Two doc runs cannot combine into a claim neither of them makes, checked on an arranged pair rather
     /// than on the tree — the same way <see cref="DashNormalisationProbe"/> checks the normalisation it
     /// depends on.
@@ -838,6 +1077,18 @@ public sealed class RefreshCeilingProvenancePinTests
         var max = sorted[^1];
         var total = population.Sum();
         var median = (sorted[(sorted.Length - 1) / 2] + sorted[sorted.Length / 2]) / 2;
+
+        /* THE FLOOR, and deliberately the FIRST clause that reads this population's size (#3193). Verify
+           is fail-fast, so clause order decides which repair the next reader is handed: the derivation
+           below disagrees about the CONSTANT and is fixed by moving it, while this one disagrees about the
+           POPULATION and is fixed by widening it. On a population re-derived downward those two are the
+           same edit read two ways, and the wrong one of them is the cheap one. */
+        RequireEnoughDrawsForAMaximum(
+            nameof(TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds),
+            population.Length,
+            "This population is PUBLISHED, as the two lists parsed above, so widening it means extending "
+            + "those lists from a fresh run of the census read the comment names — not re-scoping them, and "
+            + "not dropping the readings that make the maximum inconvenient.");
 
         /* THE DERIVATION, and the one relationship everything else here is decoration on: the constant is
            the maximum of the population the comment publishes. */
@@ -1078,6 +1329,19 @@ public sealed class RefreshCeilingProvenancePinTests
         var lightCensus = Read("the light-refresh census");
         var lightMax10 = (lightCensus[0] * 10) + lightCensus[1];
         var lightRuns = lightCensus[2];
+
+        /* THE SAME FLOOR, at the site that had NOTHING to stop this (#3193). The heaviest ceiling's
+           population is published, so its clauses at least compute over readings and one of them - the
+           95th-percentile divergence - is unsatisfiable below the floor as a side effect. This one's
+           population is deliberately not republished; only its COUNT is. Every figure the paragraph states
+           is therefore consistent with any count whatever, and a census cut from 874 runs to four was
+           measured green across this whole file. */
+        RequireEnoughDrawsForAMaximum(
+            nameof(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds),
+            lightRuns,
+            "This population is NOT republished — only its count and its quantiles are — so widening it "
+            + "means a fresh read at a later instant, restated with its own count and its own quantiles, "
+            + "rather than an edit to the figures already here.");
 
         Require(lightMax10 == LightCeilingTenths,
             $"the stated census maximum {lightCensus[0]}.{lightCensus[1]} s is not this constant's "
@@ -1351,6 +1615,45 @@ public sealed class RefreshCeilingProvenancePinTests
     }
 
     /* ─────────────────────────────── mutation ─────────────────────────────── */
+
+    /// <summary>
+    /// A copy of <paramref name="source"/> with each list the heaviest ceiling's doc comment publishes cut
+    /// down to its first <paramref name="keep"/> readings — the mutation
+    /// <see cref="ThePopulationFloor_ReportsAPopulationTooThinToSupportAMaximum"/> needs. STRUCTURAL rather
+    /// than a digit bump, so it cannot go through <see cref="RewriteNumberInDocRun"/>, which preserves the
+    /// count by construction.
+    ///
+    /// <para><b>The lists are found by SHAPE, not by an anchor phrase.</b> A <c>&lt;c&gt;</c> block holding
+    /// three or more comma-separated integers is one of the two published lists and nothing else in that doc
+    /// run is: the timestamps in it carry colons and the window expressions carry words. An anchor phrase
+    /// would be a second copy of a pin's own wording, free to drift from it — which is the defect one level
+    /// up, inside the mutation helper that is supposed to catch it.</para>
+    ///
+    /// <para>Scoped to the ceiling's own doc run rather than applied file-wide, and the wrap is consumed
+    /// with the list: a published list spans several <c>///</c> lines, so the separator has to admit a line
+    /// break and the marker that opens the next line.</para>
+    /// </summary>
+    private static string ShrinkPublishedPopulation(string source, int keep)
+    {
+        Require(keep >= 2,
+            $"{ParseMiss}: both published lists are pinned as two or more readings, so a shorter one is a "
+            + "parse miss rather than a thin population");
+
+        var (start, end) = DocRunSpan(source, CeilingDeclaration);
+
+        var shrunk = Regex.Replace(
+            source[start..end],
+            @"<c>([0-9]+(?:,(?:[ \t]*\r?\n[ \t]*///)?[ \t]*[0-9]+){2,})</c>",
+            match => "<c>" + string.Join(
+                ", ",
+                Regex.Matches(match.Groups[1].Value, "[0-9]+").Take(keep).Select(number => number.Value))
+                + "</c>");
+
+        Require(!string.Equals(shrunk, source[start..end], StringComparison.Ordinal),
+            $"{ParseMiss}: no published list was found to shrink, so the mutation would prove nothing");
+
+        return source[..start] + shrunk + source[end..];
+    }
 
     private static int CapturedNumberCount(string source, string declaration, string pattern)
     {
