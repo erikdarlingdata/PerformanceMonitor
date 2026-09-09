@@ -39,6 +39,14 @@ namespace Darling.Tests;
 /// <see cref="NoGuardSiteSpellsItsOwnWidth"/> is the control, the composed-SQL pin below is the corroborator
 /// (it catches a site appearing or disappearing, which the source scan alone would not price), and the
 /// derivation pin holds the width to the margin it is spent out of.</para>
+///
+/// <para><b>Two of the four assertions here fire on changes that move NO value</b>, which is the shape worth
+/// noticing when adding to this class. A guard site hard-coded to the width it already has, and a
+/// category-error term folded into <see cref="QueryStoreLivenessTouchGuard.StampSkewMarginDays"/>'s
+/// <c>min</c> whose value cannot move the result, are both invisible to every value assertion in the file —
+/// <see cref="NoGuardSiteSpellsItsOwnWidth"/> and
+/// <see cref="TheGuardedStoreTypesAreDerivedFromTheGuardSites"/> are what see them, and both read SOURCE for
+/// that reason. Cripple either one and its own mutation passes silently.</para>
 /// </summary>
 public sealed class QueryStoreTouchGuardSingleSourceTests
 {
