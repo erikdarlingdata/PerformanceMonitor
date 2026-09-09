@@ -321,6 +321,27 @@ public sealed class EntraCredentialSelectionTests : IDisposable
     public void IsCredentialTypeName_RejectsEverySensitiveSiblingShape(string? value) =>
         Assert.False(EntraCredentialSelectionLog.IsCredentialTypeName(value));
 
+    /// <summary>
+    /// <para>The character rule, isolated. Every case above that a real sibling payload looks like is
+    /// ALSO missing a dot, so the dot requirement alone rejects it and the character allowlist is
+    /// never the thing under test — measured: widening the allowlist by a hyphen left the whole suite
+    /// green. Each row here is a well-formed dotted name differing from an acceptable one by exactly
+    /// one illegal character, so each character in that allowlist is load-bearing.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Azure.Identity.Cli-Credential")]                 // hyphen: tenant/subscription ids
+    [InlineData("Azure.Identity Credential")]                     // space: any message or log line
+    [InlineData("Azure.Identity/Credential")]                     // slash: a scope or resource path
+    [InlineData("Azure.Identity:Credential")]                     // colon: a scheme or a scope
+    [InlineData("Azure.Identity@Credential")]                     // at: an account upn
+    [InlineData("Azure.Identity\\Credential")]                     // backslash: a down-level logon name
+    [InlineData("Azure.Identity,Credential")]                     // comma: an assembly-qualified name
+    [InlineData("Azure.Identity=Credential")]                     // equals: a connection-string fragment
+    [InlineData("Azure.Identity\tCredential")]                    // tab: a delimiter in a rendered payload
+    [InlineData("Azure.Identity\nCredential")]                    // newline: would split the log line in two
+    public void IsCredentialTypeName_RejectsADottedNameCarryingOneIllegalCharacter(string value) =>
+        Assert.False(EntraCredentialSelectionLog.IsCredentialTypeName(value));
+
     [Fact]
     public void IsCredentialTypeName_RejectsSomethingLongerThanAnyTypeName() =>
         Assert.False(EntraCredentialSelectionLog.IsCredentialTypeName(
@@ -348,6 +369,12 @@ public sealed class EntraCredentialSelectionTests : IDisposable
         Assert.Null(listener.SelectedCredentialType);
         Assert.True(listener.RejectedPayload);
 
+        /* Note what this can and cannot show. The refused value never LEAVES OnEventWritten - the
+           listener stores a bool, not the string - so Decide structurally cannot name it, and the
+           DoesNotContain below is a consequence of that rather than an independent check of it.
+           Measured: interpolating the value into that message changed nothing, because there is no
+           value here to interpolate. The independent checks are the two assertions above, and
+           Decide_RefusesAValueThatIsNotATypeName_EvenWhenTheListenerDidNot below. */
         var line = EntraCredentialSelectionLog.Decide(
             listener.SelectedCredentialType, listener.RejectedPayload, lastReported: null);
 
@@ -411,6 +438,26 @@ public sealed class EntraCredentialSelectionTests : IDisposable
         EntraCredentialSelectionLog.Report(null);
 
     // ---- What gets written, and at which level -------------------------------------------
+
+    /// <summary>
+    /// <para><b><see cref="EntraCredentialSelectionLog.Decide"/> re-reads the rule rather than
+    /// trusting the listener's verdict</b>, and this is the pin that makes that re-read load-bearing.
+    /// Handed a value that is not a type name with <c>rejectedPayload: false</c> — the shape a
+    /// listener that stopped applying the rule would produce — it must still refuse to log it.
+    /// Without this, keying the refusal off the bool alone leaves every other pin here green.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    [InlineData("someone@example.com")]
+    [InlineData("https://database.windows.net/.default")]
+    public void Decide_RefusesAValueThatIsNotATypeName_EvenWhenTheListenerDidNot(string value)
+    {
+        var line = EntraCredentialSelectionLog.Decide(value, rejectedPayload: false, lastReported: null);
+
+        Assert.Equal(LogLevel.Debug, line.Level);
+        Assert.DoesNotContain(value, line.Message, StringComparison.Ordinal);
+        Assert.Null(line.Reported);
+    }
 
     [Fact]
     public void Decide_ReportsAFirstObservationAtInformation()
