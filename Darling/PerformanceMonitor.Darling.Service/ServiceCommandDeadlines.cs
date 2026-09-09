@@ -314,22 +314,24 @@ public static class ServiceCommandDeadlines
     public const int BootstrapConnectProbeSeconds = 10;
 
     /// <summary>
-    /// The store commands awaited INLINE on the serial collection-loop thread, ahead of every per-server
-    /// launch: the control-plane reload body — <c>StoreConfigProvider.LoadViewAsync</c>'s five config
-    /// reads, <c>DarlingObservability.SyncServerEnabledStatesAsync</c>'s two registry statements and the
+    /// The store commands awaited INLINE on the serial collection-loop thread: the control-plane reload
+    /// body — <c>StoreConfigProvider.LoadViewAsync</c>'s five config reads,
+    /// <c>DarlingObservability.SyncServerEnabledStatesAsync</c>'s two registry statements and the
     /// managed-role <c>statement_timeout</c> re-assert — plus the store-size lookup behind the
-    /// disk-pressure check and the daily retention sweep's own run-record.
+    /// disk-pressure check and the daily retention sweep's own run-record. The first eight run ahead of
+    /// the per-server launches; the last two run after them, in the same tick.
     ///
     /// <para><b>The regime, by the token test.</b> Every one of these is awaited directly inside
     /// <c>DarlingWorker</c>'s <c>while (!stoppingToken.IsCancellationRequested)</c> body, on the plain
-    /// stopping token, BEFORE the per-server launches fan out. So unlike the sweep body — which holds one
+    /// stopping token, on the same single thread as the launches. So unlike the sweep body — which holds one
     /// of <c>max_concurrent_sweeps</c> permits while the rest of the fleet proceeds — a stall here delays
     /// the whole fleet's cycle, and unlike the bootstrap path it happens repeatedly for as long as the
     /// service runs. That combination is what makes it a regime of its own rather than an extension of
     /// either neighbour.</para>
     ///
-    /// <para><b>Seven of the nine ALSO run once on the bootstrap path</b> (<c>LoadViewAsync</c> at
-    /// <c>DarlingWorker.cs:1179</c>, <c>SyncServerEnabledStatesAsync</c> at <c>:1192</c>), which is
+    /// <para><b>Seven of the ten ALSO run once on the bootstrap path</b> (<c>DarlingWorker</c> awaits
+    /// <c>LoadViewAsync</c> and then <c>SyncServerEnabledStatesAsync</c> during startup, named rather than
+    /// cited by line because those citations had drifted by ~180 lines by the time anyone read them), which is
     /// precisely why they take this constant and not <see cref="BootstrapSeconds"/>: a deadline is a
     /// property of the command, so a dual-caller site has to take the TIGHTER of its two bounds, and this
     /// is it.</para>
@@ -362,17 +364,34 @@ public static class ServiceCommandDeadlines
     /// needs such a read belongs on a cadence with its own budget and its own connection, the way the
     /// hourly self-metrics sweep already owned this one at <c>StoreSelfMetrics.SweepTimeoutSeconds</c>.</para>
     ///
-    /// <para><b>BELOW the point where a stalled chain reports as a hang.</b> The ten run SEQUENTIALLY on
-    /// one thread, so the bound that matters is the chain's, not one command's: 10 x 5 s = 50 s stays
-    /// inside <c>DarlingWorker.SweepWatchdogSeconds</c> (60 s), while 10 x the inherited 30 s default is
-    /// 300 s and would put a merely-slow reload five minutes past it. That is the same chain-length
-    /// reasoning #2928 applied to the sweep body, on a different chain. Ten is the count on the worst
-    /// tick rather than a bound on the longest single path: a tick where the reload beacon fires AND the
-    /// 24 h purge comes due runs the reload body's nine and the purge's run-record back to back.</para>
+    /// <para><b>BELOW the loop's own tick interval, and NOT derived from a chain bound, because there is
+    /// no chain bound (#3204).</b> This paragraph used to read <c>10 x 5 s = 50 s stays inside
+    /// <c>DarlingWorker.SweepWatchdogSeconds</c> (60 s)</c>, and both operands were wrong. The watchdog is
+    /// fed elapsed times stamped when a PER-SERVER BODY launches, and its verdict picks a log level — it
+    /// never observes this thread and it cancels nothing. And the ten are the commands carrying THIS
+    /// constant, not the chain: the same thread awaits <c>ReadCollectorWatermarksAsync</c> under
+    /// <see cref="CollectionSweepSeconds"/> once per server that gains a collector entry, the mute-rule
+    /// load and the disk-pressure alert writes under
+    /// <c>DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds</c>, the retention deletes under
+    /// <c>DarlingRetention</c>'s own 300 s, and the hourly self-metrics sweep under
+    /// <c>StoreSelfMetrics.SweepTimeoutSeconds</c> — so the product understated the chain rather than
+    /// bounding it.</para>
+    ///
+    /// <para>What does hold is per-command and tighter than any of that: the collection loop's tick delay
+    /// is the LAST statement in its body, so the period is finish-to-start and every second spent here is
+    /// a second the next tick's launches are pushed out, one for one, on a loop whose delivered cadence
+    /// already runs behind its schedule at fleet scale. A deadline at or above the 15 s interval would let
+    /// one stalled command more than double the delivered period on its own; 5 s is a third of it.</para>
+    ///
+    /// <para><b>So what would justify 6?</b> The same three ceilings 5 clears — the tick, Npgsql's
+    /// default, and the bootstrap's number for the seven dual-caller sites — which 6 also clears. Nothing
+    /// in the service forbids 6, and the arithmetic that appeared to was measuring the wrong thing on both
+    /// sides. What raising it costs is delivered cadence in proportion, which is a trade to argue with a
+    /// measurement rather than an inequality to lose.</para>
     ///
     /// <para><b>Why it is LOOSER than the reload beacon's own bound and must stay so.</b>
     /// <c>ReadConfigVersionAsync</c> runs on EVERY 15 s tick and is a single-row lookup, so it is the
-    /// tightest thing on this thread and is bounded separately. The nine here run only when the beacon
+    /// tightest thing on this thread and is bounded separately. The ten here run only when the beacon
     /// has already seen a version change, or on the 5-minute disk-check cadence — rare, and each one a
     /// heavier read than the beacon.</para>
     ///

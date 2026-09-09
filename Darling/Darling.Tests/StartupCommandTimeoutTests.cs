@@ -12,7 +12,9 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -91,7 +93,7 @@ public sealed class StartupCommandTimeoutTests
     /// launch, on the 15 s <c>s_sweepInterval</c> tick. Their blast radius is the whole fleet while their
     /// floor is a single-row lookup, they fail OPEN (the live config stands), and their ceiling is the
     /// tick — a strictly TIGHTER bound on both sides than this group's. Seven of them also run once on
-    /// the bootstrap path, at <c>DarlingWorker.cs:1179</c> and <c>:1192</c>, and that is exactly why they
+    /// the bootstrap path, where <c>DarlingWorker</c> awaits them during startup, and that is exactly why they
     /// are excluded rather than claimed: a deadline is a property of the command, so the tighter of a
     /// dual-caller site's two bounds has to win, and it is not this one.</para>
     ///
@@ -145,7 +147,7 @@ public sealed class StartupCommandTimeoutTests
         ("DarlingWorker.cs", "ReadStoreSizeBytesAsync", 0, 0, 1, 0),
 
         /* The daily retention sweep's own run-record. Same thread, same token, same fail-open posture:
-           DarlingRetention.PurgeAsync is AWAITED inline at DarlingWorker.cs:1635 on the plain stopping
+           DarlingRetention.PurgeAsync is AWAITED inline in the collection loop's body on the plain stopping
            token, so the purge holds the serial loop for its whole duration and the audit row rides that
            hold. It is a single-row INSERT into the same collect.collection_log #2928 bounded from the
            sweep body, and it belongs to THIS regime rather than that one because it holds no sweep
@@ -450,14 +452,40 @@ public sealed class StartupCommandTimeoutTests
     }
 
     /// <summary>
-    /// The serial-loop bound — see <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/>. The
-    /// interesting assertion is the CHAIN one: these ten run sequentially on one thread, so what has to
-    /// stay bounded is their sum, not any single deadline. Pinned RELATIONALLY against
-    /// <c>DarlingWorker.SweepWatchdogSeconds</c> and against the site count, so adding a tenth site to
-    /// this regime forces the value to be re-derived rather than silently stretching the chain.
+    /// The serial-loop bound — see <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/>. Every
+    /// assertion here is PER-COMMAND, because nothing in the service bounds the chain as a whole (#3204).
+    ///
+    /// <para><b>What replaced the chain assertion, and why it had to go.</b> This test used to enforce
+    /// <c>ExpectedSerialLoopSites * N &lt; DarlingWorker.SweepWatchdogSeconds</c> — 10 x 5 s inside 60 s —
+    /// and both operands were wrong. <c>SweepWatchdogSeconds</c> is fed
+    /// <c>(now - server.SweepStartedUtc)</c> and <c>(now - server.RunStartedTicks)</c>, both stamped when a
+    /// per-server body launches, and its verdict selects between <c>LogWarning</c> and
+    /// <c>LogInformation</c> — it never observes this loop and it cancels nothing, so there is no 60 s
+    /// event to stay inside. Nor could a slow chain "report as a hang": the bodies it delays have not
+    /// launched, so they carry no <c>SweepStartedUtc</c> and are never classified. And
+    /// <see cref="ExpectedSerialLoopSites"/> is a census of the commands carrying THIS constant, not of the
+    /// chain: the same thread awaits <c>ReadCollectorWatermarksAsync</c> under
+    /// <see cref="ServiceCommandDeadlines.CollectionSweepSeconds"/> once per server that gains a collector
+    /// entry, the mute-rule load and the disk-pressure alert writes under
+    /// <c>DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds</c>, the retention deletes under
+    /// <c>DarlingRetention</c>'s own 300 s, and the hourly self-metrics sweep under
+    /// <c>StoreSelfMetrics.SweepTimeoutSeconds</c>. So the product understated the chain even on the
+    /// reading where the watchdog had clocked it.</para>
+    ///
+    /// <para><b>The tightest relationship that does hold is the tick.</b> The loop body's last statement is
+    /// <c>await Task.Delay(s_sweepInterval, ...)</c>, so the period is finish-to-start: every second a
+    /// serial command spends is a second the NEXT tick's launches are pushed out, one for one, on a loop
+    /// whose delivered cadence already runs behind its schedule at fleet scale. A deadline at or above the
+    /// 15 s interval lets one stalled command more than double the delivered period on its own.</para>
+    ///
+    /// <para><b>What this no longer claims.</b> The old product forbade 6; nothing in the service does.
+    /// The answer to "why 5, and what would justify 6" is that 5 is a measured floor with three ceilings
+    /// over it — the tick, Npgsql's default, and the bootstrap's number for the seven dual-caller sites —
+    /// and 6 clears all three as well. Raising it costs delivered cadence in proportion, which is a trade
+    /// to argue rather than an inequality to lose.</para>
     /// </summary>
     [Fact]
-    public void TheSerialLoopDeadline_KeepsItsWholeChainInsideTheWatchdog()
+    public void TheSerialLoopDeadline_StaysUnderTheTickItDelays()
     {
         var seconds = ServiceCommandDeadlines.SerialLoopSeconds;
 
@@ -475,15 +503,38 @@ public sealed class StartupCommandTimeoutTests
             $"serial-loop deadline {seconds}s is at or above Npgsql's inherited 30s default, so it buys "
             + "nothing on a thread that blocks the whole fleet's cycle while it runs");
 
-        /* The multiplier is the SITE count rather than the longest single path, and that is exact rather
-           than merely conservative: a tick on which the reload beacon fires AND the 24 h purge comes due
-           runs the reload body's nine and the purge's run-record back to back on the same thread. */
+        /* The tick, read out of DarlingWorker rather than restated here, because the defect this replaces
+           was an inequality against a number that did not measure what its name said. */
+        var tick = CommandPlaneCommandTimeoutTests.SecondsOfPrivateTimeSpan("DarlingWorker.cs", "s_sweepInterval");
+
+        Assert.Equal(15, tick);
+
         Assert.True(
-            ExpectedSerialLoopSites * seconds < DarlingWorker.SweepWatchdogSeconds,
-            $"{ExpectedSerialLoopSites} sequential commands at {seconds}s is "
-            + $"{ExpectedSerialLoopSites * seconds}s, which reaches the "
-            + $"{DarlingWorker.SweepWatchdogSeconds}s watchdog — a merely-slow control-plane reload would "
-            + "then report as a hang, the #1581/#2170 warning herd #2928 also had to avoid");
+            seconds < tick,
+            $"serial-loop deadline {seconds}s is at or above the loop's own {tick}s tick interval. The tick "
+            + "delay is the loop body's LAST statement, so the period is finish-to-start and one stalled "
+            + "command adds its whole duration to the next tick's launches — at or above the interval, a "
+            + "single command more than doubles the delivered cadence");
+
+        /* The census is not the chain, and that is what made the old product wrong rather than merely
+           mis-named. Each of these governs a command awaited on this SAME thread and every one is looser
+           than this deadline, so ExpectedSerialLoopSites x SerialLoopSeconds is a strict under-estimate of
+           the worst tick and cannot be re-derived as its sum. */
+        foreach (var (name, value) in new[]
+        {
+            (nameof(ServiceCommandDeadlines.CollectionSweepSeconds), ServiceCommandDeadlines.CollectionSweepSeconds),
+            ("DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds", DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
+            ("StoreSelfMetrics.SweepTimeoutSeconds", StoreSelfMetrics.SweepTimeoutSeconds),
+            ("DarlingAnalysisService.AnalysisCommandTimeoutSeconds", DarlingAnalysisService.AnalysisCommandTimeoutSeconds),
+        })
+        {
+            Assert.True(
+                value > seconds,
+                $"{name} is {value}s, no longer looser than this regime's {seconds}s. It governs a command "
+                + "awaited on the same serial thread, and the point of naming it here is that this regime's "
+                + "site count is not a census of the chain — if the chain's deadlines have converged, a "
+                + "chain bound may now be derivable and this test should say so");
+        }
 
         Assert.True(
             seconds < ServiceCommandDeadlines.BootstrapSeconds,
