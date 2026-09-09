@@ -556,8 +556,16 @@ public sealed class RefreshCeilingStalenessTests
     /// What makes a "rounded up" mention honest: it is describing what the width USED TO BE. Matched
     /// case-insensitively, because the file emphasises with capitals and a case-sensitive allowance would
     /// flag correct prose for its typography.
+    ///
+    /// <para><b>Kept SHORT deliberately, because every entry here is a WIDENING of the allowance and an
+    /// allowance is the direction that costs.</b> An earlier version carried <c>was </c> and
+    /// <c>it used</c> as well. Both admit present-tense sentences: "the band it used is rounded up to a
+    /// whole minute" carries <c>it used</c> and claims the derivation, and <c>was </c> matches almost
+    /// anything. A marker that matches more than it means does not make this pin stricter — it makes the
+    /// rule skip a sentence it should have flagged, which is the same failure as a window that does not
+    /// reach. Two entries, each of which can only be about the past.</para>
     /// </summary>
-    private static readonly string[] PastTenseMarkers = ["used to", "it used", "before #3188"];
+    private static readonly string[] PastTenseMarkers = ["used to", "before #3188"];
 
     /// <summary>
     /// A MEASURED reading, quoted as evidence rather than derived: the clean 17:00Z run of 2026-09-08, whose
