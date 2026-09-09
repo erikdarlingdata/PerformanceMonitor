@@ -596,10 +596,19 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Formats a SQL-server-local wall-clock time (dm_exec_* last_execution_time / creation_time /
-    /// cached_time — NOT naive UTC) for the grid: shown raw, no timezone conversion. Empty when null.
+    /// cached_time, plan_correction's action stamps, msdb Agent's job start time — NOT naive UTC) for
+    /// the grid, in the current display mode. Empty when null.
+    ///
+    /// <para>The counterpart to <see cref="FormatStoredUtc"/>. Exactly one of the pair applies the
+    /// collected offset, and which one depends only on the column's frame; picking the wrong one is
+    /// silent, because both return a plausible timestamp and they differ by the server's whole offset.
+    /// Both honour the Server / Local / UTC preference, so the choice is about the FRAME and never about
+    /// whether the user's selection is respected.</para>
     /// </summary>
     public static string FormatServerClock(DateTime? serverLocal)
-        => serverLocal.HasValue ? serverLocal.Value.ToString("yyyy-MM-dd HH:mm:ss") : "";
+        => serverLocal.HasValue
+            ? ViewerTimeHelper.ForServerClockDisplay(serverLocal.Value).ToString("yyyy-MM-dd HH:mm:ss")
+            : "";
 
     /// <summary>
     /// Renders a STORED naive-UTC timestamp in the current display mode — the counterpart to

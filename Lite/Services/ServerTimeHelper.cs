@@ -126,10 +126,12 @@ public static class ServerTimeHelper
     /// and, applied to a value already in the server's frame, skews it by the collected offset a second
     /// time — the fleet's -240 renders four hours early, in every display mode.</para>
     ///
-    /// <para>Darling's <c>ViewerDataService.FormatServerClock</c> takes the same frame under the same name.
-    /// The INPUT CONTRACT is the shared fact; the mode handling is not — that renderer emits the server's
-    /// clock verbatim in all three modes, because <c>ViewerTimeHelper</c> has no server-local arm to route
-    /// through. Do not read the shared name as shared behaviour.</para>
+    /// <para>Darling's <c>ViewerDataService.FormatServerClock</c> is the mirror of this, under the same
+    /// name and with the same input contract, reached the other way round: its
+    /// <c>ViewerTimeHelper.ConvertToDisplay</c> takes naive UTC, so the server-clock conversion there
+    /// SUBTRACTS the offset first, where this one starts from the server's clock and the naive-UTC renderer
+    /// adds it. Either way there is exactly one offset step between the two frames, and both renderers
+    /// honour the display preference.</para>
     /// </summary>
     public static string FormatServerClock(DateTime serverLocal, string format = "yyyy-MM-dd HH:mm:ss")
         => ConvertForDisplay(serverLocal, CurrentDisplayMode).ToString(format);

@@ -15,14 +15,15 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #3207: the viewer's naive-UTC conversion, against ONE instant expressed in both frames, plus the raw
-/// server-clock render's mode behaviour stated as a fact rather than described.
+/// #3207: the viewer's two conversions — naive-UTC and server-clock — against ONE instant expressed in
+/// both frames.
 ///
-/// <para><b>Why one instant.</b> A pinned string per renderer passes under a sign error as readily as
+/// <para><b>Why one instant.</b> A pinned string per conversion passes under a sign error as readily as
 /// under the right sign, because expectation and implementation are written from the same belief about
-/// which way the offset goes. What discriminates is that <see cref="ViewerTimeHelper.ForDisplay"/> handed
-/// the instant's NAIVE-UTC value and the raw render of the instant's SERVER-CLOCK value produce the same
-/// text in Server mode and differ by the whole offset if either side's arithmetic moves.</para>
+/// which way the offset goes. What discriminates is that <see cref="ViewerTimeHelper.ConvertToDisplay"/>
+/// handed the instant's NAIVE-UTC value and
+/// <see cref="ViewerTimeHelper.ConvertServerClockToDisplay"/> handed the instant's SERVER-CLOCK value
+/// must agree in EVERY mode, and differ by the whole offset if either side's arithmetic moves.</para>
 ///
 /// <para><b>Where -240 comes from.</b> The fleet's measured offset, not an illustration: #2932 measured
 /// <c>cpu_utilization_stats.sample_time</c> exactly four hours behind the same run's
@@ -33,12 +34,12 @@ namespace Darling.Tests;
 /// <c>utc + offset</c>, so a value already in that frame must not be sent through the conversion that adds
 /// the offset again.</para>
 ///
-/// <para><b>The raw render is mode-blind, and that is pinned here rather than left implied.</b>
-/// <c>ViewerDataService.FormatServerClock</c> emits the server's own clock in all three display modes
-/// because <see cref="ViewerTimeHelper"/> has no server-local arm to route through. Lite's namesake takes
-/// the same frame and DOES honour the preference, through <c>ServerTimeHelper.ConvertForDisplay</c>. The
-/// shared name is an input contract, not shared behaviour, and the assertions below fail if that stops
-/// being true in either direction.</para>
+/// <para><b>The server-clock conversion composes; it does not reimplement.</b> The naive-UTC twin of a
+/// server-clock value is <c>serverLocal - offset</c>, so
+/// <see cref="ViewerTimeHelper.ConvertServerClockToDisplay"/> is one subtraction in front of
+/// <see cref="ViewerTimeHelper.ConvertToDisplay"/> and every arm — the machine-local one especially — is
+/// the one already there. The agreement theory below asserts that composition rather than restating any
+/// arm, so a divergence between the two conversions fails instead of being duplicated into both.</para>
 /// </summary>
 public sealed class ViewerClockRendererArithmeticTests
 {
@@ -112,21 +113,6 @@ public sealed class ViewerClockRendererArithmeticTests
     }
 
     /// <summary>
-    /// The other direction, which no test asserted before: a naive-UTC value rendered RAW — the shape the
-    /// three Query Store surfaces shipped — is the whole offset LATE against the same instant converted
-    /// properly. Four hours late reads as plausible on a Query Store row, which is why these sites were
-    /// silent while the running-job one was visible.
-    /// </summary>
-    [Fact]
-    public void ANaiveUtcValue_RenderedRaw_IsTheWholeOffsetLate()
-    {
-        var correct = ViewerTimeHelper.ConvertToDisplay(NaiveUtc, TimeDisplayMode.ServerTime, FleetOffsetMinutes);
-
-        Assert.Equal(TimeSpan.FromMinutes(-FleetOffsetMinutes), NaiveUtc - correct);
-        Assert.True(NaiveUtc > correct, "expected the raw render to be LATER");
-    }
-
-    /// <summary>
     /// The inverse the custom-range pickers use round-trips, in every mode. A conversion pair that agrees
     /// with itself in one direction only skews every window the user types.
     /// </summary>
@@ -139,6 +125,64 @@ public sealed class ViewerClockRendererArithmeticTests
         var display = ViewerTimeHelper.ConvertToDisplay(NaiveUtc, mode, FleetOffsetMinutes);
 
         Assert.Equal(NaiveUtc, ViewerTimeHelper.ConvertFromDisplay(display, mode, FleetOffsetMinutes));
+    }
+
+    /// <summary>
+    /// The server-clock conversion composes out of <see cref="ViewerTimeHelper.ConvertToDisplay"/>'s
+    /// EXISTING arms with one pre-step, and this asserts the composition rather than reimplementing it:
+    /// a server-clock value converted for display must equal the same instant's naive-UTC value
+    /// converted for display, in every mode. That holds because the naive-UTC twin of a server-clock
+    /// value is <c>serverLocal - offset</c>, so nothing needs a new arm — the Local arm in particular is
+    /// reused, not re-derived.
+    /// </summary>
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime)]
+    [InlineData(TimeDisplayMode.LocalTime)]
+    [InlineData(TimeDisplayMode.UTC)]
+    public void TheServerClockConversion_AgreesWithTheNaiveUtcOne_OnOneInstant(TimeDisplayMode mode)
+    {
+        Assert.Equal(
+            ViewerTimeHelper.ConvertToDisplay(NaiveUtc, mode, FleetOffsetMinutes),
+            ViewerTimeHelper.ConvertServerClockToDisplay(ServerClock, mode, FleetOffsetMinutes));
+
+        /* And the two are NOT interchangeable: the same value through both conversions differs by the
+           whole offset. Without this the agreement above is satisfied by any pair of conversions that
+           happen to coincide, including one conversion compared against itself. */
+        Assert.NotEqual(
+            ViewerTimeHelper.ConvertToDisplay(ServerClock, mode, FleetOffsetMinutes),
+            ViewerTimeHelper.ConvertServerClockToDisplay(ServerClock, mode, FleetOffsetMinutes));
+    }
+
+    /// <summary>
+    /// <b>The assertion that makes the pair honest.</b> The same server-clock value must render
+    /// DIFFERENTLY under UTC and Server mode, by exactly the offset. A renderer that ignores the
+    /// preference passes every same-instant check above trivially in Server mode and is untestable on
+    /// this axis — which is why the raw render shipped unnoticed.
+    /// </summary>
+    [Fact]
+    public void TheServerClockConversion_HonoursTheDisplayMode()
+    {
+        var server = ViewerTimeHelper.ConvertServerClockToDisplay(ServerClock, TimeDisplayMode.ServerTime, FleetOffsetMinutes);
+        var utc = ViewerTimeHelper.ConvertServerClockToDisplay(ServerClock, TimeDisplayMode.UTC, FleetOffsetMinutes);
+
+        Assert.NotEqual(server, utc);
+        Assert.Equal(TimeSpan.FromMinutes(-FleetOffsetMinutes), utc - server);
+
+        /* Server mode is the value itself: it IS the server's clock, so there is nothing to convert. */
+        Assert.Equal(ServerClock, server);
+        Assert.Equal(NaiveUtc, utc);
+    }
+
+    /// <summary>The two conversions are inverses across the frames: a naive-UTC value through the
+    /// server-clock conversion would be the whole offset out, which is the "four hours late" direction
+    /// stated as arithmetic rather than as prose.</summary>
+    [Fact]
+    public void ANaiveUtcValue_ThroughTheServerClockConversion_IsTheWholeOffsetLate()
+    {
+        var correct = ViewerTimeHelper.ConvertServerClockToDisplay(ServerClock, TimeDisplayMode.ServerTime, FleetOffsetMinutes);
+        var skewed = ViewerTimeHelper.ConvertServerClockToDisplay(NaiveUtc, TimeDisplayMode.ServerTime, FleetOffsetMinutes);
+
+        Assert.Equal(TimeSpan.FromMinutes(-FleetOffsetMinutes), skewed - correct);
     }
 
     /// <summary>The pinned wall clocks, so the relative assertions above cannot all agree on a wrong

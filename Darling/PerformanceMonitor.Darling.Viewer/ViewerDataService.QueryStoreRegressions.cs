@@ -29,7 +29,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>datetimeoffset</c> and <c>QueryStoreCollector</c> normalises it through
 /// <c>((DateTimeOffset)…).UtcDateTime</c> before storing — so it converts through
 /// <see cref="ViewerTimeHelper.ForDisplay"/>, the same conversion the collection_time columns get, and
-/// like the sibling Query Store tab. The <c>sys.dm_exec_*</c> stamps that DO render raw through
+/// like the sibling Query Store tab. The <c>sys.dm_exec_*</c> stamps that go through
 /// <see cref="ViewerDataService.FormatServerClock"/> are a different frame, not a different tab: the
 /// renderer follows the column, never the neighbouring grid. The regression read carries no
 /// plan XML (the Dashboard TVF selects none either), so — like the sibling Query Store tab (View-Plan

@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <see cref="CollectionTime"/> is the collector's naive-UTC capture time in all three and routes through
 /// <see cref="ViewerTimeHelper.ForDisplay"/>. The <c>sys.dm_exec_*</c> stamps in
 /// <see cref="ViewerQueryStatsHistoryRow"/> and <see cref="ViewerProcedureStatsHistoryRow"/>
-/// (creation / cached / last-execution) are the SQL server's own local time and render raw through
+/// (creation / cached / last-execution) are the SQL server's own local time and convert through
 /// <see cref="ViewerDataService.FormatServerClock"/> — the same split every other viewer query row uses
 /// (see <see cref="ViewerQueryStatsRow"/>). <see cref="ViewerQueryStoreHistoryRow"/>'s first- and
 /// last-execution stamps are NOT in that family: Query Store returns <c>datetimeoffset</c> and
@@ -232,8 +232,9 @@ public sealed class ViewerQueryStoreHistoryRow
     public double TotalCpuMs => ExecutionCount * AvgCpuTimeMs;
     public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
     /* query_store_stats, not query_stats: both stamps are naive UTC (see the file header), so they take
-       the same conversion CollectionTime above takes rather than the raw render the two DMV history
-       row types use for their same-named columns. */
+       the same conversion CollectionTime above takes rather than the server-clock one the two DMV history
+       row types use for their same-named columns. Both honour the display mode; they differ only in which
+       frame they start from. */
     public string FirstExecutionTimeLocal => ViewerDataService.FormatStoredUtc(FirstExecutionTime);
 
     public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);

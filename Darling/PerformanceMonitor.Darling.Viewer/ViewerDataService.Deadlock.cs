@@ -68,7 +68,7 @@ public sealed class DeadlockProcessDetail : DeadlockProcessInfo
 
     /// <summary>The deadlock graph's <c>lasttranstarted</c> attribute, walked out of the stored
     /// <c>deadlock_graph_xml</c> at READ time by <see cref="DeadlockGraphProcessParser"/>. SQL Server
-    /// writes that attribute in its own local clock, so it renders raw through
+    /// writes that attribute in its own local clock, so it converts through
     /// <see cref="ViewerDataService.FormatServerClock"/> — the other frame from
     /// <see cref="DeadlockTimeLocal"/> two properties up, in the same row. No <c>CollectorColumn</c>
     /// declares it, so the catalog-derived clock-frame census cannot reach this pair and the frames are

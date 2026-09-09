@@ -207,9 +207,9 @@ public class PlanCorrectionRow
 
     public string CollectionTimeLocal => Local(CollectionTime);
 
-    /* sys.dm_db_tuning_recommendations reports these four in the instance's own clock, so they render
-       raw through FormatServerClock while CollectionTime above, which the collector stamps in UTC,
-       goes through Local. The renderer is named at the site rather than reached through Local: a
+    /* sys.dm_db_tuning_recommendations reports these four in the instance's own clock, so they convert
+       through FormatServerClock while CollectionTime above, which the collector stamps in UTC, goes
+       through Local. The renderer is named at the site rather than reached through Local: a
        one-hop wrapper hides the renderer from the clock-frame census, which is how the frame these
        four are in went unread. */
     public string ValidSinceLocal => ViewerDataService.FormatServerClock(ValidSince);

@@ -82,8 +82,8 @@ public sealed class ViewerQuerySnapshotRow
 
     /// <summary>The transaction begin time, empty when the request has no open transaction.
     /// transaction_begin_time from sys.dm_tran_active_transactions is a SQL-server-local wall-clock time (NOT
-    /// naive UTC), so it renders raw via <see cref="ViewerDataService.FormatServerClock"/> like the other
-    /// dm_exec_* times (last_execution_time / cached_time), NOT through the UTC-converting ForDisplay.
+    /// naive UTC), so it converts via <see cref="ViewerDataService.FormatServerClock"/> like the other
+    /// dm_exec_* times (last_execution_time / cached_time), NOT through the naive-UTC ForDisplay.
     ///
     /// <para>Lite's <c>QuerySnapshotRow.TranStartTimeLocal</c> is the mirror, through
     /// <c>ServerTimeHelper.FormatServerClock</c>. It is NOT <c>FormatServerTime</c>: that method takes

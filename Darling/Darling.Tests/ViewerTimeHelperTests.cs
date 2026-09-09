@@ -130,20 +130,21 @@ public sealed class ViewerTimeHelperTests
 
     /// <summary>
     /// <c>ViewerDataService.FormatServerClock</c> — the renderer for a column already in the monitored
-    /// server's own frame — emits that clock verbatim in ALL THREE display modes, because
-    /// <see cref="ViewerTimeHelper"/> has no server-local arm for it to route through: every overload
-    /// above takes naive UTC.
+    /// server's own frame — HONOURS the display mode, through
+    /// <see cref="ViewerTimeHelper.ForServerClockDisplay"/>. Server mode is the value itself; UTC mode is
+    /// the value less the collected offset; Local mode is that instant in the viewer machine's zone.
     ///
-    /// <para>Asserted rather than inferred from the absence of a mode argument, and asserted at the
-    /// fleet's measured -240 so a renderer that started converting would move. Lite's same-named
-    /// <c>ServerTimeHelper.FormatServerClock</c> takes the same frame and DOES honour the preference,
-    /// through <c>ServerTimeHelper.ConvertForDisplay</c> — the shared name is an INPUT CONTRACT, not
-    /// shared behaviour, and a reader who assumes otherwise is why #3207's sites spread. Whether the
-    /// viewer SHOULD convert here is a product question; this pin only stops the answer changing by
-    /// accident, in either direction.</para>
+    /// <para><b>The load-bearing assertion is that the modes DIFFER</b>, by exactly the offset, at the
+    /// fleet's measured -240. A renderer that emitted the server's clock verbatim would satisfy the Server
+    /// arm and nothing else, and it is untestable on this axis without this comparison — which is why the
+    /// raw render went unnoticed until #3207 read the pair together.</para>
+    ///
+    /// <para>Lite's same-named <c>ServerTimeHelper.FormatServerClock</c> is the mirror: same input
+    /// contract, and it reaches the modes through <c>ConvertForDisplay</c>, which starts from the server's
+    /// clock instead of from naive UTC. One offset step between the frames, either way round.</para>
     /// </summary>
     [Fact]
-    public void FormatServerClock_IgnoresTheDisplayMode_AtTheFleetOffset()
+    public void FormatServerClock_HonoursTheDisplayMode_AtTheFleetOffset()
     {
         var serverClock = new DateTime(2026, 7, 1, 13, 45, 7, DateTimeKind.Unspecified);
         var savedMode = ViewerTimeHelper.CurrentDisplayMode;
@@ -152,19 +153,27 @@ public sealed class ViewerTimeHelperTests
         {
             ViewerTimeHelper.UtcOffsetMinutes = -240;
 
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+            Assert.Equal("2026-07-01 13:45:07", ViewerDataService.FormatServerClock(serverClock));
+
+            /* UTC mode is four hours LATER on this fleet: the stored value is utc + offset, so recovering
+               UTC subtracts a negative offset. A sign error here renders 09:45:07 and is eight hours out. */
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+            Assert.Equal("2026-07-01 17:45:07", ViewerDataService.FormatServerClock(serverClock));
+
+            /* Local mode is that same instant in the viewer machine's zone, computed rather than pinned:
+               CI and a developer machine are not in the same zone. */
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+            Assert.Equal(
+                DateTime.SpecifyKind(new DateTime(2026, 7, 1, 17, 45, 7), DateTimeKind.Utc)
+                    .ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"),
+                ViewerDataService.FormatServerClock(serverClock));
+
             foreach (var mode in new[] { TimeDisplayMode.ServerTime, TimeDisplayMode.LocalTime, TimeDisplayMode.UTC })
             {
                 ViewerTimeHelper.CurrentDisplayMode = mode;
-                Assert.Equal("2026-07-01 13:45:07", ViewerDataService.FormatServerClock(serverClock));
                 Assert.Equal("", ViewerDataService.FormatServerClock(null));
             }
-
-            /* And the naive-UTC renderer in the same viewer DOES move with the mode, so the assertion
-               above is about this renderer rather than about a display mode nothing honours. */
-            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-            var server = ViewerTimeHelper.ForDisplay(serverClock);
-            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-            Assert.NotEqual(server, ViewerTimeHelper.ForDisplay(serverClock));
         }
         finally
         {

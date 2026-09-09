@@ -388,21 +388,18 @@ public sealed class ViewerQueriesDisplayTests
     /// columns get. <c>query_store_stats</c>' stamps are not in this family: the collector normalises
     /// them to UTC, so they take <c>ViewerTimeHelper.ForDisplay</c> instead (#3207).
     ///
-    /// <para>Raw means raw in all three display modes, because <c>ViewerTimeHelper</c> has no
-    /// server-local arm to route through — and Lite's same-named
-    /// <c>ServerTimeHelper.FormatServerClock</c> takes the same frame and DOES honour the preference,
-    /// so the shared name is an input contract and not shared behaviour. That fact is asserted by
-    /// <c>ViewerTimeHelperTests.FormatServerClock_IgnoresTheDisplayMode_AtTheFleetOffset</c> rather than
-    /// here: it has to flip the process-wide display-mode static, and only the
-    /// <c>viewer-time-statics</c> collection serializes that. This file holds a live-Postgres class, so
-    /// it is in neither the right collection nor a place a <c>finally</c> belongs.</para>
+    /// <para>Only the NULL contract is asserted here, and deliberately: both renderers honour the display
+    /// mode, so a pinned rendered value depends on the process-wide
+    /// <c>ViewerTimeHelper.CurrentDisplayMode</c>, which this class does not serialize — xUnit runs classes
+    /// in parallel and three others flip it. The values are asserted in
+    /// <c>ViewerTimeHelperTests.FormatServerClock_HonoursTheDisplayMode_AtTheFleetOffset</c>, which is in
+    /// the <c>viewer-time-statics</c> collection. Empty-for-null is the same in every mode.</para>
     /// </summary>
     [Fact]
-    public void FormatServerClock_ShowsRawServerWallClock_EmptyForNull()
+    public void TheTwoClockRenderers_RenderEmptyForNull()
     {
-        var t = new DateTime(2026, 7, 1, 13, 45, 7);
-        Assert.Equal("2026-07-01 13:45:07", ViewerDataService.FormatServerClock(t));
         Assert.Equal("", ViewerDataService.FormatServerClock(null));
+        Assert.Equal("", ViewerDataService.FormatStoredUtc(null));
     }
 
     [Fact]

@@ -119,7 +119,7 @@ public sealed partial class ViewerDataService
 /// <c>running_jobs.start_time</c> is <c>ja.start_execution_date</c> — msdb Agent's own local clock,
 /// which <c>RunningJobsCollector</c> confirms by taking the running duration as
 /// <c>DATEDIFF(SECOND, ja.start_execution_date, GETDATE())</c>, a local-vs-local subtraction — so it
-/// renders raw through <see cref="ViewerDataService.FormatServerClock"/>. <c>collection_time</c> is
+/// converts through <see cref="ViewerDataService.FormatServerClock"/>. <c>collection_time</c> is
 /// naive UTC and converts through <see cref="ViewerTimeHelper.ForDisplay"/>. Sending the start time
 /// through that conversion applies the collected offset a second time and shows a job that started
 /// seconds ago as a four-hour runner on the fleet's measured -240.</para>

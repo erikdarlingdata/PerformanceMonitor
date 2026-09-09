@@ -30,7 +30,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// on naive-UTC <c>collection_time</c> ($ positional params, Kind=Unspecified); (2) <c>collection_time</c> is
 /// naive UTC and renders through <see cref="ViewerTimeHelper.ForDisplay"/>, while the DMV wall-clock stamps
 /// (query_stats' creation_time / last_execution_time and procedure_stats' cached_time /
-/// last_execution_time) are the SQL server's own local time and render raw through
+/// last_execution_time) are the SQL server's own local time and convert through
 /// <see cref="FormatServerClock"/> — query_store_stats' first_execution_time / last_execution_time are
 /// NOT in that family, being normalised to UTC by the collector, and take ForDisplay; (3) Darling's
 /// <c>delta_*</c> columns are
