@@ -2691,9 +2691,11 @@ WITH NO DATA";
     /// half a uniform slot to the light refreshes' own ceiling. Both lines now clear the ceiling and they are
     /// 30 s apart, so the ordering no longer discriminates and lead time argues mildly FOR the lower one.
     /// What rejects it instead is COUPLING, a property the old geometry could not have exposed: the guard band
-    /// is derived from <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, a measurement of the TWELVE
-    /// OTHER refresh policies, so the alternative would make the heaviest refresh's watch line move whenever
-    /// a light refresh got slower. Five sixths of <see cref="RefreshPhaseSlotSeconds"/> depends on the window
+    /// is a DECLARED width for the TWELVE OTHER refresh policies, so the alternative would make the
+    /// heaviest refresh's watch line move whenever the light class's width was re-declared. While that width
+    /// was <c>ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c> the coupling was worse still — the
+    /// line would have moved whenever a light refresh got slower — and #3188's inversion narrows the
+    /// coupling without removing it, which is why this rejection stands rather than being re-taken. Five sixths of <see cref="RefreshPhaseSlotSeconds"/> depends on the window
     /// this job has to fit inside and on nothing else. Under a uniform grid the guard was
     /// <c>step / 2</c> and both lines were functions of the same step, which is exactly why the argument had
     /// to be about ordering back then and can be about coupling now.</para>
@@ -3072,8 +3074,8 @@ WITH NO DATA";
     /// <para><b>THE POPULATION IS DOWNSTREAM OF THE CONSTANT, so no estimator over it is stable and moving
     /// this value is a SCHEDULING decision rather than a renumbering (#3188).</b>
     /// <see cref="UnboundedLightRefreshSeparationMinutes"/> IS <see cref="CompressionPhaseGuardMinutes"/>,
-    /// which is this constant rounded up to a whole minute — so this constant sets the adjacency the twelve
-    /// light refreshes run under, and their runtimes are a measurement OF that adjacency. The loop closes in
+    /// which WAS this constant rounded up to a whole minute — so this constant set the adjacency the twelve
+    /// light refreshes run under, and their runtimes are a measurement OF that adjacency. The loop closed in
     /// BOTH directions and only one of them was written down. UPWARD is the paragraph on
     /// <see cref="UnboundedLightRefreshSeparationMinutes"/>: a ceiling read while two of them overlapped
     /// would size the separation from the defect the separation exists to remove. DOWNWARD is the half that
@@ -3083,8 +3085,9 @@ WITH NO DATA";
     /// (#3185) and #3186 shipped a layout to remove. So the value that fits the hour most comfortably is the
     /// one that re-creates the mechanism it was measured under the repair for. What breaks the loop is
     /// CHOOSING the guard's width and CHECKING this measurement against it, instead of deriving one from the
-    /// other — a scheduling decision taken nowhere in this file, whose feasible range is on
-    /// <see cref="WidestFeasibleOtherRefreshCeilingSeconds"/>.</para>
+    /// other. That is what <see cref="CompressionPhaseGuardMinutes"/> now is, so the loop is cut at the
+    /// width rather than argued about at the measurement; the width's own reason and its upper bound are
+    /// stated there.</para>
     ///
     /// <para><b>AND IT IS NOT THE SAME POPULATION AS ITS SIBLING'S (#3182).</b> This one spans the whole of
     /// the post-boundary record and grows; the live-envelope figures on
@@ -3158,19 +3161,71 @@ WITH NO DATA";
     /// from, reproduced as an ordinary post-boundary member, which is what says the method is the same one
     /// rather than a new one that happens to agree.</para>
     ///
-    /// <para><b>What changed underneath it: it IS sized from now, so the old escape no longer applies.</b>
-    /// <see cref="CompressionPhaseGuardMinutes"/> is this figure rounded up to a whole minute, which makes it
-    /// a bound the grid rests on rather than a characterisation of one. The direction of risk is stated rather
-    /// than left to be discovered: a light-refresh ceiling past <c>CompressionPhaseGuardMinutes * 60</c> leaves
-    /// a compression policy able to start while a light refresh still holds <c>AccessShareLock</c>, which is
-    /// #3012's mechanism, and TimescaleSupportTests is written to fail in that direction.</para>
+    /// <para><b>NOTHING IS SIZED FROM IT, and since #3188 that is a property of the grid rather than an
+    /// escape this figure happens to enjoy.</b> <see cref="CompressionPhaseGuardMinutes"/> is a DECLARED
+    /// width, so this constant is CHECKED AGAINST it and no longer sets it. The direction of risk is stated
+    /// rather than left to be discovered: a light-refresh ceiling past
+    /// <c>CompressionPhaseGuardMinutes * 60</c> leaves a compression policy able to start while a light
+    /// refresh still holds <c>AccessShareLock</c>, which is #3012's mechanism, and TimescaleSupportTests is
+    /// written to fail in that direction. Under the old derivation it could not fail in that direction at
+    /// all — a larger reading widened the width instead, and took the minutes out of
+    /// <see cref="HeaviestRefreshWindowMinutes"/> without anything going red.</para>
+    ///
+    /// <para><b>WHICH REGIME THIS VALUE BELONGS TO, and it is not the current one (#3188).</b> The read
+    /// named above is at <c>2026-09-08 14:57Z</c>, and the grid changed at <c>16:30Z</c> that day (#3178)
+    /// and again at <c>23:07Z</c> (#3186) — so this is a maximum over a layout that has since been replaced
+    /// twice, and the three layouts imply three different widths. The value is therefore held rather than
+    /// re-derived, and holding it is now SAFE in a way it was not before: with the width declared, a
+    /// re-derivation moves no job and no band, so it is a data task rather than a scheduling change. What it
+    /// needs is a population for the current layout with its own quantiles and its own midnight paragraph;
+    /// what exists is a maximum of <b>76.635</b> s over <b>29</b> runs of <b>12</b> views, all succeeded,
+    /// from <c>2026-09-08 23:07Z</c> and read at <c>2026-09-09 01:55:41Z</c> — which would leave
+    /// <b>163.365</b> s of the declared width instead of 13.2 s. It is not adopted here because the figures
+    /// every other sentence in this summary is stated against have not been read for that population, and a
+    /// constant moved ahead of the prose that explains it is the drift RefreshCeilingProvenancePinTests
+    /// exists to stop.</para>
     /// </summary>
     public const double OtherHourlyRefreshObservedCeilingSeconds = 226.8;
 
     /// <summary>
-    /// How long after a light refresh starts a compression policy may be scheduled —
-    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> rounded UP to a whole minute, so 4 minutes
-    /// against a 226.8 s ceiling.
+    /// How long after a light refresh starts a compression policy may be scheduled — a DECLARED width of 4
+    /// minutes, checked against a 226.8 s ceiling, and derived from no measurement at all (#3188).
+    ///
+    /// <para><b>WHY IT IS DECLARED, and this is the whole of #3188's repair.</b> This member IS
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/>, so its width decides the adjacency the twelve
+    /// light refreshes run under — and their runtimes are a measurement OF that adjacency. Deriving the
+    /// width from <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> therefore made the grid's shape a
+    /// function of a measurement the shape itself produced, and it closed in BOTH directions: a reading
+    /// taken while two of them overlapped asks for a WIDER width than the overlap warrants, and a reading
+    /// taken after the separation worked asks for a NARROWER one that re-creates the overlap. Both
+    /// directions were available on one store inside one day. A declared width has no such input, and what
+    /// the measurement does instead is stated two paragraphs down.</para>
+    ///
+    /// <para><b>FOUR, and the reason is what the width BUYS rather than which reading produced it — because
+    /// "this was the maximum we measured" is the defect rather than a justification.</b> UPPER BOUND:
+    /// <see cref="WidestFeasibleCompressionPhaseGuardMinutes"/>, read rather than re-derived — past it the
+    /// heaviest refresh's window no longer clears its own recorded ceiling with the watch line's lead
+    /// intact. COVERAGE: 240 s, which covers every light-refresh population this file admits as a source.
+    /// WHAT IT DECLINES TO COVER: the 265.5 s runs measured under the two-minute adjacency #3186 removed,
+    /// and declining is deliberate —
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/> states why a ceiling taken from an overlapping
+    /// population would size the separation from the defect the separation exists to remove, and a width
+    /// chosen to cover those runs would do exactly that. THE TRADE, both ways: every minute here is a minute
+    /// off <see cref="HeaviestRefreshWindowMinutes"/> and 50 s off
+    /// <see cref="RefreshSlotWarningSeconds"/>, and every minute here is 60 s more clearance for the light
+    /// class. WHAT IS NOT SETTLED: whether four is the best point on that trade. It is where the grid runs,
+    /// this declaration's job is to stop it moving as a SIDE EFFECT of a measurement, and moving it
+    /// deliberately is a scheduling decision with the upper bound above as its ceiling.</para>
+    ///
+    /// <para><b>THE DIRECTION OF FAILURE INVERTED WITH THE DEPENDENCY, which is what makes this a stronger
+    /// check and not a looser one.</b> Under the derivation ANY measurement was satisfiable: a larger
+    /// reading silently widened this band and took minutes from the heaviest refresh's window, with no
+    /// upper bound of its own — which is why #3183 had to add
+    /// <see cref="WidestFeasibleOtherRefreshCeilingSeconds"/> as the bound the derivation was missing. Under
+    /// the declaration a reading past 240 s fails the coverage requirement
+    /// (<c>CompressionPhaseGuardMinutes * 60 &gt;= OtherHourlyRefreshObservedCeilingSeconds</c>, held by
+    /// TimescaleSupportTests) and is reported live by <see cref="LogRefreshCeilingStaleness"/>. The old form
+    /// could be satisfied by a width that had stopped covering anything; this one goes red.</para>
     ///
     /// <para><b>The guard is one-sided, and that asymmetry is the mechanism rather than a simplification.</b>
     /// #3012's convoy needs compression's <c>AccessExclusiveLock</c> request to ARRIVE while a refresh already
@@ -3182,18 +3237,19 @@ WITH NO DATA";
     /// next one. That one-sidedness is also what decides which band opens the hour — see
     /// <see cref="HeaviestRefreshStartMinute"/>.</para>
     ///
-    /// <para><b>It was <c>step / 2</c> and is now the ceiling itself, which is a smaller number and a
-    /// stronger check (#3174).</b> Half a uniform slot was 7 minutes and happened to be 3x the light
-    /// refreshes' then-recorded ceiling, and that 3x was asserted — a check on the CHARACTERISATION rather
-    /// than on anything the grid rested on. There is no uniform slot to halve now, so the guard is derived
-    /// from the measurement it has to cover: 226.8 s rounds up to 4 minutes, and the assertion becomes the
-    /// requirement (<c>CompressionPhaseGuardMinutes * 60 &gt;= OtherHourlyRefreshObservedCeilingSeconds</c>)
-    /// instead of a multiple of it. <b>The rounding is the whole margin, and it is 13.2 s.</b> That is thin
-    /// and it is stated rather than dressed up: what it buys is that the margin can only be consumed by the
-    /// light refreshes actually getting slower, which goes red here, where a multiple of a ceiling could
-    /// be satisfied by a guard that had stopped covering anything. A wider guard is not free either — every
-    /// minute of it comes out of <see cref="HeaviestRefreshWindowMinutes"/>, which is the band that has a
-    /// measured growth series behind it.</para>
+    /// <para><b>What the width has been, in order, because each form was rejected for a different reason
+    /// (#3174, #3188).</b> It was <c>step / 2</c> — 7 minutes of a uniform slot, asserted as 3x the light
+    /// refreshes' then-recorded ceiling, which was a check on the CHARACTERISATION rather than on anything
+    /// the grid rested on. #3174 made it the ceiling rounded up, which tied it to the measurement it has to
+    /// cover and left the rounding as the whole margin — thin, and stated rather than dressed up. #3188
+    /// removed the tie: a measurement whose own population is decided by this width cannot set it. <b>The
+    /// coverage margin is the whole of what the width buys, and it is 13.2 s</b> against the ceiling
+    /// recorded today — as thin as the derivation's rounding left it, because the recorded value has not
+    /// moved. What the declaration changes is that the value CAN now move without moving a job, and the
+    /// margin the current layout's measured maximum would leave is stated on
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> along with why it is not adopted yet. Either
+    /// way the margin can only be consumed by the light refreshes actually getting slower, which goes red at
+    /// the coverage requirement.</para>
     ///
     /// <para><b>It can never exceed the gap it sits in</b>, because
     /// <see cref="HeaviestRefreshStartMinute"/> and <see cref="CompressionPhaseBandMinutes"/> are both
@@ -3205,13 +3261,14 @@ WITH NO DATA";
     /// <see cref="UnboundedLightRefreshSeparationMinutes"/> IS this member: "how long after a light refresh
     /// starts is it safe to start something else" is the question the guard asks about a compression policy
     /// and the light band asks about the next long-running refresh. Two derivations from one constant would
-    /// be two places to update; one expression cannot disagree with itself. So re-deriving
-    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> moves the light band's internal spacing as
-    /// well as this band's width, which is the coupling that makes the constant worth getting right rather
-    /// than a number two grids each keep a copy of.</para>
+    /// be two places to update; one declaration cannot disagree with itself. <b>And this is the second
+    /// reason the width is declared rather than derived (#3188):</b> while it was
+    /// <c>ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c>, re-deriving that constant moved the light
+    /// band's internal spacing as well as this band's width — so a measurement of the light class silently
+    /// re-laid out the light class. Now re-deriving it moves neither, and whether the spacing should change
+    /// is asked here, once, as a scheduling question.</para>
     /// </summary>
-    public static int CompressionPhaseGuardMinutes =>
-        (int)Math.Ceiling(OtherHourlyRefreshObservedCeilingSeconds / 60.0);
+    public const int CompressionPhaseGuardMinutes = 4;
 
     /// <summary>
     /// The minutes <see cref="CompressionPhaseGuardMinutes"/> and
@@ -3280,12 +3337,14 @@ WITH NO DATA";
     /// precondition still holds at <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> — negative when
     /// no guard at all leaves a wide enough window.
     ///
-    /// <para><b>Why this is stated rather than discovered (#3182).</b> The guard is
-    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> rounded up to a whole minute, and that ceiling
-    /// is a MAXIMUM over a series with a long tail — so the derivation has no upper bound of its own, while
-    /// the hour does. Nothing in the derivation notices when the two conflict: the conflict surfaces as a
-    /// grid that has already been widened past what the hour contains, and then as an argument about which
-    /// number to bend. This term is the bound the derivation is missing, and
+    /// <para><b>Why this is stated rather than discovered (#3182), and what it became at #3188.</b> The
+    /// guard USED TO BE <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> rounded up to a whole minute,
+    /// and that ceiling is a MAXIMUM over a series with a long tail — so the derivation had no upper bound of
+    /// its own, while the hour does. Nothing in it noticed when the two conflicted: the conflict surfaced as
+    /// a grid already widened past what the hour contains, and then as an argument about which number to
+    /// bend. This term is the bound that derivation was missing. It still binds now the width is DECLARED,
+    /// and it binds a different act: it is the ceiling on what a re-declaration may choose, rather than a
+    /// backstop on what a measurement may silently impose. And
     /// <see cref="WidestFeasibleOtherRefreshCeilingSeconds"/> converts it back into the units the constant is
     /// measured in, so a re-derivation that does not fit is red AT THE CONSTANT rather than after the grid
     /// has been re-dimensioned around it.</para>
@@ -3322,9 +3381,17 @@ WITH NO DATA";
     }
 
     /// <summary>
-    /// The largest value <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> may take before the grid
-    /// stops fitting in the hour — <see cref="WidestFeasibleCompressionPhaseGuardMinutes"/> back in seconds,
-    /// so the bound is stated in the unit the constant is measured in.
+    /// The widest <see cref="CompressionPhaseGuardMinutes"/> the hour can carry, expressed in the unit
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is measured in —
+    /// <see cref="WidestFeasibleCompressionPhaseGuardMinutes"/> back in seconds.
+    ///
+    /// <para><b>What it bounds changed at #3188 while the arithmetic did not.</b> While the width was that
+    /// constant rounded up, this was the largest value the CONSTANT could take before the grid stopped
+    /// fitting the hour — a backstop on what a measurement could silently impose. The width is declared now,
+    /// so a measurement imposes nothing and this is the ceiling on what a RE-DECLARATION may choose. Stated
+    /// in seconds either way, because the question a reader arrives with is still "the light refreshes are
+    /// taking N seconds, can the hour give them that", and the answer is a comparison against this
+    /// number.</para>
     ///
     /// <para>This is the number a re-derivation of that constant has to be read against. A light-refresh
     /// census whose maximum lands above it is not a constant to update: it is a statement that the guard the
@@ -5838,10 +5905,12 @@ AND   js.last_run_status = 'Success'";
     /// The same read pointed at every OTHER continuous aggregate refresh policy — the live feed
     /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> did not have (#3182).
     ///
-    /// <para><b>Why this exists at all.</b> That constant is not merely asserted against; it is ARITHMETIC
-    /// INPUT — <see cref="CompressionPhaseGuardMinutes"/> is it rounded up to a whole minute, so a light
-    /// refresh running longer than the constant records leaves a compression policy able to start while that
-    /// refresh still holds <c>AccessShareLock</c>, which is #3012's convoy. Until #3182 nothing read a light
+    /// <para><b>Why this exists at all.</b> That constant is what
+    /// <see cref="CompressionPhaseGuardMinutes"/>' declared width is CHECKED AGAINST, so a light refresh
+    /// running longer than the constant records leaves a compression policy able to start while that refresh
+    /// still holds <c>AccessShareLock</c>, which is #3012's convoy. Until #3188 the constant was arithmetic
+    /// INPUT to that width rather than a check on it, and the difference is which way the failure goes: a
+    /// longer light refresh used to widen the width silently, and now it goes red. Until #3182 nothing read a light
     /// refresh's runtime back at all: the heaviest one had <see cref="HeaviestRefreshRuntimeSql"/> and the
     /// other twelve had no live reading keyed to a view anywhere in the product. #2136's
     /// <see cref="JobCadenceReadSql"/> does read their durations, but it keys on

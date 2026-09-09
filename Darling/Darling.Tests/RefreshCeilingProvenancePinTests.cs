@@ -127,7 +127,7 @@ public sealed class RefreshCeilingProvenancePinTests
         "public const double OtherHourlyRefreshObservedCeilingSeconds";
 
     private const string GuardBandDeclaration =
-        "public static int CompressionPhaseGuardMinutes";
+        "public const int CompressionPhaseGuardMinutes";
 
     private static int Ceiling => TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
 
@@ -383,18 +383,20 @@ public sealed class RefreshCeilingProvenancePinTests
             @"The third-largest run is ([0-9]+)\.([0-9]+) s",
             false);
 
-        /* The guard band the light ceiling now SIZES, rather than merely characterises, and the whole of the
-           margin that sizing leaves. Both are derived, so both are swept. */
+        /* The guard band's DECLARED width and the ceiling it is CHECKED AGAINST - the direction #3188
+           inverted. The width no longer follows this constant, so what these pin is that the summary states
+           the width the code declares and the ceiling the code checks, with the coverage margin derived from
+           both. Both swept. */
         yield return (
-            "the guard band the light ceiling derives",
+            "the guard band's declared width and the ceiling it covers",
             GuardBandDeclaration,
-            @"so ([0-9]+) minutes against a ([0-9]+)\.([0-9]+) s ceiling",
+            @"a DECLARED width of ([0-9]+) minutes, checked against a ([0-9]+)\.([0-9]+) s ceiling",
             true);
 
         yield return (
-            "the guard band's rounding margin",
+            "the guard band's coverage margin",
             GuardBandDeclaration,
-            @"rounding is the whole margin, and it is ([0-9]+)\.([0-9]+) s",
+            @"coverage margin is the whole of what the width buys, and it is ([0-9]+)\.([0-9]+) s",
             true);
     }
 
@@ -1006,6 +1008,53 @@ public sealed class RefreshCeilingProvenancePinTests
         return hits[0];
     }
 
+    /// <summary>
+    /// The guard's width is DECLARED and nothing derives it from a measurement (#3188) — checked against the
+    /// code, because the prose pins above cannot see a derivation reinstated underneath them.
+    ///
+    /// <para><b>Why the code half needs its own pin, and it is the reason the old assertion had stopped
+    /// meaning anything.</b> TimescaleSupportTests held
+    /// <c>CompressionPhaseGuardMinutes == ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c>. That
+    /// identity is now false BY DESIGN and it still passed, because 4 and
+    /// <c>ceil(226.8 / 60)</c> are both 4 — so the assertion certified a derivation the code no longer has,
+    /// on a numeric coincidence. An identity between a declared width and a rounded measurement is exactly
+    /// the pin that cannot fail while the values happen to agree, so it is replaced by a check on the
+    /// SHAPE: the width is a constant declaration, and the rounding expression appears nowhere.</para>
+    ///
+    /// <para><b>The two clauses fail in opposite directions on purpose.</b> The declaration clause catches
+    /// the width becoming an expression again; the absence clause catches the rounding being reinstated
+    /// somewhere else and read into the grid by a different name. Either alone would pass a half-reverted
+    /// inversion.</para>
+    /// </summary>
+    [Fact]
+    public void NoGuardWidth_IsDerivedFromAMeasurement()
+    {
+        var source = ReadTimescaleSupportSource();
+
+        Assert.Contains(
+            "public const int CompressionPhaseGuardMinutes = ",
+            source,
+            StringComparison.Ordinal);
+
+        Assert.DoesNotContain(
+            "Math.Ceiling(OtherHourlyRefreshObservedCeilingSeconds",
+            source,
+            StringComparison.Ordinal);
+
+        /* And the coverage requirement the declaration is checked by, which is what replaces the identity
+           rather than being a second copy of it: an inequality cannot be satisfied by a coincidence the way
+           an equality between two 4s could. */
+        Assert.True(
+            TimescaleSupport.CompressionPhaseGuardMinutes * 60
+                >= TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
+            $"the declared {TimescaleSupport.CompressionPhaseGuardMinutes}-minute width is "
+            + $"{TimescaleSupport.CompressionPhaseGuardMinutes * 60}s against a "
+            + $"{TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s recorded light-refresh ceiling, "
+            + "so it no longer covers the class it exists to cover and a compression policy can start while "
+            + "a light refresh still holds AccessShareLock (#3012). Widening it is a scheduling decision "
+            + "bounded by WidestFeasibleCompressionPhaseGuardMinutes, not a renumbering");
+    }
+
     /* ─────────────────────────────── verification ─────────────────────────────── */
 
     /// <summary>
@@ -1339,25 +1388,29 @@ public sealed class RefreshCeilingProvenancePinTests
             $"the run called third-largest, {thirdLargest[0]}.{thirdLargest[1]} s, is at or above the "
             + "second-largest the same paragraph states, so the ordering the sentence claims is false");
 
-        /* And the guard band this constant SIZES, which is the whole of what changed about it at #3174: it
-           used to be characterised against a step-derived band, and now the band is derived from it. */
-        var guardBand = Read("the guard band the light ceiling derives");
+        /* And the guard band's DECLARED width, which is what changed at #3188: #3174 made the band the
+           ceiling rounded up, and #3188 cut that tie because a measurement whose own population is decided
+           by the width cannot set the width. These two pins keep their shape and invert their meaning - the
+           summary's width has to be the width the CODE DECLARES and its ceiling the one the code CHECKS, so
+           a summary still describing the width as derived states a figure that follows from nothing.
+           NoGuardWidth_IsDerivedFromAMeasurement holds the code half. */
+        var guardBand = Read("the guard band's declared width and the ceiling it covers");
         Require(guardBand[0] == TimescaleSupport.CompressionPhaseGuardMinutes,
-            $"the guard band is stated as {guardBand[0]} minutes against "
-            + $"{TimescaleSupport.CompressionPhaseGuardMinutes} derived");
+            $"the declared width is stated as {guardBand[0]} minutes against the "
+            + $"{TimescaleSupport.CompressionPhaseGuardMinutes} the code declares");
         Require((guardBand[1] * 10) + guardBand[2] == LightCeilingTenths,
-            $"the ceiling the guard band is derived from is stated as {guardBand[1]}.{guardBand[2]} s "
+            $"the ceiling the width is checked against is stated as {guardBand[1]}.{guardBand[2]} s "
             + $"against this constant's {LightCeilingTenths / 10}.{LightCeilingTenths % 10} s");
 
-        var guardMargin = Read("the guard band's rounding margin");
+        var guardMargin = Read("the guard band's coverage margin");
         Require(
             (guardMargin[0] * 10) + guardMargin[1]
                 == (TimescaleSupport.CompressionPhaseGuardMinutes * 600) - LightCeilingTenths,
-            $"the rounding margin is stated as {guardMargin[0]}.{guardMargin[1]} s against "
+            $"the coverage margin is stated as {guardMargin[0]}.{guardMargin[1]} s against "
             + $"{((TimescaleSupport.CompressionPhaseGuardMinutes * 600) - LightCeilingTenths) / 10}."
             + $"{((TimescaleSupport.CompressionPhaseGuardMinutes * 600) - LightCeilingTenths) % 10} s derived "
-            + "from the guard band less the ceiling it covers - if this reached zero or below, a compression "
-            + "policy could start while a light refresh still held AccessShareLock");
+            + "from the declared width less the ceiling it covers - if this reached zero or below, a "
+            + "compression policy could start while a light refresh still held AccessShareLock");
 
         /* And nothing in the pin list went unused: a pattern that is never asserted against reads, from the
            list, exactly like one that is. */

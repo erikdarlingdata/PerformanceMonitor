@@ -2290,10 +2290,22 @@ LIMIT 1", connection))
         Assert.Equal(1, TimescaleSupport.LightRefreshStepMinutes);
         Assert.Equal(3, TimescaleSupport.CompressionPhaseMaxPerMinute);
 
+        /* The guard's width is CHOSEN, so it is pinned as a literal and NOT as an identity against the
+           light-refresh ceiling (#3188). The identity that used to sit here was
+           `guard == ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)`, and it is now false by design
+           while STILL PASSING, because 4 and ceil(226.8 / 60) are both 4 - an equality between a declared
+           width and a rounded measurement certifies a derivation the code does not have as soon as the two
+           coincide. What replaces it is the requirement the width actually has to meet, which is an
+           inequality no coincidence satisfies, plus the code-shape check in
+           RefreshCeilingProvenancePinTests.NoGuardWidth_IsDerivedFromAMeasurement. */
         Assert.Equal(4, TimescaleSupport.CompressionPhaseGuardMinutes);
-        Assert.Equal(
-            (int)Math.Ceiling(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds / 60.0),
-            TimescaleSupport.CompressionPhaseGuardMinutes);
+        Assert.True(
+            TimescaleSupport.CompressionPhaseGuardMinutes
+                <= TimescaleSupport.WidestFeasibleCompressionPhaseGuardMinutes,
+            $"the declared {TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard is wider than the "
+            + $"{TimescaleSupport.WidestFeasibleCompressionPhaseGuardMinutes} minutes the hour carries at the "
+            + "recorded heaviest ceiling, so the heaviest refresh's window no longer clears that ceiling with "
+            + "the watch line's lead intact - re-take the width against its own upper bound (#3188)");
 
         Assert.Equal(24, TimescaleSupport.CompressionPhaseBandMinutes);
         Assert.Equal(
@@ -2644,12 +2656,16 @@ LIMIT 1", connection))
             + $"{ceiling} s recorded ceiling");
         Assert.Equal(30, TimescaleSupport.RefreshSlotWarningSeconds - alternative);
 
-        /* THE COUPLING, as the derivations rather than as prose. The alternative tracks a measurement of the
-           OTHER twelve policies; the chosen line tracks only the window. Both are asserted as identities, so
-           a future change that made the chosen line depend on the guard would fail the second one. */
-        Assert.Equal(
-            (int)Math.Ceiling(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds / 60.0),
-            TimescaleSupport.CompressionPhaseGuardMinutes);
+        /* THE COUPLING, as the derivations rather than as prose. The alternative is the slot less one guard
+           band, so it moves with the light class's declared width; the chosen line tracks only the window.
+           What is asserted is the SECOND half, because that is the one a future change could break: a
+           warning line that started depending on the guard fails the cross-multiplication below.
+
+           The first half used to be asserted as `guard == ceil(OtherHourlyRefreshObservedCeilingSeconds/60)`,
+           which said the alternative tracked a MEASUREMENT. #3188 declared the width, so it now tracks a
+           scheduling choice instead - a narrower coupling and still a coupling, which is why the rejection
+           on RefreshSlotWarningSeconds stands. That identity is gone rather than restated: it is false by
+           design and it passed anyway, on 4 == ceil(226.8/60). */
         Assert.Equal(
             TimescaleSupport.RefreshPhaseSlotSeconds * 5,
             TimescaleSupport.RefreshSlotWarningSeconds * 6);

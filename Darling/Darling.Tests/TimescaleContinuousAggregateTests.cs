@@ -799,8 +799,10 @@ public sealed class TimescaleContinuousAggregateTests
             + "understating what the hour carries and the argument for separating inside the band instead of "
             + "widening it no longer holds (#3185)");
 
-        /* And the step a duration derivation would ask for — the light ceiling rounded up, which is the
-           same rounding CompressionPhaseGuardMinutes uses — is infeasible, which is the whole finding. */
+        /* And the step a duration derivation would ask for - the light ceiling rounded up - is infeasible,
+           which is the whole finding. The rounding is spelled here rather than borrowed from
+           CompressionPhaseGuardMinutes: that width is DECLARED since #3188 and derives from no measurement,
+           so a step derived from one has to state its own derivation. What is asserted is unchanged. */
         var durationDerivedStep =
             (int)Math.Ceiling(TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds / 60.0);
 
