@@ -1240,7 +1240,19 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             DeclinedAmbiguousRenderSites.OrderBy(d => d, StringComparer.Ordinal).ToArray(),
             declined.OrderBy(d => d, StringComparer.Ordinal).ToArray());
 
-        AssertMatchesInventory(found, [SiteLabel.DesktopRenderFrameMismatch]);
+        /* Set equality against the inventory, spelled out here rather than through AssertMatchesInventory,
+           because that helper asserts the found set is NOT empty and #3207 fixed every render site — the
+           inventory carries no DesktopRenderFrameMismatch rows now, so the correct found set IS empty.
+           Vacuity is already excluded, and more strongly than NotEmpty manages: `judged` above counts the
+           sites this scan LOOKED AT, so a matcher that stopped recognising the renderers fails on the floor
+           instead of reporting a clean bill. The ratchet survives intact in the direction that matters — a
+           reintroduced mismatch lands in `found`, is absent from the inventory, and reds here. */
+        Assert.Equal(
+            Inventory.Where(i => i.Label == SiteLabel.DesktopRenderFrameMismatch)
+                .Select(i => $"{i.File} | {i.Column} | {i.Tables} | {i.Sites}")
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray(),
+            found.Select(x => $"{x.Key.File} | {x.Key.Column} | {x.Key.Tables} | {x.Value}")
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
     }
 
     /// <summary>
@@ -1414,11 +1426,16 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "last_user_access",
             ProjectionAlias.Match("    GREATEST(last_user_seek, last_user_scan) AS last_user_access,").Groups[2].Value);
 
-        /* And the two renderer families are distinguished, not merged: three names, two expectations. */
-        Assert.Equal(3, Renderers.Length);
+        /* And the two renderer families are distinguished, not merged: four names, two expectations. Three
+           take naive UTC and one takes the server's own clock; #3207 added FormatStoredUtc to the UTC side,
+           and registering it is what keeps its five sites visible to this scan rather than dropping them out
+           of the census as the price of fixing them. */
+        Assert.Equal(4, Renderers.Length);
         Assert.Equal(2, Renderers.Select(r => r.Expects).Distinct().Count());
         Assert.Equal(ClockFrame.ServerLocal, Renderers.Single(r => r.Renderer == "FormatServerClock").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatServerTime").Expects);
+        Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatStoredUtc").Expects);
+        Assert.Single(Renderers.Where(r => r.Expects == ClockFrame.ServerLocal));
     }
 
     /// <summary>
