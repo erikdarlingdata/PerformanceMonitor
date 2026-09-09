@@ -405,8 +405,6 @@ internal static class CSharpMemberMap
         return -1;
     }
 
-    /// <summary>One past the <c>}</c> that closes the brace group opening at <paramref name="open"/>, or
-    /// <c>-1</c> if it never closes.</summary>
     /// <summary>
     /// One past the declaration's last character, derived by asking which braced group is the BODY rather
     /// than by stopping at the first one.
@@ -426,11 +424,12 @@ internal static class CSharpMemberMap
     /// <para><b>Trailing <c>;</c> and whitespace are trimmed, which is what makes the disagreement mean
     /// something.</b> <c>=&gt; new T { … };</c> ends the range at the initialiser's brace and leaves the
     /// <c>;</c> outside it — true of 510 members on the tree, and harmless, because no literal lives in a
-    /// semicolon. Reporting those would bury the 34 where real content falls outside the range. So what is
+    /// semicolon. Reporting those would bury the 34 members tree-wide — 31 of them in the trees
+    /// <c>TsqlConventionGuardTests</c> sweeps — where real content falls outside the range. So what is
     /// compared is the end of the declaration's CONTENT, and the shape reds only when something a scan
     /// could look for is stranded. Those 510 are the same defect one character short of mattering: append
-    /// <c>.Normalize()</c> after the initialiser and the member joins the 34 with nothing else changing,
-    /// which is why the arm is a derivation rather than a list.</para>
+    /// <c>.Normalize()</c> after the initialiser and the member joins the reported set with nothing else
+    /// changing, which is why the arm is a derivation rather than a list.</para>
     /// </summary>
     private static int StatementEnd(string code, int from)
     {
@@ -508,6 +507,8 @@ internal static class CSharpMemberMap
         return i;
     }
 
+    /// <summary>One past the <c>}</c> that closes the brace group opening at <paramref name="open"/>, or
+    /// <c>-1</c> if it never closes.</summary>
     private static int BraceGroupEnd(string code, int open)
     {
         var depth = 0;
