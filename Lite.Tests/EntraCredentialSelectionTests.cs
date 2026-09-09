@@ -790,15 +790,6 @@ public sealed class EntraCredentialSelectionTests : IDisposable
     }
 
     /// <summary>
-    /// An independent instrument: records every event id the enabled level actually delivers, so the
-    /// production listener's filtering can be told apart from a level that delivered nothing.
-    ///
-    /// <para>The bag is a FIELD INITIALISER, which in C# runs BEFORE the base constructor — the same
-    /// hazard the production listener avoids with consts. Assigned in a constructor body it would be
-    /// null when <see cref="OnEventSourceCreated"/> fires for an already-existing source, which is
-    /// exactly the case every test here sets up.</para>
-    /// </summary>
-    /// <summary>
     /// An unrelated event source, existing only so "the listener enabled nothing else" has something
     /// to be false about. Named outside the <c>Azure-</c> family on purpose.
     /// </summary>
@@ -848,6 +839,15 @@ public sealed class EntraCredentialSelectionTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// An independent instrument: records every event id the enabled level actually delivers, so the
+    /// production listener's filtering can be told apart from a level that delivered nothing.
+    ///
+    /// <para>The bag is a FIELD INITIALISER, which in C# runs BEFORE the base constructor — the same
+    /// hazard the production listener avoids with consts. Assigned in a constructor body it would be
+    /// null when <see cref="OnEventSourceCreated"/> fires for an already-existing source, which is
+    /// exactly the case every test here sets up.</para>
+    /// </summary>
     private sealed class RecordingListener : EventListener
     {
         private readonly ConcurrentBag<int> _seen = new();
