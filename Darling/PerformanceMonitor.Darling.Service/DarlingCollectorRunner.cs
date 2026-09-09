@@ -42,6 +42,27 @@ namespace PerformanceMonitor.Darling.Service;
 /// default would let those sites stand in for the ONE success site that must pass the real list, which is
 /// the site whose silence #3161 was filed about. The compiler names every site instead of a grep.
 /// </param>
+/// <param name="SqlMs">
+/// What lands in <c>collection_log.sql_duration_ms</c>: the driver's SQL slice for this run.
+///
+/// <para><b>Not a purely target-side figure, and on the heaviest collector mostly not one (#3192).</b> On
+/// the enumerated path this is the per-item stopwatch around the watermark refresh plus the whole
+/// <c>readItem</c> closure, and for <c>query_store</c> that closure calls
+/// <c>DarlingCollectorRunner.FetchAndStorePlansAsync</c> /
+/// <c>FetchAndStoreQueryTextAsync</c> — each of which probes the STORE for
+/// what content is already held and writes back what came off the target. One measured production run put
+/// 107,334 ms of a 124,972 ms <c>SqlMs</c> in the store against 6,494 ms of plan-plus-text target time, and
+/// the store probe is the largest single term in both fetches fleet-wide (55.4% / 80.6%, V110).</para>
+///
+/// <para><b>Deliberately left blended rather than re-based</b>, and the reason is downstream: this value is
+/// also what <see cref="CollectorCostAccumulator"/> sums into <c>collect.collector_cost</c>, a 90-day hourly
+/// series that carries NO phase split and is built in memory rather than re-aggregated from
+/// <c>collection_log</c>. Subtracting the store terms here would leave 90 days of rows meaning one thing and
+/// every row after meaning another, with nothing in that series able to reconcile them — under a
+/// Collector Cost Regression self-alert whose baseline window is 14 days. The attribution is published
+/// instead of applied: <see cref="Mcp.DarlingDataReader.CollectionLogEntry.SqlStoreMs"/> derives the store
+/// share from the V110 columns, which makes it retroactive to every row that has them.</para>
+/// </param>
 /// <param name="HostNote">
 /// The note the RUNNER authored for a run worth explaining on its collection_log row: the RDS ingest
 /// outcome, the whole-cycle budget, the probe-failure summary, the fan-out bookkeeping. Null (the default)
@@ -2083,8 +2104,11 @@ public sealed class DarlingCollectorRunner
                             definition.Name, item, server.Config.DisplayName, ex.Message);
                     },
                     cancellationToken,
-                    /* #2150: the per-database wall-clock ceiling. Null for every collector but
-                       query_store, so this argument leaves every other cycle untouched. */
+                    /* #2150: the per-database wall-clock ceiling, straight off the definition, so this
+                       argument leaves a cycle whose collector declares none exactly as it was.
+                       Not "every collector but query_store", which is what this said: four definitions
+                       declare a budget and two of them also enumerate, so plan_correction arrives here
+                       non-null too. */
                     perItemBudget: definition.PerItemWallClockBudget);
 
                 rowsWritten = driverResult.Rows;

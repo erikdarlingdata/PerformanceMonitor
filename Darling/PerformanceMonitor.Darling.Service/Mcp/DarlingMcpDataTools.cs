@@ -1235,7 +1235,7 @@ public sealed class DarlingMcpDataTools
             .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc))
             .McpToken();
 
-    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost.")]
+    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost. CRITICAL for reading sql_duration_ms on a fetching collector: it is NOT purely target-side there. The deferred fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what plan XML and statement text are already held before writing back what came off the target, so the store's probe and write are billed to the column documented as the monitored server's. The probe is the largest single term in both fetches on this fleet — 55.4% of plan_fetch and 80.6% of text_fetch — and on one production run it was 107,334 ms of a 124,972 ms sql_duration_ms, 86%, against a plan-plus-text target time of 6,494 ms. sql_store_ms is that store share, derived from the two fetch blocks (probe_ms + write_ms of each) and null when no fetch ran. It is a FLOOR, not the whole: the per-item watermark refresh is also a store read inside the same stopwatch, the enumerated path records no watermark_ms, and that component is stored nowhere — so sql_duration_ms minus sql_store_ms is an UPPER bound on target-side time rather than the target-side time. store_duration_ms is not where the probe went either: it is the binary COPY of the collected rows and nothing else. Do NOT conclude a monitored server is slow from a large sql_duration_ms on query_store without reading sql_store_ms beside it.")]
     public static async Task<string> GetCollectionLog(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1303,9 +1303,34 @@ public sealed class DarlingMcpDataTools
                     server is slow needs work on that server; one slow because the store is slow
                     needs work here. The total alone cannot tell those apart, and it is the
                     question people actually ask of this log.
+
+                    #3192: and on the ENUMERATED path that split does not fall where these two columns
+                    put it. sql_duration_ms is the driver's per-item stopwatch, which wraps the whole
+                    readItem closure -- and for query_store that closure round-trips the STORE to decide
+                    what plan XML and statement text are already held, then writes back what came off the
+                    target. So the store's probe and write are billed to the target's column, and on this
+                    fleet the probe is the largest single term in both fetches (55.4% of plan_fetch, 80.6%
+                    of text_fetch; 107,334 of a 124,972 ms run). store_duration_ms is NOT where that time
+                    went either -- it is the binary COPY of the collected rows and nothing else, which is
+                    the measurement ServiceCommandDeadlines derives the COPY deadline from.
+
+                    So sql_store_ms names it instead, derived from the fetch blocks below rather than
+                    stored (the SqlOtherMs / #2859 rule), which also makes it RETROACTIVE to every row
+                    written since V110 instead of only to rows written after this change. Deliberately
+                    NOT a correction applied to sql_duration_ms itself: that column feeds
+                    collect.collector_cost, a 90-day hourly series that carries no phase split and is
+                    written from an in-memory accumulator rather than re-aggregated from this table, so
+                    the past could not be corrected to match and a re-based column would make the series
+                    a step function across the deploy -- under a self-alert whose baseline window is 14
+                    days. The number stays; the attribution arrives beside it.
                 */
                 sql_duration_ms = r.SqlDurationMs is null ? (double?)null : Math.Round(r.SqlDurationMs.Value, 0),
                 store_duration_ms = r.StoreDurationMs is null ? (double?)null : Math.Round(r.StoreDurationMs.Value, 0),
+                /* Flat and nullable rather than inside a block, like sweep_peer_max_ms: it decomposes
+                   sql_duration_ms (the sql_ prefix carries that, V108's convention) and belongs to neither
+                   fetch half, being the sum of both halves' store terms. NULL means no deferred fetch ran,
+                   so nothing is attributable -- never "the store share was zero". */
+                sql_store_ms = r.SqlStoreMs is null ? (double?)null : Math.Round(r.SqlStoreMs.Value, 0),
                 rows_collected = r.RowsCollected,
                 status = r.Status,
                 error_message = r.ErrorMessage,

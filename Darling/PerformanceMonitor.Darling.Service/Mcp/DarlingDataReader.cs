@@ -125,6 +125,44 @@ internal static class DarlingDataReader
             SqlDurationMs is null || SqlOpenMs is null || SqlDrainMs is null
                 ? null
                 : Math.Max(0, SqlDurationMs.Value - SqlOpenMs.Value - SqlDrainMs.Value);
+
+        /// <summary>
+        /// The milliseconds inside <see cref="SqlDurationMs"/> that were spent against the monitoring
+        /// STORE rather than the monitored target (#3192). NULL when this run performed no deferred fetch,
+        /// which is every collector but the plan/text-fetching ones and most runs of even those.
+        ///
+        /// <para><b>Why a target-side column contains store time at all.</b> On the ENUMERATED path the
+        /// driver's per-item stopwatch wraps the whole <c>readItem</c> closure
+        /// (<c>EnumeratedCollectorDriver.RunAsync</c>), and for <c>query_store</c> that closure calls
+        /// <c>FetchAndStorePlansAsync</c> / <c>FetchAndStoreQueryTextAsync</c> — each of which round-trips
+        /// the store to learn what content is already held and then writes back what came off the target.
+        /// Two of those three steps are Postgres, and all three are billed to <c>sql_duration_ms</c>. The
+        /// store probe is the largest single term in both: 55.4% of <c>plan_fetch</c> and 80.6% of
+        /// <c>text_fetch</c> measured over 38.2 h on 42 members (V110), and on one production run 107,334 ms
+        /// of a 124,972 ms "target-side" figure — 86% — against a plan-plus-text target time of 6,494 ms.</para>
+        ///
+        /// <para><b>Probe and write, not target.</b> <c>*FetchTargetMs</c> is genuinely the monitored
+        /// server's work and belongs where it is; only the probe round trip and the write-back are ours.</para>
+        ///
+        /// <para><b>Derived, never stored</b> — the <see cref="SqlOtherMs"/> and #2859 rule: a persisted copy
+        /// could drift from the parent it decomposes, and deriving it means it applies RETROACTIVELY to every
+        /// row written since V110 rather than only to rows written after this change. Nothing about
+        /// <c>sql_duration_ms</c> moves, so the 90-day <c>collector_cost</c> series and the rows already in
+        /// the store stay comparable with each other and with what follows.</para>
+        ///
+        /// <para><b>A FLOOR on the store share, not the whole of it, and the gap is named rather than
+        /// implied.</b> The enumerated path's per-item watermark refresh is also inside the same stopwatch and
+        /// is also a store read — plus a store WRITE on the catch-up/adaptive path
+        /// (<c>CollectorContext.PerItemWatermarkMs</c>) — but that path never sets V108's measured flag, so
+        /// <c>watermark_ms</c> is NULL on precisely the rows this property is non-null on and the component is
+        /// recorded nowhere. So <c>SqlDurationMs - SqlStoreMs</c> is an UPPER bound on target-side time, not
+        /// the target-side time.</para>
+        /// </summary>
+        public double? SqlStoreMs =>
+            PlanFetchProbeMs is null && TextFetchProbeMs is null
+                ? null
+                : (PlanFetchProbeMs ?? 0) + (PlanFetchWriteMs ?? 0)
+                    + (TextFetchProbeMs ?? 0) + (TextFetchWriteMs ?? 0);
     }
 
     /// <summary>One database file's latest I/O snapshot; avg latency is computed by the tool.</summary>

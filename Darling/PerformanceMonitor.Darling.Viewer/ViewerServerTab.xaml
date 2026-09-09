@@ -3519,6 +3519,18 @@
                                 <DataGridTextColumn Binding="{Binding DurationFormatted}" Width="90" SortMemberPath="DurationMs">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                                <!-- #3192: "SQL (ms)" names the PHASE and deliberately not the side. On a collector
+                                     that fetches plan XML or statement text the driver's SQL slice contains the
+                                     monitoring store's own probe and write-back, so a header naming the monitored
+                                     server would be false here - which is why the web grid's "On Server" was
+                                     renamed rather than annotated. The web grid also carries a "Store (in SQL)"
+                                     breakout; this grid does NOT, and the reason is the row type rather than an
+                                     oversight: CollectionLogRow and both backing queries are verbatim copies of
+                                     Lite's, Lite runs no deferred fetch, and Lite's store has no V110 columns - so
+                                     the breakout would either fork a deliberately-verbatim type or add
+                                     permanently-NULL DuckDB columns, which is the outcome the two-store parity
+                                     rule prevents (V110 declined a Lite twin on the same ground).
+                                     get_collection_log's sql_store_ms is the attribution. -->
                                 <DataGridTextColumn Binding="{Binding SqlDurationFormatted}" Width="90" SortMemberPath="SqlDurationMs">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="SQL (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
