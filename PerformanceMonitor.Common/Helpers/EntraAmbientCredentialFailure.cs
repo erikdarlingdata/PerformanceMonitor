@@ -96,10 +96,16 @@ public static class EntraAmbientCredentialFailure
         /* Walked to the bottom, because the driver's own message is the outermost layer and the
            chain's is underneath it - the same shape that made a Message-only read useless in #3196.
 
-           Ordered by specificity rather than likelihood, matching EntraBrokerFailure: a source that
-           threw names a definite fault, and "everything declined" is the residue. The two markers
-           cannot both match one string, but they can both appear in one CHAIN, and in that case the
-           fault is the more useful thing to say. */
+           OUTERMOST WINS, and unlike EntraBrokerFailure that is the whole of the priority rule here:
+           the two markers are prefixes of different sentences, so no single message can match both,
+           and the order the two ifs are written in therefore decides nothing. Only the DEPTH does.
+           Azure.Identity produces the two at different depths - CreateTokenCredentialInstance's
+           unhandled-exception wrapper sits above whatever the source threw - so the shallower marker
+           is the one describing this attempt and the deeper one is context it wrapped.
+
+           This comment previously claimed the ifs were "ordered by specificity". They are not
+           ordered at all in any sense a caller can observe, and the test asserting the ordering
+           passed with the two swapped. Saying so here rather than keeping a rule nothing enforces. */
         for (var current = ex; current is not null; current = current.InnerException)
         {
             var message = current.Message;

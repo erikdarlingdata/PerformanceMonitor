@@ -279,18 +279,30 @@ public class EntraDefaultCredentialTests
     }
 
     [Fact]
-    public void Classify_PrefersTheDefiniteFaultOverTheResidue()
+    public void Classify_TakesTheShallowestMarkerWhenTheChainHoldsBoth()
     {
-        /* Both markers in one chain. "Something threw" names a cause; "everything declined" is what
-           is left when nothing else fits, so the fault wins. Ordered by specificity rather than by
-           likelihood, matching EntraBrokerFailure. */
-        var chain = new InvalidOperationException(
+        /* Asserted in BOTH directions, and that is the point. The first assertion alone passes
+           whatever the walk does, because the arm testing the fault marker is written first - it
+           was the whole of this test until a mutation swapped the two arms and nothing failed. The
+           second assertion is the one that discriminates: it can only hold if depth decides, so a
+           bottom-up walk, or one that flattens every message into a single string before matching,
+           fails it. The two markers are prefixes of different sentences and cannot both match one
+           message, so arm order is not observable and only depth is. */
+        var faultOverDeclined = new InvalidOperationException(
             ChainFaultedMessage,
             new InvalidOperationException(ChainDeclinedMessage));
 
         Assert.Equal(
             EntraAmbientCredentialFailureKind.CredentialSourceFaulted,
-            EntraAmbientCredentialFailure.Classify(chain));
+            EntraAmbientCredentialFailure.Classify(faultOverDeclined));
+
+        var declinedOverFault = new InvalidOperationException(
+            ChainDeclinedMessage,
+            new InvalidOperationException(ChainFaultedMessage));
+
+        Assert.Equal(
+            EntraAmbientCredentialFailureKind.NoCredentialFound,
+            EntraAmbientCredentialFailure.Classify(declinedOverFault));
     }
 
     [Fact]
