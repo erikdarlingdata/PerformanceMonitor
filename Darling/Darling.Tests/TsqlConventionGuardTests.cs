@@ -196,8 +196,8 @@ public sealed class TsqlConventionGuardTests
                 Note: "Checked by tokenising, not by line prefix. This codebase does not put an asterisk on a "
                     + "block comment's continuation lines, so a prefix filter reads that prose as code and a "
                     + "comment mentioning the banned form becomes an offender — the #3052 defect "
-                    + "CommentFilterAdoptionTests exists to track. Six files carry a `--` inside block-comment "
-                    + "prose today and none of them is a violation."),
+                    + "CommentFilterAdoptionTests exists to track. Block-comment prose in the scanned trees "
+                    + "carries a `--` where a dash or a flag is meant, and none of those is a violation."),
 
             ["Functions"] = new(
                 Covered: new[] { CountBig, RowcountBig },
@@ -1554,7 +1554,7 @@ public sealed class TsqlConventionGuardTests
 
         /* A GENERIC member with a constraint, where the parameter list follows the > that closed the type
            parameters rather than the name itself. Left unhandled the scan reads past the parameter list
-           into the constraint and answers class. Nine members in the scanned trees carry a where-clause,
+           into the constraint and answers class. The scanned trees do carry members with a where-clause,
            so the shape is real; none of them holds T-SQL, which is why it is arranged here. */
         Assert.Equal(
             "Constrained",
