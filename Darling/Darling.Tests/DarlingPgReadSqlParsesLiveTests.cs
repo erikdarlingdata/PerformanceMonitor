@@ -189,7 +189,9 @@ public sealed class DarlingPgReadSqlParsesLiveTests
 
         /* Attribution breaking is a different fault from a field being uncovered, and reporting it as
            the latter would send the next reader to the wrong file. */
-        var unattributed = declared.Where(d => d.StartsWith(NoDeclaringType, StringComparison.Ordinal)).ToList();
+        var unattributed = declared
+            .Where(d => d.StartsWith(CSharpMemberMap.Unknown + ".", StringComparison.Ordinal))
+            .ToList();
 
         Assert.True(
             unattributed.Count == 0,
@@ -215,12 +217,15 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     /// <c>Type.Field</c> for every <c>const string</c> and <c>static readonly string</c> declared in the
     /// Storage project's <c>DarlingPg*Reader*.cs</c> files, read from the SOURCE.
     ///
-    /// <para>Read through <see cref="CSharpMemberMap"/> — which walks with
+    /// <para>Read through <see cref="CSharpMemberMap.EnclosingType"/> — which walks with
     /// <see cref="CSharpSourceWalker"/> — so a declaration spelled in a doc comment or inside a string
     /// cannot enter the census, and so each field is attributed to the type that DECLARES it rather
     /// than to the file that holds it. The file stem is not the key: it agrees with the type name only
     /// while no reader file is split, and a partial-class split would key half the fields to a name no
-    /// CLR type has.</para>
+    /// CLR type has. Attribution is the SHARED containment scan rather than a private copy of it, so it
+    /// cannot drift from the member-side answer about an unterminated body — a copy here did exactly
+    /// that, treating one as running to EOF where the shared scan escalates to
+    /// <see cref="CSharpMemberMap.Unknown"/>.</para>
     /// </summary>
     private static IReadOnlyList<string> DeclaredStringFields([CallerFilePath] string thisFile = "")
     {
@@ -239,45 +244,11 @@ public sealed class DarlingPgReadSqlParsesLiveTests
 
             foreach (Match match in declaration.Matches(map.Code))
             {
-                fields.Add(EnclosingType(map, match.Index) + "." + match.Groups["name"].Value);
+                fields.Add(CSharpMemberMap.EnclosingType(map, match.Index) + "." + match.Groups["name"].Value);
             }
         }
 
         return fields;
-    }
-
-    /// <summary>What <see cref="CSharpMemberMap.Unknown"/> is for a member, for a TYPE: the name the
-    /// census keys an unattributable field under, so it fails saying the attribution broke rather than
-    /// saying the field is uncovered.</summary>
-    private const string NoDeclaringType = "<no declaring type>";
-
-    /// <summary>
-    /// The innermost <see cref="CSharpMemberMap.DeclarationKind.Type"/> declaration containing
-    /// <paramref name="offset"/>. Innermost rather than nearest-above because a reader file also
-    /// declares its row types, and a field below one of those belongs to whichever type's BODY it sits
-    /// in — which a scan for the closest preceding declaration would get wrong.
-    /// </summary>
-    private static string EnclosingType(CSharpMemberMap.MemberMap map, int offset)
-    {
-        var name = NoDeclaringType;
-        var innermost = -1;
-
-        foreach (var declaration in map.Declarations)
-        {
-            /* End is -1 when the brace walk never closed the body, which means it runs to EOF. */
-            if (declaration.Kind != CSharpMemberMap.DeclarationKind.Type
-                || declaration.Start > offset
-                || (declaration.End >= 0 && offset >= declaration.End)
-                || declaration.Start <= innermost)
-            {
-                continue;
-            }
-
-            name = declaration.Name;
-            innermost = declaration.Start;
-        }
-
-        return name;
     }
 
     [Fact]
