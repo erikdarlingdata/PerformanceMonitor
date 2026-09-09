@@ -448,7 +448,7 @@ public sealed class AlertReadFailureCounter
     /// const-string concatenation is a compile-time constant — so the set cannot grow in one place and
     /// go stale in three. The first draft hand-maintained it and was wrong in both directions at once:
     /// it listed store DISK PRESSURE, whose two feed reads are both exempt (a local filesystem read,
-    /// and a <c>pg_database_size</c> read that is context for the alert text rather than the evidence
+    /// and a recorded-store-size lookup that is context for the alert text rather than the evidence
     /// it is judged on), so that condition can never contribute a failure here; and it omitted the
     /// collector-cost regression self-alert, which does. An operator reading the phantom list would
     /// have hunted a disk-pressure read that cannot fail into this number, and would not have thought
