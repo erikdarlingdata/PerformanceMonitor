@@ -729,6 +729,14 @@ ORDER BY k.index_bytes DESC";
     /// <summary>Per-database: indexes and their catalogs are per-database.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => true;
 
+    /// <summary><c>pgstatindex</c> is the function this MEASURES with, and it is the extension's. A plain
+    /// <c>CREATE EXTENSION</c> with no restart, but in every database wanted — which
+    /// <see cref="RunsPerDatabase"/> above already implies rather than restating here.</summary>
+    public override IReadOnlyList<PgExtensionDependency> RequiredPgExtensions { get; } = new[]
+    {
+        new PgExtensionDependency("pgstattuple", PgExtensionInstallKind.CreateExtension),
+    };
+
     /// <summary>
     /// The one piece of per-server state this collector declares: the rotation cursor's key prefix.
     ///

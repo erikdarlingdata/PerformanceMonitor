@@ -129,6 +129,14 @@ LIMIT 500";
     /// </summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => true;
 
+    /// <summary>Preloaded — it samples inside the planner, so it is inert until a restart loads it — and
+    /// created per database, which needs no second declaration because
+    /// <see cref="RunsPerDatabase"/> above already says so.</summary>
+    public override IReadOnlyList<PgExtensionDependency> RequiredPgExtensions { get; } = new[]
+    {
+        new PgExtensionDependency("pg_qualstats", PgExtensionInstallKind.SharedPreloadLibraries),
+    };
+
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
