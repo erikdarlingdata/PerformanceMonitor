@@ -651,6 +651,50 @@ public sealed class EntraCredentialSelectionTests : IDisposable
     }
 
     /// <summary>
+    /// <para><b>A listener that observed no selection writes NOTHING at the default configuration.</b>
+    /// This is the acceptance criterion for the case where the credential chain found nothing, or where
+    /// the driver's cache means this connection raised no event: it must not record a selection that
+    /// did not happen — not an empty type name, not "unknown", not a line at all on a default
+    /// install.</para>
+    ///
+    /// <para>The <see cref="LogLevel.Debug"/> explanation exists and is asserted separately below, at a
+    /// lowered minimum, because an operator who goes looking should find "the event fires once per
+    /// process" rather than silence. Two different questions, and only this one is about what a shipped
+    /// install writes.</para>
+    ///
+    /// <para>The positive control is the first assertion: a first observation on the same listener type
+    /// at the same level does reach the log, so the emptiness below is a decision about having nothing
+    /// to say rather than a sink that was never wired up.</para>
+    /// </summary>
+    [Fact]
+    public void Report_WritesNothingAtTheDefaultLevel_WhenNoSelectionWasObserved()
+    {
+        Singleton();
+        EntraCredentialSelectionLog.ResetForTests();
+        Assert.Equal(LogLevel.Information, AppLogger.MinimumLevel);
+        AppLogger.DrainBufferedLines();
+
+        using (var observed = new EntraCredentialSelectionListener())
+        {
+            Raise(SelectedMethod, CliCredential);
+            EntraCredentialSelectionLog.Report(observed);
+        }
+
+        Assert.Single(Ours());
+
+        EntraCredentialSelectionLog.ResetForTests();
+
+        using (var silent = new EntraCredentialSelectionListener())
+        {
+            Assert.Null(silent.SelectedCredentialType);
+            Assert.False(silent.RejectedPayload);
+            EntraCredentialSelectionLog.Report(silent);
+        }
+
+        Assert.Empty(Ours());
+    }
+
+    /// <summary>
     /// The same repeat, with the minimum lowered — so "not written at the default" above is a level
     /// decision rather than a <see cref="Report"/> that produced no line at all.
     /// </summary>
