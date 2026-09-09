@@ -388,37 +388,21 @@ public sealed class ViewerQueriesDisplayTests
     /// columns get. <c>query_store_stats</c>' stamps are not in this family: the collector normalises
     /// them to UTC, so they take <c>ViewerTimeHelper.ForDisplay</c> instead (#3207).
     ///
-    /// <para><b>Raw means raw in all three display modes</b>, because
-    /// <c>ViewerTimeHelper</c> has no server-local arm to route through. That is asserted below rather
-    /// than left to be inferred from the absence of a mode argument: Lite's same-named
-    /// <c>ServerTimeHelper.FormatServerClock</c> takes the same frame and DOES honour the Server /
-    /// Local / UTC preference, through <c>ServerTimeHelper.ConvertForDisplay</c>. The shared name is an
-    /// input contract, not shared behaviour, and a reader who assumes otherwise is the reason #3207's
-    /// sites spread.</para>
+    /// <para>Raw means raw in all three display modes, because <c>ViewerTimeHelper</c> has no
+    /// server-local arm to route through — and Lite's same-named
+    /// <c>ServerTimeHelper.FormatServerClock</c> takes the same frame and DOES honour the preference,
+    /// so the shared name is an input contract and not shared behaviour. That fact is asserted by
+    /// <c>ViewerTimeHelperTests.FormatServerClock_IgnoresTheDisplayMode_AtTheFleetOffset</c> rather than
+    /// here: it has to flip the process-wide display-mode static, and only the
+    /// <c>viewer-time-statics</c> collection serializes that. This file holds a live-Postgres class, so
+    /// it is in neither the right collection nor a place a <c>finally</c> belongs.</para>
     /// </summary>
     [Fact]
-    public void FormatServerClock_ShowsRawServerWallClock_InEveryDisplayMode_EmptyForNull()
+    public void FormatServerClock_ShowsRawServerWallClock_EmptyForNull()
     {
         var t = new DateTime(2026, 7, 1, 13, 45, 7);
-        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
-        var savedOffset = ViewerTimeHelper.UtcOffsetMinutes;
-        try
-        {
-            /* The fleet's measured offset, so a renderer that started honouring the mode would move. */
-            ViewerTimeHelper.UtcOffsetMinutes = -240;
-
-            foreach (var mode in new[] { TimeDisplayMode.ServerTime, TimeDisplayMode.LocalTime, TimeDisplayMode.UTC })
-            {
-                ViewerTimeHelper.CurrentDisplayMode = mode;
-                Assert.Equal("2026-07-01 13:45:07", ViewerDataService.FormatServerClock(t));
-                Assert.Equal("", ViewerDataService.FormatServerClock(null));
-            }
-        }
-        finally
-        {
-            ViewerTimeHelper.CurrentDisplayMode = savedMode;
-            ViewerTimeHelper.UtcOffsetMinutes = savedOffset;
-        }
+        Assert.Equal("2026-07-01 13:45:07", ViewerDataService.FormatServerClock(t));
+        Assert.Equal("", ViewerDataService.FormatServerClock(null));
     }
 
     [Fact]
