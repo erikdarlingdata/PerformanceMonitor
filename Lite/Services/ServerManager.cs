@@ -443,7 +443,18 @@ public class ServerManager
             };
 
             using var connection = new SqlConnection(builder.ConnectionString);
-            await connection.OpenAsync();
+
+            /* Observability only: the listener reads one Azure-Identity event and writes the chosen
+               credential's type name. It is non-null for EntraDefaultCredential alone, so every other
+               mode disposes nothing and logs nothing, and the window is exactly this open rather than
+               the life of the process - see EntraCredentialSelectionLog for both lifetime decisions.
+               This is also the site that usually gets there first: the sweep runs on a timer, and the
+               driver's static credential cache means the event fires at most once per process. */
+            using (var credentialSelection = EntraCredentialSelectionLog.Begin(builder))
+            {
+                await connection.OpenAsync();
+                EntraCredentialSelectionLog.Report(credentialSelection);
+            }
 
             // Connection succeeded — server is reachable regardless of DMV permissions below.
             status.IsOnline = true;

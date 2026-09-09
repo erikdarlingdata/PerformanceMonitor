@@ -373,8 +373,20 @@ public partial class AddServerDialog : Window
 
         try
         {
-            using var connection = new SqlConnection(BuildConnectionBuilder().ConnectionString);
-            await connection.OpenAsync();
+            var builder = BuildConnectionBuilder();
+            using var connection = new SqlConnection(builder.ConnectionString);
+
+            /* Observability only, window exactly this open, non-null for EntraDefaultCredential alone
+               - see EntraCredentialSelectionLog. Instrumented here AS WELL AS in ServerManager, not
+               instead of it: the event fires at most once per process, so whichever site opens the
+               first EntraDefaultCredential connection is the only one that can observe it, and which
+               one that is depends on whether a server was already saved when the sweep ran. */
+            using (var credentialSelection = EntraCredentialSelectionLog.Begin(builder))
+            {
+                await connection.OpenAsync();
+                EntraCredentialSelectionLog.Report(credentialSelection);
+            }
+
             using var cmd = new SqlCommand("SELECT @@VERSION", connection);
             var version = await cmd.ExecuteScalarAsync() as string;
             serverVersion = version?.Split('\n')[0]?.Trim();
