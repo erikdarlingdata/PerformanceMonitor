@@ -265,6 +265,10 @@ public sealed class ReadmeDerivedCountPinTests
     {
         var readme = ReadReadme();
 
+        /* Both facts over SetPins() iterate it, so an EMPTY SetPins() would pass both while checking
+           nothing — a pin that cannot fail, which is the shape this whole file exists to refuse. */
+        Assert.NotEmpty(SetPins());
+
         foreach (var (name, pattern, expected, extract) in SetPins())
         {
             AssertSetPin(readme, name, pattern, expected(), extract);
@@ -334,6 +338,8 @@ public sealed class ReadmeDerivedCountPinTests
                 Assert.Equal(want[i] + 1, values[i]);
             }
         }
+
+        Assert.NotEmpty(SetPins());
 
         foreach (var (name, pattern, expected, extract) in SetPins())
         {
