@@ -128,8 +128,11 @@ public sealed class EntraCredentialSelectionTests : IDisposable
     ///
     /// <para>Read off <see cref="EventWrittenEventArgs.PayloadNames"/> rather than the reflected
     /// method signature, because the name the runtime reports is what actually accompanies the
-    /// payload — and the two can disagree. The count assertion is the control: an empty
-    /// <c>PayloadNames</c> (which some event formats produce) would make an index check vacuous.</para>
+    /// payload — and the two can disagree. Some event formats carry no payload names at all, so the
+    /// count is asserted first for the MESSAGE rather than as a control: an empty list makes
+    /// <c>names[0]</c> throw, which fails either way — measured, by discarding the names and
+    /// deleting the count assertion — so this says "this pin needs rewriting" instead of leaving
+    /// someone an index-out-of-range to diagnose.</para>
     /// </summary>
     [Fact]
     public void PayloadSlotZero_IsTheCredentialType_OnARealWrittenEvent()
