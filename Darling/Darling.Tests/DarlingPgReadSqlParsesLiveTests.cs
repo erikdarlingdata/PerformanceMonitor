@@ -232,24 +232,50 @@ public sealed class DarlingPgReadSqlParsesLiveTests
         var storage = Path.GetFullPath(Path.Combine(
             Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Storage"));
 
-        var declaration = new Regex(
-            @"(?:const|static\s+readonly)\s+string\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=",
-            RegexOptions.Compiled);
-
         var fields = new List<string>();
 
         foreach (var path in Directory.EnumerateFiles(storage, "DarlingPg*Reader*.cs", SearchOption.TopDirectoryOnly))
         {
             var map = CSharpMemberMap.Of(File.ReadAllText(path));
 
-            foreach (Match match in declaration.Matches(map.Code))
+            foreach (var declaration in map.Declarations)
             {
-                fields.Add(CSharpMemberMap.EnclosingType(map, match.Index) + "." + match.Groups["name"].Value);
+                /* Anchored at a DECLARATION, not matched anywhere in the file. A free regex for
+                   `const string X =` also matches a LOCAL const inside a method body — C# allows
+                   those — and reflection only ever sees static fields, so such a local would sit in
+                   `missing` permanently and the only way to quiet it would be putting a local into
+                   NotQueryFields, which is for fields that hold no query rather than for things the
+                   pattern over-matched. CSharpMemberMap.DeclarationHead requires an access modifier,
+                   which a local cannot carry, so anchoring here is what excludes them. */
+                if (declaration.Kind != CSharpMemberMap.DeclarationKind.Member
+                    || declaration.NextStart <= declaration.Start)
+                {
+                    continue;
+                }
+
+                var head = map.Code[declaration.Start..Math.Min(declaration.NextStart, map.Code.Length)];
+
+                if (!StaticStringField.IsMatch(head))
+                {
+                    continue;
+                }
+
+                fields.Add(CSharpMemberMap.EnclosingType(map, declaration.Start) + "." + declaration.Name);
             }
         }
 
         return fields;
     }
+
+    /// <summary>A <c>const string</c> or <c>static readonly string</c> field, matched from the START of
+    /// a declaration <see cref="CSharpMemberMap"/> already found — so declaration POSITION comes from the
+    /// shared walk and this pattern only has to say which declarations are static string fields. The
+    /// modifier run is bounded to one line because a wrapped declaration would put the name out of reach
+    /// of the name the map read; the count floor below is what would catch that if one ever wraps.</summary>
+    private static readonly Regex StaticStringField = new(
+        @"\A[ \t]*(?:public|private|protected|internal)\b[^\r\n=]*?"
+        + @"\b(?:const|static[ \t]+readonly|readonly[ \t]+static)[ \t]+string[ \t]+",
+        RegexOptions.Compiled);
 
     [Fact]
     public async Task EveryShippedPostgreSqlReadPassesParseAnalysis()
