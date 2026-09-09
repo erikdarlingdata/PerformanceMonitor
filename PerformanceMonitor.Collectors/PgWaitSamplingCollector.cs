@@ -160,6 +160,16 @@ LIMIT 500";
     /// </summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
+    /// <summary>
+    /// Preloaded, and the restart is the reason an operator sees nothing here for so long. This is
+    /// the one dependency <c>PgExtensionAvailabilityCollector</c>'s roster deliberately omits, so a
+    /// consumer reading that roster as the dependency set misses exactly this collector.
+    /// </summary>
+    public override IReadOnlyList<PgExtensionDependency> RequiredPgExtensions { get; } = new[]
+    {
+        new PgExtensionDependency("pg_wait_sampling", PgExtensionInstallKind.SharedPreloadLibraries),
+    };
+
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]

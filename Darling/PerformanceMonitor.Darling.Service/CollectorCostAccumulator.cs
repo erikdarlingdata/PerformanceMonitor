@@ -29,9 +29,19 @@ namespace PerformanceMonitor.Darling.Service;
 /// preserves the TAIL — a single 555s execution is how a collector sticks out on a target, and an hourly
 /// average would hide it.</para>
 ///
-/// <para>sql_ms is a DURATION on the target (it includes waits), not pure CPU — a slow collector may be
-/// latch-waiting rather than burning CPU. It still holds a connection/slot and competes, which is the
-/// point of watching it.</para>
+/// <para>sql_ms is a DURATION (it includes waits), not pure CPU — a slow collector may be latch-waiting
+/// rather than burning CPU. It still holds a connection/slot and competes, which is the point of watching
+/// it.</para>
+///
+/// <para><b>"On the target" is not true of every collector, and the exception is the most expensive one
+/// (#3192).</b> <c>CollectorRunResult.SqlMs</c> is the driver's SQL slice, and on the ENUMERATED path that
+/// slice wraps the per-item watermark refresh and the deferred plan/text fetches — all of which touch the
+/// STORE. For <c>query_store</c> the store probe and write are the majority of it (107,334 of 124,972 ms on
+/// one measured run; 55.4% of <c>plan_fetch</c> and 80.6% of <c>text_fetch</c> fleet-wide per V110). This
+/// series cannot be corrected for it: it aggregates the blended figure in memory and flushes an hourly
+/// total, so there is no phase split to subtract and no source table to re-derive from. That bound is why
+/// the number is left alone and named instead — <c>get_collector_cost</c> carries the caveat and
+/// <c>get_collection_log</c>'s <c>sql_store_ms</c> carries the per-run attribution.</para>
 /// </summary>
 public sealed class CollectorCostAccumulator
 {

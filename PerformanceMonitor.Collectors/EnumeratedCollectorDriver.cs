@@ -18,7 +18,13 @@ using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Collectors;
 
-/// <summary>Per-run outcome of the enumeration driver: rows written and the summed SQL/storage slice times.</summary>
+/// <summary>Per-run outcome of the enumeration driver: rows written and the summed SQL/storage slice times.
+///
+/// <para><see cref="SqlMs"/> is the SLICE, not a target-side total (#3192): it is the sum of each item's
+/// stopwatch around <c>perItemWatermark</c> plus <c>readItem</c>, and both of those legitimately touch the
+/// HOST STORE. See <c>RunAsync</c>'s <c>readItem</c> parameter for the measured magnitude and for the
+/// <see cref="CollectorContext"/> stamps that let a host attribute it.</para>
+/// </summary>
 public readonly record struct EnumeratedRunResult(int Rows, long SqlMs, long StorageMs);
 
 /// <summary>
@@ -631,6 +637,18 @@ public static class EnumeratedCollectorDriver
     /// <param name="readItem">
     /// The SQL phase: builds the per-item query, runs it, and materializes the batch. Returns a non-null
     /// (possibly empty) list. Its wall time is summed into <see cref="EnumeratedRunResult.SqlMs"/>.
+    ///
+    /// <para><b>Whatever this closure does is billed to <see cref="EnumeratedRunResult.SqlMs"/>, including
+    /// work against the HOST STORE (#3192).</b> That is not a target-side total, and on this driver's
+    /// heaviest caller it is mostly not target-side at all: <c>query_store</c>'s closure calls the deferred
+    /// plan-XML and statement-text fetches, each of which round-trips the store to learn what content is
+    /// already held and then writes back what came off the target, and one measured production run put
+    /// 107,334 ms of a 124,972 ms <c>SqlMs</c> in the store against 6,494 ms of target time. The same is true
+    /// of <paramref name="perItemWatermark"/> above, whose read and clamp-path write are also inside this
+    /// stopwatch. <see cref="CollectorContext"/> carries the phase stamps that let a host attribute it —
+    /// <c>PerItemWatermarkMs</c>, <c>PerItemPlan/TextProbeMs</c> and <c>PerItemPlan/TextWriteMs</c> are the
+    /// store terms — and a host that persists <c>SqlMs</c> as a target-side figure without them is publishing
+    /// a number that answers the opposite of the question it appears to.</para>
     /// </param>
     /// <param name="writeBatch">
     /// The storage phase: writes ONE item's batch to the host store. Skipped for an empty batch. Its wall
@@ -645,8 +663,16 @@ public static class EnumeratedCollectorDriver
     /// <param name="onItemError">Per-item skip log, invoked when one item fails (offline DB, timeout, permissions).</param>
     /// <param name="perItemBudget">
     /// Wall-clock ceiling for one item's watermark refresh plus its read (#2150), from
-    /// <c>ICollectorDefinition.PerItemWallClockBudget</c>. Null (every collector but <c>query_store</c>) leaves
-    /// the loop exactly as it was. Exceeding it abandons THAT item as a per-item failure and continues;
+    /// <c>ICollectorDefinition.PerItemWallClockBudget</c>. Null for a collector that declares none, which
+    /// leaves the loop exactly as it was.
+    ///
+    /// <para>Not "every collector but <c>query_store</c>", which is what this said and what
+    /// <see cref="StartItemBudget"/> said with it. FOUR definitions declare a budget —
+    /// <c>CollectorCatalog.HasWallClockBudget</c>'s own doc calls them "the four budgeted heavies" — and TWO
+    /// of them also enumerate, so <c>plan_correction</c> reaches this parameter non-null as well. The other
+    /// two are server-scoped, so this driver never sees theirs. Stated relationally rather than as a name,
+    /// because the count is derived from the catalog by a test: a hardcoded name is correct until the fifth
+    /// collector earns a budget, with nothing to say so.</para> Exceeding it abandons THAT item as a per-item failure and continues;
     /// the WRITE is deliberately outside the budget, because abandoning a flush that is already underway
     /// would trade a slow cycle for a partially-written one.
     /// </param>
@@ -750,8 +776,9 @@ public static class EnumeratedCollectorDriver
     }
 
     /// <summary>
-    /// Starts one item's wall-clock budget (#2150), or returns null when the definition declares none —
-    /// which is every collector but <c>query_store</c>, so the unbounded path stays byte-identical.
+    /// Starts one item's wall-clock budget (#2150), or returns null when the definition declares none, so
+    /// the unbounded path stays byte-identical for every collector that declares no budget. Which is most of
+    /// them but not only <c>query_store</c> — see <c>RunAsync</c>'s <c>perItemBudget</c> parameter.
     ///
     /// <para>A LINKED source, so host shutdown still cancels the item promptly; the timer only adds a
     /// second reason to stop. Callers must pass <see cref="CancellationTokenSource.Token"/> to the work

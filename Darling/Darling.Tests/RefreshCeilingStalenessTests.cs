@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -21,8 +22,9 @@ namespace Darling.Tests;
 /// that reading sits against its slot.
 ///
 /// <para><b>The defect these cases are written against.</b>
-/// <see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/> is recorded as the maximum of
-/// a closed population. Runs above it happened, and every one of them classified
+/// <see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/> is recorded as a PREFIX
+/// MAXIMUM — the largest run its regime had been recorded to make when it was read, which a later run of
+/// the same regime joins and can exceed (#3188). Runs above it happened, and every one of them classified
 /// <see cref="TimescaleSupport.RefreshSlotHeadroom.InsideSlot"/> and logged at Debug, because a run can be
 /// past the recorded ceiling and still a long way inside the window the grid gives it. So the product had a
 /// signal for "the slot is exceeded" and no signal at all for "the number the grid was DERIVED from is
@@ -436,6 +438,134 @@ public sealed class RefreshCeilingStalenessTests
             $"new {nameof(RefreshCeilingStalenessWatch)}()", ServiceSweepBody(worker),
             StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The sweep's own comment does not describe <see cref="TimescaleSupport.CompressionPhaseGuardMinutes"/>
+    /// as the light-refresh ceiling rounded up (#3188) — a PRESENT-TENSE claim about a derivation the code
+    /// no longer has.
+    ///
+    /// <para><b>Why this is a test and why it lives here.</b> #3188 declared that width and swept every
+    /// site in <c>TimescaleSupport.cs</c> to say the relationship in the past tense. It did not sweep the
+    /// CALL SITE, which sat in another project and went on telling a reader that the ceiling was arithmetic
+    /// INPUT to the width. That is the drift the whole change is about, one file over — and the prose pins
+    /// in <c>RefreshCeilingProvenancePinTests</c> could not see it, because they read the doc runs of the
+    /// declaration rather than the comments of its callers. This file already reads the real worker source
+    /// for the wiring case above, so the check goes where the reader already is.</para>
+    ///
+    /// <para><b>SENTENCE-SCOPED, and the first version of this pin got that wrong in a way worth recording
+    /// rather than quietly fixing.</b> It matched the member and <c>rounded up</c> as two anchors within a
+    /// 160-character window. In the shipped file those anchors are <b>287</b> characters apart, so the
+    /// pattern found ZERO matches on the one real occurrence: the rule still fired for an ADJACENT claim
+    /// (which is what its mutation case had injected and proved), while the past-tense allowance branch was
+    /// never reached by anything and the shipped text passed because the regex could not see it. A window is
+    /// a number someone chooses about prose that is free to get longer. This scopes to the SENTENCE
+    /// containing <c>rounded up</c> instead, so there is no distance to fall short of.</para>
+    ///
+    /// <para><b>What it does NOT cover, stated because "the file I happened to sweep" is how this got
+    /// here.</b> It reads the worker and nothing else — <c>TimescaleSupport.cs</c>' half is
+    /// <see cref="RefreshCeilingProvenancePinTests.NoGuardWidth_IsDerivedFromAMeasurement"/>, which forbids
+    /// the expression itself, and every other project is unchecked. And it flags ANY unqualified
+    /// <c>rounded up</c> in the worker rather than only one about this width: there is exactly one such
+    /// mention today and it is about this width, so the broader rule costs nothing and fails toward
+    /// flagging. A future mention about something else has to say so.</para>
+    ///
+    /// <para><b>THREE POSITIVE CONTROLS, because green is not evidence a pin reached its subject.</b> This
+    /// is the third pin in this change to pass while asserting nothing — the first was an equality that
+    /// held on a numeric coincidence after its subject was deleted, the second a clause short-circuited by
+    /// an assertion above it, the third this window. All three needed something other than a green suite to
+    /// find. So: the walk has to FIND a sentence to judge; the rule has to FIRE on the defect's own
+    /// historical wording, injected into a copy; and the ALLOWANCE has to be what lets the current text
+    /// pass, checked by removing it. A pin over prose must prove it found the prose before it can prove
+    /// anything about it.</para>
+    /// </summary>
+    [Fact]
+    public void TheSweepsComment_DoesNotDescribeTheGuardWidthAsDerivedFromTheCeiling()
+    {
+        var worker = ReadDarlingWorkerSource();
+
+        /* CONTROL 1 - the walk reached its subject. Zero sentences mentioning the rounding is exactly what a
+           splitter that read nothing looks like, and it is indistinguishable from a clean file on the rule
+           below. This is the assertion the windowed version did not have. */
+        Assert.NotEmpty(SentencesMentioningRounding(worker));
+
+        /* CONTROL 2 - the rule FIRES on the defect's own wording. The sentence below is what shipped before
+           #3188, verbatim; a rule that had stopped being able to see its subject fails here rather than
+           reporting a clean file. */
+        var withTheDefectBack = worker.Replace(
+            "Their ceiling is what",
+            "CompressionPhaseGuardMinutes IS that constant rounded up to a whole minute, so a light refresh "
+            + "running past it leaves a compression policy able to start. Their ceiling is what",
+            StringComparison.Ordinal);
+        Assert.NotEqual(worker, withTheDefectBack);
+        Assert.NotEmpty(StaleDerivationClaims(withTheDefectBack));
+
+        /* CONTROL 3 - the ALLOWANCE is what lets the shipped text pass, not blindness. Strip the past-tense
+           marker and the same sentence has to be flagged. This is the case the 160-character window could
+           not have passed: with no match at all, removing the marker changed nothing. */
+        var withoutThePastTense = worker.Replace(
+            "It used to be the width's INPUT, rounded up to a whole",
+            "It is the width's INPUT, rounded up to a whole",
+            StringComparison.Ordinal);
+        Assert.NotEqual(worker, withoutThePastTense);
+        Assert.NotEmpty(StaleDerivationClaims(withoutThePastTense));
+
+        /* THE RULE. */
+        var stale = StaleDerivationClaims(worker);
+        Assert.True(stale.Count == 0,
+            "DarlingWorker.cs describes CompressionPhaseGuardMinutes as the light-refresh ceiling rounded up "
+            + "without saying that is what it USED TO BE. That width is DECLARED since #3188 and derives from "
+            + "no measurement, so the comment states something false about the code beside it — and it points "
+            + "a reader at the wrong remedy, because a ceiling past the width is now a scheduling decision "
+            + "rather than a renumbering. Say it in the past tense, or say what the relationship is now. If "
+            + "this mention is about something other than the guard's width, say that instead: "
+            + string.Join(" | ", stale));
+
+        /* And the positive half of the CONTENT, so a comment that dropped the relationship entirely is not a
+           pass: a reader not told which way it goes reads the finding's remedy as "re-derive the guard". */
+        Assert.Contains("DECLARED width is checked against", worker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every sentence in <paramref name="source"/> that mentions rounding up — the unit the claim lives in,
+    /// which is why this pin no longer measures a distance between two anchors.
+    /// </summary>
+    private static IReadOnlyList<string> SentencesMentioningRounding(string source) =>
+        SentenceBoundary.Split(source)
+            .Where(sentence => sentence.Contains("rounded up", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+    /// <summary>
+    /// The sentences that state the rounding WITHOUT saying it is history. Empty is the passing answer, and
+    /// <see cref="SentencesMentioningRounding"/> being non-empty is what makes that answer mean something.
+    /// </summary>
+    private static IReadOnlyList<string> StaleDerivationClaims(string source) =>
+        SentencesMentioningRounding(source)
+            .Where(sentence => !PastTenseMarkers.Any(
+                marker => sentence.Contains(marker, StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+
+    /// <summary>
+    /// A sentence end: a period followed by whitespace. Deliberately NOT a period alone —
+    /// <c>TimescaleSupport.CompressionPhaseGuardMinutes</c> and <c>10.0.302</c> carry periods with no space
+    /// after them, and splitting on those would cut a claim in half and hide it.
+    /// </summary>
+    private static readonly Regex SentenceBoundary = new(
+        @"(?<=\.)\s", RegexOptions.Compiled);
+
+    /// <summary>
+    /// What makes a "rounded up" mention honest: it is describing what the width USED TO BE. Matched
+    /// case-insensitively, because the file emphasises with capitals and a case-sensitive allowance would
+    /// flag correct prose for its typography.
+    ///
+    /// <para><b>Kept SHORT deliberately, because every entry here is a WIDENING of the allowance and an
+    /// allowance is the direction that costs.</b> An earlier version carried <c>was </c> and
+    /// <c>it used</c> as well. Both admit present-tense sentences: "the band it used is rounded up to a
+    /// whole minute" carries <c>it used</c> and claims the derivation, and <c>was </c> matches almost
+    /// anything. A marker that matches more than it means does not make this pin stricter — it makes the
+    /// rule skip a sentence it should have flagged, which is the same failure as a window that does not
+    /// reach. Two entries, each of which can only be about the past.</para>
+    /// </summary>
+    private static readonly string[] PastTenseMarkers = ["used to", "before #3188"];
 
     /// <summary>
     /// A MEASURED reading, quoted as evidence rather than derived: the clean 17:00Z run of 2026-09-08, whose

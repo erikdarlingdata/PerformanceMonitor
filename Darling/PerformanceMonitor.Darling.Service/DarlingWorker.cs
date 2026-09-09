@@ -4447,11 +4447,13 @@ LIMIT 1";
             readClock.Restart();
 
             /* And the same question for the OTHER twelve hourly refreshes, which had no live reading keyed
-               to a view anywhere in the product before #3182. Their ceiling is not merely asserted against:
-               CompressionPhaseGuardMinutes IS that constant rounded up to a whole minute, so a light refresh
-               running past it leaves a compression policy able to start while the refresh still holds
-               AccessShareLock — #3012's convoy. One constant covers all twelve, so the rate limit is keyed
-               on the constant and the loop cannot make it twelve times looser than it reads. */
+               to a view anywhere in the product before #3182. Their ceiling is what
+               CompressionPhaseGuardMinutes' DECLARED width is checked against (#3188), so a light refresh
+               running past that width leaves a compression policy able to start while the refresh still
+               holds AccessShareLock — #3012's convoy. It used to be the width's INPUT, rounded up to a whole
+               minute, and the difference is which way the failure goes: a longer light refresh widened the
+               width silently, and now it goes red. One constant covers all twelve, so the rate limit is
+               keyed on the constant and the loop cannot make it twelve times looser than it reads. */
             foreach (var lightRefresh in await TimescaleSupport.ReadOtherHourlyRefreshRuntimesAsync(
                 connection, _logger, cancellationToken))
             {

@@ -186,6 +186,21 @@ internal sealed class DarlingSelfAlertEvaluator
     /// alone cannot tell that answer from a genuinely new one. Mirrors #2704's
     /// <c>PoisonWaitDelta.CollectionTime</c> fix for the identical shape of bug.</summary>
     private readonly ConcurrentDictionary<string, DateTime> _lastCostRegressionDataPoint = new();
+    /// <summary>
+    /// #3192: the figure this condition fires on is <c>collect.collector_cost.total_sql_ms</c>, which is the
+    /// driver's SQL slice — and on the enumerated path that slice contains the per-item watermark refresh and
+    /// the deferred plan/text fetches, all of which touch the monitoring STORE. So a <c>query_store</c>
+    /// regression here can be the store getting slower rather than the target, and the alert used to say
+    /// flatly that it was "cost on the target". Appended rather than folded into the sentence above so the
+    /// text stays one substitution away from being re-worded, and stated on the alert itself because that is
+    /// where the reader is when the inference gets made.
+    /// </summary>
+    private const string CostIsNotAllTargetSide =
+        "NOTE: on collectors that fetch plan XML or statement text (query_store), part of this figure is the "
+        + "monitoring STORE's own probe and write rather than the monitored server - they run inside the same "
+        + "per-item stopwatch. get_collection_log's sql_store_ms attributes it per run; this series carries no "
+        + "phase split.";
+
     private const double CostRegressionFactor = 2.0;
     private const long CostRegressionBaselineFloorMs = 1000;
     private static readonly TimeSpan CostRegressionBaselineWindow = TimeSpan.FromDays(14);
@@ -697,8 +712,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// FLEET-level (not per-server): the tool's OWN collectors regressing in cost ON the monitored servers
     /// (#2674) — the self-monitoring that makes a collector "sticking out" on a target page us instead of
     /// hiding in a log. Reads <c>collect.collector_cost</c> for per-(server, collector) pairs whose latest
-    /// day's target-side query time exceeds their own baseline (see the thresholds above), fires once per pair
+    /// day's query time exceeds their own baseline (see the thresholds above), fires once per pair
     /// on entry, re-fires on the cooldown while it stays regressed, and resolves the moment it drops back.
+    ///
+    /// <para>"ON the monitored servers" is the series' intent and not always what it measures (#3192): the
+    /// figure rolls up the driver's SQL slice, which on the enumerated path contains the store's own
+    /// plan/text probe and write-back. So a <c>query_store</c> regression here can be the STORE getting
+    /// slower rather than the target, and the fired alert says so — see
+    /// <see cref="CostIsNotAllTargetSide"/>, which exists because this doc and that text have to agree.</para>
     /// Called once per cycle from the worker's hourly store-metrics tick, AFTER the flush that writes the
     /// latest hour. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
@@ -759,10 +780,10 @@ internal sealed class DarlingSelfAlertEvaluator
                     detail: $"The '{regression.CollectorName}' collector's OWN query time on {regression.ServerName} rose to " +
                         $"{regression.LatestMsPerRun:N1} ms per run, {ratio:N1}x its {CostRegressionBaselineWindow.TotalDays:N0}-day " +
                         $"baseline of {regression.BaselineMsPerRun:N1} ms per run ({regression.LatestRuns:N0} runs totalling " +
-                        $"{regression.LatestMs:N0} ms so far today). This is the MONITORING TOOL's cost on the target, not the " +
-                        $"server's own workload - each individual run is costing more than it used to. Measured PER RUN (#2846) so " +
+                        $"{regression.LatestMs:N0} ms so far today). This is the MONITORING TOOL's own cost, not the " +
+                        $"server's workload - each individual run is costing more than it used to. Measured PER RUN (#2846) so " +
                         $"a cadence change cannot read as a cost change. get_collector_cost with " +
-                        $"collector_name={regression.CollectorName} shows the trend.",
+                        $"collector_name={regression.CollectorName} shows the trend. {CostIsNotAllTargetSide}",
                     severity: AlertSeverityLevel.Warning,
                     shortMessage: $"{regression.CollectorName} collection cost on {regression.ServerName} is {ratio:N1}x its per-run baseline",
                     numericCurrentValue: regression.LatestMsPerRun,
