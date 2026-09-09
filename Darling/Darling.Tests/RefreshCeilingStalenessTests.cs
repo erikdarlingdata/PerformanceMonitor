@@ -21,8 +21,9 @@ namespace Darling.Tests;
 /// that reading sits against its slot.
 ///
 /// <para><b>The defect these cases are written against.</b>
-/// <see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/> is recorded as the maximum of
-/// a closed population. Runs above it happened, and every one of them classified
+/// <see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/> is recorded as a PREFIX
+/// MAXIMUM — the largest run its regime had been recorded to make when it was read, which a later run of
+/// the same regime joins and can exceed (#3188). Runs above it happened, and every one of them classified
 /// <see cref="TimescaleSupport.RefreshSlotHeadroom.InsideSlot"/> and logged at Debug, because a run can be
 /// past the recorded ceiling and still a long way inside the window the grid gives it. So the product had a
 /// signal for "the slot is exceeded" and no signal at all for "the number the grid was DERIVED from is

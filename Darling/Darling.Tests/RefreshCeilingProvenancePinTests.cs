@@ -87,6 +87,17 @@ namespace Darling.Tests;
 /// <see cref="Verify"/> requires that it CONSUMED every pin in <see cref="Pins"/>, because a pattern defined
 /// in the list and never asserted against anything looks exactly like a pattern doing work.</para>
 ///
+/// <para><b>And the #3188 half, which pins a DECISION rather than a figure.</b> Two of these guards hold
+/// prose to prose instead of prose to arithmetic, because what they protect is not a number: the estimator
+/// and the closure rule are stated in ONE paragraph that has to be word-for-word identical on both ceiling
+/// constants (<see cref="BothCeilings_StateOneEstimatorAndOneClosureRule_WordForWord"/>), and the
+/// proposition that paragraph and <see cref="TimescaleSupport.RefreshSlotHeadroom.SlotExceeded"/>'s Error
+/// band are two sides of has to appear at every site that states it
+/// (<see cref="TheSlotExceededBand_AndBothCeilings_StateOneProposition"/>). Neither can be derived from a
+/// constant, which is exactly why #3182 produced four wrong published claims with this whole file green:
+/// every FIGURE was correct arithmetic over a population the sentence above it mislabelled. Held as
+/// identity and presence rather than as wording, so an honest rewrite passes and a rewrite that moves one
+/// site without the others does not.</para>
 /// <para><b>And the SCOPING rule, held file-wide rather than only where it is stated (#3133).</b>
 /// <see cref="Verify"/> requires the ceiling paragraph's live-envelope population to carry a CLOSED scope;
 /// <see cref="NoOpenPopulationClaim_SurvivesOutsideTheSentenceThatRejectsIt"/> requires the rest of the
@@ -805,6 +816,186 @@ public sealed class RefreshCeilingProvenancePinTests
             "two doc runs combined into a population claim neither of them makes, so the run separator is "
             + "being absorbed by a pattern's whitespace class. Keep the separator non-whitespace: \\s "
             + "matches \\n in .NET, so a newline cannot hold two runs apart.");
+    }
+
+    /* ───────────── #3188: one estimator, one closure rule, one proposition ───────────── */
+
+    /// <summary>
+    /// The paragraph that states the estimator and what closes its population, matched by its own opening so
+    /// it cannot be confused with the derivation recipe that also carries an <c>ESTIMATOR:</c> clause.
+    /// </summary>
+    private const string SharedEstimatorMarker =
+        "<para>THE ESTIMATOR, AND WHAT CLOSES THE POPULATION IT IS TAKEN OVER";
+
+    /// <summary>
+    /// The quantifier the grid's precondition is, named once so the Error band and the two constants cannot
+    /// state it differently. <see cref="TheSlotExceededBand_AndBothCeilings_StateOneProposition"/> is what
+    /// requires it at every site.
+    /// </summary>
+    private const string UniversalOverRunsToken = "UNIVERSAL over runs";
+
+    /// <summary>
+    /// What a maximum over a population a read instant merely stopped reading actually is. Required at the
+    /// same sites, because the two claims are one: the constant is evidence for the universal over the runs
+    /// it saw, which is why a later run can overtake it without any figure here being wrong.
+    /// </summary>
+    private const string PrefixMaximumToken = "PREFIX MAXIMUM";
+
+    /// <summary>The band whose Error is the falsification, addressed by its own declaration line.</summary>
+    private const string SlotExceededMember = "        SlotExceeded,";
+
+    /// <summary>
+    /// The estimator and the closure rule are ONE paragraph, and it is word-for-word identical on both
+    /// ceiling constants (#3188).
+    ///
+    /// <para><b>Identity rather than presence, and that is the whole of the pin.</b> #3182's four wrong
+    /// published claims were all made by reading one of these constants' method and applying it to the
+    /// other, and both summaries were internally careful at the time. Requiring each to STATE an estimator
+    /// would have passed then. Requiring the two statements to be the same string cannot: a decision
+    /// re-taken on one constant alone is red here, which is the only property that makes the pair safe to
+    /// read as a pair.</para>
+    ///
+    /// <para><b>What the paragraph has to contain is checked too, so an identical pair of paragraphs that
+    /// says nothing is not a pass.</b> The estimator, the closure rule, and the two tokens the Error band
+    /// shares with it.</para>
+    /// </summary>
+    [Fact]
+    public void BothCeilings_StateOneEstimatorAndOneClosureRule_WordForWord()
+    {
+        var source = ReadTimescaleSupportSource();
+        var shared = new List<string>();
+
+        foreach (var declaration in new[] { CeilingDeclaration, LightCeilingDeclaration })
+        {
+            var prose = DocProseFor(source, declaration);
+
+            var start = prose.IndexOf(SharedEstimatorMarker, StringComparison.Ordinal);
+            Assert.True(start >= 0,
+                $"'{declaration}' carries no shared estimator paragraph. It opens with "
+                + $"\"{SharedEstimatorMarker}\" and states the estimator and the closure rule for BOTH "
+                + "ceiling constants; a constant without it has no stated estimator this file can hold to "
+                + "its sibling's.");
+            Assert.True(
+                prose.IndexOf(SharedEstimatorMarker, start + 1, StringComparison.Ordinal) < 0,
+                $"'{declaration}' carries the shared estimator paragraph more than once, so this pin is not "
+                + "comparing one known paragraph");
+
+            var end = prose.IndexOf("</para>", start, StringComparison.Ordinal);
+            Assert.True(end > start,
+                $"'{declaration}''s shared estimator paragraph is not closed by </para>, so the slice this "
+                + "pin compares runs to the end of the summary");
+
+            var paragraph = prose[start..(end + "</para>".Length)];
+
+            Assert.Contains("ESTIMATOR: the maximum", paragraph, StringComparison.Ordinal);
+            Assert.Contains("CLOSURE:", paragraph, StringComparison.Ordinal);
+            Assert.Contains(UniversalOverRunsToken, paragraph, StringComparison.Ordinal);
+            Assert.Contains(PrefixMaximumToken, paragraph, StringComparison.Ordinal);
+
+            shared.Add(paragraph);
+        }
+
+        Assert.Equal(2, shared.Count);
+        Assert.Equal(shared[0], shared[1]);
+    }
+
+    /// <summary>
+    /// No <c>ESTIMATOR:</c> clause anywhere in the file names anything but the maximum (#3188).
+    ///
+    /// <para><b>Why a file-wide shape and not a check on the two constants.</b> A percentile estimator is
+    /// rejected on a ground that is not about either constant's population: what a ceiling constant carries
+    /// is the EVIDENCE for a universal over runs, and a percentile below the width the grid gives the job is
+    /// compatible with part of its own population being above that width — the negation of the claim the
+    /// grid rests on. That argument holds for any ceiling this file gains, so the guard is written over the
+    /// clause rather than over the two sites that carry it today.</para>
+    ///
+    /// <para>Read out of JOINED doc prose, because the recipe clauses wrap: one of them has
+    /// <c>ESTIMATOR: the</c> at the end of a <c>///</c> line and <c>maximum.</c> at the start of the next,
+    /// so a line-oriented scan reads a clause that names nothing and passes.</para>
+    /// </summary>
+    [Fact]
+    public void NoEstimatorClause_NamesAnythingButTheMaximum()
+    {
+        var declared = Regex.Matches(JoinedDocProse(ReadTimescaleSupportSource()), @"ESTIMATOR: ([^.,;]+)");
+
+        Assert.NotEmpty(declared);
+        Assert.All(declared, match => Assert.Equal("the maximum", match.Groups[1].Value.Trim()));
+    }
+
+    /// <summary>
+    /// The Error band and both ceiling constants state ONE proposition, at every site that states it
+    /// (#3188) — which is the half of the estimator decision that lives outside the constants.
+    ///
+    /// <para><b>The conflict this resolves, stated as the two claims rather than as a worry.</b>
+    /// <see cref="TimescaleSupport.RefreshSlotHeadroom.SlotExceeded"/>'s Error says the grid's stated
+    /// precondition is FALSE. That precondition is a universal over runs, so one run at or past the window
+    /// is a witness and the verdict is sound under any estimator. What it is NOT is a claim the constant
+    /// could establish: a prefix maximum is evidence over the runs it was measured on. The two are one
+    /// proposition read from its two sides — and a percentile ceiling would break that, because it would
+    /// assert at build time the very condition the band reports. So both sides have to say so, and a
+    /// wording that moved on one side only would leave the pair contradicting each other silently, which is
+    /// the state #3188 was filed on.</para>
+    ///
+    /// <para><b>Including the two LIVE messages, which is where the contradiction actually shipped.</b> The
+    /// staleness Warning said its constant was "the MAXIMUM of a closed population" and then that the
+    /// population "has been overtaken" — a closed population cannot be overtaken, and an operator reading
+    /// that line was being told the constant was wrong when what was true is that it had been overtaken by
+    /// a later member. Held as a forbidden SHAPE in either order, because a contradiction has as many
+    /// wordings as it has sites.</para>
+    /// </summary>
+    [Fact]
+    public void TheSlotExceededBand_AndBothCeilings_StateOneProposition()
+    {
+        var source = ReadTimescaleSupportSource();
+
+        foreach (var declaration in new[] { CeilingDeclaration, LightCeilingDeclaration, SlotExceededMember })
+        {
+            var prose = DocProseFor(source, declaration);
+
+            Assert.Contains(UniversalOverRunsToken, prose, StringComparison.Ordinal);
+            Assert.Contains(PrefixMaximumToken, prose, StringComparison.Ordinal);
+        }
+
+        /* THE TWO LIVE MESSAGES. Each is one source line, and MessageLineContaining requires exactly one
+           line to carry its anchor - so a pin aimed at a message that had been split, renamed or duplicated
+           reports a parse miss instead of reading the wrong literal. */
+        var slotError = MessageLineContaining(source, "at or past the {Slot}s window it has to fit inside");
+        Assert.Contains(UniversalOverRunsToken, slotError, StringComparison.Ordinal);
+        Assert.Contains(PrefixMaximumToken, slotError, StringComparison.Ordinal);
+
+        var staleness = MessageLineContaining(source, "which is {Over:F1}s ABOVE {Constant}");
+        Assert.Contains(PrefixMaximumToken, staleness, StringComparison.Ordinal);
+
+        /* AND THE CONTRADICTION THAT HAD TO GO, in either order and file-wide rather than in the one
+           message that carried it. A double-quote bounds the window, so a match cannot run from one prose
+           region through a cref attribute into another. */
+        var contradiction = Regex.Matches(
+            source,
+            @"closed population[^""]{0,160}?\b(?:overtaken|falsified|exceeded)\b"
+            + @"|\b(?:overtaken|falsified|exceeded)\b[^""]{0,160}?closed population");
+
+        Assert.Empty(contradiction);
+    }
+
+    /// <summary>
+    /// The single source line carrying <paramref name="anchor"/> — the shape the two live messages have, so
+    /// a token pin can read one known literal rather than a window around an index.
+    ///
+    /// <para>Exactly one, and a parse miss otherwise: zero means the message was reworded and the pin is
+    /// reading nothing, more than one means it is reading whichever came first. Both are indistinguishable
+    /// from a pass on the token check alone.</para>
+    /// </summary>
+    private static string MessageLineContaining(string source, string anchor)
+    {
+        var hits = source.Split('\n')
+            .Where(line => line.Contains(anchor, StringComparison.Ordinal))
+            .ToArray();
+
+        Require(hits.Length == 1,
+            $"{ParseMiss}: '{anchor}' appears on {hits.Length} source lines rather than one, so this pin is "
+            + "not reading one known message literal");
+
+        return hits[0];
     }
 
     /* ─────────────────────────────── verification ─────────────────────────────── */
