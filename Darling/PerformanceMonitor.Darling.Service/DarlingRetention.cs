@@ -1053,8 +1053,9 @@ public static class DarlingRetention
                per-table and the summary is fleet-wide.
 
                The CUTOFF, because it is not the retention knob and reading it as the knob is a live trap:
-               ComputeDimensionCutoff subtracts the configured days PLUS a one-day margin for the hourly
-               last_seen refresh, so counting rows older than the knob value overstates what is eligible by
+               ComputeDimensionCutoff subtracts the configured days PLUS a one-day margin for the
+               last_seen refresh guard (QueryStoreLivenessTouchGuard.GuardHours wide, itself a stated share
+               of that margin), so counting rows older than the knob value overstates what is eligible by
                a full day of ingest — on this table that is hundreds of thousands of rows, which reads as a
                backlog retention is failing to clear when it is simply not due yet.
 
