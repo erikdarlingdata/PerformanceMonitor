@@ -60,9 +60,31 @@ namespace PerformanceMonitorLite.Tests;
 /// the <see cref="LogLevel.Information"/> line this class expects to be admitted is never enqueued
 /// at all. Sharing the collection name serialises the two classes, which is the whole mechanism.</para>
 ///
-/// <para><c>EntraCredentialSelectionModeGateTests</c> and <c>EntraCredentialSelectionOrderingTests</c>
-/// deliberately do NOT join: neither touches <see cref="AppLogger"/>, and a collection name that
-/// serialises classes which cannot race with each other costs suite time for nothing.</para>
+/// <para><b>And a SECOND process-wide static, which is why that collection name now covers more than
+/// its name says.</b> This class raises real events on <c>Azure.Identity</c>'s
+/// <c>AzureIdentityEventSource</c> singleton and constructs <see cref="EventListener"/>s over it, and
+/// both are process-wide: enabling an <see cref="EventSource"/> is a global effect, and a raised event
+/// is delivered to EVERY listener attached to that source anywhere in the process.
+/// <c>EntraCredentialSelectionModeGateTests</c> calls <c>Begin</c>, so it constructs real listeners on
+/// the same source — it therefore joins the same collection. Not because it touches
+/// <see cref="AppLogger"/>, which it does not, but because a class cannot be in two collections: a
+/// separate name for the event-source hazard would fail to serialise it against THIS class, which is
+/// the one pairing that matters.</para>
+///
+/// <para>Harmless today and that is a separate fact from being safe: the mode-gate class never reads a
+/// listener's captured state and never calls <c>Report</c>, so a synthetic event landing in its
+/// listener changes no assertion of its own. The condition that would make it bite is that class — or
+/// any future one — reading <c>SelectedCredentialType</c>, <c>RejectedPayload</c>, or calling
+/// <c>Report</c>. Serialising now costs two small classes' parallelism and removes the question.</para>
+///
+/// <para><c>EntraCredentialSelectionOrderingTests</c> stays out, and is the case that shows the rule is
+/// about REACH rather than about subject matter: it is entirely about this feature, and it reads source
+/// files only — no <see cref="AppLogger"/>, no listener, no event source, nothing process-wide to
+/// share.</para>
+///
+/// <para>These are the only <see cref="EventListener"/> subclasses and the only <c>Azure-Identity</c>
+/// consumers anywhere in the repository, measured rather than assumed, so no third party can observe
+/// the events raised here today.</para>
 /// </remarks>
 [Collection("app-logger-statics")]
 public sealed class EntraCredentialSelectionTests : IDisposable

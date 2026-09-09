@@ -67,6 +67,14 @@ namespace PerformanceMonitorLite.Tests;
 /// nothing. Any further class that reads the log joins it too; a class that merely WRITES through the
 /// adapter still does not need to, and adding it would serialise the suite for no benefit.</para>
 ///
+/// <para><b>The name now covers two unrelated process-wide statics, which is a consequence of xUnit's
+/// model rather than a taxonomy choice.</b> <c>EntraCredentialSelectionTests</c> and
+/// <c>EntraCredentialSelectionModeGateTests</c> also share <c>Azure.Identity</c>'s process-wide event
+/// source — one raises events on it, the other attaches listeners to it. A class can belong to only one
+/// collection, so a second name for that hazard would have failed to serialise those two against each
+/// other. One name, two reasons, and the reasons are recorded at each member rather than inferred from
+/// the name.</para>
+///
 /// <para><b>Why a separate name rather than joining <c>app-alert-statics</c>.</b> Its five members touch
 /// <c>App</c>'s alert-settings statics and make no <c>AppLogger</c> calls at all, so joining them would
 /// serialise this class against classes that cannot race with it while still not serialising the five

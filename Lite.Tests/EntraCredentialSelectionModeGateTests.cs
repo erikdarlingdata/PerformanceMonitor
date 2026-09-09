@@ -33,6 +33,21 @@ namespace PerformanceMonitorLite.Tests;
 /// Windows-only credential storage; the listener pins themselves need none of that and run in a
 /// plain <c>net10.0</c> harness on any platform.</para>
 /// </summary>
+/// <remarks>
+/// <para><b>In <c>app-logger-statics</c> for the event source, not for the log.</b> Nothing here
+/// touches <see cref="PerformanceMonitorLite.Services.AppLogger"/> — but both pins call
+/// <c>Begin</c>, which constructs a real <see cref="System.Diagnostics.Tracing.EventListener"/> over
+/// <c>Azure.Identity</c>'s process-wide event source, and <c>EntraCredentialSelectionTests</c> raises
+/// real events on that same source. A raised event reaches every listener attached to it anywhere in
+/// the process.</para>
+///
+/// <para>It changes no assertion here today, because these pins only ask whether <c>Begin</c> returned
+/// a listener and never read what one captured. Joined anyway, and joined to THAT name rather than a
+/// new one: a class can only be in one collection, so a separate event-source collection would leave
+/// the one pairing that matters — this class against the class that raises the events —
+/// unserialised.</para>
+/// </remarks>
+[Collection("app-logger-statics")]
 public class EntraCredentialSelectionModeGateTests
 {
     /// <summary>
