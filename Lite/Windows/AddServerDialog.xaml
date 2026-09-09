@@ -85,6 +85,9 @@
                 <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Non-interactive Azure SQL auth using the managed identity of the Azure resource running Lite."/>
+                <RadioButton x:Name="EntraDefaultAuthRadio" Content="Azure — Existing Sign-_In (az login)" Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthMode_Changed" Margin="0,4,0,0"
+                             ToolTip="Signs in as the Azure identity already established on this machine — an az login session, an Azure PowerShell session, a Visual Studio sign-in, the AZURE_CLIENT_ID/AZURE_CLIENT_SECRET environment variables, or a managed identity. Never prompts, and does not use the Windows account broker that Microsoft Entra MFA depends on. Requires one of those to exist already."/>
             </StackPanel>
         </StackPanel>
 
@@ -122,6 +125,20 @@
                      ToolTip="Leave blank to use the system-assigned managed identity. Set to a client id to use a specific user-assigned identity."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
                        Text="Managed Identity only works when Lite is running on an Azure VM / resource that has a managed identity assigned — not on a typical workstation. Use Service Principal for non-interactive auth from a workstation."/>
+        </StackPanel>
+
+        <!-- Existing Azure sign-in (ActiveDirectoryDefault). No input fields: the mode takes no
+             parameters, because the credential it uses is established outside this app. The panel
+             exists only to state the precondition BEFORE the test button is pressed - this mode
+             never prompts, so a machine with no Azure sign-in on it gets a failure rather than a
+             sign-in window, and a user who learns that from the failure has learned it too late. -->
+        <StackPanel Grid.Row="7" x:Name="EntraDefaultPanel" Visibility="Collapsed" Margin="0,0,0,12">
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
+                       Text="Signs in as the Azure identity already established on this machine, and never shows a prompt. It looks for, in order: the AZURE_CLIENT_ID / AZURE_CLIENT_SECRET environment variables, a workload identity, a managed identity, a Visual Studio or VS Code sign-in, an Azure CLI session (az login), an Azure PowerShell session, and an Azure Developer CLI session. If none of those exists, the connection fails — it will not ask you to sign in. Run &quot;az login&quot; in a terminal first if you are not sure."/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
+                       Text="Because the list is searched in that order, this connects as whichever identity comes first — not necessarily the one you signed into Windows with. If several are set up on this machine and you need a specific identity, use Azure — Service Principal, which names it."/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
+                       Text="Unlike Microsoft Entra MFA, this never asks the Windows account broker for anything, so the broker cannot refuse it. That is the failure this option exists to route around — but it has not yet been confirmed against a live Microsoft Entra tenant, so please report what happens."/>
         </StackPanel>
 
         <!-- Connection Options -->

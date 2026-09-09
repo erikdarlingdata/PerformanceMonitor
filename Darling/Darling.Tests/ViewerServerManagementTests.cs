@@ -212,7 +212,8 @@ public sealed class ViewerCommandSqlTests
     }
 }
 
-/// <summary>The pure auth mapping — the service honors integrated + SQL only; the three Azure/Entra modes block.</summary>
+/// <summary>The pure auth mapping — the service honors integrated + SQL only; every Azure/Entra mode blocks,
+/// including any added later, because the mapping is a whitelist with a null default.</summary>
 public sealed class ServerStoreCredentialTests
 {
     [Theory]
@@ -228,6 +229,7 @@ public sealed class ServerStoreCredentialTests
     [InlineData(AuthenticationTypes.EntraMFA)]
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     public void MapAuth_AzureModes_AreUnsupported(string authType)
     {
         Assert.Null(ServerStoreCredential.MapAuth(authType));
@@ -342,6 +344,7 @@ public sealed class ViewerServerMigrationTests
     [InlineData(AuthenticationTypes.EntraMFA)]
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     public void Projection_AzureAuth_IsSkipped(string authType)
     {
         using var fixture = new Fixture();
@@ -513,6 +516,7 @@ public sealed class BulkServerOnboardingMappingTests
     [InlineData(AuthenticationTypes.EntraMFA)]
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     public void BuildMonitoredServerRow_AzureAuth_IsRejected_TheBelt(string authType)
     {
         // The trimmed radios never offer these, but a picked profile could resolve to one — the mapping helper

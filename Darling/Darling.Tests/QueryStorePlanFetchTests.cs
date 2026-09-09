@@ -218,11 +218,13 @@ public class QueryStorePlanFetchTests
     {
         var sql = QueryStorePlanMap.TouchAndProbeSql;
 
-        /* The liveness half (Finding 3): map and dim last_seen stamped by the same pass, hourly-guarded,
-           and the dim update skips the NULL-digest content-less markers — there is no dim row to touch. */
+        /* The liveness half (Finding 3): map and dim last_seen stamped by the same pass, both guarded at the
+           same width, and the dim update skips the NULL-digest content-less markers — there is no dim row to
+           touch. The width itself belongs to QueryStoreTouchGuardSingleSourceTests: counting a literal here
+           would be a third copy of it, and this pin's job is the statement's SHAPE. */
         Assert.Contains("UPDATE collect.query_store_plan_map", sql, StringComparison.Ordinal);
         Assert.Contains("UPDATE collect.query_plan_dim", sql, StringComparison.Ordinal);
-        Assert.Equal(2, CountOf(sql, "interval '1 hour'"));
+        Assert.Equal(2, CountOf(sql, QueryStoreLivenessTouchGuard.GuardInterval));
         Assert.Contains("FROM map_touch WHERE digest IS NOT NULL", sql, StringComparison.Ordinal);
 
         /* Hash adoption: legacy rows (stored hash NULL) take the batch's live hash on first touch — never
@@ -247,7 +249,7 @@ public class QueryStorePlanFetchTests
         var sql = QueryStoreTextStore.TouchAndProbeSql;
 
         Assert.Contains("UPDATE collect.query_store_text", sql, StringComparison.Ordinal);
-        Assert.Contains("interval '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreLivenessTouchGuard.GuardInterval, sql, StringComparison.Ordinal);
         Assert.Contains("query_hash = COALESCE(t.query_hash, x.live_hash)", sql, StringComparison.Ordinal);
         Assert.Contains("(t.query_id IS NOT NULL) AS resolved", sql, StringComparison.Ordinal);
         Assert.Contains("t.query_hash IS NOT NULL AND batch.query_hash IS NOT NULL", sql, StringComparison.Ordinal);

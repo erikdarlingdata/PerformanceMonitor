@@ -157,6 +157,7 @@ public class AzureAuthConnectionStringTests
     [InlineData(AuthenticationTypes.EntraMFA, "Microsoft Entra MFA")]
     [InlineData(AuthenticationTypes.SqlServer, "SQL Server")]
     [InlineData(AuthenticationTypes.Windows, "Windows")]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential, "Azure — Existing Sign-In (az login)")]
     public void AuthenticationDisplay_MapsEachMode(string authType, string expected)
     {
         var server = new ServerConnection { AuthenticationType = authType };
@@ -184,6 +185,7 @@ public class AzureAuthConnectionStringTests
     [InlineData(AuthenticationTypes.EntraMFA)]
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     public void BuildSites_ProduceIdenticalAuthShape_PerMode(string authType)
     {
         // Production builder (ServerConnection) call shape: (username, password, AzureClientId, ManagedIdentityClientId).

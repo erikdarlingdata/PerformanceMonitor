@@ -97,15 +97,21 @@ WHERE EXCLUDED.last_seen >= query_store_text.last_seen";
     /// <summary>
     /// The text side's liveness touch and missing-set probe (#2312), the single-table sibling of
     /// <see cref="QueryStorePlanMap.TouchAndProbeSql"/>: refresh <c>last_seen</c> for every statement the
-    /// cycle's batch references (hourly-guarded, same write-amplification argument), adopt the batch's
-    /// <c>query_hash</c> where the stored one is NULL (legacy rows from before the column existed), and
-    /// return per batch row whether the store already holds the text and whether the stored hash still
-    /// matches the live one. <c>hash_stale</c> is the Query Store RESET detector: ids renumber, so id 5
-    /// carrying a different hash means it now names a different statement and its text must be refetched —
-    /// per-id, within one cycle, where the retired watermark design re-walked the whole catalog daily to
-    /// eventually notice.
+    /// cycle's batch references, adopt the batch's <c>query_hash</c> where the stored one is NULL (legacy
+    /// rows from before the column existed), and return per batch row whether the store already holds the
+    /// text and whether the stored hash still matches the live one. <c>hash_stale</c> is the Query Store
+    /// RESET detector: ids renumber, so id 5 carrying a different hash means it now names a different
+    /// statement and its text must be refetched — per-id, within one cycle, where the retired watermark
+    /// design re-walked the whole catalog daily to eventually notice.
+    ///
+    /// <para>The guard is <see cref="QueryStoreLivenessTouchGuard.GuardInterval"/>, the same width the plan
+    /// side's two sites carry and written in exactly one place, for the same write-amplification argument:
+    /// the horizons are multi-day, so one update per row per window is enough freshness. This table shares
+    /// the constant rather than carrying its own copy, and the width is derived from the SMALLER of the two
+    /// prune margins — this table's <see cref="PruneMarginDays"/> is the wider of them, so the shared width
+    /// is conservative here rather than merely adequate.</para>
     /// </summary>
-    public const string TouchAndProbeSql = @"WITH touched AS (
+    public static readonly string TouchAndProbeSql = @"WITH touched AS (
     SELECT t.server_id, t.database_name, t.query_id, batch.query_hash AS live_hash
     FROM collect.query_store_text AS t
     JOIN unnest($1::integer[], $2::text[], $3::bigint[], $4::text[])
@@ -113,7 +119,7 @@ WHERE EXCLUDED.last_seen >= query_store_text.last_seen";
       ON  batch.server_id = t.server_id
       AND batch.database_name = t.database_name
       AND batch.query_id = t.query_id
-    WHERE t.last_seen < $5::timestamp - interval '1 hour'
+    WHERE t.last_seen < $5::timestamp - " + QueryStoreLivenessTouchGuard.GuardInterval + @"
     ORDER BY t.server_id, t.database_name, t.query_id
 ),
 text_touch AS (
