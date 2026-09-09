@@ -62,8 +62,22 @@ public sealed class DarlingMcpDefaultTraceToolsSurfaceAndSqlTests
         Assert.All(p, x => Assert.True(x.Item2, $"{x.Item1} must be optional"));
     }
 
+    /// <summary>
+    /// #3198: the stored <c>event_time</c> is the Default Trace <c>StartTime</c> — the monitored server's
+    /// LOCAL wall clock — so this read de-skews it to naive UTC by the collected offset and both RETURNS and
+    /// WINDOWS that one expression. The half that was missing is the projection: skewing the bounds into the
+    /// local frame selects exactly the right rows, so the filter looked correct while every returned
+    /// timestamp came back a whole UTC offset from the frame of <c>as_of</c>, <c>collection_time</c> and
+    /// <c>last_collection</c>. At UTC-4 that renders a 04:28 event as 00:28, which reads as having PRECEDED
+    /// the 04:28 collector error it actually coincided with.
+    ///
+    /// <para>Asserted as the same three expressions <c>ViewerSystemEventsTests</c> pins on
+    /// <c>ViewerDataService.DefaultTraceEventsByWindowSql</c>, because the two constants read the same column
+    /// out of the same store and a second convention on one of them is worse than either convention.
+    /// <c>ServerLocalReadFrameDisciplineTests</c> holds the corpus-level version of that.</para>
+    /// </summary>
     [Fact]
-    public void EventsByWindowSql_ReadsBaseTables_WindowsOnServerLocalEventTime()
+    public void EventsByWindowSql_ReadsBaseTables_DeSkewsLocalEventTimeToUtc_AndWindowsOnIt()
     {
         var sql = DarlingDefaultTraceReader.EventsByWindowSql;
 
@@ -74,16 +88,22 @@ public sealed class DarlingMcpDefaultTraceToolsSurfaceAndSqlTests
         Assert.DoesNotContain("v_default_trace_events", string.Join(",", PgSchemaGenerator.AllPassthroughViews));
 
         Assert.Contains("dte.server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY dte.event_time DESC", sql, StringComparison.Ordinal);
 
-        /* The window bounds (UTC) are converted to the server's LOCAL frame — the Default Trace StartTime is
-           server-local — by the collected utc_offset_minutes (0 when none yet). */
+        /* De-skew by the collected utc_offset_minutes (single-row COALESCE CTE, 0 when none yet), returned
+           AND windowed AND ordered as the one expression. */
         Assert.Contains("server_properties", sql, StringComparison.Ordinal);
         Assert.Contains("utc_offset_minutes", sql, StringComparison.Ordinal);
-        Assert.Contains("make_interval(mins => svr.offset_minutes)", sql, StringComparison.Ordinal);
         Assert.Contains("COALESCE(", sql, StringComparison.Ordinal);
+        Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc", sql, StringComparison.Ordinal);
+        Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY event_time_utc DESC", sql, StringComparison.Ordinal);
+
+        /* And no bare occurrence survives: a bound skewed INTO the local frame is the shape that shipped, and
+           it selects the same rows, so only the absence of this form distinguishes fixed from broken. */
+        Assert.DoesNotContain("$2 + make_interval", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$3 + make_interval", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY dte.event_time", sql, StringComparison.Ordinal);
 
         /* Postgres dialect, positional params (no @, no now()/getdate). */
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);

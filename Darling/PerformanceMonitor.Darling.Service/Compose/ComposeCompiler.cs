@@ -494,10 +494,33 @@ public static class ComposeCompiler
         return results;
     }
 
+    /// <summary>The per-server latest collected UTC offset, joined in for a
+    /// <see cref="AnnotationClockFrame.ServerLocal"/> annotation source. Keyed on <c>server_name</c> because
+    /// that is the column an annotation query already scopes on, and <c>DISTINCT ON</c> because each server
+    /// carries its own offset — one panel routinely overlays several servers at once, so a single scalar
+    /// would de-skew all of them by whichever server answered first. Every identifier here is a compiler
+    /// constant; the join adds no parameter.</summary>
+    private const string ServerOffsetJoin =
+        "LEFT JOIN (\n"
+        + "        SELECT DISTINCT ON (server_name) server_name, utc_offset_minutes\n"
+        + "        FROM " + PgSchemaGenerator.CollectSchema + ".server_properties\n"
+        + "        WHERE utc_offset_minutes IS NOT NULL\n"
+        + "        ORDER BY server_name, collection_time DESC\n"
+        + "      ) AS o ON o.server_name = f.server_name\n";
+
     /// <summary>Compiles one annotation source into its bounded, catalog-only, schema-qualified event query:
-    /// <c>SELECT f.&lt;timeCol&gt; AS ts, f.&lt;labelCol&gt; AS label FROM collect.&lt;table&gt; AS f WHERE
-    /// f.&lt;timeCol&gt; BETWEEN $1 AND $2 [AND f.server_name = ANY($3)] ORDER BY ts LIMIT
-    /// &lt;MaxAnnotationEvents&gt;</c>. Every identifier is a catalog constant; every value is bound.</summary>
+    /// <c>SELECT &lt;ts&gt; AS ts, f.&lt;labelCol&gt; AS label FROM collect.&lt;table&gt; AS f WHERE
+    /// &lt;ts&gt; BETWEEN $1 AND $2 [AND f.server_name = ANY($3)] ORDER BY ts LIMIT
+    /// &lt;MaxAnnotationEvents&gt;</c>. Every identifier is a catalog constant; every value is bound.
+    ///
+    /// <para><c>&lt;ts&gt;</c> is the bare <c>f.&lt;timeCol&gt;</c> for a UTC source and the de-skewed
+    /// <c>f.&lt;timeCol&gt; - make_interval(mins =&gt; COALESCE(o.utc_offset_minutes, 0))</c> for a
+    /// <see cref="AnnotationClockFrame.ServerLocal"/> one, and the SAME expression both returns and bounds —
+    /// the measure query it decorates buckets on naive-UTC <c>collection_time</c>, so a server-local marker
+    /// would be selected from the wrong slice and drawn at the wrong x-position. <c>LEFT JOIN</c> with
+    /// <c>COALESCE(..., 0)</c> keeps a server whose <c>server_properties</c> has not been collected yet:
+    /// treating its clock as UTC is the same fallback the reader-side de-skews take, and it beats dropping
+    /// the server's markers with no explanation.</para></summary>
     private static ComposeCompiled CompileAnnotation(ComposeAnnotationSource source, ComposeRunContext context)
     {
         var p = new ParamList();
@@ -505,14 +528,24 @@ public static class ComposeCompiler
         var endParam = p.AddTimestamp(context.EndUtc);
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        var serverLocal = source.Frame == AnnotationClockFrame.ServerLocal;
+
+        var ts = serverLocal
+            ? $"{FactAlias}.{source.TimeColumn} - make_interval(mins => COALESCE(o.utc_offset_minutes, 0))"
+            : $"{FactAlias}.{source.TimeColumn}";
 
         var sql = new StringBuilder();
-        sql.Append("SELECT ").Append(FactAlias).Append('.').Append(source.TimeColumn).Append(" AS ts, ")
+        sql.Append("SELECT ").Append(ts).Append(" AS ts, ")
             .Append(FactAlias).Append('.').Append(source.LabelColumn).Append(" AS label\n");
         sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append('.').Append(source.SourceTable)
             .Append(" AS ").Append(FactAlias).Append('\n');
-        sql.Append("WHERE ").Append(FactAlias).Append('.').Append(source.TimeColumn).Append(" >= ").Append(startParam).Append('\n');
-        sql.Append("  AND ").Append(FactAlias).Append('.').Append(source.TimeColumn).Append(" <= ").Append(endParam).Append('\n');
+        if (serverLocal)
+        {
+            sql.Append("      ").Append(ServerOffsetJoin);
+        }
+
+        sql.Append("WHERE ").Append(ts).Append(" >= ").Append(startParam).Append('\n');
+        sql.Append("  AND ").Append(ts).Append(" <= ").Append(endParam).Append('\n');
         if (hasServerScope)
         {
             sql.Append("  AND ").Append(FactAlias).Append(".server_name = ANY(").Append(serverScopeParam).Append(")\n");
