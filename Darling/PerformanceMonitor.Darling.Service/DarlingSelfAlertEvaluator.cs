@@ -712,8 +712,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// FLEET-level (not per-server): the tool's OWN collectors regressing in cost ON the monitored servers
     /// (#2674) — the self-monitoring that makes a collector "sticking out" on a target page us instead of
     /// hiding in a log. Reads <c>collect.collector_cost</c> for per-(server, collector) pairs whose latest
-    /// day's target-side query time exceeds their own baseline (see the thresholds above), fires once per pair
+    /// day's query time exceeds their own baseline (see the thresholds above), fires once per pair
     /// on entry, re-fires on the cooldown while it stays regressed, and resolves the moment it drops back.
+    ///
+    /// <para>"ON the monitored servers" is the series' intent and not always what it measures (#3192): the
+    /// figure rolls up the driver's SQL slice, which on the enumerated path contains the store's own
+    /// plan/text probe and write-back. So a <c>query_store</c> regression here can be the STORE getting
+    /// slower rather than the target, and the fired alert says so — see
+    /// <see cref="CostIsNotAllTargetSide"/>, which exists because this doc and that text have to agree.</para>
     /// Called once per cycle from the worker's hourly store-metrics tick, AFTER the flush that writes the
     /// latest hour. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>

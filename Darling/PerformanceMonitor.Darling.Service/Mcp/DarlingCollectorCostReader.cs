@@ -22,8 +22,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para>Two reads: the ranked fleet summary over a window (total and per-run cost, and the TAIL — the
 /// worst single execution, which is how a collector "sticks out" on a target), and a per-collector daily
-/// trend that both the panel charts and the self-alert's baseline consume. sql_ms is a DURATION on the
-/// target, not pure CPU.</para>
+/// trend that both the panel charts and the self-alert's baseline consume. sql_ms is a DURATION, not pure
+/// CPU.</para>
+///
+/// <para><b>And not reliably a TARGET-side duration either (#3192)</b>, which is why the word is absent
+/// above and from the members below. It rolls up <c>CollectorRunResult.SqlMs</c>, and on the enumerated path
+/// that is the driver's per-item stopwatch around the watermark refresh and the whole <c>readItem</c> closure
+/// — so for <c>query_store</c> the store's plan/text probe and write-back are inside it, measured at 107,334
+/// of 124,972 ms on one production run. This series carries no phase split and is flushed hourly from an
+/// in-memory accumulator, so nothing here can subtract it;
+/// <c>get_collection_log</c>'s <c>sql_store_ms</c> is where the attribution lives.</para>
 /// </summary>
 internal static class DarlingCollectorCostReader
 {
@@ -65,7 +73,8 @@ ORDER BY day";
         long TotalRows,
         int ServerCount)
     {
-        /// <summary>Average target-side duration per run, over the window. Zero when nothing ran.</summary>
+        /// <summary>Average duration per run, over the window. Zero when nothing ran. NOT purely target-side
+        /// on the plan/text-fetching collectors — see this class's remarks (#3192).</summary>
         public long AvgSqlMs => RunCount > 0 ? TotalSqlMs / RunCount : 0;
     }
 
@@ -120,7 +129,7 @@ ORDER BY day";
 
         return rows;
     }
-    /// <summary>A collector whose most-recent day's target-side cost regressed against its own baseline
+    /// <summary>A collector whose most-recent day's cost regressed against its own baseline
     /// (#2674) — the self-alert's detection query. Per (server, collector): latest day's cost PER RUN vs the
     /// run-weighted cost per run of the prior days in the window, returned only when the baseline is
     /// meaningful (total >= floor, and at least 3 prior days so a new collector cannot trip it) and the

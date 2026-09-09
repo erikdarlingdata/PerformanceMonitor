@@ -2896,8 +2896,10 @@ const DEFAULT_TRACE_COLUMNS = [
    that header was false. The deferred fetches run inside the driver's per-item SQL stopwatch and each one
    round-trips the STORE before writing back what came off the target, so a measured 107,334 ms of a
    124,972 ms query_store figure was the monitoring store -- 86% -- under a header naming the monitored
-   server. Headed "SQL" now, matching what the WPF viewer's grid has always called it, with the store share
-   in its own column beside it. "Store (in SQL)" is blank on the ~98% of runs that perform no deferred
+   server. Headed "SQL" now, matching what the WPF viewer's grid has always called it - the HEADER only: that
+   grid has no "Store (in SQL)" breakout and cannot get one cheaply, because its row type and both backing
+   queries are verbatim copies of Lite's and Lite runs no deferred fetch. Its own comment says so. Here the
+   store share does get its own column beside the total. "Store (in SQL)" is blank on the ~98% of runs that perform no deferred
    fetch, and blank there means "nothing to attribute", not "no store time": the per-item watermark refresh
    is a store read inside the same stopwatch and is recorded nowhere, which is why that column is a floor
    and "On Store" (the binary COPY of the collected rows) is not where the probe went either. */

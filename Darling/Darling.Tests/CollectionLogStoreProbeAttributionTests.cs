@@ -256,6 +256,41 @@ public class CollectionLogStoreProbeAttributionTests
         Assert.Equal(2, CountOccurrences(source, "+ StoreProbeCaveat"));
         Assert.DoesNotContain("target-side query DURATION", source, StringComparison.Ordinal);
 
+        /* The READER the fixed tool calls through, and the evaluator doc sitting above the fixed alert text.
+           Review found three copies in the first and one in the second, uncorrected - a description that
+           refuses the claim while the code it reads through still asserts it is the same defect one file
+           over, so the sweep is by PHRASE across the whole call path rather than per site. */
+        foreach (var path in new[]
+                 {
+                     "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingCollectorCostReader.cs",
+                     "Darling/PerformanceMonitor.Darling.Service/DarlingSelfAlertEvaluator.cs",
+                     "Darling/PerformanceMonitor.Darling.Service/CollectorCostAccumulator.cs",
+                 })
+        {
+            /* FLATTENED first, and this is the whole reason the helper exists rather than a bare
+               DoesNotContain. Mutation-testing this pin caught it: restoring "a DURATION on the target" put
+               the phrase across a doc-comment line break, so the exact-substring form matched nothing and
+               reported GREEN on the very claim it was written to forbid. A pin that cannot fail is worse
+               than no pin, because it certifies the defect. Every phrase below is swept against prose whose
+               `///` continuations and whitespace runs have been collapsed, so wrapping cannot hide it. */
+            var text = FlattenDocProse(ReadSource(path));
+
+            Assert.DoesNotContain("target-side cost", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("target-side duration", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("target-side query time", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("DURATION on the target", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("duration on the target", text, StringComparison.Ordinal);
+
+            /* Positive control for the five negatives, per file: each one really does still discuss the
+               figure, so none of them is passing against a file that has stopped saying anything. */
+            Assert.Contains("sql_ms", text, StringComparison.Ordinal);
+
+            /* And a control on the FLATTENER, per file, because a helper that returned the empty string
+               would make every negative above pass. A wrapped phrase this fix deliberately kept must be
+               findable through it. */
+            Assert.Contains("monitored servers", text, StringComparison.Ordinal);
+        }
+
         var log = ToolDescription(typeof(DarlingMcpDataTools), nameof(DarlingMcpDataTools.GetCollectionLog));
         Assert.Contains("sql_store_ms", log, StringComparison.Ordinal);
         Assert.Contains("UPPER bound", log, StringComparison.Ordinal);
@@ -375,6 +410,68 @@ public class CollectionLogStoreProbeAttributionTests
            so 0 == 0 cannot be what is passing. */
         Assert.True(CountOccurrences(driver, "every collector but") > 0);
         Assert.True(CountOccurrences(runner, "every collector but") > 0);
+    }
+
+    /// <summary>
+    /// Lite does NOT have the defect, and the pin is here so nobody "fixes" it into having one.
+    ///
+    /// <para>Review read this PR and concluded Lite's <c>query_store</c> "has the identical store-probe
+    /// contamination" because Lite sums the same <c>driverResult.SqlMs</c> from the same shared driver. It
+    /// does not. The fetches are gated on <c>CollectorContext.CapturePlanXml</c> and
+    /// <c>FetchQueryTextSeparately</c>, and Lite sets neither — that is what makes Darling the plan-capturing
+    /// SKU — so no probe and no write-back ever runs there. What Lite DOES share is the watermark shape: its
+    /// <c>query_store</c> reaches the driver's <c>perItemWatermark</c>, which reads its local store inside the
+    /// slice. So Lite's description gains that precision and explicitly disclaims the probe half, and this
+    /// test asserts the disclaimer rather than the correction — a Lite description that CLAIMED store-probe
+    /// time would be asserting a cost that cannot be incurred, and would send someone building V110-equivalent
+    /// DuckDB columns that could only ever be NULL.</para>
+    /// </summary>
+    [Fact]
+    public void LiteNeverRunsTheFetches_SoItsDescriptionDisclaimsTheProbeRatherThanInheritingTheCaveat()
+    {
+        /* The gates, from the shipped context: Lite sets neither, so the probe cannot run there. Asserted
+           against the Lite source rather than trusted from V110's prose. */
+        var liteRunner = ReadSource("Lite/Services/RemoteCollectorService.DefinitionRunner.cs");
+        Assert.DoesNotContain("CapturePlanXml = true", liteRunner, StringComparison.Ordinal);
+        Assert.DoesNotContain("FetchQueryTextSeparately = true", liteRunner, StringComparison.Ordinal);
+
+        /* Positive control: that file really is Lite's enumerated runner, so the two negatives are not
+           passing against a file that has moved. */
+        Assert.Contains("EnumeratedCollectorDriver.RunAsync<TRow>(", liteRunner, StringComparison.Ordinal);
+
+        /* And it really does reach the watermark delegate, which is the part that DOES carry over. */
+        Assert.Contains("perItemWatermark:", liteRunner, StringComparison.Ordinal);
+
+        /* Lite's description read as SOURCE rather than by reflection: Darling.Tests deliberately holds no
+           ProjectReference to Lite, and reading Lite .cs across the seam is the pattern #2839 established for
+           exactly this. Sliced to the one tool's attribute so a sibling tool's text cannot satisfy it. */
+        var liteTools = ReadSource("Lite/Mcp/McpHealthTools.cs");
+        var at = liteTools.IndexOf("Name = \"get_collection_log\"", StringComparison.Ordinal);
+        Assert.True(at > 0, "Could not locate Lite's get_collection_log tool.");
+        var lite = liteTools[at..liteTools.IndexOf(")]", at, StringComparison.Ordinal)];
+
+        Assert.Contains("watermark refresh", lite, StringComparison.Ordinal);
+        Assert.Contains("never enables the deferred", lite, StringComparison.Ordinal);
+
+        /* The disclaimer, not the caveat: Lite must not advertise a store-probe share it cannot have, and
+           must not point at a sql_store_ms field its tool does not emit. */
+        Assert.DoesNotContain("sql_store_ms", lite, StringComparison.Ordinal);
+
+        /* Positive control for that negative: the slice really is a tool description carrying the subject,
+           so the assertion is not passing on an empty span. */
+        Assert.Contains("sql_duration_ms", lite, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Collapses C# doc-comment continuations and whitespace runs so a phrase sweep sees PROSE rather than
+    /// lines. Without it a claim wrapped across two <c>///</c> lines is invisible to an exact-substring
+    /// assertion — which is not hypothetical: it is the mutation that reported GREEN and forced this helper.
+    /// </summary>
+    private static string FlattenDocProse(string source)
+    {
+        var text = source.Replace("\r\n", "\n", StringComparison.Ordinal);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\n\s*///?\s*", " ");
+        return System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
     }
 
     private static int CountOccurrences(string haystack, string needle)
