@@ -1244,9 +1244,10 @@ public sealed class TsqlConventionGuardTests
     /// separately.</b> An OVER-EXTENDED body keeps containing the literals below it AND the next member's,
     /// so it hands out a name that is confidently wrong. An UNDER-READ body stops containing the literals
     /// below the cut, and a literal contained by nothing is labelled <see cref="Unknown"/> — which is only
-    /// loud if some census is looking for a site of that kind. Most of <see cref="KnownTruncatedRanges"/>
-    /// strands a literal, and no census looks for a site of that kind, so the whole class read as healthy
-    /// until the ranges themselves were checked against a second derivation.</para>
+    /// loud if some census is looking for a site of that kind. Entries in
+    /// <see cref="KnownTruncatedRanges"/> strand a literal and no census looks for a site of that kind, so
+    /// the whole class read as healthy until the ranges themselves were checked against a second
+    /// derivation.</para>
     ///
     /// <para>The two arms are complementary rather than redundant, and both are pinned by
     /// <see cref="TheMemberScan_IsBoundedByTheNextDeclaration_AndByTheBraceWalkAtTheEndOfTheFile"/>:
@@ -1401,7 +1402,7 @@ public sealed class TsqlConventionGuardTests
     /// <c>"Never"</c>, <c>"None scheduled"</c>, <c>"N0"</c> — never T-SQL and never a tempdb label. Rewriting
     /// these member bodies to satisfy a walker would be changing the subject to suit the instrument.</para>
     ///
-    /// <para><b>What the inventory is for is the day that stops being true.</b> Most of these strand a
+    /// <para><b>What the inventory is for is the day that stops being true.</b> Entries here strand a
     /// string literal, and <see cref="EnclosingMember"/> answers <c>&lt;unknown&gt;</c> for each one. A
     /// census that starts looking for a site of that kind — a format string, a renderer name — would
     /// silently miss it here, and the miss reads as absence rather than as error. This list is what makes
@@ -1414,7 +1415,7 @@ public sealed class TsqlConventionGuardTests
     /// carry. Count the entries; that answer cannot go stale.</para>
     ///
     /// <para>Scope: the trees <see cref="ScannedTrees"/> sweeps, so <c>Darling.Tests</c> and
-    /// <c>Lite.Tests</c> are outside it. A few truncated members live there and are not listed.</para>
+    /// <c>Lite.Tests</c> are outside it. Truncated members there are not listed.</para>
     /// </summary>
     private static readonly string[] KnownTruncatedRanges =
     [
