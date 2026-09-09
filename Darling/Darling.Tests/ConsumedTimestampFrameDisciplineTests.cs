@@ -36,17 +36,18 @@ namespace Darling.Tests;
 /// <c>default_trace_events</c> by design.</item>
 /// </list>
 ///
-/// <para><b>What this ships, and what it deliberately does not.</b> This is the census and the guard. It
-/// repairs nothing: #3206 owns the MCP payload fixes and #3207 the desktop render fixes, and #3207's fix
-/// list is waiting on the inventory below. That split follows #3086, which landed a cref resolver that
-/// inventoried 31 unresolved targets at set equality in three labelled kinds and fixed none of them. Set
-/// equality is a ratchet in BOTH directions: a new offender fails, and so does a FIXED one, which is what
-/// stops an inventory rotting into a permanent excuse list.</para>
+/// <para><b>This reports; it does not repair.</b> #3206 owns the MCP payload defects and #3207 the desktop
+/// render ones. <see cref="Inventory"/> carries every offending site instead, labelled, in the shape
+/// <c>DocCommentHygieneTests</c> uses for its unresolved cref targets: pinned at SET EQUALITY, which is a
+/// ratchet in BOTH directions. A new offender fails, and so does a FIXED one whose row is still here —
+/// that second direction is the only thing keeping an inventory from becoming a permanent excuse list.</para>
 ///
-/// <para><b>The frame is never keyed on the column name.</b> The repo has established this twice — see
-/// <c>StoreSqlClockDisciplineTests.AmbiguousFrameColumns</c> and <c>CollectorTimestampFrameTests</c>'
-/// remarks about its own first cut. Here the classification is scoped per (TABLE, COLUMN), and whether a
-/// NAME may stand in for its column at a consumer site is itself DERIVED:
+/// <para><b>The frame is never keyed on the column name.</b> Two sibling guards say why:
+/// <c>StoreSqlClockDisciplineTests.AmbiguousFrameColumns</c> names three columns that are two frames
+/// across several tables each, and <c>CollectorTimestampFrameTests</c> records that a store-wide "all
+/// naive timestamps are UTC" rule forbids the CPU collector's intentional local clock. So classification
+/// here is scoped per (TABLE, COLUMN), and whether a NAME may stand in for its column at a consumer site
+/// is itself DERIVED:
 /// <see cref="FrameAmbiguousColumnNames_AreDerived_AndAgreeWithTheSiblingGuardsRegister"/> computes the
 /// names whose tables disagree and checks the answer against that hand-written register. Two instruments,
 /// independently arrived at, and drift in either one fails.</para>
