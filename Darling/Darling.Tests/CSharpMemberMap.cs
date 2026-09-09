@@ -425,12 +425,12 @@ internal static class CSharpMemberMap
     /// <para><b>Trailing <c>;</c> and whitespace are trimmed, which is what makes the disagreement mean
     /// something.</b> <c>=&gt; new T { … };</c> ends the range at the initialiser's brace and leaves the
     /// <c>;</c> outside it — true of 510 members on the tree, and harmless, because no literal lives in a
-    /// semicolon. Reporting those would bury the 34 members tree-wide — 31 of them in the trees
-    /// <c>TsqlConventionGuardTests</c> sweeps — where real content falls outside the range. So what is
-    /// compared is the end of the declaration's CONTENT, and the shape reds only when something a scan
-    /// could look for is stranded. Those 510 are the same defect one character short of mattering: append
-    /// <c>.Normalize()</c> after the initialiser and the member joins the reported set with nothing else
-    /// changing, which is why the arm is a derivation rather than a list.</para>
+    /// semicolon — and they outnumber the members where real content falls outside the range by more than
+    /// ten to one, so reporting them would bury the set that matters. What is compared is therefore the end
+    /// of the declaration's CONTENT, and the shape reds only when something a scan could look for is
+    /// stranded. Those semicolon-only members are the same defect one character short of mattering: append
+    /// <c>.Normalize()</c> after the initialiser and one joins the reported set with nothing else changing,
+    /// which is why the arm is a derivation rather than a list.</para>
     /// </summary>
     private static int StatementEnd(string code, int from)
     {

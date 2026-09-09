@@ -1369,9 +1369,23 @@ public sealed class TsqlConventionGuardTests
            no edit to any member — and it cannot tell an addition from a removal, which is the whole
            question here: one member leaving is progress, one arriving is a scan that has quietly stopped
            reading a member whole. Set equality fails on both, and names which. */
-        Assert.Equal(
-            KnownTruncatedRanges.OrderBy(s => s, StringComparer.Ordinal),
-            stoppedShort.OrderBy(s => s, StringComparer.Ordinal));
+        var arrived = stoppedShort.Except(KnownTruncatedRanges, StringComparer.Ordinal).OrderBy(s => s, StringComparer.Ordinal).ToList();
+        var left = KnownTruncatedRanges.Except(stoppedShort, StringComparer.Ordinal).OrderBy(s => s, StringComparer.Ordinal).ToList();
+
+        Assert.True(
+            arrived.Count == 0 && left.Count == 0,
+            "the set of members whose range stops short of its own content has moved, and this list is how "
+            + "a new one becomes visible before a census is written against it. Neither direction is a "
+            + "failure of your change — edit KnownTruncatedRanges to match and say which in the PR body."
+            + Environment.NewLine
+            + (arrived.Count == 0 ? "" : Environment.NewLine
+                + "ARRIVED — these now stop short. Add each line to KnownTruncatedRanges. If a census reads "
+                + "the file, check first that what falls outside the range is not a site it counts:"
+                + Environment.NewLine + string.Join(Environment.NewLine, arrived) + Environment.NewLine)
+            + (left.Count == 0 ? "" : Environment.NewLine
+                + "LEFT — these no longer stop short, usually because the member was rewritten into a shape "
+                + "the walk reads whole. That is progress. Delete each line from KnownTruncatedRanges:"
+                + Environment.NewLine + string.Join(Environment.NewLine, left)));
     }
 
     /// <summary>
@@ -1421,7 +1435,6 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Viewer/SettingsWindow.xaml.cs BuildViewerPreferences",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Blocking.cs EventTimeLocal",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Deadlock.cs DeadlockTimeLocal",
-        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Deadlock.cs LastTranStartedLocal",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.JobHistory.cs RunTimeLocal",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.JobHistory.cs LastSuccessfulRunLocal",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.JobHistory.cs NextScheduledRunLocal",
