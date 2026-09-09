@@ -98,7 +98,8 @@ internal static class CSharpMemberMap
     ///
     /// <para>Types are in the declaration list rather than filtered out of it because a member's range is
     /// bounded by the NEXT declaration of either kind, and a nested type is the next thing after the member
-    /// above it. They are excluded from attribution and from
+    /// above it. They are also what <see cref="EnclosingType"/> answers from. They are excluded from MEMBER
+    /// attribution and from
     /// <c>TsqlConventionGuardTests.TheMemberScan_ReadsEveryDeclarationWhole</c>: a type's body legitimately contains every
     /// declaration below it, which is the exact shape that assertion calls an over-run.</para>
     /// </summary>
@@ -420,14 +421,39 @@ internal static class CSharpMemberMap
     /// <see cref="TheMemberScan_ReadsABodyWhoseLiteralHoldsABrace_AndARawCountDoesNot"/>, which is an
     /// arranged case rather than a site on the tree, and that is the honest status of it.</para>
     /// </summary>
-    internal static string EnclosingMember(MemberMap map, int offset)
+    internal static string EnclosingMember(MemberMap map, int offset) =>
+        Enclosing(map, offset, DeclarationKind.Member);
+
+    /// <summary>
+    /// The TYPE a declaration belongs to: the innermost type declaration whose range CONTAINS the
+    /// offset. What <see cref="EnclosingMember"/> answers about members, for the enclosing type — which
+    /// a scan attributing a FIELD needs, because a file declares more than one type and the field
+    /// belongs to whichever body it sits in rather than to the file it is written in.
+    /// </summary>
+    internal static string EnclosingType(MemberMap map, int offset) =>
+        Enclosing(map, offset, DeclarationKind.Type);
+
+    /// <summary>
+    /// The innermost declaration of <paramref name="kind"/> whose range CONTAINS
+    /// <paramref name="offset"/>, or <see cref="Unknown"/>.
+    ///
+    /// <para>ONE implementation for both kinds, which is the whole point of it being here. The two
+    /// entry points differ by a <see cref="DeclarationKind"/> and nothing else, and a second copy of
+    /// this scan would be free to disagree about the part that is a JUDGEMENT rather than a filter:
+    /// an unterminated body (<c>End &lt; 0</c>) escalates to <see cref="Unknown"/> instead of being
+    /// treated as running to EOF, so a declaration the brace walk lost cannot lend its name to
+    /// everything below it. A copy that guessed EOF there would attribute confidently and wrongly,
+    /// and #3094 is the episode where a message-only copy was corrected while the deciding copy was
+    /// left broken.</para>
+    /// </summary>
+    private static string Enclosing(MemberMap map, int offset, DeclarationKind kind)
     {
         var name = Unknown;
         var innermost = -1;
 
         foreach (var declaration in map.Declarations)
         {
-            if (declaration.Kind != DeclarationKind.Member
+            if (declaration.Kind != kind
                 || declaration.End < 0
                 || offset < declaration.Start
                 || offset >= declaration.End
