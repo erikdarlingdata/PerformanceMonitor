@@ -111,7 +111,8 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $base = ([xml](Get-Content Lite/PerformanceMonitorLite.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          $base = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }
+          if ([string]::IsNullOrWhiteSpace($base)) { throw "Read no version from Directory.Build.props." }
           $date = Get-Date -Format "yyyyMMdd"
           $nightly = "$base-nightly.$date"
           echo "VERSION=$nightly" >> $env:GITHUB_OUTPUT
@@ -470,7 +471,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base=$(grep -oPm1 '(?<=<Version>)[^<]+' Lite/PerformanceMonitorLite.csproj)
+          base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)
+          [ -n "${base}" ] || { echo "::error::Read no version from Directory.Build.props."; exit 1; }
           date=$(date +%Y%m%d)
           echo "VERSION=${base}-nightly.${date}" >> "$GITHUB_OUTPUT"
           echo "Nightly version: ${base}-nightly.${date}"

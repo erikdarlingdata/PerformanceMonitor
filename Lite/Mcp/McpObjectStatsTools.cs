@@ -54,7 +54,7 @@ public sealed class McpObjectStatsTools
         }
     }
 
-    [McpServerTool(Name = "get_index_usage"), Description("Gets per-index usage (seeks, scans, lookups, updates) from the latest daily snapshot, classifying each index as Unused, Write-only, or Active. Unused and write-only indexes are listed first - these are drop candidates. Counters are cumulative since the last instance restart.")]
+    [McpServerTool(Name = "get_index_usage"), Description("Gets per-index usage (seeks, scans, lookups, updates) from the latest daily snapshot, classifying each index as Unused, Write-only, or Active. Unused and write-only indexes are listed first - these are drop candidates. Counters are cumulative since the last instance restart. last_user_access is UTC - the underlying sys.dm_db_index_usage_stats columns are in the monitored server's local clock and this read de-skews them - so it compares directly against get_collection_log and list_servers.")]
     public static async Task<string> GetIndexUsage(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -65,6 +65,14 @@ public sealed class McpObjectStatsTools
 
         try
         {
+            /* The stamps below are THIS server's local wall clock in the store, so putting them in the
+               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
+               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
+               because the WPF grids read the same rows and render them through ServerTimeHelper — that
+               surface has its own frame defect and its own issue, and folding the two together would fix
+               one by breaking the other. */
+            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+
             var rows = await dataService.GetIndexUsageAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
@@ -87,7 +95,7 @@ public sealed class McpObjectStatsTools
                 user_lookups = r.UserLookups,
                 total_reads = r.TotalReads,
                 user_updates = r.UserUpdates,
-                last_user_access = r.LastUserAccess?.ToString("o")
+                last_user_access = r.LastUserAccess?.AddMinutes(-utcOffsetMinutes).ToString("o")
             });
 
             return JsonSerializer.Serialize(new

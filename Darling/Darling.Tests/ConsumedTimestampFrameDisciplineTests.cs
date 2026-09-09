@@ -766,9 +766,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// one-sided-port regression #2992 found nothing guarding against, and the shape three of the entries
     /// below are: Darling is correct exactly where Lite is wrong.
     ///
-    /// <para><b>Nothing here is repaired by this change.</b> The MCP rows are #3206's work and the render
-    /// rows are #3207's. Set equality is the ratchet in both directions: adding an offender fails, and so
-    /// does fixing one without deleting its row.</para>
+    /// <para><b>The render rows are still unrepaired; the MCP rows are not.</b> #3206 landed and moved
+    /// thirty MCP rows to <see cref="SiteLabel.DeSkewedAtRead"/>; the seventeen render rows remain #3207's
+    /// work. Set equality is the ratchet in both directions: adding an offender fails, and so does fixing
+    /// one without moving its row to the label that says so.</para>
     ///
     /// <para><b>Tables</b> is the census table(s) the site's column can come from, after resolution —
     /// joined with <c>+</c> when several agree on the frame. It is part of the KEY, not a note: without it
@@ -777,83 +778,89 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// </summary>
     private static readonly (SiteLabel Label, string File, string Column, string Tables, int Sites, string Why)[] Inventory =
     [
-        /* ── MCP payloads: a server-local value stamped straight into the object (#3206) ── */
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+        /* ── MCP payloads. #3206 de-skewed thirty of these at the read, by the collected
+           server_properties.utc_offset_minutes (Darling in SQL, Lite in C# at the projection), so the
+           payload FIELD still carries the column's name while the VALUE is naive UTC — which is why they
+           are relabelled here rather than deleted. The one still unmarked is a Lite-only surface with no
+           Darling counterpart, and #3206's own census missed it for exactly that reason: it enumerated
+           Darling's emissions and intersected with Lite, which cannot see a Lite-only tool. ── */
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
             "blocked_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1,
-            "get_blocking; the same payload's event_time is UTC on both arms"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+            "get_blocking; the same payload's event_time is UTC on both arms; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
             "blocking_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1,
-            "get_blocking; on a DMV-fallback row the two frames are mixed within one row"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
-            "blocked_last_batch_started", "blocked_process_reports", 1, "get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
-            "blocking_last_batch_started", "blocked_process_reports", 1, "get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
-            "blocked_last_batch_completed", "blocked_process_reports", 1, "get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
-            "blocking_last_batch_completed", "blocked_process_reports", 1, "get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs",
+            "get_blocking; on a DMV-fallback row the two frames are mixed within one row; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+            "blocked_last_batch_started", "blocked_process_reports", 1, "get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+            "blocking_last_batch_started", "blocked_process_reports", 1, "get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+            "blocked_last_batch_completed", "blocked_process_reports", 1, "get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+            "blocking_last_batch_completed", "blocked_process_reports", 1, "get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs",
             "start_time", "running_jobs", 1,
             "get_running_jobs; collection_time in the same object is UTC, so a job started seconds ago "
-            + "reads as a four-hour runner — a long-running-job alert's exact signature"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs",
+            + "reads as a four-hour runner — a long-running-job alert's exact signature; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs",
             "last_user_access", "index_object_stats", 1,
-            "get_index_usage; the payload field is a GREATEST() alias over the four last_user_* columns, and "
-            + "this payload carries no UTC field at all, so nothing in it contradicts the wrong reading"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
-            "valid_since", "plan_correction", 1, "get_plan_corrections; as_of and collection_time are UTC"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
-            "last_refresh", "plan_correction", 1, "get_plan_corrections"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
-            "execute_action_initiated_time", "plan_correction", 1, "get_plan_corrections"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
-            "revert_action_initiated_time", "plan_correction", 1, "get_plan_corrections"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
-            "aborted_version_cleaner_start_time", "pvs_stats", 1, "get_pvs_stats; as_of in the same object is UTC"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
-            "aborted_version_cleaner_end_time", "pvs_stats", 1, "get_pvs_stats"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
+            "get_index_usage, and the only offending payload with NO UTC field beside it, so nothing in the "
+            + "object contradicted the wrong reading; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
+            "valid_since", "plan_correction", 1, "get_plan_corrections; as_of and collection_time are UTC; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
+            "last_refresh", "plan_correction", 1, "get_plan_corrections; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
+            "execute_action_initiated_time", "plan_correction", 1, "get_plan_corrections; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
+            "revert_action_initiated_time", "plan_correction", 1, "get_plan_corrections; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
+            "aborted_version_cleaner_start_time", "pvs_stats", 1, "get_pvs_stats; as_of in the same object is UTC; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
+            "aborted_version_cleaner_end_time", "pvs_stats", 1, "get_pvs_stats; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
             "offrow_version_cleaner_start_time", "pvs_stats", 1,
             "get_pvs_stats; the tool's own description says a start without an end means mid-run, so the "
-            + "phantom staleness lands on the question it exists to answer"),
-        (SiteLabel.McpPayloadUnmarked, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
-            "offrow_version_cleaner_end_time", "pvs_stats", 1, "get_pvs_stats"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpBlockingTools.cs",
-            "blocked_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1, "Lite get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpBlockingTools.cs",
-            "blocking_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1, "Lite get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpBlockingTools.cs",
-            "blocked_last_batch_started", "blocked_process_reports", 1, "Lite get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpBlockingTools.cs",
-            "blocking_last_batch_started", "blocked_process_reports", 1, "Lite get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpBlockingTools.cs",
-            "blocked_last_batch_completed", "blocked_process_reports", 1, "Lite get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpBlockingTools.cs",
-            "blocking_last_batch_completed", "blocked_process_reports", 1, "Lite get_blocking"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpJobTools.cs", "start_time", "running_jobs", 1,
-            "Lite get_running_jobs"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpObjectStatsTools.cs", "last_user_access", "index_object_stats", 1,
-            "Lite get_index_usage"),
+            + "phantom staleness lands on the question it exists to answer; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
+            "offrow_version_cleaner_end_time", "pvs_stats", 1, "get_pvs_stats; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
+            "blocked_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1, "Lite get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
+            "blocking_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1, "Lite get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
+            "blocked_last_batch_started", "blocked_process_reports", 1, "Lite get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
+            "blocking_last_batch_started", "blocked_process_reports", 1, "Lite get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
+            "blocked_last_batch_completed", "blocked_process_reports", 1, "Lite get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
+            "blocking_last_batch_completed", "blocked_process_reports", 1, "Lite get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpJobTools.cs", "start_time", "running_jobs", 1,
+            "Lite get_running_jobs; de-skewed at the read by #3206"),
         (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPlanCacheSchedulerTools.cs", "oldest_plan_create_time",
             "plan_cache_stats", 1,
             "Lite get_plan_cache_bloat, and the only offending field with NO Darling counterpart: Darling's "
             + "plan-cache tool does not emit it, so this one is Lite-side only"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPlanCorrectionTools.cs", "valid_since", "plan_correction", 1,
-            "Lite get_plan_corrections"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPlanCorrectionTools.cs", "last_refresh", "plan_correction", 1,
-            "Lite get_plan_corrections"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPlanCorrectionTools.cs", "execute_action_initiated_time",
-            "plan_correction", 1, "Lite get_plan_corrections"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPlanCorrectionTools.cs", "revert_action_initiated_time",
-            "plan_correction", 1, "Lite get_plan_corrections"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPvsTools.cs", "aborted_version_cleaner_start_time", "pvs_stats", 1,
-            "Lite get_pvs_stats"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPvsTools.cs", "aborted_version_cleaner_end_time", "pvs_stats", 1,
-            "Lite get_pvs_stats"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPvsTools.cs", "offrow_version_cleaner_start_time", "pvs_stats", 1,
-            "Lite get_pvs_stats"),
-        (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPvsTools.cs", "offrow_version_cleaner_end_time", "pvs_stats", 1,
-            "Lite get_pvs_stats"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpObjectStatsTools.cs", "last_user_access", "index_object_stats", 1,
+            "Lite get_index_usage, same shape as Darling's and same absence of a UTC neighbour; de-skewed at "
+            + "the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPlanCorrectionTools.cs", "valid_since", "plan_correction", 1,
+            "Lite get_plan_corrections; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPlanCorrectionTools.cs", "last_refresh", "plan_correction", 1,
+            "Lite get_plan_corrections; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPlanCorrectionTools.cs", "execute_action_initiated_time",
+            "plan_correction", 1, "Lite get_plan_corrections; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPlanCorrectionTools.cs", "revert_action_initiated_time",
+            "plan_correction", 1, "Lite get_plan_corrections; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPvsTools.cs", "aborted_version_cleaner_start_time", "pvs_stats", 1,
+            "Lite get_pvs_stats; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPvsTools.cs", "aborted_version_cleaner_end_time", "pvs_stats", 1,
+            "Lite get_pvs_stats; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPvsTools.cs", "offrow_version_cleaner_start_time", "pvs_stats", 1,
+            "Lite get_pvs_stats; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPvsTools.cs", "offrow_version_cleaner_end_time", "pvs_stats", 1,
+            "Lite get_pvs_stats; de-skewed at the read by #3206"),
 
         /* ── MCP payloads that are CORRECT because the read converts first (#3202, #1262) ── */
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDefaultTraceTools.cs",
@@ -878,9 +885,13 @@ public sealed class ConsumedTimestampFrameDisciplineTests
            verdict against a planted offender in each direction. */
     ];
 
-    private const int McpPayloadUnmarkedSites = 33;
+    /* #3206 (via #3212) took the MCP label from 33 to 1 by de-skewing at the read; the survivor is
+       Lite get_plan_cache_bloat's oldest_plan_create_time, which that lane does not touch. #3207 took
+       the render label from 22 to 0. Both labels moved by fixing their sites and deleting their rows in
+       the same change, which is the ratchet working in the removing direction. */
+    private const int McpPayloadUnmarkedSites = 1;
     private const int DesktopRenderMismatchSites = 0;
-    private const int DeSkewedAtReadSites = 2;
+    private const int DeSkewedAtReadSites = 34;
 
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */
 
@@ -1114,9 +1125,12 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             }
         }
 
-        /* Reach, in the direction AssertMatchesInventory no longer asserts: the MCP arm has offenders
-           today, so an empty found here is a broken matcher rather than a clean tree. #3206 owns
-           these rows; when its lane empties this label too, this assertion goes with them. */
+        /* Reach, in the direction AssertMatchesInventory no longer asserts. Its own NotEmpty went when
+           #3207 emptied the render label, so it is asserted here instead, where it is still TRUE: this
+           arm has one McpPayloadUnmarked row left after #3206 - Lite get_plan_cache_bloat's
+           oldest_plan_create_time, which that lane does not touch - plus 34 DeSkewedAtRead rows, so an
+           empty found here is a broken matcher rather than a clean tree. It goes when that last row
+           does. */
         Assert.NotEmpty(found);
 
         AssertMatchesInventory(found, [SiteLabel.McpPayloadUnmarked, SiteLabel.DeSkewedAtRead]);
@@ -1521,6 +1535,70 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 "dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc"),
             ("sample_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs",
                 "MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time"),
+            ("blocked_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
+                "blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started"),
+            ("blocking_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
+                "blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started"),
+            ("blocked_last_batch_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
+                "blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started"),
+            ("blocking_last_batch_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
+                "blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started"),
+            ("blocked_last_batch_completed", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
+                "blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed"),
+            ("blocking_last_batch_completed", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
+                "blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed"),
+            ("start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingJobReader.cs",
+                "start_time - make_interval(mins => svr.offset_minutes) AS start_time"),
+            ("last_user_access", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs",
+                "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access"),
+            ("valid_since", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPlanCorrectionReader.cs",
+                "valid_since - make_interval(mins => svr.offset_minutes) AS valid_since"),
+            ("last_refresh", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPlanCorrectionReader.cs",
+                "last_refresh - make_interval(mins => svr.offset_minutes) AS last_refresh"),
+            ("execute_action_initiated_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPlanCorrectionReader.cs",
+                "execute_action_initiated_time - make_interval(mins => svr.offset_minutes) AS execute_action_initiated_time"),
+            ("revert_action_initiated_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPlanCorrectionReader.cs",
+                "revert_action_initiated_time - make_interval(mins => svr.offset_minutes) AS revert_action_initiated_time"),
+            ("aborted_version_cleaner_start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
+                "aborted_version_cleaner_start_time - make_interval(mins => svr.offset_minutes) AS aborted_version_cleaner_start_time"),
+            ("aborted_version_cleaner_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
+                "aborted_version_cleaner_end_time - make_interval(mins => svr.offset_minutes) AS aborted_version_cleaner_end_time"),
+            ("offrow_version_cleaner_start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
+                "offrow_version_cleaner_start_time - make_interval(mins => svr.offset_minutes) AS offrow_version_cleaner_start_time"),
+            ("offrow_version_cleaner_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
+                "offrow_version_cleaner_end_time - make_interval(mins => svr.offset_minutes) AS offrow_version_cleaner_end_time"),
+            ("blocked_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
+                "BlockedLastTranStarted?.AddMinutes(-utcOffsetMinutes)"),
+            ("blocking_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
+                "BlockingLastTranStarted?.AddMinutes(-utcOffsetMinutes)"),
+            ("blocked_last_batch_started", "Lite/Mcp/McpBlockingTools.cs",
+                "BlockedLastBatchStarted?.AddMinutes(-utcOffsetMinutes)"),
+            ("blocking_last_batch_started", "Lite/Mcp/McpBlockingTools.cs",
+                "BlockingLastBatchStarted?.AddMinutes(-utcOffsetMinutes)"),
+            ("blocked_last_batch_completed", "Lite/Mcp/McpBlockingTools.cs",
+                "BlockedLastBatchCompleted?.AddMinutes(-utcOffsetMinutes)"),
+            ("blocking_last_batch_completed", "Lite/Mcp/McpBlockingTools.cs",
+                "BlockingLastBatchCompleted?.AddMinutes(-utcOffsetMinutes)"),
+            ("start_time", "Lite/Mcp/McpJobTools.cs",
+                "StartTime.AddMinutes(-utcOffsetMinutes)"),
+            ("last_user_access", "Lite/Mcp/McpObjectStatsTools.cs",
+                "LastUserAccess?.AddMinutes(-utcOffsetMinutes)"),
+            ("valid_since", "Lite/Mcp/McpPlanCorrectionTools.cs",
+                "ValidSince?.AddMinutes(-utcOffsetMinutes)"),
+            ("last_refresh", "Lite/Mcp/McpPlanCorrectionTools.cs",
+                "LastRefresh?.AddMinutes(-utcOffsetMinutes)"),
+            ("execute_action_initiated_time", "Lite/Mcp/McpPlanCorrectionTools.cs",
+                "ExecuteActionInitiatedTime?.AddMinutes(-utcOffsetMinutes)"),
+            ("revert_action_initiated_time", "Lite/Mcp/McpPlanCorrectionTools.cs",
+                "RevertActionInitiatedTime?.AddMinutes(-utcOffsetMinutes)"),
+            ("aborted_version_cleaner_start_time", "Lite/Mcp/McpPvsTools.cs",
+                "AbortedCleanerStartTime?.AddMinutes(-utcOffsetMinutes)"),
+            ("aborted_version_cleaner_end_time", "Lite/Mcp/McpPvsTools.cs",
+                "AbortedCleanerEndTime?.AddMinutes(-utcOffsetMinutes)"),
+            ("offrow_version_cleaner_start_time", "Lite/Mcp/McpPvsTools.cs",
+                "OffrowCleanerStartTime?.AddMinutes(-utcOffsetMinutes)"),
+            ("offrow_version_cleaner_end_time", "Lite/Mcp/McpPvsTools.cs",
+                "OffrowCleanerEndTime?.AddMinutes(-utcOffsetMinutes)"),
         };
 
         Assert.Equal(

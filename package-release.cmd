@@ -8,11 +8,11 @@ echo  Packaging Performance Monitor Release
 echo ========================================
 echo.
 
-:: Get version from Dashboard csproj
-for /f "tokens=2 delims=<>" %%a in ('findstr "<Version>" Dashboard\Dashboard.csproj') do set VERSION=%%a
+:: Get version from the one file that declares it (#3222)
+for /f "tokens=2 delims=<>" %%a in ('findstr "<Version>" Directory.Build.props') do set VERSION=%%a
 
 if "%VERSION%"=="" (
-    echo ERROR: Could not determine version from Dashboard.csproj.
+    echo ERROR: Could not determine version from Directory.Build.props.
     exit /b 1
 )
 

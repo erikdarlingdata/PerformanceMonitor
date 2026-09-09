@@ -9,7 +9,7 @@ disable-model-invocation: false
 
 Run through the full release prep checklist for PerformanceMonitor. `$ARGUMENTS` is the target version (e.g., `3.3.0`).
 
-> **Scope (since v3.3.0):** the Full Dashboard and the CLI Installer are DEPRECATED and OUT of this process — they ship no release artifacts and get no live install/upgrade testing here. They still build and their test suites still run in CI on the release event, and their csprojs still get version bumps (below). The release artifacts are: Lite (zip + Velopack Setup.exe), the Darling service zip, and the Darling Viewer Setup.exe.
+> **Scope (since v3.3.0):** the Full Dashboard and the CLI Installer are DEPRECATED and OUT of this process — they ship no release artifacts and get no live install/upgrade testing here. They still build and their test suites still run in CI on the release event, and they inherit the single `<Version>` with everything else in the tree (below). The release artifacts are: Lite (zip + Velopack Setup.exe), the Darling service zip, and the Darling Viewer Setup.exe.
 
 ## Checklist
 
@@ -17,15 +17,17 @@ Work through each step in order. Report status as you go. If a step fails, stop 
 
 ### 1. Version Bumps
 
-Bump `<Version>`, `<AssemblyVersion>`, `<FileVersion>`, and `<InformationalVersion>` in all 6 csproj files:
-- `Lite/PerformanceMonitorLite.csproj`
-- `Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj` (carries the Version/AssemblyVersion/FileVersion triplet, no InformationalVersion)
-- `Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj` (same triplet)
-- `deprecated/Dashboard/Dashboard.csproj` — still bumped even though deprecated: the `check-version-bump` workflow reads THIS file
-- `deprecated/Installer/PerformanceMonitorInstaller.csproj` — still bumped for consistency (CI builds it on release events)
-- `deprecated/Installer.Core/Installer.Core.csproj` — same
+Bump `<Version>` in **`Directory.Build.props`**. That is the whole step — one line, one file.
 
-The `check-version-bump` workflow only reads `Dashboard.csproj`, so the other five are on THIS checklist to catch — nothing in CI enforces them.
+Every project in the tree inherits it, and `AssemblyVersion` / `FileVersion` / `InformationalVersion` derive
+from it at build time. Do not add any of those four elements to a csproj: `ProductVersionDeclarationTests`
+fails the build on a second `<Version>` property anywhere in the tree, on a re-added derived property, and
+on a workflow or script that reads a version from any path but `Directory.Build.props`.
+
+This replaced six independently hand-bumped csproj files (#3222). Two of them had been sitting three
+releases behind, `deprecated/Dashboard/Dashboard.csproj` was declaring 3.6.0 while its binary stamped
+3.3.0.0, and the release gate took its judgement from that file — so nothing in CI compared the version it
+gated on against the version the artifacts were named with. Both now read the file above.
 
 Verify no other files contain hardcoded version strings that need updating.
 

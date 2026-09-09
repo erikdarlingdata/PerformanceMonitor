@@ -23,7 +23,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPvsTools
 {
     [McpServerTool(Name = "get_pvs_stats"), Description(
-        "Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window.")]
+        "Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of.")]
     public static async Task<string> GetPvsStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -40,6 +40,14 @@ public sealed class McpPvsTools
                 var hoursError = McpHelpers.ValidateHoursBack(trend_hours_back);
                 if (hoursError != null) return hoursError;
             }
+
+            /* The stamps below are THIS server's local wall clock in the store, so putting them in the
+               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
+               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
+               because the WPF grids read the same rows and render them through ServerTimeHelper — that
+               surface has its own frame defect and its own issue, and folding the two together would fix
+               one by breaking the other. */
+            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
 
             var rows = await dataService.GetPvsStatsLatestAsync(resolved.ServerId);
             if (rows.Count == 0)
@@ -62,11 +70,14 @@ public sealed class McpPvsTools
                 online_index_version_store_mb = r.OnlineIndexVersionStoreMb,
                 database_data_size_mb = r.DatabaseDataSizeMb,
                 aborted_transaction_count = r.AbortedTransactionCount,
-                /* Cleaner state, Microsoft's shape: a start without an end means mid-run. Presented raw. */
-                aborted_version_cleaner_start_time = r.AbortedCleanerStartTime?.ToString("o"),
-                aborted_version_cleaner_end_time = r.AbortedCleanerEndTime?.ToString("o"),
-                offrow_version_cleaner_start_time = r.OffrowCleanerStartTime?.ToString("o"),
-                offrow_version_cleaner_end_time = r.OffrowCleanerEndTime?.ToString("o"),
+                /* Cleaner state, Microsoft's shape: a start without an end means mid-run. The PAIRING is
+                   presented as the DMV reports it; the FRAME is not — these four are server-local in the
+                   store and are de-skewed above, so they compare directly against as_of instead of reading
+                   one whole UTC offset stale on a value that is usually seconds old. */
+                aborted_version_cleaner_start_time = r.AbortedCleanerStartTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                aborted_version_cleaner_end_time = r.AbortedCleanerEndTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                offrow_version_cleaner_start_time = r.OffrowCleanerStartTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                offrow_version_cleaner_end_time = r.OffrowCleanerEndTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
                 /* The lag between these ids is how far cleanup is behind — the gap itself, never a verdict. */
                 oldest_active_transaction_id = r.OldestActiveTransactionId,
                 oldest_aborted_transaction_id = r.OldestAbortedTransactionId,
