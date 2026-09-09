@@ -73,12 +73,12 @@ SELECT
     regressed_plan_cpu_time_average_ms,
     last_good_plan_execution_count,
     last_good_plan_cpu_time_average_ms,
-    valid_since - make_interval(mins => svr.offset_minutes) AS valid_since_utc,
-    last_refresh - make_interval(mins => svr.offset_minutes) AS last_refresh_utc,
+    valid_since - make_interval(mins => svr.offset_minutes) AS valid_since,
+    last_refresh - make_interval(mins => svr.offset_minutes) AS last_refresh,
     execute_action_initiated_by,
-    execute_action_initiated_time - make_interval(mins => svr.offset_minutes) AS execute_action_initiated_time_utc,
+    execute_action_initiated_time - make_interval(mins => svr.offset_minutes) AS execute_action_initiated_time,
     revert_action_initiated_by,
-    revert_action_initiated_time - make_interval(mins => svr.offset_minutes) AS revert_action_initiated_time_utc
+    revert_action_initiated_time - make_interval(mins => svr.offset_minutes) AS revert_action_initiated_time
 FROM plan_correction, svr
 WHERE server_id = $1
 AND   collection_time >= $2

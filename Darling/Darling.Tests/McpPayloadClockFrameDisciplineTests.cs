@@ -82,21 +82,26 @@ public sealed class McpPayloadClockFrameDisciplineTests
     /// fifteen of the sixteen are stored columns projected straight through; only <c>last_user_access</c>
     /// differs, and defaulting rather than requiring it keeps that one visible as the exception it is.
     /// </summary>
-    public readonly record struct PayloadColumn(
-        string Alias, string? Source = null, string? BareForm = null, string? OutAlias = null)
+    public readonly record struct PayloadColumn(string Alias, string? Source = null, string? BareForm = null)
     {
         public string Expression => Source ?? Alias;
 
         /// <summary>
-        /// The de-skewed projection this column must carry, spelled as the read ships it. The output alias is
-        /// <c>{Alias}_utc</c> for the fifteen stored columns; <c>last_user_access</c> overrides it to its own
-        /// name, because that payload field is reached through the SQL ALIAS by
-        /// <c>ConsumedTimestampFrameDisciplineTests</c>'s projection hop, and a suffix would make the field
-        /// name and the alias diverge and drop the site out of that census. Its conversion is pinned there
-        /// directly instead, which outranks a suffix nothing checks.
+        /// The de-skewed projection this column must carry, spelled as the read ships it.
+        ///
+        /// <para><b>The output alias is the column's own name, with no <c>_utc</c> suffix.</b> Not cosmetic:
+        /// <c>ConsumedTimestampFrameDisciplineTests.RenamedServerLocalProjections</c> reads a projection
+        /// alias's SOURCE columns and cannot see the conversion, so a suffixed alias over a server-local
+        /// column is reported as inheriting a server-local frame — wrong, and it also makes the payload field
+        /// diverge from the column name, which drops the site out of that census. Keeping the alias equal to
+        /// the column name routes every site through the ordinary column path, where the frame check applies
+        /// and the register answers correctly. The conversion is pinned by
+        /// <c>EveryDeSkewedAtReadSite_CarriesItsConversionInTheReaderItDependsOn</c> — a stronger claim than
+        /// a suffix nothing checks. #3202's <c>event_time_utc</c> keeps its suffix and is unaffected:
+        /// <c>event_time</c> spans five tables and two frames, so that helper declines it.</para>
         /// </summary>
         public string DeSkewed =>
-            $"{Expression} - make_interval(mins => svr.offset_minutes) AS {OutAlias ?? Alias + "_utc"}";
+            $"{Expression} - make_interval(mins => svr.offset_minutes) AS {Alias}";
     }
 
     /// <summary>
@@ -124,8 +129,7 @@ public sealed class McpPayloadClockFrameDisciplineTests
         ("IndexUsageSql",
             [new("last_user_access",
                  "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
-                 BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,",
-                 OutAlias: "last_user_access")],
+                 BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,")],
             "IndexObjectStatsCollector ships us.last_user_seek/scan/lookup/update from "
             + "sys.dm_db_index_usage_stats verbatim; the read GREATESTs the four"),
         ("PvsStatsLatestSql",
@@ -388,8 +392,7 @@ public sealed class McpPayloadClockFrameDisciplineTests
         var greatest = new PayloadColumn(
             "last_user_access",
             "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
-            BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,",
-            OutAlias: "last_user_access");
+            BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,");
         Assert.Equal(
             "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)"
             + " - make_interval(mins => svr.offset_minutes) AS last_user_access",

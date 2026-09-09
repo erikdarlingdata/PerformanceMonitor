@@ -77,7 +77,7 @@ internal static class DarlingJobReader
             job_name,
             job_id,
             job_enabled,
-            start_time - make_interval(mins => svr.offset_minutes) AS start_time_utc,
+            start_time - make_interval(mins => svr.offset_minutes) AS start_time,
             current_duration_seconds,
             avg_duration_seconds,
             p95_duration_seconds,

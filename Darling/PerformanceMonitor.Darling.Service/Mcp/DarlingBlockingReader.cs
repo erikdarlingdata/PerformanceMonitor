@@ -155,12 +155,12 @@ internal static class DarlingBlockingReader
             blocking_sql_text,
             blocked_transaction_name,
             blocking_transaction_name,
-            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started_utc,
-            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started_utc,
-            blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started_utc,
-            blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started_utc,
-            blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed_utc,
-            blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed_utc,
+            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started,
+            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started,
+            blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started,
+            blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started,
+            blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed,
+            blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed,
             blocked_priority,
             blocking_priority,
             blocked_process_report_xml,
@@ -211,8 +211,8 @@ internal static class DarlingBlockingReader
             blocking_login_name,
             blocking_host_name,
             blocking_client_app,
-            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started_utc,
-            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started_utc
+            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started,
+            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started
         FROM v_dmv_blocking_snapshots, svr
         WHERE server_id = $1
         AND   collection_time >= $2
