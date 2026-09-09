@@ -110,11 +110,13 @@ public sealed class CollectorStateContractTests
            collector is a two-host concern rather than a definition-local one. Pinned on the catalog
            surface both hosts iterate.
 
-           TWO of them: default_trace_events' last-seen trace FILE (#1962), and pg_index_bloat's
-           per-database rotation cursor (#3153). Neither needed host CODE — the wiring below is generic —
-           but both depend on it, which is why they are enumerated in the same file that pins it. */
+           ONE of them now: default_trace_events' last-seen trace FILE (#1962). pg_index_bloat's
+           per-database rotation cursor (#3153) was the other and #3234 retired it — the statistics
+           estimate covers every index in one statement, so there is no position to resume from. It did
+           not need host CODE, and neither does the survivor: the wiring below is generic. Enumerated in
+           the same file that pins that wiring, so a collector newly declaring state lands here first. */
         Assert.Equal(
-            new[] { "default_trace_events", "pg_index_bloat" },
+            new[] { "default_trace_events" },
             CollectorCatalog.All
                 .Where(c => c.StateKeys.Count > 0)
                 .Select(c => c.Name)

@@ -3378,7 +3378,15 @@ ALTER TABLE collect.pg_extension_availability
     ADD COLUMN IF NOT EXISTS database_name text;";
 
     /// <summary>
-    /// V94 — <c>collect.pg_index_bloat</c> (#2561): b-tree index bloat, MEASURED via <c>pgstatindex</c>
+    /// V94 — <c>collect.pg_index_bloat</c>. <b>Its column list carries the #3234 estimate columns that
+    /// V114 also adds, and that duplication is the convention rather than an oversight</b>: a collector's
+    /// creating rung must stay byte-identical to what <c>PgSchemaGenerator.CreateTable</c> emits from its
+    /// <c>PayloadColumns</c>, which <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>
+    /// asserts. So a fresh install gets the full shape here and V114's <c>ADD COLUMN IF NOT EXISTS</c> is a
+    /// no-op for it, while a store already past V94 gets the same columns from V114. Both converge, which
+    /// is what the <c>IF NOT EXISTS</c> is for. V95 did the same thing with <c>database_name</c>.
+    ///
+    /// <para>Originally (#2561): b-tree index bloat, MEASURED via <c>pgstatindex</c>
     /// rather than estimated from column statistics.
     ///
     /// <para>The issue proposed porting the ioguix estimator. Measured, that route is unusable for the role
@@ -3420,7 +3428,15 @@ CREATE TABLE IF NOT EXISTS collect.pg_index_bloat (
     deleted_pages bigint,
     avg_leaf_density double precision,
     leaf_fragmentation double precision,
-    skipped_reason text
+    skipped_reason text,
+    index_pages bigint,
+    table_rows bigint,
+    fillfactor integer,
+    est_tuple_bytes bigint,
+    est_leaf_pages bigint,
+    est_bloat_pct double precision,
+    est_reclaimable_bytes bigint,
+    pgstattuple_available boolean
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_index_bloat_time
