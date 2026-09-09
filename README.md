@@ -426,7 +426,7 @@ Common issues:
 
 ## Authentication
 
-Every edition supports five authentication types, defined once in `PerformanceMonitor.Common.AuthenticationTypes` and shared by Lite, Darling, the Dashboard, and the CLI installer:
+Every edition supports six authentication types, defined once in `PerformanceMonitor.Common.AuthenticationTypes` and shared by Lite, Darling, the Dashboard, and the CLI installer:
 
 | Type | Interactive? | Credential stored? | Where |
 |---|---|---|---|
@@ -435,11 +435,25 @@ Every edition supports five authentication types, defined once in `PerformanceMo
 | Entra ID (MFA) | Yes, once per session | None | — |
 | Service Principal | No | Client secret | Windows Credential Manager |
 | Managed Identity | No | None | — |
+| Existing Azure Sign-In | No | None | — (established outside the app, e.g. `az login`) |
 
 **Managed Identity and Service Principal** are non-interactive Azure AD (Entra ID) authentication modes, added for fleet onboarding of Azure SQL Database / Managed Instance without a per-server interactive MFA prompt (see [#1038](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1038)). Both map directly to `Microsoft.Data.SqlClient`'s native `SqlAuthenticationMethod` (`ActiveDirectoryServicePrincipal` / `ActiveDirectoryManagedIdentity`) — PerformanceMonitor never acquires, caches, or stores a token itself; the official Microsoft driver handles that internally.
 
 - **Managed Identity** requires the machine running the app/service to itself be an Azure resource (VM, App Service, etc.) with a system- or user-assigned managed identity. That identity is then provisioned as a user directly on each target database (see [Permissions](#permissions) below). Nothing is stored locally.
 - **Service Principal** uses an Entra app registration's client id + secret. The client id is non-secret and stored in config; the secret is stored only in Windows Credential Manager, same as a SQL auth password.
+
+### Existing Azure Sign-In (Lite only, `ActiveDirectoryDefault`)
+
+Labelled **Azure — Existing Sign-In (az login)** in Lite's connection dialog, and added because **Entra ID (MFA) cannot be repaired in place** (see [#3196](https://github.com/erikdarlingdata/PerformanceMonitor/issues/3196), [#3214](https://github.com/erikdarlingdata/PerformanceMonitor/issues/3214)). `Microsoft.Data.SqlClient` forces the Windows account broker (WAM) on for any caller using the driver's own Entra application id, and `UseWamBroker` is inert in that configuration — so when the broker refuses a sign-in, the app has no browser fallback to reach for. This mode maps to `SqlAuthenticationMethod.ActiveDirectoryDefault`, whose arm in the driver returns before any MSAL public-client application is constructed, which is the only place a broker is ever attached.
+
+It signs in as **whichever Azure identity is already established on the machine** and **never prompts** — the driver hard-codes `ExcludeInteractiveBrowserCredential = true`, so there is no browser and no account picker. It searches, in order: the `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` environment variables, a workload identity, a managed identity, a Visual Studio or VS Code sign-in, an Azure CLI session (`az login`), an Azure PowerShell session, and an Azure Developer CLI session. Two consequences worth knowing before you pick it:
+
+- **With no Azure sign-in on the machine it fails rather than asking for one.** Run `az login` first. The connection dialog says which of the two failure modes happened — nothing found, or one found and broken — and the log names each source and why it declined.
+- **The order is the driver's, not yours.** There is no seam to narrow the list: the driver constructs the credential chain itself and this app cannot pass options into it. On a machine with several Azure identities set up, this connects as whichever comes first, which is not necessarily the one you signed into Windows with. When a specific identity matters, use **Service Principal**, which names it.
+
+Darling does not offer this mode: the Darling service's connect path builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
+
+**Not yet confirmed against a live Entra tenant.** The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.0.2 and `Azure.Identity` 1.18.0 sources, and the behaviour is pinned by tests; nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
 
 ### Credential Profiles (Lite, fleet onboarding)
 
