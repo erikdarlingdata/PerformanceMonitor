@@ -187,6 +187,25 @@ internal static class DarlingObjectStatsReader
     /// keeps it NULL. This read returns NO other timestamp, which is why converting rather than labelling
     /// matters more here than elsewhere: there is nothing else in the payload for a reader to notice a
     /// disagreement against.</para>
+    /// <para><b>The de-skew is exact only inside the current DST period, and this is the read where that
+    /// matters most.</b> <c>server_properties.utc_offset_minutes</c> is
+    /// <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — the offset in force AT COLLECTION TIME, one
+    /// current value. The other de-skewed reads describe current state (a running job, an open transaction,
+    /// a cleaner that ran seconds ago), so their timestamps and that offset sit on the same side of any
+    /// transition. These four do not: <c>sys.dm_db_index_usage_stats</c> persists since the instance
+    /// restarted, which on a stable production box is routinely months, so a large share of values predate
+    /// the most recent transition and come back <b>60 minutes early</b> — silently, and in the plausible
+    /// direction. This is not a theoretical exposure: any target in a DST-observing zone has it, a target
+    /// configured to UTC does not, and on AWS RDS the instance takes its time zone from a creation-time
+    /// parameter — so a non-UTC zone is an ordinary configuration rather than an exotic one, and "it is
+    /// RDS, so it is probably UTC" is not a safe assumption. #2932 records the measured offset behind the
+    /// four-hour figure quoted above. <c>sqlserver_start_time</c> on the same row is the bound on how far
+    /// back the affected values can reach.</para>
+    /// <para>Fixing it properly needs a ZONE rather than an offset — <c>CURRENT_TIMEZONE_ID()</c>
+    /// (SQL Server 2019+) collected alongside the offset, then <c>AT TIME ZONE</c> at the read boundary,
+    /// which handles transitions. That is a collected-column addition and a migration rung, so what is
+    /// carried here is the SCOPE of the claim, in the #2993 shape: this read places a timestamp exactly
+    /// when it falls inside the current DST period, and within an hour otherwise.</para>
     /// <para>The alias deliberately does NOT carry a <c>_utc</c> suffix, unlike the other fifteen. This one
     /// is a projection alias rather than a column, and <c>ConsumedTimestampFrameDisciplineTests</c> reaches
     /// the payload field through the alias — a suffix here would make the field name and the alias diverge

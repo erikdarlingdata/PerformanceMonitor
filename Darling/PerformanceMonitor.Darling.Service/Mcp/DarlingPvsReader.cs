@@ -31,6 +31,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// exists to answer — the tool's own description sends a caller here "when ADR cleanup looks stuck" — so a
 /// phantom four-hour stall is the worst place for an unmarked frame. The trend read needs nothing: it
 /// returns only <c>collection_time</c>.</para>
+///
+/// <para><b>Exact only inside the current DST period.</b> The collected offset is the one in force at
+/// collection time, so a cleaner timestamp from before the most recent transition is de-skewed by an
+/// offset that was not in force when it was written and lands 60 minutes early. The off-row cleaner runs
+/// continuously and is unaffected in practice, but <c>aborted_version_cleaner_*</c> can reach back weeks
+/// on a quiet database — a live read showed 2026-08-26 against a 2026-09-09 snapshot — so it can cross a
+/// transition. Same limit and same proper fix as <c>DarlingObjectStatsReader</c> records: a collected zone
+/// plus <c>AT TIME ZONE</c>, rather than one offset applied to every age of value.</para>
 /// </summary>
 internal static class DarlingPvsReader
 {
