@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Collectors;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
@@ -254,7 +255,13 @@ public sealed class DarlingMcpPgTableBloatTools
             var tables = rows.Select(r =>
             {
                 var suppression = EstimateSuppressionReason(r);
-                var qualified = (r.SchemaName ?? "public") + "." + (r.TableName ?? "?");
+                /* Identifier-quoted then literal-escaped, for the reasons DarlingPgIndexBloatReader
+                   .QuoteIdentifier records: regclass text input folds an unquoted part to lower
+                   case, and a name created through a double-quoted CREATE may contain a single
+                   quote that would close this literal inside a command an operator is invited to
+                   paste privileged. Pre-dates #3234 and is fixed here rather than left as the half
+                   nobody owns. */
+                var qualified = PgIdentifier.Qualify(r.SchemaName, r.TableName);
                 var heapGrowth = r.HeapBytes >= 0 && r.FirstHeapBytes >= 0
                     ? r.HeapBytes - r.FirstHeapBytes
                     : (long?)null;

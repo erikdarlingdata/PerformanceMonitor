@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Collectors;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -139,11 +140,20 @@ public static class DarlingPgIndexBloatReader
         {
             get
             {
-                var qualified = (SchemaName ?? "public") + "." + (IndexName ?? "?");
+                /* TWO levels of escaping, and both are load-bearing rather than defensive.
+                   pgstatindex takes regclass, whose TEXT input parses like an SQL identifier: an unquoted
+                   part is folded to lower case, so a camelCase or reserved-word index resolves to the wrong
+                   object or to none. And a name created through a double-quoted CREATE INDEX may contain
+                   almost any character INCLUDING a single quote, which would close the outer literal and
+                   append whatever follows to a command an operator is being invited to paste into a
+                   privileged session. So each part is quoted as an identifier (doubling any embedded
+                   double quote, which is quote_ident's rule) and the assembled name is then escaped for
+                   the string literal it sits inside (doubling any single quote). */
+                var literal = PgIdentifier.Qualify(SchemaName, IndexName);
 
                 return PgstattupleAvailable == false
-                    ? $"CREATE EXTENSION pgstattuple; SELECT * FROM pgstatindex('{qualified}');"
-                    : $"SELECT * FROM pgstatindex('{qualified}');";
+                    ? $"CREATE EXTENSION pgstattuple; SELECT * FROM pgstatindex('{literal}');"
+                    : $"SELECT * FROM pgstatindex('{literal}');";
             }
         }
     }

@@ -96,7 +96,13 @@ public class PgIndexBloatCollectorDefinitionTests
     public void NoExtensionIsRequired()
     {
         Assert.Empty(PgIndexBloatCollector.Instance.RequiredPgExtensions);
-        Assert.DoesNotContain("pgstatindex", Sql(), StringComparison.Ordinal);
+
+        /* The statement must not CALL the function. It does still NAME it, in the suppression reason that
+           tells an operator what to run instead, so asserting the absence of the string would fail on
+           correct code -- which is exactly what the first version of this test did. The call is what the
+           parenthesis distinguishes. */
+        Assert.DoesNotMatch(new Regex(@"pgstatindex\s*\("), Sql());
+        Assert.Contains("Run pgstatindex", Sql(), StringComparison.Ordinal);
     }
 
     /// <summary>

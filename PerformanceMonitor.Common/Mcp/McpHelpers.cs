@@ -261,4 +261,6 @@ internal static class McpHelpers
             ? JsonSerializer.Serialize(new { status, message }, JsonOptions)
             : JsonSerializer.Serialize(new { status, message, hints }, JsonOptions);
     }
+
+
 }
