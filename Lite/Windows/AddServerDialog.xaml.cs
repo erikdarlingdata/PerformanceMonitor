@@ -368,9 +368,9 @@ public partial class AddServerDialog : Window
                dialog can show, and for a federated-auth failure the message is the shallowest layer
                of a chain several deep - the driver wraps MSAL's exception, which wraps the broker's.
                AppLogger.Error walks that chain; nothing else on this path does, so a failure that is
-               not logged here is a failure whose detail the process never recorded anywhere. Not
-               gated on mfaCancelled: a cancellation is a decision the user made and its own dialog
-               already reports it, so logging it as an error would file user intent as a fault. */
+               not logged here is a failure whose detail the process never recorded anywhere.
+               Cancellations are excluded: one is a decision the user made, its own dialog already
+               reports it, and filing user intent as an error would bury real faults among them. */
             if (!mfaCancelled)
             {
                 AppLogger.Error(
