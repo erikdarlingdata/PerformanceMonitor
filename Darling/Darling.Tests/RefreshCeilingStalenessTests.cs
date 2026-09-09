@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -437,6 +438,70 @@ public sealed class RefreshCeilingStalenessTests
             $"new {nameof(RefreshCeilingStalenessWatch)}()", ServiceSweepBody(worker),
             StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The sweep's own comment does not describe <see cref="TimescaleSupport.CompressionPhaseGuardMinutes"/>
+    /// as the light-refresh ceiling rounded up (#3188) — a PRESENT-TENSE claim about a derivation the code
+    /// no longer has.
+    ///
+    /// <para><b>Why this is a test and why it lives here.</b> #3188 declared that width and swept every
+    /// site in <c>TimescaleSupport.cs</c> to say the relationship in the past tense. It did not sweep the
+    /// CALL SITE, which sat in another project and went on telling a reader that the ceiling was arithmetic
+    /// INPUT to the width. That is the drift the whole change is about, one file over — and the prose pins
+    /// in <c>RefreshCeilingProvenancePinTests</c> could not see it, because they read the doc runs of the
+    /// declaration rather than the comments of its callers. This file already reads the real worker source
+    /// for the wiring case above, so the check goes where the reader already is.</para>
+    ///
+    /// <para><b>A SHAPE with a stated bound, not a list of wordings.</b> The claim is matched as
+    /// "<c>CompressionPhaseGuardMinutes</c> … <c>rounded up</c>" within 160 characters, and a match is
+    /// allowed only when a past-tense marker sits between the two — so a rewording passes only if it is
+    /// honest about tense. The window is bounded and the scan stops at the next mention of the member, so a
+    /// match cannot run from one comment through unrelated code into another. <b>What it does NOT cover:</b>
+    /// this reads the worker and nothing else. <c>TimescaleSupport.cs</c>' half is
+    /// <see cref="RefreshCeilingProvenancePinTests.NoGuardWidth_IsDerivedFromAMeasurement"/>, which forbids
+    /// the expression itself, and every other project is unchecked. The split is named rather than implied,
+    /// because "the file I happened to sweep" is exactly how this defect got here.</para>
+    ///
+    /// <para>The positive clause is what stops a comment that DROPPED the relationship from passing: the
+    /// sweep reads that ceiling because it is what the declared width is checked against, and a reader not
+    /// told which way that goes will read the finding's remedy as "re-derive the guard".</para>
+    /// </summary>
+    [Fact]
+    public void TheSweepsComment_DoesNotDescribeTheGuardWidthAsDerivedFromTheCeiling()
+    {
+        var worker = ReadDarlingWorkerSource();
+
+        var stale = GuardDescribedAsRoundedUp.Matches(worker)
+            .Where(match => !PastTenseMarkers.Any(
+                marker => match.Groups["between"].Value.Contains(marker, StringComparison.OrdinalIgnoreCase)))
+            .Select(match => match.Value)
+            .ToArray();
+
+        Assert.True(stale.Length == 0,
+            "DarlingWorker.cs describes CompressionPhaseGuardMinutes as the light-refresh ceiling rounded up, "
+            + "in the present tense. That width is DECLARED since #3188 and derives from no measurement, so "
+            + "the comment states something false about the code beside it — and it points a reader at the "
+            + "wrong remedy, because a ceiling past the width is now a scheduling decision rather than a "
+            + "renumbering. Say it in the past tense or say what the relationship is now: "
+            + string.Join(" | ", stale));
+
+        Assert.Contains("DECLARED width is checked against", worker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The derivation claim as a bounded shape. Non-greedy and stopped at the next mention of the member, so
+    /// one match spans one comment rather than reaching across unrelated code to find the words it wants.
+    /// </summary>
+    private static readonly Regex GuardDescribedAsRoundedUp = new(
+        @"CompressionPhaseGuardMinutes(?<between>(?:(?!CompressionPhaseGuardMinutes).){0,160}?)rounded up",
+        RegexOptions.Compiled | RegexOptions.Singleline);
+
+    /// <summary>
+    /// What makes a "rounded up" mention honest: it is describing what the width USED TO BE. Matched
+    /// case-insensitively, because the file emphasises with capitals and a case-sensitive allowance would
+    /// flag correct prose for its typography.
+    /// </summary>
+    private static readonly string[] PastTenseMarkers = ["used to", "it used", "was ", "before #3188"];
 
     /// <summary>
     /// A MEASURED reading, quoted as evidence rather than derived: the clean 17:00Z run of 2026-09-08, whose

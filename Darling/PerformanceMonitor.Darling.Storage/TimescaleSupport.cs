@@ -3040,8 +3040,9 @@ WITH NO DATA";
 
     /// <summary>
     /// The longest run recorded for any hourly refresh OTHER than <see cref="HeaviestHourlyRefreshView"/> —
-    /// and, since #3174, the number <see cref="CompressionPhaseGuardMinutes"/> is DERIVED from rather than
-    /// merely characterised against.
+    /// the measurement <see cref="CompressionPhaseGuardMinutes"/>' declared width is CHECKED AGAINST. #3174
+    /// made it the number that width was DERIVED from; #3188 cut that tie, because a measurement whose own
+    /// population is decided by the width cannot set the width.
     ///
     /// <para><b>WHICH STATISTIC, OVER WHICH POPULATION — stated at the top for the reason
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states it there (#3182).</b> This is a
