@@ -10,6 +10,10 @@ echo.
 
 :: Get version from the one file that declares it (#3222)
 for /f %%a in ('powershell -Command "([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }"') do set VERSION=%%a
+if "%VERSION%"=="" (
+    echo ERROR: Could not determine version from Directory.Build.props.
+    exit /b 1
+)
 echo Version: %VERSION%
 echo.
 

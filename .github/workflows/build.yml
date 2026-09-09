@@ -399,7 +399,9 @@ jobs:
         shell: pwsh
         run: |
           $version = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "Read no version from Directory.Build.props." }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $version"
 
       # #2501: -r win-x64 --self-contained, and it makes the portable ZIP SMALLER, not bigger.
       # The RID-agnostic framework-dependent publish this replaced copied every platform its
@@ -989,6 +991,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)"
+          [ -n "${version}" ] || { echo "::error::Read no version from Directory.Build.props."; exit 1; }
           echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Package linux artifact + checksum

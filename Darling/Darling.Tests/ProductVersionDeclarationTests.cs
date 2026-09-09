@@ -407,9 +407,74 @@ public class ProductVersionDeclarationTests
         }
     }
 
-    /// <summary>One detected version read: the line it sits on, and the version-source paths it resolves
-    /// to. Plural because a read through a variable resolves to every literal assigned to it.</summary>
-    private sealed record VersionRead(string Line, IReadOnlyList<string> Sources);
+    /// <summary>
+    /// Every version read fails its own step when it reads nothing.
+    ///
+    /// <para><b>No test of the readers' PATHS can cover this.</b> A read pointed at the right file still
+    /// yields an empty string if the property is renamed, the file is malformed, or a comment gets in
+    /// front of the element for the text scrapers. Every one of these nine reads only NAMES something,
+    /// so an empty result is a green run and an artifact called <c>PerformanceMonitorLite-.zip</c>.</para>
+    ///
+    /// <para>Why the guards are not self-evidently unnecessary: on a pull request <c>build.yml</c>'s read
+    /// EXECUTES, and every consumer of its value is gated on <c>github.event_name == 'release'</c>. So a
+    /// pull request demonstrates only that the read does not throw; the VALUE first matters on a release,
+    /// which is the worst place to discover it. The release gate's pair is worse than silent: two empty
+    /// reads compare EQUAL, so an unguarded pair fails the gate for the wrong reason while one empty side
+    /// passes it for the wrong reason.</para>
+    /// </summary>
+    [Fact]
+    public void EveryVersionRead_FailsItsStepOnAnEmptyResult()
+    {
+        var reads = 0;
+        var unguarded = new List<string>();
+
+        foreach (var file in VersionReadingSources())
+        {
+            var text = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+            var name = RepoRelative(file);
+
+            foreach (var read in VersionReads(text))
+            {
+                reads++;
+
+                if (!read.Guarded)
+                {
+                    unguarded.Add($"{name}: {read.Line.Trim()}");
+                }
+            }
+        }
+
+        Assert.True(reads >= 9, $"only {reads} version reads were detected; the detector is not detecting");
+
+        Assert.True(
+            unguarded.Count == 0,
+            "A version read that does not fail its step when it reads nothing. These reads only name "
+            + "artifacts, so an empty value ships a wrongly-named build rather than going red:\n  "
+            + string.Join("\n  ", unguarded));
+    }
+
+    /// <summary>
+    /// The guard detector recognises each language's guard, does not credit an unguarded read, and does
+    /// not credit a bash emptiness TEST that fails nothing.
+    ///
+    /// <para>The last three rows are the point: a detector returning true for everything satisfies the
+    /// pin above by never having anything to report.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("$v = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version\nif ([string]::IsNullOrWhiteSpace($v)) { throw \"no\" }", true)]
+    [InlineData("base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)\n[ -n \"${base}\" ] || { echo x; exit 1; }", true)]
+    [InlineData("for /f \"tokens=2 delims=<>\" %%a in ('findstr \"<Version>\" Directory.Build.props') do set VERSION=%%a\nif \"%VERSION%\"==\"\" (\n    exit /b 1\n)", true)]
+    [InlineData("$v = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version\necho \"VERSION=$v\"", false)]
+    [InlineData("base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)", false)]
+    // An emptiness test that fails nothing is not a guard, and this spelling is already in the workflows.
+    [InlineData("base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)\nif [ -n \"$base\" ]; then echo found; fi", false)]
+    public void TheGuardDetector_CreditsOnlyAGuardThatFailsTheStep(string snippet, bool expected) =>
+        Assert.Equal(expected, Assert.Single(VersionReads(snippet)).Guarded);
+
+    /// <summary>One detected version read: the line it sits on, the version-source paths it resolves to,
+    /// and whether an emptiness guard follows it. Sources is plural because a read through a variable
+    /// resolves to every literal assigned to it.</summary>
+    private sealed record VersionRead(string Line, IReadOnlyList<string> Sources, bool Guarded);
 
     /// <summary>
     /// The version reads in a block of text.
@@ -426,8 +491,9 @@ public class ProductVersionDeclarationTests
         var lines = normalised.Split('\n');
         var found = new List<VersionRead>();
 
-        foreach (var line in lines)
+        for (var index = 0; index < lines.Length; index++)
         {
+            var line = lines[index];
             var selectsProperty = line.Contains("PropertyGroup.Version", StringComparison.Ordinal);
             var scrapesSource = line.Contains("<Version>", StringComparison.Ordinal);
 
@@ -456,11 +522,34 @@ public class ProductVersionDeclarationTests
 
             /* A line that reads a version and resolves to no path at all is reported as a read with no
                source, which fails the caller's membership check rather than vanishing from the count. */
-            found.Add(new VersionRead(line, sources.Count == 0 ? new[] { "(unresolved)" } : sources));
+            found.Add(new VersionRead(
+                line,
+                sources.Count == 0 ? new[] { "(unresolved)" } : sources,
+                lines.Skip(index + 1).Take(GuardWindowLines).Any(IsGuardLine)));
         }
 
         return found;
     }
+
+    /// <summary>How far after a read an emptiness guard may sit. Small on purpose: a guard further away
+    /// than this is not visibly attached to the read it protects.</summary>
+    private const int GuardWindowLines = 6;
+
+    /// <summary>
+    /// Whether one line is an emptiness guard that fails its own step.
+    ///
+    /// <para>Three spellings, because the reads live in three languages and each needs the form that
+    /// actually fails there: <c>throw</c> in a pwsh step, a <c>||</c> exit in a bash step,
+    /// <c>exit /b 1</c> in a cmd script.</para>
+    ///
+    /// <para>The bash arm requires the exit as well as the test. <c>[ -n "</c> on its own is not a
+    /// guard &#8212; the workflows already use that spelling for unrelated conditions, and one sitting
+    /// near a read would otherwise be credited as protecting it.</para>
+    /// </summary>
+    private static bool IsGuardLine(string line) =>
+        line.Contains("IsNullOrWhiteSpace", StringComparison.Ordinal)
+        || (line.Contains("[ -n \"", StringComparison.Ordinal) && line.Contains("exit 1", StringComparison.Ordinal))
+        || line.Contains("==\"\" (", StringComparison.Ordinal);
 
     /// <summary>The MSBuild file paths named on one line, separators normalised to forward slashes.</summary>
     private static List<string> MsBuildPathsIn(string line) =>

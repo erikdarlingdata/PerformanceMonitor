@@ -46,6 +46,7 @@ jobs:
         shell: pwsh
         run: |
           $version = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "Read no version from Directory.Build.props." }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
           Write-Host "PR version: $version"
 
@@ -68,6 +69,9 @@ jobs:
           $path = 'main-branch/Directory.Build.props'
           if (-not (Test-Path $path)) { $path = 'main-branch/deprecated/Dashboard/Dashboard.csproj' }
           $version = ([xml](Get-Content $path)).Project.PropertyGroup.Version | Where-Object { $_ }
+          # Two empty reads compare EQUAL, so an unguarded pair fails this gate for the wrong reason
+          # while one empty side passes it for the wrong reason.
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "Read no version from $path." }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
           Write-Host "Main version: $version (from $path)"
 
