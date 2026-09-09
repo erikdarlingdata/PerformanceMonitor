@@ -86,10 +86,12 @@ public static class UpdateCheckService
     private static Version? GetCurrentVersion()
     {
         // Use the entry assembly (the app .exe) rather than the executing assembly.
-        // This service lives in PerformanceMonitor.Common.dll, which carries no
-        // <Version> and defaults to 1.0.0.0. GetExecutingAssembly() would therefore
-        // report 1.0.0.0 and make every real release look like an available update.
-        // GetEntryAssembly() returns the host app's real version (e.g. 2.11.0.0).
+        // The comparison is against the latest release tag, so the version that answers
+        // it is the one the user is RUNNING - the host app's. This service lives in
+        // PerformanceMonitor.Common.dll, which inherits the same <Version> from
+        // Directory.Build.props (#3222) and so agrees today; it agrees by inheritance
+        // rather than by definition, and a library whose version diverged would make
+        // every real release look like an available update forever.
         return Assembly.GetEntryAssembly()?.GetName().Version;
     }
 

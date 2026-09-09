@@ -82,6 +82,13 @@ jobs:
             # affect every product, so it forces a full build/test/publish.
             root:
               - 'PerformanceMonitor.sln'
+              # #3222: every project in the tree inherits the product version from here, so a
+              # release bump touches this file and NOTHING else. Absent this entry that bump
+              # matches no area filter at all and the job that stamps the artifacts never builds
+              # them: the enumerated-list failure this file's other comments keep describing.
+              # Spelled without the angle brackets on purpose. ProductVersionDeclarationTests
+              # treats that spelling as a version READ and would score this comment as one.
+              - 'Directory.Build.props'
               - 'global.json'
               - 'nuget.config'
               - 'NuGet.config'
@@ -196,6 +203,12 @@ jobs:
               # directories, for the same reason #2114 added the *.xaml catch-all above an
               # enumerated six: an enumerated list stops covering the next file added.
               - 'Lite/**/*.cs'
+              # #3222, same reason again and a project file this time: ProductVersionDeclarationTests
+              # enumerates every csproj/props/targets in the tree to assert that exactly one place
+              # declares a product version. Lite's project file is in that population, so adding a
+              # version property back to it must run the Darling guard that would catch it. Derived
+              # rather than the one path, for the reason the two entries above are derived.
+              - 'Lite/**/*.csproj'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
@@ -391,8 +404,10 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $version = ([xml](Get-Content Lite/PerformanceMonitorLite.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          $version = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "Read no version from Directory.Build.props." }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $version"
 
       # #2501: -r win-x64 --self-contained, and it makes the portable ZIP SMALLER, not bigger.
       # The RID-agnostic framework-dependent publish this replaced copied every platform its
@@ -981,7 +996,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(grep -oPm1 '(?<=<Version>)[^<]+' Lite/PerformanceMonitorLite.csproj)"
+          version="$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)"
+          [ -n "${version}" ] || { echo "::error::Read no version from Directory.Build.props."; exit 1; }
           echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Package linux artifact + checksum

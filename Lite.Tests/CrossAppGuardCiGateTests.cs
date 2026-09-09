@@ -1204,14 +1204,15 @@ public class CrossAppGuardCiGateTests
     /// project that compiles and references its own SKU, so those two carry the count floor and
     /// <see cref="TheEvaluatedRead_SurvivesEveryFormThatDefeatsAnXmlParse"/> carries the other four.</para>
     ///
-    /// <para><see cref="ImportedBuildFileProperties"/> is reported and not floored on the first two names:
-    /// there is no <c>Directory.Build.props</c> or <c>Directory.Build.targets</c> in this repository and
-    /// asserting one exists would be asserting a fiction. What IS floored is that the property set came back
-    /// populated at all, through <c>MSBuildProjectFullPath</c> naming the project that was asked — so
-    /// "MSBuild says there are none" is distinguishable from "no properties were returned".
-    /// <c>Directory.Packages.props</c> is asserted because it is imported into every project here, and
-    /// because a two-name upward probe of <c>Directory.Build.*</c> is exactly the answer that misses
-    /// it.</para>
+    /// <para><see cref="ImportedBuildFileProperties"/> is asserted by VALUE on all three names.
+    /// <c>Directory.Build.props</c> carries the repository's one product-version declaration (#3222) and
+    /// <c>Directory.Packages.props</c> the central package versions, so both are imported into every
+    /// project here; there is no <c>Directory.Build.targets</c>, and that name reading empty is itself the
+    /// assertion. A two-name upward probe of <c>Directory.Build.*</c> is exactly the answer that misses the
+    /// packages file. What ALSO stays floored is that the property set came back populated at all, through
+    /// <c>MSBuildProjectFullPath</c> naming the project that was asked — so "MSBuild says there are
+    /// none" is distinguishable from "no properties were returned", which three empty strings would
+    /// read as either.</para>
     /// </summary>
     [Fact]
     public void ThePopulationReachesTheProjectItems_AndNotOnlyTheCSharp()
@@ -1276,11 +1277,19 @@ public class CrossAppGuardCiGateTests
                 Path.GetFullPath(Path.Combine(repo, manifest.Replace('/', Path.DirectorySeparatorChar))),
                 evaluated.Properties.TryGetValue("MSBuildProjectFullPath", out var self) ? self : null);
 
-            /* MSBuild's own answer for the build files it imports unnamed. The two Directory.Build names
-               are absent from this tree, and Directory.Packages.props is not — which is the half a
-               two-name upward probe of the Directory.Build names cannot see. */
+            /* MSBuild's own answer for the build files it imports unnamed. Directory.Build.props carries
+               the one product-version declaration (#3222) and Directory.Packages.props the central
+               package versions; there is no Directory.Build.targets, which is why the middle name reads
+               empty. Asserting all three by VALUE is what a two-name upward probe of the
+               Directory.Build names cannot do — it never looks for the packages file at all, and it
+               cannot tell "MSBuild imported none" from "MSBuild answered nothing". */
             Assert.Equal(
-                new[] { string.Empty, string.Empty, Path.Combine(repo, "Directory.Packages.props") },
+                new[]
+                {
+                    Path.Combine(repo, "Directory.Build.props"),
+                    string.Empty,
+                    Path.Combine(repo, "Directory.Packages.props"),
+                },
                 ImportedBuildFileProperties
                     .Select(p => evaluated.Properties.TryGetValue(p, out var v) ? v : "<absent>")
                     .ToArray());
