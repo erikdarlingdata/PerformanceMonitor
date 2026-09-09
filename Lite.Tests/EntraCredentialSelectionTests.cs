@@ -46,6 +46,25 @@ namespace PerformanceMonitorLite.Tests;
 /// <c>az login</c> session through this path — still unverified, still needs a tenant and a Windows
 /// host. This file answers only for what the listener does with the event once it is raised.</para>
 /// </summary>
+/// <remarks>
+/// <para><b>In <c>app-logger-statics</c> because this class READS the sink.</b> Two pins here drain
+/// <see cref="AppLogger"/>'s process-wide buffer and assert on what came out, and one of them moves
+/// the process-wide minimum. <c>LiteLogLevelGateTests</c> created that collection for exactly this
+/// case and named the condition that would make the hazard bite: a second class reading the log.
+/// This is that class.</para>
+///
+/// <para>Two ways it would fail otherwise, both intermittent and neither reproducible on demand.
+/// <c>DrainBufferedLines</c> is destructive, so a concurrent sweep there dequeues the line this
+/// class is about to look for — and tag-filtering on the log source cannot recover a line another
+/// reader already took. And those sweeps set the minimum as far as <see cref="LogLevel.None"/>, so
+/// the <see cref="LogLevel.Information"/> line this class expects to be admitted is never enqueued
+/// at all. Sharing the collection name serialises the two classes, which is the whole mechanism.</para>
+///
+/// <para><c>EntraCredentialSelectionModeGateTests</c> and <c>EntraCredentialSelectionOrderingTests</c>
+/// deliberately do NOT join: neither touches <see cref="AppLogger"/>, and a collection name that
+/// serialises classes which cannot race with each other costs suite time for nothing.</para>
+/// </remarks>
+[Collection("app-logger-statics")]
 public sealed class EntraCredentialSelectionTests : IDisposable
 {
     /* Azure.Identity 1.18.0, AzureIdentityEventSource.cs — every id and signature reflected below is

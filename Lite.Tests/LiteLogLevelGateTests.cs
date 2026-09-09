@@ -53,15 +53,19 @@ namespace PerformanceMonitorLite.Tests;
 /// line that was never enqueued. That is the #1965 shape, which <c>app-alert-statics</c> was created
 /// for.</para>
 ///
-/// <para><b>The interaction is real and currently harmless, which are two separate facts.</b> Five other
-/// classes hand an <see cref="AppLoggerAdapter{T}"/> to a service that logs —
-/// <c>AnalysisNotificationTests</c>, <c>MuteRuleServiceTests</c>, <c>PagerDutyWebhookTests</c>,
-/// <c>RemainingEmptyReadsToolTests</c> and <c>WebhookCooldownSeedTests</c>, against 28 log sites across
-/// four services — and each sits in its own default collection, so they run in parallel with the sweeps
-/// here and their lines really can be dropped. Nothing fails, because this class is the only reader of
-/// the sink anywhere in the suite: no other test asserts on log output, so a dropped line changes no
-/// assertion. The condition that would make it bite is any of those five reading the log, and then they
-/// join <c>app-logger-statics</c>.</para>
+/// <para><b>The interaction is real, and it now has a second party.</b> Five other classes hand an
+/// <see cref="AppLoggerAdapter{T}"/> to a service that logs — <c>AnalysisNotificationTests</c>,
+/// <c>MuteRuleServiceTests</c>, <c>PagerDutyWebhookTests</c>, <c>RemainingEmptyReadsToolTests</c> and
+/// <c>WebhookCooldownSeedTests</c>, against 28 log sites across four services — and each sits in its own
+/// default collection, so they run in parallel with the sweeps here and their lines really can be
+/// dropped. Nothing fails for those five, because none of them READS the sink: a dropped line changes no
+/// assertion of theirs.</para>
+///
+/// <para><b>This class is no longer the only reader, which is what the condition below was waiting
+/// for.</b> <c>EntraCredentialSelectionTests</c> drains the buffer and asserts on what came out, so it
+/// joins <c>app-logger-statics</c> — which means the name now serialises two classes rather than
+/// nothing. Any further class that reads the log joins it too; a class that merely WRITES through the
+/// adapter still does not need to, and adding it would serialise the suite for no benefit.</para>
 ///
 /// <para><b>Why a separate name rather than joining <c>app-alert-statics</c>.</b> Its five members touch
 /// <c>App</c>'s alert-settings statics and make no <c>AppLogger</c> calls at all, so joining them would
