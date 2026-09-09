@@ -118,6 +118,17 @@ public sealed class SqlTextPinTests
             SqlTextPin.Normalise("JOIN sys.dm_xe_database_sessions AS xes"));
         Assert.Equal("EXEC dbo.usp_Thing", SqlTextPin.Normalise("EXEC dbo.usp_Thing"));
 
+        /* The set compares OrdinalIgnoreCase, so ONE entry covers every spelling — pinned because the
+           alternative reading, that each casing needs its own entry, is what a duplicate entry in a
+           membership set invites the next reader to assume. */
+        Assert.Equal(
+            "FROM INFORMATION_SCHEMA.TABLES",
+            SqlTextPin.Normalise("FROM INFORMATION_SCHEMA.TABLES"));
+        Assert.Equal(
+            "FROM information_schema.tables",
+            SqlTextPin.Normalise("FROM information_schema.tables"));
+        Assert.Equal("FROM SYS.objects", SqlTextPin.Normalise("FROM SYS.objects"));
+
         Assert.Throws<Xunit.Sdk.TrueException>(
             () => SqlTextPin.AssertExpresses(
                 "FROM sys.dm_exec_requests",
@@ -127,6 +138,50 @@ public sealed class SqlTextPinTests
         /* And an alias on the same statement still normalises, so the pin stays insensitive to the thing it
            is meant to be insensitive to. */
         Assert.Equal("WHERE rn = 1", SqlTextPin.Normalise("WHERE rs.rn = 1"));
+    }
+
+    /// <summary>
+    /// The alias stripper cannot tell <c>ios.</c> in <c>ios.database_name</c> from <c>foo.</c> inside
+    /// <c>'foo.bar'</c>, so a needle carrying a dotted literal is REFUSED rather than quietly shortened.
+    ///
+    /// <para>Measured, not assumed: <c>Normalise("'foo.bar'")</c> is <c>'bar'</c> and
+    /// <c>Normalise("'prod.pos.use1'")</c> is <c>'pos.use1'</c>. Nothing in the tree hits this today; the
+    /// class doc floats reusing this helper for the collectors' T-SQL pins, which is where
+    /// <c>sys.</c>/<c>dbo.</c>-qualified values inside literals actually live, so the hazard activates the
+    /// moment someone follows that suggestion.</para>
+    ///
+    /// <para><b><c>'v1.2'</c> is the control</b>, and it is the point of the pair: its dot is followed by a
+    /// digit, which the alias lookahead already declines, so it normalises untouched and must still pass. A
+    /// guard that refused both would be over-broad — it would be rejecting every dotted literal rather than
+    /// the ones this heuristic actually eats.</para>
+    /// </summary>
+    [Fact]
+    public void ItRefusesANeedleWhoseDottedLiteralItWouldEat_AndAcceptsOneItWouldNot()
+    {
+        Assert.Equal("'bar'", SqlTextPin.Normalise("'foo.bar'"));
+        Assert.Equal("'pos.use1'", SqlTextPin.Normalise("'prod.pos.use1'"));
+
+        foreach (var eaten in new[]
+        {
+            "database_name = 'foo.bar'",
+            "server_name = 'prod.pos.use1'",
+            "THEN 'sys.dm_exec_requests'",
+        })
+        {
+            var refusal = Assert.Throws<Xunit.Sdk.FalseException>(
+                () => SqlTextPin.AssertExpresses(eaten, "irrelevant", "the behaviour is gone"));
+            Assert.Contains("silently shortened", refusal.Message, StringComparison.Ordinal);
+        }
+
+        /* The control: the lookahead already declines a digit, so this needle survives normalisation and
+           must be accepted. It reds against a statement that does not carry it, like any other needle. */
+        Assert.Equal("'v1.2'", SqlTextPin.Normalise("'v1.2'"));
+        SqlTextPin.AssertExpresses("version = 'v1.2'", "WHERE version = 'v1.2'", "the version pin is gone");
+        Assert.Throws<Xunit.Sdk.TrueException>(
+            () => SqlTextPin.AssertExpresses("version = 'v1.2'", "WHERE version = 'v1.3'", "the version pin is gone"));
+
+        /* And an undotted literal is untouched either way, so the guard has not swallowed the ordinary case. */
+        SqlTextPin.AssertExpresses("THEN 'Unused'", "CASE WHEN x = 0 THEN 'Unused' END", "the classification is gone");
     }
 
     /// <summary>

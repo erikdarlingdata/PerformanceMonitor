@@ -84,10 +84,30 @@ internal static class SqlTextPin
         "information_schema",
         "sys",
         "dbo",
-        "INFORMATION_SCHEMA",
     };
 
-    /// <summary>Alias qualifiers dropped, whitespace runs collapsed, ends trimmed.</summary>
+    /// <summary>
+    /// A single-quoted literal carrying a dotted component whose right-hand side begins with an identifier
+    /// character — exactly the shape <see cref="AliasQualifier"/> strips. Measured:
+    /// <c>'foo.bar'</c> normalises to <c>'bar'</c> and <c>'prod.pos.use1'</c> to <c>'pos.use1'</c>, while
+    /// <c>'v1.2'</c> survives untouched because its dot is followed by a digit, which the alias lookahead
+    /// already declines.
+    ///
+    /// <para>This is a heuristic on a heuristic and it is meant to be: it decides whether to REFUSE, so a
+    /// false positive is a loud failure a caller fixes in one line, and only a false negative is silent.
+    /// That is the direction #3217 asks for.</para>
+    /// </summary>
+    private static readonly Regex DottedLiteral =
+        new(@"'[^']*\.[A-Za-z_][^']*'", RegexOptions.CultureInvariant);
+
+    /// <summary>Alias qualifiers dropped, whitespace runs collapsed, ends trimmed.
+    ///
+    /// <para><b>Not literal-aware, deliberately.</b> It cannot tell <c>ios.</c> in
+    /// <c>ios.database_name</c> from <c>foo.</c> inside <c>'foo.bar'</c>, and teaching it the difference is
+    /// a SQL parser — which #3217's own analysis rejected for these pins, there being none in the
+    /// dependency graph. <see cref="AssertExpresses"/> therefore REFUSES a needle carrying such a literal
+    /// rather than normalising it into something quieter. A helper that cannot distinguish the two should
+    /// say so at the call site, not guess.</para></summary>
     internal static string Normalise(string sql)
     {
         var unqualified = AliasQualifier.Replace(
@@ -108,6 +128,16 @@ internal static class SqlTextPin
     /// </summary>
     internal static void AssertExpresses(string clause, string sql, string because)
     {
+        /* The needle only. The STATEMENT may legitimately contain a dotted literal — both sides normalise
+           the same way, so a removed clause still reds — but a needle that gets quietly shortened is an
+           assertion weakened with nothing to show it. */
+        Assert.False(
+            DottedLiteral.IsMatch(clause),
+            $"`{clause}` carries a quoted literal with a dotted component, and this helper strips "
+            + "`<identifier>.` as a table-alias qualifier without being able to tell the two apart — the "
+            + "needle would be silently shortened and the assertion weakened. Assert that clause with a "
+            + "plain Assert.Contains, or split the needle so the literal is pinned separately.");
+
         var normalisedClause = Normalise(clause);
 
         Assert.True(
