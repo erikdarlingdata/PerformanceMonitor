@@ -54,7 +54,7 @@ public sealed class McpObjectStatsTools
         }
     }
 
-    [McpServerTool(Name = "get_index_usage"), Description("Gets per-index usage (seeks, scans, lookups, updates) from the latest daily snapshot, classifying each index as Unused, Write-only, or Active. Unused and write-only indexes are listed first - these are drop candidates. Counters are cumulative since the last instance restart. last_user_access is UTC - the underlying sys.dm_db_index_usage_stats columns are in the monitored server's local clock and this read de-skews them.")]
+    [McpServerTool(Name = "get_index_usage"), Description("Gets per-index usage (seeks, scans, lookups, updates) from the latest daily snapshot, classifying each index as Unused, Write-only, or Active. Unused and write-only indexes are listed first - these are drop candidates. Counters are cumulative since the last instance restart. last_user_access is UTC - the underlying sys.dm_db_index_usage_stats columns are in the monitored server's local clock and this read de-skews them - so it compares directly against get_collection_log and list_servers.")]
     public static async Task<string> GetIndexUsage(
         LocalDataService dataService,
         ServerManager serverManager,
