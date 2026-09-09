@@ -236,11 +236,12 @@ public class ServerManager
         }
         else if (server.AuthenticationType == AuthenticationTypes.Windows ||
                  server.AuthenticationType == AuthenticationTypes.ManagedIdentity ||
+                 server.AuthenticationType == AuthenticationTypes.EntraDefaultCredential ||
                  server.AuthenticationType == AuthenticationTypes.EntraMFA)
         {
-            // Zero-touch auth (Windows / Managed Identity): remove any stored credential.
-            // This also deletes an orphaned secret left behind when switching away from
-            // SqlServer or ServicePrincipal (e.g. SP -> MI, SP -> Windows).
+            // Zero-touch auth (Windows / Managed Identity / existing Azure sign-in): remove any
+            // stored credential. This also deletes an orphaned secret left behind when switching
+            // away from SqlServer or ServicePrincipal (e.g. SP -> MI, SP -> Windows).
             //
             // EntraMFA reaches this arm ONLY when the MFA username is blank, because the
             // earlier EntraMFA arm (which requires a non-blank username) runs first and stores
@@ -371,8 +372,15 @@ public class ServerManager
         // Get previous status to detect status changes
         var previousStatus = GetConnectionStatus(serverId);
 
-        // Skip interactive authentication methods during background checks
-        if (!allowInteractiveAuth && server.AuthenticationType == AuthenticationTypes.EntraMFA)
+        // Skip interactive authentication methods during background checks.
+        //
+        // Asked as a question about the MODE rather than as an equality test against EntraMFA, so
+        // that adding an Entra mode is a decision about whether it can raise a window and not an
+        // omission at whichever gate nobody remembered. EntraDefaultCredential answers false and is
+        // therefore collected on schedule like Windows or SQL auth: the driver excludes the
+        // interactive browser from its credential chain outright, so there is no prompt to suppress
+        // and suppressing it would leave a perfectly unattended mode uncollected.
+        if (!allowInteractiveAuth && AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType))
         {
             // Determine appropriate message based on whether user cancelled
             var errorMsg = previousStatus.UserCancelledMfa 
@@ -400,7 +408,8 @@ public class ServerManager
 
         // CRITICAL: Prevent connection checks while Add/Edit dialog is open
         // This prevents MFA popups when user is just configuring the server
-        if (Windows.AddServerDialog.IsDialogOpen && server.AuthenticationType == AuthenticationTypes.EntraMFA)
+        if (Windows.AddServerDialog.IsDialogOpen &&
+            AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType))
         {
             return new ServerConnectionStatus
             {

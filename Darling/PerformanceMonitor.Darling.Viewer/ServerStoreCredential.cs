@@ -23,6 +23,14 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// service rejects or silently mis-connects as integrated. Rather than persist an un-honorable definition,
 /// the write path BLOCKS those modes with <see cref="UnsupportedAuthMessage"/>. Adding an Azure connect path
 /// is a Service-project feature, out of scope here — surfaced in the PR, not silently dropped.</para>
+///
+/// <para><b>The mapping is a whitelist, and that is the load-bearing part when a new auth mode ships.</b>
+/// <see cref="MapAuth"/> names the two honorable modes and returns null for everything else, so a mode added
+/// to <see cref="AuthenticationTypes"/> is rejected here on the day it is added rather than on the day someone
+/// remembers to reject it — #3214's broker-free Entra mode arrived that way and needed no edit to this file.
+/// A blacklist would have admitted it silently and written a row the service cannot connect with. The reason
+/// is the same for every Azure mode and does not weaken as more are added: the service acquires no tokens at
+/// all, so there is nothing for a new Entra mode to be honored BY.</para>
 /// </summary>
 public static class ServerStoreCredential
 {
@@ -34,7 +42,7 @@ public static class ServerStoreCredential
 
     /// <summary>
     /// The store <c>auth</c> value for a viewer <see cref="AuthenticationTypes"/> mode, or null when the
-    /// Darling service cannot honor it (the three Azure/Entra modes). Callers treat null as "block the save".
+    /// Darling service cannot honor it (every Azure/Entra mode). Callers treat null as "block the save".
     /// </summary>
     public static string? MapAuth(string? authenticationType) => authenticationType switch
     {

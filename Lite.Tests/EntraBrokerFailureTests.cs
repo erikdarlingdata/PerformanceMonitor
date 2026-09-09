@@ -127,6 +127,7 @@ public class EntraBrokerFailureTests
         var body = ConnectionFailureMessage.Compose(
             ReportedBrokerRefusal,
             EntraBrokerFailureKind.BrokerRejected,
+            EntraAmbientCredentialFailureKind.None,
             @"C:\Users\someone\AppData\Local\PerformanceMonitorLite-Data\logs");
 
         Assert.Contains("unknown_broker_error", body, StringComparison.Ordinal);
@@ -152,7 +153,8 @@ public class EntraBrokerFailureTests
     {
         /* A pointer with no path after it reads as "the logs are missing", which is the confusion
            this text exists to end. */
-        var body = ConnectionFailureMessage.Compose("Login failed.", EntraBrokerFailureKind.None, logDirectory);
+        var body = ConnectionFailureMessage.Compose(
+            "Login failed.", EntraBrokerFailureKind.None, EntraAmbientCredentialFailureKind.None, logDirectory);
 
         Assert.DoesNotContain("is in the log at", body, StringComparison.Ordinal);
         Assert.Contains("Login failed.", body, StringComparison.Ordinal);
@@ -161,7 +163,10 @@ public class EntraBrokerFailureTests
     [Fact]
     public void Compose_AddsNothingWhenThereIsNothingToAdd()
     {
-        Assert.Equal(string.Empty, ConnectionFailureMessage.Compose(null, EntraBrokerFailureKind.None, null));
+        Assert.Equal(
+            string.Empty,
+            ConnectionFailureMessage.Compose(
+                null, EntraBrokerFailureKind.None, EntraAmbientCredentialFailureKind.None, null));
     }
 
     [Fact]

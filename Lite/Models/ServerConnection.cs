@@ -174,6 +174,11 @@ public class ServerConnection : INotifyPropertyChanged
         AuthenticationTypes.SqlServer => "SQL Server",
         AuthenticationTypes.ServicePrincipal => "Azure — Service Principal",
         AuthenticationTypes.ManagedIdentity => "Azure — Managed Identity",
+        /* The label names its own precondition on purpose. "Azure - Default Credential" would be
+           the driver's word for it and would tell a user nothing about what it needs; this mode
+           fails outright on a machine with no Azure sign-in on it, so the requirement belongs in
+           the name rather than only in a failure message. */
+        AuthenticationTypes.EntraDefaultCredential => "Azure — Existing Sign-In (az login)",
         _ => "Windows"
     };
 
@@ -530,6 +535,31 @@ public class ServerConnection : INotifyPropertyChanged
                 builder.UserID = managedIdentityClientId;   // user-assigned MI; omit for system-assigned
             }
         }
+        else if (authenticationType == AuthenticationTypes.EntraDefaultCredential)
+        {
+            /* Microsoft Entra via whatever Azure credential the machine already has, and the one
+               Entra mode that never reaches the Windows account broker (see
+               AuthenticationTypes.EntraDefaultCredential for the two-legged proof).
+
+               Three keywords are deliberately NOT set, and each omission is load-bearing:
+
+               No Password, because there is nothing to hold one - the credential is established
+               outside this app, by az login or the environment, and a password keyword here would be
+               a secret the app stores for a mode that cannot use it.
+
+               No UserID, which is the trap. It reads like the Entra MFA username hint beside it and
+               is not: SqlClient forwards UserId on THIS path into DefaultAzureCredentialOptions as
+               ManagedIdentityClientId, SharedTokenCacheUsername and WorkloadIdentityClientId at
+               once (Extensions.Azure 7.0.2, :873-878). A UPN typed into that field would be handed
+               to the managed-identity and workload-identity sources as a client id, which is not
+               what it is, and would misconfigure two credential sources to no purpose.
+
+               No IntegratedSecurity = true; it is set false explicitly to match the siblings, so a
+               builder arriving pre-populated cannot leave integrated auth on beside an
+               Authentication keyword. */
+            builder.IntegratedSecurity = false;
+            builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryDefault;
+        }
     }
 
     /// <summary>
@@ -557,10 +587,14 @@ public class ServerConnection : INotifyPropertyChanged
             return credentialService.CredentialExists(ProfileManager.ProfileCredentialId(profile.Id));
         }
 
-        // Zero-touch auth modes need no stored secret.
+        // Zero-touch auth modes need no stored secret. EntraDefaultCredential belongs here for a
+        // reason unlike the other three: its credential exists, but it lives outside this app
+        // entirely (an az login session, the environment, a managed identity), so there is nothing
+        // for Credential Manager to hold and nothing for this check to look for.
         if (server.AuthenticationType == AuthenticationTypes.Windows ||
             server.AuthenticationType == AuthenticationTypes.EntraMFA ||
-            server.AuthenticationType == AuthenticationTypes.ManagedIdentity)
+            server.AuthenticationType == AuthenticationTypes.ManagedIdentity ||
+            server.AuthenticationType == AuthenticationTypes.EntraDefaultCredential)
         {
             return true;
         }
