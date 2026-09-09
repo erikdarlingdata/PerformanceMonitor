@@ -196,8 +196,8 @@ public sealed class TsqlConventionGuardTests
                 Note: "Checked by tokenising, not by line prefix. This codebase does not put an asterisk on a "
                     + "block comment's continuation lines, so a prefix filter reads that prose as code and a "
                     + "comment mentioning the banned form becomes an offender — the #3052 defect "
-                    + "CommentFilterAdoptionTests exists to track. Six files carry a `--` inside block-comment "
-                    + "prose today and none of them is a violation."),
+                    + "CommentFilterAdoptionTests exists to track. Block-comment prose in the scanned trees "
+                    + "carries a `--` where a dash or a flag is meant, and none of those is a violation."),
 
             ["Functions"] = new(
                 Covered: new[] { CountBig, RowcountBig },
@@ -1244,9 +1244,10 @@ public sealed class TsqlConventionGuardTests
     /// separately.</b> An OVER-EXTENDED body keeps containing the literals below it AND the next member's,
     /// so it hands out a name that is confidently wrong. An UNDER-READ body stops containing the literals
     /// below the cut, and a literal contained by nothing is labelled <see cref="Unknown"/> — which is only
-    /// loud if some census is looking for a site of that kind. Thirteen members strand a literal today and
-    /// no census looks for those, so the whole class read as healthy until the ranges themselves were
-    /// checked against a second derivation.</para>
+    /// loud if some census is looking for a site of that kind. Entries in
+    /// <see cref="KnownTruncatedRanges"/> strand a literal and no census looks for a site of that kind, so
+    /// the whole class read as healthy until the ranges themselves were checked against a second
+    /// derivation.</para>
     ///
     /// <para>The two arms are complementary rather than redundant, and both are pinned by
     /// <see cref="TheMemberScan_IsBoundedByTheNextDeclaration_AndByTheBraceWalkAtTheEndOfTheFile"/>:
@@ -1398,18 +1399,23 @@ public sealed class TsqlConventionGuardTests
     /// scan a corpus none of these members are in (the first two read only
     /// <c>PerformanceMonitor.Darling.Storage</c>) or look for a kind of site none of them strand: what
     /// falls outside these ranges is date formats and UI fallbacks — <c>"yyyy-MM-dd HH:mm:ss"</c>,
-    /// <c>"Never"</c>, <c>"None scheduled"</c>, <c>"N0"</c> — never T-SQL and never a tempdb label. Editing
-    /// 31 member bodies to satisfy a walker would be changing the subject to suit the instrument.</para>
+    /// <c>"Never"</c>, <c>"None scheduled"</c>, <c>"N0"</c> — never T-SQL and never a tempdb label. Rewriting
+    /// these member bodies to satisfy a walker would be changing the subject to suit the instrument.</para>
     ///
-    /// <para><b>What the inventory is for is the day that stops being true.</b> Thirteen of these strand a
-    /// string literal, and <see cref="EnclosingMember"/> answers <c>&lt;unknown&gt;</c> for every one of
-    /// them today. A census that starts looking for a site of that kind — a format string, a renderer name —
-    /// would silently miss it here, and the miss reads as absence rather than as error. This list is what
-    /// makes such a member visible before a census is written against it, which is the opposite order from
-    /// how the current 31 were found.</para>
+    /// <para><b>What the inventory is for is the day that stops being true.</b> Entries here strand a
+    /// string literal, and <see cref="EnclosingMember"/> answers <c>&lt;unknown&gt;</c> for each one. A
+    /// census that starts looking for a site of that kind — a format string, a renderer name — would
+    /// silently miss it here, and the miss reads as absence rather than as error. This list is what makes
+    /// such a member visible before a census is written against it, which is the opposite order from how
+    /// the entries below were found.</para>
+    ///
+    /// <para><b>No count appears in this comment, deliberately.</b> The array is asserted at set equality,
+    /// so a numeral beside it is prose that nothing can fail on — and one that an unrelated PR invalidates
+    /// the moment it rewrites any listed member, which is what happened to the counts this comment used to
+    /// carry. Count the entries; that answer cannot go stale.</para>
     ///
     /// <para>Scope: the trees <see cref="ScannedTrees"/> sweeps, so <c>Darling.Tests</c> and
-    /// <c>Lite.Tests</c> are outside it. Three further truncated members live there and are not listed.</para>
+    /// <c>Lite.Tests</c> are outside it. Truncated members there are not listed.</para>
     /// </summary>
     private static readonly string[] KnownTruncatedRanges =
     [
@@ -1548,7 +1554,7 @@ public sealed class TsqlConventionGuardTests
 
         /* A GENERIC member with a constraint, where the parameter list follows the > that closed the type
            parameters rather than the name itself. Left unhandled the scan reads past the parameter list
-           into the constraint and answers class. Nine members in the scanned trees carry a where-clause,
+           into the constraint and answers class. The scanned trees do carry members with a where-clause,
            so the shape is real; none of them holds T-SQL, which is why it is arranged here. */
         Assert.Equal(
             "Constrained",
